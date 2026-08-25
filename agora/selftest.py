@@ -452,6 +452,49 @@ def _case_revoked_key_is_invalid() -> None:
         os.path.exists(revoked) and os.remove(revoked)
 
 
+def _case_missing_revocation_list_fails_closed() -> None:
+    """폐기 목록 **파일이 없으면 멈춘다**(H2 · R-14) — 「폐기된 키 0건」이 아니다.
+
+    ★예전에는 부재를 공집합으로 읽었다. 그러면 **파일 하나를 지우는 것이 곧 폐기를 끄는 방법**이
+      되고, 아무 표시도 안 난다. 이 목록이 막으려는 사고(폐기 키로 서명한 글이 유효로 읽히는 것)가
+      정확히 그 상태에서 난다.
+    ★이 저장소의 규율 그대로다 — **못 잰 것을 잰 것으로 세지 않는다**(게이트가 스캐너 부재를
+      통과가 아니라 실패로 세는 것과 같은 판단).
+    """
+    import tempfile
+    from agora import roster
+    from agora.errors import AgoraError
+    d = tempfile.mkdtemp(prefix="agora-krl-")
+    try:
+        roster._fingerprints_of(os.path.join(d, "revoked_keys"))
+    except AgoraError as e:
+        if e.code != errors.PRECONDITION:
+            raise AssertionError(f"코드가 {e.code}")
+        return
+    raise AssertionError("파일이 없는데 폐기 목록을 읽었다고 답했다")
+
+
+def _case_comment_only_revocation_list_is_explicit_zero() -> None:
+    """**있는데 비었다**는 0건이다 — 부재와 갈라야 이 축이 쓸모가 있다.
+
+    ★반대 방향을 같이 잰다. 부재만 막고 「주석뿐인 파일」까지 막으면, 명부를 문서대로
+      복사한 참가자의 모든 읽기가 죽는다(2026-08-26 실물에서 실제로 그랬다).
+      **「없다」와 「비었다」는 다른 말이고, 파일의 존재가 그 둘을 가른다.**
+    """
+    import tempfile
+    from agora import roster
+    d = tempfile.mkdtemp(prefix="agora-krl2-")
+    path = os.path.join(d, "revoked_keys")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("# 폐기된 키를 여기 적는다\n# (아직 없다)\n")
+    if roster._fingerprints_of(path) != frozenset():
+        raise AssertionError("주석뿐인 파일이 0건으로 안 읽힌다")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("")
+    if roster._fingerprints_of(path) != frozenset():
+        raise AssertionError("빈 파일이 0건으로 안 읽힌다")
+
+
 def _case_roster_checkpoint_changes() -> None:
     """명부 파일 하나만 바뀌어도 체크포인트가 바뀌고, **파일 경계**도 해시에 들어간다."""
     import shutil
@@ -2540,7 +2583,7 @@ def _case_receiver_no_flag_when_matching() -> None:
 #   그 경계를 케이스 이름과 보고에 그대로 적는다.
 
 def _fake_transport(pages: list[dict[str, Any]], *, replies: dict[str, list] | None = None,
-                    log: list | None = None) -> Any:
+                    log: list | None = None, search_nodes: list | None = None) -> Any:
     """정해진 응답을 순서대로 돌려주는 가짜 운반층."""
     state = {"i": 0}
     replies = replies or {}
@@ -2557,7 +2600,12 @@ def _fake_transport(pages: list[dict[str, Any]], *, replies: dict[str, list] | N
             else:
                 log.append(("?", dict(variables)))
         if "search(" in query:
-            return {"search": {"nodes": [{"id": "D_1", "number": 7, "title": "t"}]}}
+            # ★후보를 **여러 개** 세울 수 있어야 「첫 번째를 믿는다」를 잴 수 있다(H1·R-13).
+            #   하나만 돌려주는 가짜로는 그 결함이 영원히 안 보인다.
+            if search_nodes is not None:
+                return {"search": {"nodes": list(search_nodes)}}
+            return {"search": {"nodes": [{"id": "D_1", "number": 7, "title": "t",
+                                          "createdAt": "2026-01-01T00:00:00Z"}]}}
         if "... on DiscussionComment" in query:
             rows = replies.get(variables.get("id"), [])
             return {"node": {"replies": {"pageInfo": {"hasNextPage": False,
@@ -2633,6 +2681,81 @@ def _case_github_fetch_paginates_replies() -> None:
     ids = [i["node_id"] for i in store.fetch(thread_id="a" * 32)["items"]]
     if ids != ["D_1", "C_1", "R_1", "R_2"]:
         raise AssertionError(f"답글 2페이지 누락: {ids}")
+
+
+def _binding_nodes() -> list[dict[str, Any]]:
+    """원본(늦게 검색되는)과 복제본(먼저 검색되는) 한 쌍.
+
+    ★복제본이 **먼저** 오게 세운다 — 그래야 「첫 번째를 믿는다」가 실제로 진다.
+      검색 순서는 우리 것이 아니므로, 우리가 통제할 수 없는 것을 통제한다고 가정하지 않는다.
+    """
+    return [
+        {"id": "D_FAKE", "number": 99, "title": "복제본",
+         "createdAt": "2026-02-01T00:00:00Z"},
+        {"id": "D_1", "number": 7, "title": "원본",
+         "createdAt": "2026-01-01T00:00:00Z"},
+    ]
+
+
+def _case_locate_prefers_the_earliest_discussion() -> None:
+    """복제본이 검색 앞자리를 차지해도 **원본**을 고른다(H1 · R-13).
+
+    ★서명은 「이 바이트가 누구에게서 왔는가」만 말한다. **「어느 게시물에 실렸는가」는 안 말한다.**
+      그래서 서명된 genesis 를 그대로 복사한 Discussion 은 **단독으로는 검증을 통과한다.**
+      남는 판별 근거는 하나뿐이다 — **복제본은 원본보다 먼저 존재할 수 없다.**
+    """
+    from agora.store_github import GitHubStore
+    pages = [_disc_page(comments=[], has_next=False, cursor=None)]
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_fake_transport(pages, search_nodes=_binding_nodes()))
+    number, node_id = store._locate("a" * 32)
+    if (number, node_id) != (7, "D_1"):
+        raise AssertionError(f"복제본을 골랐다: {number} {node_id}")
+
+
+def _case_locate_records_multiple_candidates() -> None:
+    """후보가 둘 이상이었다는 **사실**을 감추지 않는다 — 고르고 끝내면 아무도 모른다."""
+    from agora.store_github import GitHubStore
+    pages = [_disc_page(comments=[], has_next=False, cursor=None)]
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_fake_transport(pages, search_nodes=_binding_nodes()))
+    store._locate("a" * 32)
+    if store.locate_candidates.get("a" * 32) != [7, 99]:
+        raise AssertionError(f"후보 기록이 없다: {store.locate_candidates}")
+
+
+def _case_binding_survives_and_refuses_substitutes() -> None:
+    """한 번 묶으면 **그 번호만** 쓴다 — 사라졌으면 멈춘다(조용히 갈아타지 않는다).
+
+    ★결박을 **디스크에 남기는 것**이 이 축의 핵심이다. 프로세스 안에만 있으면
+      다음 세션이 검색 결과를 다시 믿게 되고, 탈취 창이 **매 세션 열린다.**
+    ★그리고 결박이 깨졌을 때 **다른 후보로 갈아타지 않는다.** 갈아타면 그것이 곧 탈취다.
+    """
+    import tempfile
+    from agora.store_github import GitHubStore
+    from agora.errors import AgoraError
+    d = tempfile.mkdtemp(prefix="agora-bind-")
+    path = os.path.join(d, "thread-bindings.json")
+    pages = [_disc_page(comments=[], has_next=False, cursor=None)]
+    first = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_fake_transport(pages, search_nodes=_binding_nodes()),
+                        bindings_path=path)
+    if first._locate("a" * 32)[0] != 7:
+        raise AssertionError("첫 결박이 원본이 아니다")
+    if not os.path.exists(path):
+        raise AssertionError("결박이 디스크에 안 남았다 — 다음 세션이 다시 검색을 믿는다")
+    # 새 세션. 이제 검색에는 복제본만 남았다(원본이 지워졌거나 가려졌다).
+    later = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_fake_transport(
+                            pages, search_nodes=[_binding_nodes()[0]]),
+                        bindings_path=path)
+    try:
+        later._locate("a" * 32)
+    except AgoraError as e:
+        if e.code != errors.STORE:
+            raise AssertionError(f"코드가 {e.code}")
+        return
+    raise AssertionError("결박이 깨졌는데 복제본으로 갈아탔다")
 
 
 def _case_github_lookup_is_cached() -> None:
@@ -3484,6 +3607,12 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     # ★우리 방언으로만 참이던 도구 표면(성찰 I-8).
     "전송규약": ("M231-rpc-envelope-stripped", "M232-rpc-answers-notifications",
                  "M233-rpc-error-sent-as-result", "M234-rpc-claims-unsupported-protocol"),
+    # ★서명 능력 없이 운반체를 갈아치울 수 있던 자리(codex H1 · THREAT R-13).
+    "운반체결박": ("M235-locate-takes-first-node", "M236-binding-not-consulted",
+                   "M237-binding-not-persisted", "M238-candidates-not-recorded",
+                   "M239-audit-hides-candidates"),
+    # ★파일 하나를 지우면 폐기가 통째로 꺼지던 자리(codex H2 · THREAT R-14).
+    "폐기페일클로즈드": ("M240-missing-revocation-is-empty",),
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
                  "M227-operator-may-delegate-anytime"),
@@ -5910,6 +6039,25 @@ def _publish_racing_pair(ctx: Any, tid: str, state: dict[str, Any],
                            config=ctx.config, ledger=ctx.ledger)
 
 
+def _case_audit_shows_transport_candidates() -> None:
+    """후보가 여럿이었다는 사실이 **화면까지** 온다(H1 · R-13 · 구현≠배선).
+
+    ★store 가 기록만 하고 아무도 안 읽으면 그 기록은 없는 것과 같다.
+      이 저장소가 오늘 열두 자리에서 겪은 병이라 **읽는 쪽까지** 잰다.
+    ★평시에는 안 보이고 `audit` 에서만 보인다 — 양쪽으로 잰다.
+    """
+    from agora import tools
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")
+    ctx.store.locate_candidates = {tid: [7, 99]}
+    plain = tools.read(ctx, thread_id=tid)
+    if "transport_candidates" in plain:
+        raise AssertionError("평시 화면이 시끄러워졌다")
+    audit = tools.read(ctx, thread_id=tid, audit=True)
+    if audit.get("transport_candidates") != [7, 99]:
+        raise AssertionError(f"audit 에 후보가 안 실린다: {audit.get('transport_candidates')}")
+
+
 def _case_audit_shows_the_races_that_were_lost() -> None:
     """경합에서 **진 글**도 `audit` 에 나온다(2026-08-26 실물에서 드러났다).
 
@@ -6798,6 +6946,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("서명기 우회 경로 0건",        _case_no_private_key_read_outside_signer, None),
     ("scrub: 규칙 부재 → 3(fail-closed)", _case_scrub_fail_closed, errors.GATE_REJECT),
     ("명부: 폐기 키 → 무효(사유 revoked)", _case_revoked_key_is_invalid, None),
+    ("명부: 폐기 목록 부재 → 2",     _case_missing_revocation_list_fails_closed, None),
+    ("명부: 있는데 비었으면 0건",     _case_comment_only_revocation_list_is_explicit_zero, None),
     ("명부: 체크포인트·파일 경계",   _case_roster_checkpoint_changes, None),
     ("명부: namespace 단일 정의",    _case_namespace_single_source, None),
     ("participant: 정상 로드",       _case_participant_ok,        None),
@@ -6926,6 +7076,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("운반층: 답글도 회수",           _case_github_fetch_walks_replies, None),
     ("운반층: 답글 2페이지 회수",     _case_github_fetch_paginates_replies, None),
     ("운반층: 번호 조회 캐시",        _case_github_lookup_is_cached, None),
+    ("결박: 원본을 고른다",           _case_locate_prefers_the_earliest_discussion, None),
+    ("결박: 후보 여럿을 적는다",      _case_locate_records_multiple_candidates, None),
+    ("결박: 묶인 번호만 쓴다",        _case_binding_survives_and_refuses_substitutes, None),
     ("운반층: 빈 응답 → 8",           _case_github_empty_result_is_unknown_commit, errors.UNKNOWN_COMMIT),
     ("운반층: 오류 → 7(retryable)",   _case_github_transport_error_is_retryable, errors.STORE),
     ("투영: 안 한 것을 적는다",       _case_github_projection_admits_what_it_did_not_do, None),
@@ -7060,6 +7213,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("배선: 설정 예산이 판정까지",    _case_reducer_counts_with_the_configured_budget, None),
     ("배선: 본문은 데이터 표식",      _case_read_wraps_bodies_as_untrusted_data, None),
     ("읽기: 진 글도 audit 에 나온다",  _case_audit_shows_the_races_that_were_lost, None),
+    ("결박: 후보가 화면까지 온다",     _case_audit_shows_transport_candidates, None),
     ("사슬: 거부가 막지 않는다",       _case_rejected_event_does_not_wedge_the_chain, None),
     ("MCP: 예시대로 서버가 뜬다",      _case_example_mcp_config_actually_starts_the_server, None),
     ("MCP: 기동은 도구가 아니다",      _case_mcp_serve_is_not_itself_a_tool, None),
@@ -8059,6 +8213,32 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    tools = cli.role_tools(role)",
      "    tools = ()",
      "배선: 안 불리는 정의 0"),
+    # ★H1(R-13) 운반체 결박 — 「첫 번째를 믿는다」로 되돌리면 복제본이 이긴다.
+    ("M235-locate-takes-first-node", "agora/store_github.py",
+     '            chosen = min(nodes, key=lambda n: (n.get("createdAt") or "", n["number"]))',
+     '            chosen = nodes[0]',
+     "결박: 원본을 고른다"),
+    ("M236-binding-not-consulted", "agora/store_github.py",
+     '        bound = self._bindings.get(thread_id)',
+     '        bound = None',
+     "결박: 묶인 번호만 쓴다"),
+    ("M237-binding-not-persisted", "agora/store_github.py",
+     '        _save_bindings(self._bindings_path, self._bindings)',
+     '        pass',
+     "결박: 묶인 번호만 쓴다"),
+    ("M238-candidates-not-recorded", "agora/store_github.py",
+     '            self.locate_candidates[thread_id] = sorted(n["number"] for n in nodes)',
+     '            pass',
+     "결박: 후보 여럿을 적는다"),
+    ("M239-audit-hides-candidates", "agora/tools.py",
+     '            view["transport_candidates"] = list(seen[thread_id])',
+     '            pass',
+     "결박: 후보가 화면까지 온다"),
+    # ★H2(R-14) 폐기 목록 fail-closed — 부재를 0건으로 되돌리면 폐기가 조용히 꺼진다.
+    ("M240-missing-revocation-is-empty", "agora/roster.py",
+     '        raise AgoraError(errors.PRECONDITION, "폐기 목록 파일이 없다 — 비었음은 빈 파일로 말한다",\n                         {"file": os.path.basename(path),\n                          "how": "빈 파일이나 주석만 있는 파일을 두면 「폐기된 키 0건」으로 읽는다"})',
+     '        return frozenset()',
+     "명부: 폐기 목록 부재 → 2"),
 )
 
 

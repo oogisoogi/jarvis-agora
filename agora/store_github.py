@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from typing import Any
@@ -36,6 +37,41 @@ BACKOFF_FACTOR = 2.0
 BACKOFF_ATTEMPTS = 4
 
 
+BINDINGS_FILENAME = "thread-bindings.json"
+
+
+def _load_bindings(path: str | None) -> dict[str, dict[str, Any]]:
+    """결박 원장을 읽는다. **없으면 비어 있는 것이 정상**이다(아직 아무것도 안 묶었다).
+
+    ⚠깨진 파일은 **조용히 비우지 않는다** — 그러면 결박이 사라진 것과 없던 것이 같아지고,
+      파일을 부수는 것이 곧 결박을 푸는 방법이 된다.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise AgoraError(errors.PRECONDITION, "결박 원장을 읽을 수 없다",
+                         {"file": BINDINGS_FILENAME, "why": str(e)}) from None
+    threads = (data or {}).get("threads")
+    if not isinstance(threads, dict):
+        raise AgoraError(errors.PRECONDITION, "결박 원장의 모양이 다르다",
+                         {"file": BINDINGS_FILENAME})
+    return threads
+
+
+def _save_bindings(path: str, threads: dict[str, dict[str, Any]]) -> None:
+    """제자리 갈아치우기로 쓴다 — 쓰다 죽어도 반쪽 파일이 남지 않는다."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"threads": threads}, fh, ensure_ascii=False, sort_keys=True, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
 def is_rate_limited(err: AgoraError) -> bool:
     """이 실패가 「지금은 말고」인가 — 문자열로 판별한다(gh 는 상태 코드를 말로 준다)."""
     blob = json.dumps(err.detail, ensure_ascii=False, default=str).lower()
@@ -45,7 +81,7 @@ def is_rate_limited(err: AgoraError) -> bool:
 _LOOKUP = """
 query($q: String!) {
   search(query: $q, type: DISCUSSION, first: 10) {
-    nodes { ... on Discussion { id number title } }
+    nodes { ... on Discussion { id number title createdAt } }
   }
 }
 """
@@ -172,7 +208,8 @@ query($owner: String!, $name: String!, $number: Int!) {
 class GitHubStore:
     def __init__(self, owner: str, name: str, categories: dict[str, str],
                  transport: Any = None, sleep: Any = None,
-                 attempts: int = BACKOFF_ATTEMPTS) -> None:
+                 attempts: int = BACKOFF_ATTEMPTS,
+                 bindings_path: str | None = None) -> None:
         self.owner = owner
         self.name = name
         self._categories = dict(categories)      # 이름 → category id(S4-0 실측값)
@@ -183,6 +220,12 @@ class GitHubStore:
         self._numbers: dict[str, int] = {}       # thread_id → discussion number
         self._ids: dict[str, str] = {}           # thread_id → discussion node id
         self.calls = 0                           # 호출 계수 — 한도 이야기의 시작점(S4-2)
+        # ★H1(R-13) — thread_id 를 **어느 Discussion 에 결박했는지**를 디스크에 남긴다.
+        #   없으면 매 세션이 검색 결과를 새로 믿는다 = 복제본이 끼어들 자리가 매번 열린다.
+        self._bindings_path = bindings_path
+        self._bindings: dict[str, dict[str, Any]] = _load_bindings(bindings_path)
+        # 후보가 둘 이상이었다는 **사실**을 감추지 않는다 — audit 이 이것을 싣는다.
+        self.locate_candidates: dict[str, list[int]] = {}
 
     # ── 내부 ────────────────────────────────────────────────────────────────
     def _run(self, query: str, **variables: Any) -> dict[str, Any]:
@@ -211,18 +254,59 @@ class GitHubStore:
                           "last": (last.detail if last else None)})
 
     def _locate(self, thread_id: str) -> tuple[int, str]:
-        """thread_id → (번호, node id). 한 번 찾으면 캐시한다."""
+        """thread_id → (번호, node id). **결박된 것만 믿는다.**
+
+        ★H1(codex 2026-08-26 · R-13) — 예전에는 검색 결과 `nodes[0]` 를 검증 없이 채택했다.
+          그러면 **서명 능력이 없는 사람도 운반체를 갈아치울 수 있다**: 이미 서명된 genesis 를
+          그대로 복사해 새 Discussion 을 만들면, 그 복제본은 **단독으로는 서명 검증을 통과**한다
+          (서명은 이벤트 바이트에 대한 것이지 「어느 게시물에 실렸는가」에 대한 것이 아니다).
+          남는 것은 검색 순서뿐이고, 검색 순서는 **우리 것이 아니다.**
+        ★그래서 두 겹으로 막는다:
+          ⑴ **결박** — 한 번 정한 (thread_id → number) 를 참가자 설정에 남기고, 이후에는
+             그 번호만 쓴다. 후보에 없으면 **멈춘다**(조용히 다른 것을 고르지 않는다).
+          ⑵ **첫 결박의 결정 규칙** — `nodes[0]`(운반층이 정한 순서)이 아니라
+             **genesis 게시 시각이 가장 이른 것**. 복제본은 원본보다 먼저 존재할 수 없다.
+        ⚠**이것은 탈취를 「불가능」하게 만들지 않는다** — 결박 전 첫 조회를 이기면 여전히 진다.
+          그때도 후보가 여럿이었다는 사실은 `locate_candidates` 로 audit 에 남는다.
+        """
         if thread_id in self._numbers:
             return self._numbers[thread_id], self._ids[thread_id]
         q = f'repo:{self.owner}/{self.name} in:body "{thread_id}"'
         data = self._run(_LOOKUP, q=q)
-        nodes = ((data.get("search") or {}).get("nodes") or [])
+        nodes = [n for n in ((data.get("search") or {}).get("nodes") or []) if n]
         if not nodes:
             raise AgoraError(errors.STORE, "스레드를 찾지 못했다",
                              {"thread_id": thread_id})
-        self._numbers[thread_id] = nodes[0]["number"]
-        self._ids[thread_id] = nodes[0]["id"]
-        return nodes[0]["number"], nodes[0]["id"]
+        if len(nodes) > 1:
+            self.locate_candidates[thread_id] = sorted(n["number"] for n in nodes)
+        bound = self._bindings.get(thread_id)
+        if bound:
+            chosen = next((n for n in nodes if n["number"] == bound["number"]), None)
+            if chosen is None:
+                # ★경보다. 결박된 번호가 후보에 없다 = 원본이 사라졌거나 남이 갈아치웠다.
+                raise AgoraError(
+                    errors.STORE, "결박된 게시물이 후보에 없다 — 운반층을 믿지 않는다",
+                    {"thread_id": thread_id, "bound": bound["number"],
+                     "found": sorted(n["number"] for n in nodes)})
+            if chosen["id"] != bound["node_id"]:
+                raise AgoraError(
+                    errors.STORE, "결박된 게시물의 node id 가 다르다",
+                    {"thread_id": thread_id, "bound": bound["node_id"]})
+        else:
+            # ★가장 이른 것. 시각이 같거나 없으면 **번호가 작은 것**으로 갈라 준다
+            #   (결정론 — 같은 입력에 늘 같은 답이 나와야 결박이 의미를 갖는다).
+            chosen = min(nodes, key=lambda n: (n.get("createdAt") or "", n["number"]))
+            self._bind(thread_id, chosen)
+        self._numbers[thread_id] = chosen["number"]
+        self._ids[thread_id] = chosen["id"]
+        return chosen["number"], chosen["id"]
+
+    def _bind(self, thread_id: str, node: dict[str, Any]) -> None:
+        """첫 결박을 디스크에 남긴다. 경로가 없으면 이 프로세스 안에서만 산다."""
+        self._bindings[thread_id] = {"number": node["number"], "node_id": node["id"]}
+        if not self._bindings_path:
+            return
+        _save_bindings(self._bindings_path, self._bindings)
 
     def _all_replies(self, comment: dict[str, Any]) -> list[dict[str, Any]]:
         """한 댓글의 답글을 **끝까지** 따라간다.

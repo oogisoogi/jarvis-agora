@@ -84,10 +84,21 @@ def _fingerprints_of(path: str) -> frozenset[str]:
     ⚠그렇다고 실패를 통째로 삼키면 안 된다. 삼키는 순간 **폐기가 조용히 꺼지고**,
       그것이 이 파일이 막으려는 바로 그 사고다. 그래서 **키 줄이 있을 때의 실패만** 올린다.
     """
-    if not os.path.exists(path) or os.path.getsize(path) == 0:
-        return frozenset()
+    if not os.path.exists(path):
+        # ★★H2(codex 2026-08-26 · R-14) — **부재는 「폐기된 키가 없다」가 아니다.**
+        #   예전에는 여기서 공집합을 돌려줬다. 그러면 **파일 하나를 지우는 것이 곧
+        #   폐기 목록 전체를 끄는 방법**이 된다 — 그리고 아무 표시도 나지 않는다.
+        #   이 파일이 막으려는 사고(폐기 키로 서명한 글이 유효로 읽히는 것)가 정확히
+        #   그 상태에서 난다. ⇒ **못 읽으면 멈춘다**(fail-closed).
+        # ⚠「비어 있다」를 말하고 싶으면 **파일을 만들어라** — 주석만 있어도 된다.
+        #   그것이 「없다」와 「비었다」를 가르는 유일한 방법이다.
+        raise AgoraError(errors.PRECONDITION, "폐기 목록 파일이 없다 — 비었음은 빈 파일로 말한다",
+                         {"file": os.path.basename(path),
+                          "how": "빈 파일이나 주석만 있는 파일을 두면 「폐기된 키 0건」으로 읽는다"})
+    if os.path.getsize(path) == 0:
+        return frozenset()          # 있는데 비었다 = 명시적 0건
     if not _has_key_lines(path):
-        return frozenset()
+        return frozenset()          # 주석뿐 = 명시적 0건(위 docstring 의 실사고)
     proc = subprocess.run(["ssh-keygen", "-l", "-f", path],
                           capture_output=True, text=True, timeout=30)
     if proc.returncode != 0:

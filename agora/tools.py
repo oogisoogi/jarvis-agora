@@ -369,6 +369,12 @@ def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
         entry["body"] = wrapped["text"]
         entry["untrusted"] = {"label": wrapped["label"], "marker": wrapped["marker"],
                               "note": wrapped["note"]}
+    # ★후보가 여럿이었다는 **사실**은 감추지 않는다(H1·R-13). audit 에서만 드러난다 —
+    #   평시 화면을 시끄럽게 하지 않되, 볼 사람이 볼 때는 반드시 보이게.
+    if audit:
+        seen = getattr(ctx.store, "locate_candidates", None) or {}
+        if thread_id in seen:
+            view["transport_candidates"] = list(seen[thread_id])
     view["next_cursor"] = None
     return view
 
@@ -676,7 +682,7 @@ def context_from_config(directory: str | None = None, *,
     doc = load(d)
     cfg = load_config(d)
     if store is None:
-        store = _store_from_config(cfg)
+        store = _store_from_config(cfg, directory=d)
     # ★명부 3종은 **설정 폴더의 사본**이다(ONBOARDING §파일 · 저장소가 정본).
     #   셋을 **같은 폴더에서** 집는다 — 하나만 다른 데서 읽으면 「그때의 명부」가 갈라진다.
     return Context(store=store, ledger=Ledger(d), spool=Spool(d),
@@ -686,7 +692,7 @@ def context_from_config(directory: str | None = None, *,
                    participant_id=doc["id"], config=cfg)
 
 
-def _store_from_config(cfg: dict[str, Any]) -> Any:
+def _store_from_config(cfg: dict[str, Any], directory: str | None = None) -> Any:
     """설정에서 운반층을 세운다 — **어느 저장소인지는 설정에서만 온다.**
 
     ★S7-1 에서 드러난 공백이다: 도구·CLI·문서는 다 있었는데 **「어느 저장소에 올리는가」를
@@ -706,7 +712,13 @@ def _store_from_config(cfg: dict[str, Any]) -> Any:
                          {"missing": [f"repo.{m}" if m in ("owner", "name") else m
                                       for m in missing],
                           "file": "config.json"})
-    return GitHubStore(repo["owner"], repo["name"], categories)
+    # ★결박 원장(H1·R-13)은 **참가자 설정 폴더**에 둔다 — 저장소가 아니라 이 기계의 기억이다.
+    #   경로를 안 넘기면 결박이 프로세스와 함께 사라지고, 매 세션이 검색을 새로 믿는다.
+    import os as _os
+    from agora.store_github import BINDINGS_FILENAME
+    bindings = _os.path.join(directory, BINDINGS_FILENAME) if directory else None
+    return GitHubStore(repo["owner"], repo["name"], categories,
+                       bindings_path=bindings)
 
 
 def load_config(directory: str) -> dict[str, Any]:
