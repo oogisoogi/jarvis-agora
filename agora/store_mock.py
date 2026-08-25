@@ -26,10 +26,27 @@ class MockStore:
         self._answerable = set(answerable)
         self.projections: list[dict[str, Any]] = []
         self.append_calls = 0          # ★쓰기 호출 계수 — 「차단했으면 0」을 재는 데 쓴다
+        self.fetch_calls = 0           # ★읽기 호출 계수 — 「바뀐 것만 읽었는가」를 재는 데 쓴다
+        self.list_calls = 0
+        self._by_number: dict[int, str] = {}
+        self._numbers: dict[str, int] = {}
+        self._updated: dict[str, str] = {}
         self.fail_next_append: str | None = None
         if path and os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 self._items = json.load(fh)
+            # ★번호·갱신 시각은 저장하지 않고 **되세운다.** 저장하면 두 곳이 갈라질 수 있고,
+            #   되세우면 언제나 글과 같은 말을 한다. (안 되세우면 재시작한 프로세스에는
+            #   목록이 비어 보인다 — watch 재시작 픽스처가 그것을 잡았다.)
+            for item in self._items:
+                self.touch(item["thread_id"], item["created_at"])
+            # ★번호도 이어서 센다. 안 그러면 **재시작한 프로세스가 같은 node_id 를 다시 발급**하고,
+            #   그 글은 dedupe 에 「이미 본 것」으로 걸려 영영 안 온다.
+            #   실물 운반층의 node_id 는 전역 고유하므로, 그렇지 않은 mock 은 거짓 초록을 만든다
+            #   (watch 재시작 픽스처가 이것을 잡았다 — 새 글이 조용히 사라졌다).
+            used = [int(i["node_id"].rsplit("_", 1)[-1]) for i in self._items
+                    if i.get("node_id", "").startswith("MOCK_")]
+            self._counter = itertools.count(max(used) + 1 if used else 1)
 
     # ── Store 계약 ──────────────────────────────────────────────────────────
     def append(self, *, thread_id: str, category: str, title: str,
@@ -58,12 +75,18 @@ class MockStore:
             "created_at": now_iso(),
         }
         self._items.append(item)
+        self.touch(thread_id, item["created_at"])
         self._save()
         return {"node_id": item["node_id"], "url": f"mock://{item['node_id']}",
                 "created_at": item["created_at"]}
 
-    def fetch(self, *, thread_id: str, cursor: str | None = None,
-              limit: int = 100) -> dict[str, Any]:
+    def fetch(self, *, thread_id: str | None = None, number: int | None = None,
+              cursor: str | None = None, limit: int = 100) -> dict[str, Any]:
+        if thread_id is None and number is not None:
+            thread_id = self._by_number.get(number)
+        if thread_id is None:
+            raise AgoraError(errors.ARGUMENT, "thread_id 나 number 가 필요하다", None)
+        self.fetch_calls += 1
         rows = [i for i in self._items if i["thread_id"] == thread_id]
         start = int(cursor) if cursor else 0
         page = rows[start:start + limit]
@@ -75,6 +98,30 @@ class MockStore:
         self.projections.append({"thread_id": thread_id, "state": state,
                                  "answer": answer_node_id})
         return {"ok": True}
+
+    def list_threads(self, *, updated_since: str | None = None,
+                     limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+        self.list_calls += 1
+        rows = []
+        for tid, number in sorted(self._numbers.items(), key=lambda kv: kv[1]):
+            updated = self._updated.get(tid, "")
+            if updated_since and updated < updated_since:
+                continue
+            rows.append({"number": number, "node_id": f"MOCKDISC_{number}",
+                         "updated_at": updated, "title": f"thread {number}"})
+        rows.sort(key=lambda r: (r["updated_at"], r["number"]))
+        offset = int(cursor) if cursor else 0
+        window = rows[offset:offset + limit]
+        more = str(offset + limit) if offset + limit < len(rows) else None
+        return {"items": window, "next_cursor": more}
+
+    def touch(self, thread_id: str, updated_at: str) -> None:
+        """스레드가 「바뀌었다」고 표시한다 — watch 픽스처가 시간을 직접 준다."""
+        if thread_id not in self._numbers:
+            number = len(self._numbers) + 1
+            self._numbers[thread_id] = number
+            self._by_number[number] = thread_id
+        self._updated[thread_id] = updated_at
 
     def categories(self) -> dict[str, Any]:
         return {name: {"id": f"MOCKCAT_{name}", "is_answerable": name in self._answerable}
@@ -91,6 +138,9 @@ class MockStore:
         item = self._record(thread_id, category, title, body, is_genesis)
         if created_at:
             self._items[-1]["created_at"] = created_at
+            # ★갱신 시각도 함께 되돌린다. 안 그러면 목록은 「지금」이라고 말하고
+            #   본문은 옛날이라고 말해, watch 픽스처가 시간을 못 정한다.
+            self.touch(thread_id, created_at)
             self._save()
         return item
 

@@ -22,11 +22,14 @@ class Store(Protocol):
         """
         ...
 
-    def fetch(self, *, thread_id: str, cursor: str | None = None,
-              limit: int = 100) -> dict[str, Any]:
+    def fetch(self, *, thread_id: str | None = None, number: int | None = None,
+              cursor: str | None = None, limit: int = 100) -> dict[str, Any]:
         """{items: [{node_id, created_at, body, kind_hint}], next_cursor}.
 
         **top-level 과 reply 를 모두** 돌려줘야 한다 — 한쪽만 돌면 누락이 조용히 생긴다.
+
+        ★`number` 는 **watch 가 목록에서 이미 알아낸 번호**를 건네는 자리다(S5-2).
+          있으면 스레드를 찾는 검색 한 번이 통째로 사라진다 — 주기마다 도는 경로라 그 한 번이 크다.
         """
         ...
 
@@ -35,6 +38,22 @@ class Store(Protocol):
         """reducer 가 계산한 상태를 운반층 화면에 **반영만** 한다(라벨·닫기·answer 표시).
 
         ★이것은 **투영**이지 입력이 아니다. 여기서 실패해도 프로토콜 상태는 그대로다.
+        """
+        ...
+
+    def list_threads(self, *, updated_since: str | None = None,
+                     limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+        """{items: [{number, node_id, updated_at, title}], next_cursor}.
+
+        ★**watch 를 위해 신설했다(S5-2).** 인터페이스를 넓히는 것은 가볍지 않은 결정이라
+          이유를 적어 둔다: S4-2 의 실측이 「매 주기 전 스레드 읽기」로는
+          참가자 한 명만으로도 시간당 한도를 넘는다는 것을 보였다(60×100 = 6000 > 5000).
+          그래서 watch 는 **목록으로 바뀐 것을 먼저 고르고 그것만 읽어야** 한다.
+          목록을 얻을 방법이 없으면 그 제약을 지킬 수 없다.
+
+        ★`thread_id` 를 안 돌려준다. 그 값은 genesis **본문 안**에 있어서, 목록에 실으려면
+          스레드 100건의 본문을 매 주기 끌어와야 한다(점수는 그대로여도 대역폭이 커진다).
+          그래서 목록의 단위는 **번호**이고, `thread_id` 는 실제로 읽을 때 본문에서 나온다.
         """
         ...
 

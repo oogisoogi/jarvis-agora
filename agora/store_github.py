@@ -89,6 +89,18 @@ query($id: ID!, $cursor: String) {
 }
 """
 
+_LIST = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    discussions(first: 50, after: $cursor,
+                orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { id number title updatedAt }
+    }
+  }
+}
+"""
+
 _CLOSE = """
 mutation($id: ID!, $reason: DiscussionCloseReason!) {
   closeDiscussion(input: {discussionId: $id, reason: $reason}) {
@@ -254,15 +266,41 @@ class GitHubStore:
         return {"node_id": node["id"], "url": node.get("url"),
                 "created_at": node.get("createdAt")}
 
-    def fetch(self, *, thread_id: str, cursor: str | None = None,
-              limit: int = 100) -> dict[str, Any]:
+    def list_threads(self, *, updated_since: str | None = None,
+                     limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+        """바뀐 순서로 스레드 목록을 준다 — watch 가 **읽을 것을 고르는** 자리(S4-2 제약).
+
+        ★`updated_since` 보다 오래된 것이 나오면 **거기서 멈춘다.** 최신순으로 오므로
+          그 뒤는 볼 필요가 없다 — 목록을 끝까지 도는 것 자체가 비용이다.
+        """
+        data = self._run(_LIST, owner=self.owner, name=self.name, cursor=cursor)
+        block = ((data.get("repository") or {}).get("discussions") or {})
+        rows: list[dict[str, Any]] = []
+        stopped = False
+        for node in block.get("nodes") or []:
+            if updated_since and (node.get("updatedAt") or "") < updated_since:
+                stopped = True
+                break
+            rows.append({"number": node["number"], "node_id": node["id"],
+                         "updated_at": node.get("updatedAt"),
+                         "title": node.get("title")})
+        page = block.get("pageInfo") or {}
+        nxt = None if stopped or not page.get("hasNextPage") else page.get("endCursor")
+        return {"items": rows[:limit], "next_cursor": nxt}
+
+    def fetch(self, *, thread_id: str | None = None, number: int | None = None,
+              cursor: str | None = None, limit: int = 100) -> dict[str, Any]:
         """스레드의 **전건**(본문 + 댓글 + 답글)을 모은다.
 
         ★`cursor` 는 계약상 받지만 여기서는 **안 쪼갠다.** 한 스레드의 이벤트는 서로 `prev`
           로 엮여 있어서 일부만 주면 reducer 가 「닿지 않는 것」으로 잘못 읽는다.
           쪼개는 것은 스레드 **목록**(threads)의 몫이다.
         """
-        number, _id = self._locate(thread_id)
+        # ★번호를 이미 알면 검색을 통째로 건너뛴다 — 주기마다 도는 경로라 그 한 번이 크다.
+        if number is None:
+            if thread_id is None:
+                raise AgoraError(errors.ARGUMENT, "thread_id 나 number 가 필요하다", None)
+            number, _id = self._locate(thread_id)
         rows: list[dict[str, Any]] = []
         page_cursor: str | None = None
         first = True

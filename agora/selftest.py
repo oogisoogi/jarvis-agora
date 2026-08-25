@@ -3191,6 +3191,220 @@ def _case_spool_torn_tail_is_counted_not_swallowed() -> None:
     if s2.malformed != 1:
         raise AssertionError(f"반쪽 줄을 조용히 버렸다: malformed={s2.malformed}")
 
+# ── S5-2 watch · overlap · dedupe ───────────────────────────────────────────
+# ★「겹쳐 묻기 + dedupe」는 **한 벌**이다. 하나만 두면 누락이거나 중복이다.
+#   그래서 케이스도 둘을 각각, 그리고 함께 잰다.
+
+def _w_env() -> tuple[Any, Any, Any, str]:
+    """(store, spool, cursor, dir) 한 벌을 새로 만든다."""
+    import tempfile
+    from agora.spool import Spool
+    from agora.store_mock import MockStore
+    from agora.watch import Cursor
+    d = tempfile.mkdtemp(prefix="agora-watch-")
+    return MockStore(), Spool(d), Cursor(d), d
+
+
+def _w_post(store: Any, tid: str, i: int, minute: int) -> str:
+    """서명된 발언 하나를 운반층에 넣는다. 시각을 직접 준다."""
+    ev = _r2_post(f"{i:032x}", f"발언 {i}", thread_id=tid)
+    body = _r2_signed(ev)
+    ts = f"2026-01-01T00:{minute:02d}:00Z"
+    store.inject_raw(thread_id=tid, body=body, created_at=ts)
+    return ts
+
+
+def _case_store_list_paginates() -> None:
+    """스레드 **목록**도 페이지를 끝까지 준다 — 읽기 페이지와 다른 코드 경로다.
+
+    ★`fetch` 의 페이지 순회를 재는 케이스가 이미 있지만, 그것으로는 목록 쪽을 못 잰다
+      (M119 가 처음에 그렇게 살아남았다). 같은 결함이 두 곳에 따로 있을 수 있다.
+    """
+    from agora.store_mock import MockStore
+    store = MockStore()
+    for i in range(5):
+        store.inject_raw(thread_id=f"t{i}", body=f"본문 {i}",
+                         created_at=f"2026-01-01T00:0{i}:00Z")
+    seen: list = []
+    cursor = None
+    for _ in range(10):
+        page = store.list_threads(limit=2, cursor=cursor)
+        seen.extend(page["items"])
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+    if len(seen) != 5:
+        raise AssertionError(f"목록 전건 회수 실패: {len(seen)}")
+
+
+def _case_watch_three_posts_three_events() -> None:
+    """발언 3건 → 이벤트 3건(§8) · 그리고 **목록에 있는 것만 읽는다**(S4-2 제약)."""
+    from agora import watch
+    store, spool, cursor, _d = _w_env()
+    for i in range(3):
+        _w_post(store, "t1", i + 1, i + 1)
+    out = watch.poll_once(store=store, spool=spool, cursor=cursor)
+    if out["new"] != 3:
+        raise AssertionError(f"이벤트 {out['new']}건: {out}")
+    if out["delivery"] != "at-least-once":
+        raise AssertionError(f"전달 보장 표기: {out['delivery']}")
+    # 스레드가 하나뿐이므로 읽기도 한 번이어야 한다.
+    if store.fetch_calls != 1:
+        raise AssertionError(f"스레드 1개인데 {store.fetch_calls}회 읽었다")
+
+
+def _case_watch_reads_only_changed_threads() -> None:
+    """바뀌지 않은 스레드는 **읽지 않는다** — S4-2 실측이 건 제약이다.
+
+    ★이 축이 없으면 「매 주기 전부 읽기」로 되돌아가도 아무도 모른다(한도만 조용히 탄다).
+    """
+    from agora import watch
+    store, spool, cursor, _d = _w_env()
+    # ★두 스레드의 시각을 **겹치기 창(120초)보다 넓게** 벌린다.
+    #   안 벌리면 겹치기가 옛 스레드를 정당하게 다시 끌어와서, 이 케이스가
+    #   「전부 읽기」와 「바뀐 것만 읽기」를 구별하지 못한다(처음에 그렇게 실패했다).
+    _w_post(store, "t1", 1, 1)
+    _w_post(store, "t2", 2, 10)
+    watch.poll_once(store=store, spool=spool, cursor=cursor)   # 둘 다 읽는다
+    first_reads = store.fetch_calls
+    if first_reads != 2:
+        raise AssertionError(f"첫 주기 읽기 {first_reads}회")
+    _w_post(store, "t2", 3, 30)          # t2 만 바뀐다
+    watch.poll_once(store=store, spool=spool, cursor=cursor)
+    if store.fetch_calls - first_reads != 1:
+        raise AssertionError(
+            f"바뀐 것은 하나인데 {store.fetch_calls - first_reads}개를 읽었다")
+
+
+def _case_watch_dedupes_repeat_delivery() -> None:
+    """같은 글이 두 번 실려 와도 이벤트는 한 번이다(§8 dedupe 1)."""
+    from agora import watch
+    store, spool, cursor, _d = _w_env()
+    _w_post(store, "t1", 1, 1)
+    first = watch.poll_once(store=store, spool=spool, cursor=cursor)
+    store.touch("t1", "2026-01-01T00:30:00Z")      # 같은 글, 다시 실려 온다
+    second = watch.poll_once(store=store, spool=spool, cursor=cursor)
+    if first["new"] != 1:
+        raise AssertionError(f"첫 주기: {first}")
+    if second["new"] != 0 or second["duplicates"] != 1:
+        raise AssertionError(f"둘째 주기에서 중복이 안 걸렸다: {second}")
+
+
+def _case_watch_overlap_does_not_miss_boundary() -> None:
+    """겹쳐 묻지 않으면 **경계에 걸친 글**을 놓친다 — 겹치기가 그것을 막는다.
+
+    ★마지막으로 본 시각과 **같은 시각**에 새 글이 생기는 상황이다.
+      시계 오차·같은 초에 여러 건이면 실제로 난다.
+    """
+    from agora import watch
+    store, spool, cursor, _d = _w_env()
+    _w_post(store, "t1", 1, 10)
+    watch.poll_once(store=store, spool=spool, cursor=cursor)
+    seen_until = cursor.read()
+    # ★커서보다 **조금 이른** 시각에 놓는다. 같은 시각에 놓으면 겹치기가 없어도 걸리므로
+    #   그 축을 못 잰다(M115 가 처음에 그렇게 살아남았다).
+    #   이 상황은 실제로 난다: 시계 오차·같은 초에 여러 건·목록의 뒤늦은 반영.
+    _w_post(store, "t2", 2, 10)
+    earlier = seen_until.replace("00:10:00", "00:09:30")
+    if earlier == seen_until:
+        raise AssertionError("픽스처가 시각을 못 옮겼다 — 검사가 무의미하다")
+    store.touch("t2", earlier)
+    out = watch.poll_once(store=store, spool=spool, cursor=cursor)
+    if out["new"] != 1:
+        raise AssertionError(f"경계에 걸린 글을 놓쳤다: {out}")
+
+
+def _case_watch_restart_no_loss_no_duplicate() -> None:
+    """강제 종료 후 재시작 → 누락 0 · 중복 0(§8).
+
+    ★커서는 디스크에, dedupe 는 spool 에 있다. 둘 중 하나라도 메모리에 있으면
+      재시작이 「처음부터」가 되거나 「그 뒤부터」가 된다 — 중복이거나 누락이다.
+    """
+    import subprocess
+    from agora.spool import Spool
+    from agora.store_mock import MockStore
+    from agora.watch import Cursor
+    import tempfile
+    d = tempfile.mkdtemp(prefix="agora-watch-")
+    store_path = os.path.join(d, "store.json")
+    store = MockStore(store_path)
+    for i in range(3):
+        _w_post(store, "t1", i + 1, i + 1)
+
+    script = (
+        "import sys; sys.path.insert(0, %r);"
+        "from agora.spool import Spool; from agora.store_mock import MockStore;"
+        "from agora.watch import Cursor, poll_once;"
+        "out = poll_once(store=MockStore(%r), spool=Spool(%r), cursor=Cursor(%r));"
+        # ★flush=True 가 **꼭 있어야 한다.** stdout 이 파이프면 블록 버퍼링이라
+        #   SIGKILL 이 버퍼째 삼킨다 — 이 픽스처가 처음에 빈 출력으로 실패했다.
+        #   spool 이 막으려는 바로 그 현상을 픽스처가 스스로 겪은 것이다.
+        "print(out['new'], flush=True);"
+        "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"
+    ) % (_ROOT, store_path, d, d)
+    proc = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True,
+                          text=True, timeout=60)
+    if proc.returncode == 0:
+        raise AssertionError("자식이 강제 종료로 죽지 않았다 — 픽스처가 무효다")
+    if proc.stdout.strip() != "3":
+        raise AssertionError(f"첫 주기 이벤트 수: {proc.stdout.strip()!r}")
+
+    # 재시작 — 같은 글이 다시 오면 안 되고(중복 0), 새 글은 와야 한다(누락 0).
+    from agora import watch as w
+    again = w.poll_once(store=MockStore(store_path), spool=Spool(d), cursor=Cursor(d))
+    if again["new"] != 0:
+        raise AssertionError(f"재시작에서 중복이 났다: {again}")
+    _w_post(MockStore(store_path), "t1", 9, 40)
+    poll = w.poll_once(store=MockStore(store_path), spool=Spool(d), cursor=Cursor(d))
+    if poll["new"] != 1:
+        raise AssertionError(f"재시작 뒤 새 글을 놓쳤다: {poll}")
+
+    # ★커서가 하는 일은 **정확성이 아니라 비용**이다 — 중복은 dedupe 가 이미 막는다.
+    #   그래서 커서를 지운 결함은 「중복이 났나」로는 안 보이고(M117 이 그렇게 살아남았다),
+    #   **오래된 스레드를 다시 읽었나**로만 보인다. 시각이 멀리 떨어진 스레드를 하나 둔다.
+    old_store = MockStore(store_path)
+    _w_post(old_store, "t_old", 20, 1)
+    old_store.touch("t_old", "2026-01-01T00:01:00Z")
+    w.poll_once(store=MockStore(store_path), spool=Spool(d), cursor=Cursor(d))
+    metered = MockStore(store_path)
+    w.poll_once(store=metered, spool=Spool(d), cursor=Cursor(d))
+    if metered.fetch_calls != 1:
+        raise AssertionError(
+            f"커서가 있는데 {metered.fetch_calls}개 스레드를 다시 읽었다 "
+            "— 오래된 스레드까지 매 주기 읽고 있다(S4-2 제약 위반)")
+
+
+def _case_watch_says_at_least_once_everywhere() -> None:
+    """전달 보장을 **결과·출력·문서에 전부** 그렇게 적는다 — exactly-once 라고 쓰지 않는다(AC ①).
+
+    ★출력만 보는 사람이 있다. 한 곳에만 적으면 다른 곳을 보는 사람이 잘못 안다.
+    """
+    from agora import watch
+    store, spool, cursor, _d = _w_env()
+    _w_post(store, "t1", 1, 1)
+    out = watch.poll_once(store=store, spool=spool, cursor=cursor)
+    line = watch.format_line(out["events"][0])
+    if "at-least-once" not in line:
+        raise AssertionError(f"출력 줄에 전달 보장이 없다: {line}")
+    if cursor.read() is None:
+        raise AssertionError("커서가 디스크에 안 남았다")
+    with open(cursor.path, encoding="utf-8") as fh:
+        if "at-least-once" not in fh.read():
+            raise AssertionError("커서 파일에 전달 보장이 없다")
+    for path in (os.path.join(_ROOT, "agora", "watch.py"),):
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        if "exactly-once" in text.replace("exactly-once 라고", "").replace(
+                "exactly-once 라고 적지", ""):
+            pass
+    src = open(os.path.join(_ROOT, "agora", "watch.py"), encoding="utf-8").read()
+    # 「exactly-once 라고 적지 않는다」는 문장 자체는 허용한다 — 그것은 금지를 적은 것이다.
+    claims = [ln for ln in src.splitlines()
+              if "exactly-once" in ln and "적지 않는다" not in ln
+              and "라고 적으면" not in ln]
+    if claims:
+        raise AssertionError(f"exactly-once 를 주장하는 줄: {claims}")
+
 # ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
 
 # S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
@@ -3469,6 +3683,13 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("spool: node_id dedupe",         _case_spool_dedupe_by_node_id, None),
     ("spool: 전달됨 ≠ 소비됨",        _case_spool_delivered_is_not_consumed, None),
     ("spool: 잘린 꼬리는 계수",       _case_spool_torn_tail_is_counted_not_swallowed, None),
+    ("저장층: 목록 페이지 전건",      _case_store_list_paginates, None),
+    ("watch: 발언 3건 → 이벤트 3건",  _case_watch_three_posts_three_events, None),
+    ("watch: 바뀐 것만 읽는다",       _case_watch_reads_only_changed_threads, None),
+    ("watch: 중복 게시 → 1건",        _case_watch_dedupes_repeat_delivery, None),
+    ("watch: 겹치기로 경계 보존",     _case_watch_overlap_does_not_miss_boundary, None),
+    ("watch: 재시작 누락 0·중복 0",   _case_watch_restart_no_loss_no_duplicate, None),
+    ("watch: at-least-once 명시",     _case_watch_says_at_least_once_everywhere, None),
     ("S4: 4축 그물 실재",             _case_s4_axes_have_nets, None),
 )
 
@@ -3580,6 +3801,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        nxt = str(start + limit) if start + limit < len(rows) else None',
      "        nxt = None",
      "저장층: 페이지 전건 회수"),
+    ("M119-list-pagination-stops-early", "agora/store_mock.py",
+     '        more = str(offset + limit) if offset + limit < len(rows) else None',
+     "        more = None",
+     "저장층: 목록 페이지 전건"),
     ("M28-all-categories-answerable", "agora/store_mock.py",
      '        return {name: {"id": f"MOCKCAT_{name}", "is_answerable": name in self._answerable}',
      '        return {name: {"id": f"MOCKCAT_{name}", "is_answerable": True}',
@@ -3690,6 +3915,26 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "CAS: 낡은 상태로 쓰기 → 9"),
     # ★재조준: SIGKILL 은 flush 를 못 잰다(with 블록이 닫히며 어차피 flush 된다).
     #   flush 를 지우면 **fsync 가 빈 파일을 민다** — 그것을 보는 케이스로 옮겼다.
+    ("M114-watch-reads-every-thread", "agora/watch.py",
+     "    listed = store.list_threads(updated_since=since)[\"items\"]",
+     '    listed = store.list_threads(updated_since=None)["items"]',
+     "watch: 바뀐 것만 읽는다"),
+    ("M115-watch-no-overlap", "agora/watch.py",
+     "    since = _minus_overlap(seen_until, overlap_seconds)",
+     "    since = seen_until",
+     "watch: 겹치기로 경계 보존"),
+    ("M116-watch-no-dedupe", "agora/watch.py",
+     "            if spool.seen(node_id):",
+     "            if False:",
+     "watch: 중복 게시 → 1건"),
+    ("M117-watch-cursor-in-memory", "agora/watch.py",
+     "    if latest:\n        cursor.write(latest)",
+     "    if False:\n        cursor.write(latest)",
+     "watch: 재시작 누락 0·중복 0"),
+    ("M118-watch-claims-exactly-once", "agora/watch.py",
+     'DELIVERY = "at-least-once"          # ★문서·출력이 인용하는 한 곳',
+     'DELIVERY = "exactly-once"',
+     "watch: at-least-once 명시"),
     ("M109-fsync-before-flush", "agora/spool.py",
      '                    fh.flush()              # ★커널까지 — SIGKILL 을 이긴다',
      "                    pass",
@@ -4107,7 +4352,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S5-1(durable spool)"
+            "슬라이스": "S5-2(watch·overlap·dedupe)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
