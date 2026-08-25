@@ -2426,6 +2426,105 @@ def _case_approval_no_silent_auto_pass() -> None:
         return
     raise AssertionError("프롬프트가 없는데 승인으로 통과했다")
 
+# ── S3-5 서명기 재검사(M-11) ────────────────────────────────────────────────
+# ★스크럽 결과는 **발신자의 자기주장**이다. 기록에 남는 판정은 서명기의 것이다.
+#   그리고 수신 측은 그 판정을 자기 규칙으로 **다시 잰다** — 세 자리가 각각 자기 눈을 갖는다.
+
+def _case_signer_records_its_own_measurement() -> None:
+    """서명기 영수증의 scrub 은 **서명기가 직접 잰 값**이다 — 주장은 옆에 나란히 남는다(AC ①)."""
+    from agora import scrub
+    from agora.sign import sign_event
+    f = _fixtures()
+    ev = _r2_post("1" * 32, "깨끗한 본문입니다")
+    ev["scrub"] = {"rules": "f" * 64, "blocked": 0, "redacted": 0}   # 거짓 digest 주장
+    res = _with_key(f["key_a"], lambda: sign_event(ev))
+    measured = scrub.check(ev)
+    if res["scrub"]["bundle"] != measured["bundle"]:
+        raise AssertionError("영수증이 발신자 주장을 그대로 실었다")
+    if res["scrub_claim"]["rules"] != "f" * 64:
+        raise AssertionError("주장을 지웠다 — 사후 판정의 증거가 사라진다")
+    if not res["claim_mismatch"] or "rules" not in res["claim_mismatch"]:
+        raise AssertionError(f"어긋남이 안 보인다: {res['claim_mismatch']}")
+
+
+def _case_signer_refuses_forged_clean_claim() -> None:
+    """차단 대상을 담고도 `blocked: 0` 이라 주장하면 **서명이 안 나온다**(AC ① 위조 픽스처).
+
+    ★위조를 막는 것은 주장 대조가 아니라 **재검사 자체**다. 주장은 얼마든지 예쁘게 쓸 수 있다.
+    """
+    from agora.sign import sign_event
+    f = _fixtures()
+    ev = _r2_post("1" * 32, "본문에 sk-" + "B" * 24 + " 가 들어 있다")
+    ev["scrub"] = {"rules": "0" * 64, "blocked": 0, "redacted": 0}
+    _with_key(f["key_a"], lambda: sign_event(ev))
+
+
+def _case_honest_declaration_matches() -> None:
+    """정직하게 채우면 주장과 측정이 **일치**한다 — 어긋남 표시가 없다(대조군)."""
+    from agora import core
+    from agora.sign import sign_event
+    f = _fixtures()
+    ev = core.declare_scrub(_r2_post("1" * 32, "깨끗한 본문입니다"))
+    res = _with_key(f["key_a"], lambda: sign_event(ev))
+    if res["claim_mismatch"]:
+        raise AssertionError(f"정직한 주장인데 어긋남이 떴다: {res['claim_mismatch']}")
+    if ev["scrub"]["rules"] != res["scrub"]["bundle"]:
+        raise AssertionError("주장이 묶음(bundle)이 아니다")
+
+
+def _case_declaration_carries_bundle_not_one_layer() -> None:
+    """싣는 값은 **묶음**이다 — 한 겹만 실으면 수신 측이 나머지 겹을 대조할 수 없다.
+
+    ★그리고 그 대가를 함께 못박는다: 묶음을 다시 만들려면 수신 측이 **세 겹 전부**
+      (denylist 규칙 · allowlist 규칙 · 허용 도메인)를 갖고 있어야 한다.
+      한 겹이라도 다르면 묶음이 달라지고, 그 사실이 재검사 플래그로 드러나야 한다.
+    """
+    import tempfile
+    from agora import core, scrub
+    ev = core.declare_scrub(_r2_post("1" * 32, "깨끗한 본문입니다"))
+    report = scrub.check(ev)
+    claimed = ev["scrub"]["rules"]
+    if claimed in (report["rules"], report["allow_rules"]):
+        raise AssertionError("한 겹만 실었다 — 나머지 겹은 대조할 수 없다")
+    # 세 겹 중 **도메인 목록 한 겹만** 달라져도 묶음이 달라진다.
+    with tempfile.TemporaryDirectory() as d:
+        other = os.path.join(d, "domains.txt")
+        with open(other, "w", encoding="utf-8") as fh:
+            fh.write("example.test\n")
+        alt = scrub.check(ev, allow=scrub.load_allow(domains_path=other))
+        if alt["bundle"] == claimed:
+            raise AssertionError("도메인 목록이 달라졌는데 묶음이 그대로다")
+
+
+def _case_receiver_flags_digest_mismatch() -> None:
+    """수신 측이 자기 규칙으로 대조해 **재검사 플래그**를 세운다(§8) — 거부가 아니다."""
+    from agora import scrub
+    g = _r2_genesis()          # 픽스처의 주장은 가짜 digest 다
+    out = _r2_collect(_r3_store([(_r2_signed(g), "2026-01-01T00:00:00Z")]),
+                      scrub_bundle=scrub.check(g)["bundle"])
+    if out["quarantined"]:
+        raise AssertionError("digest 가 다르다고 격리했다 — 판본 차이는 거부 사유가 아니다")
+    if not out["valid"][0]["scrub_recheck"]:
+        raise AssertionError("어긋나는데 재검사 플래그가 없다")
+
+
+def _case_receiver_no_flag_when_matching() -> None:
+    """대조군 — 같은 규칙 묶음이면 플래그가 서지 않는다.
+
+    ★플래그만 재면 「항상 플래그」도 초록이다.
+    """
+    from agora import core, scrub
+    from agora.event import event_hash
+    g = core.declare_scrub(_r2_genesis())
+    out = _r2_collect(_r3_store([(_r2_signed(g), "2026-01-01T00:00:00Z")]),
+                      scrub_bundle=scrub.check(g)["bundle"])
+    if not out["valid"]:
+        raise AssertionError(f"정직한 이벤트가 격리됐다: {out['quarantined']}")
+    if out["valid"][0]["scrub_recheck"]:
+        raise AssertionError("일치하는데 플래그가 섰다")
+    if out["valid"][0]["hash"] != event_hash(g):
+        raise AssertionError("주장을 채운 뒤의 해시가 사슬 값과 다르다")
+
 # ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
 
 # S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
@@ -2627,6 +2726,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("승인: 승인하면 올라간다",       _case_approval_granted_writes_once, None),
     ("승인: 끄는 길은 config 하나",   _case_approval_off_only_via_config, None),
     ("승인: 조용한 자동 통과 0건",    _case_approval_no_silent_auto_pass, None),
+    ("서명기: 자기 측정을 기록",      _case_signer_records_its_own_measurement, None),
+    ("서명기: 위조 주장 → 3",         _case_signer_refuses_forged_clean_claim, errors.GATE_REJECT),
+    ("서명기: 정직한 주장은 일치",    _case_honest_declaration_matches, None),
+    ("주장: 한 겹이 아니라 묶음",     _case_declaration_carries_bundle_not_one_layer, None),
+    ("수신: digest 불일치 → 플래그",  _case_receiver_flags_digest_mismatch, None),
+    ("수신: 일치하면 플래그 없음",    _case_receiver_no_flag_when_matching, None),
 )
 
 
@@ -2845,6 +2950,22 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M89-signer-records-claim-not-measure", "agora/signer.py",
+     '        "scrub": report,\n        "scrub_claim": _claim_of(event),',
+     '        "scrub": _claim_of(event),\n        "scrub_claim": _claim_of(event),',
+     "서명기: 자기 측정을 기록"),
+    ("M90-claim-mismatch-hidden", "agora/signer.py",
+     '    if claim.get("rules") != report.get("bundle"):',
+     "    if False:",
+     "서명기: 자기 측정을 기록"),
+    ("M91-receiver-recheck-flag-off", "agora/reducer.py",
+     '            "scrub_recheck": (scrub_bundle is not None\n                              and event["scrub"].get("rules") != scrub_bundle),',
+     '            "scrub_recheck": False,',
+     "수신: digest 불일치 → 플래그"),
+    ("M92-declare-one-layer-only", "agora/core.py",
+     '    event["scrub"] = {"rules": report["bundle"], "blocked": report["blocked"],',
+     '    event["scrub"] = {"rules": report["rules"], "blocked": report["blocked"],',
+     "주장: 한 겹이 아니라 묶음"),
     ("M84-approval-default-off", "agora/contract_open.py",
      "DEFAULT_HUMAN_APPROVAL = True",
      "DEFAULT_HUMAN_APPROVAL = False",
@@ -3160,7 +3281,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S3-4(human_approval)"
+            "슬라이스": "S3-5(서명기 재검사·M-11)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

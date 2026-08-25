@@ -75,7 +75,7 @@ def fetch_all(store: Any, thread_id: str, *, limit: int = 100,
 
 def collect(*, store: Any, thread_id: str, allowed_signers_path: str,
             revoked_path: str | None = None, roster_checkpoint: str | None = None,
-            limit: int = 100) -> dict[str, Any]:
+            scrub_bundle: str | None = None, limit: int = 100) -> dict[str, Any]:
     """검증 파이프. 유효 목록과 격리 목록을 가른다(상태는 계산하지 않는다)."""
     rows = sorted(fetch_all(store, thread_id, limit=limit), key=_order_key)
 
@@ -138,6 +138,10 @@ def collect(*, store: Any, thread_id: str, allowed_signers_path: str,
             #   서명 자체는 지금 명부로 검증됐고, 과거 명부 복원은 체크포인트(S5·S7)의 몫이다.
             "roster_stale": (roster_checkpoint is not None
                              and event["roster"] != roster_checkpoint),
+            # ★§8 재검사 플래그 — 발신자가 **다른 규칙 묶음**으로 걸렀다고 주장한다.
+            #   거부가 아니다: 판본이 다를 뿐일 수 있다. 수신 측이 **자기 규칙으로 다시 재라**는 표시다.
+            "scrub_recheck": (scrub_bundle is not None
+                              and event["scrub"].get("rules") != scrub_bundle),
         })
 
     return {"thread_id": thread_id, "fetched": len(rows),

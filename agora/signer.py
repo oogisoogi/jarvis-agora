@@ -103,9 +103,38 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
     return {
         "hash": hashlib.sha256(raw).hexdigest(),
         "signature": signature,
+        # ★영수증에 실리는 것은 **서명기가 직접 잰 값**이다(M-11). 발신자 주장은 옆에 나란히 둔다 —
+        #   지우지 않는 이유: 「무엇을 주장했는가」가 사후 판정의 증거이기 때문이다.
         "scrub": report,
+        "scrub_claim": _claim_of(event),
+        "claim_mismatch": _claim_mismatch(event, report),
         "namespace": SIGN_NAMESPACE,
     }
+
+
+def _claim_of(event: Any) -> dict[str, Any]:
+    claim = (event or {}).get("scrub") if type(event) is dict else None
+    return claim if type(claim) is dict else {}
+
+
+def _claim_mismatch(event: Any, report: dict[str, Any]) -> dict[str, Any] | None:
+    """발신자 주장과 서명기 측정이 어긋나는가 — **어긋나도 서명은 막지 않는다.**
+
+    ★막지 않는 이유: 규칙 판본이 다르면 정직한 발신자도 다른 digest 를 낸다.
+      진짜 위조(차단 대상을 담고도 blocked:0 이라 주장)는 **재검사 자체**가 이미 막는다
+      (self_check 의 enforce 가 code 3 을 낸다) — 여기서 하는 일은 **보이게 하는 것**이다.
+      수신 측은 이 표시를 보고 자기 규칙으로 다시 잰다(§8 재검사 플래그).
+    """
+    claim = _claim_of(event)
+    if not claim:
+        return {"why": "no_claim"}
+    diff: dict[str, Any] = {}
+    if claim.get("rules") != report.get("bundle"):
+        diff["rules"] = {"claimed": claim.get("rules"), "measured": report.get("bundle")}
+    if claim.get("blocked") != report.get("blocked"):
+        diff["blocked"] = {"claimed": claim.get("blocked"),
+                           "measured": report.get("blocked")}
+    return diff or None
 
 
 def main() -> int:

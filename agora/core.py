@@ -110,3 +110,19 @@ def envelope_check(envelope: Any) -> dict[str, Any]:
     except AgoraError as e:
         errs.append({"code": e.code, "message": e.message, "detail": e.detail})
     return {"ok": not errs, "errors": errs, "scrub_report": report}
+
+
+def declare_scrub(event: dict[str, Any]) -> dict[str, Any]:
+    """이벤트의 `scrub` 칸을 **정직하게** 채운다(§2-1).
+
+    ★이 칸은 서명 대상 안에 있으므로 **이벤트를 만들 때** 채워야 한다 — 나중에 덮어쓰면
+      해시가 바뀌어 사슬(`prev`)이 끊긴다. 그래서 「보내기 직전에 고쳐 주는」 편의를 두지 않는다.
+
+    ★싣는 값은 **묶음(bundle)** 이다. 한 겹만 실으면 수신 측이 나머지 겹을 대조할 수 없다.
+      대신 대가가 있다: 묶음이 바뀌면 수신 측은 **세 겹(denylist·allowlist·도메인) 전부**를
+      갖고 있어야 같은 값을 다시 만들 수 있다 — 규칙 배포 경로가 이 선택의 전제다.
+    """
+    report = scrub.check(event)
+    event["scrub"] = {"rules": report["bundle"], "blocked": report["blocked"],
+                      "redacted": report["redacted"]}
+    return event
