@@ -453,6 +453,11 @@ def mark_solved(ctx: Context, *, thread_id: str, post_message_id: str) -> dict[s
                    prev=prev, expected_state=expected, category=state["type"])
     # ★답으로 고른 글의 **운반층 node_id** 를 찾아 넘긴다 — 없으면 화면에 답 표시가 안 된다.
     #   우리는 `message_id` 로 말하고 운반층은 `node_id` 로 말한다(그 둘을 잇는 자리가 여기다).
+    verdict = _accepted(ctx, thread_id, out["message_id"])
+    if not verdict["accepted"]:
+        return {"ok": False, "message_id": out["message_id"], "usage": out["usage"],
+                "why": verdict["why"], "state": verdict["state"],
+                "projection": {"sent": False, "verified": False, "why": "not_accepted"}}
     projection = _project(ctx, thread_id=thread_id, state="solved",
                           answer_node_id=_node_id_of(ctx, thread_id, post_message_id))
     return {"ok": True, "message_id": out["message_id"], "usage": out["usage"],
@@ -464,9 +469,36 @@ def close(ctx: Context, *, thread_id: str, reason: str) -> dict[str, Any]:
     state, prev, expected = _head_and_state(ctx, thread_id)
     out = _publish(ctx, kind="close", thread_id=thread_id, payload={"reason": reason},
                    prev=prev, expected_state=expected, category=state["type"])
+    # ★올린 것과 **받아들여진 것**은 다르다 — 거부됐으면 화면을 건드리지 않는다.
+    verdict = _accepted(ctx, thread_id, out["message_id"])
+    if not verdict["accepted"]:
+        return {"ok": False, "message_id": out["message_id"], "usage": out["usage"],
+                "why": verdict["why"], "state": verdict["state"],
+                "projection": {"sent": False, "verified": False, "why": "not_accepted"}}
     projection = _project(ctx, thread_id=thread_id, state="closed", close_reason=reason)
     return {"ok": True, "message_id": out["message_id"], "usage": out["usage"],
             "projection": projection}
+
+
+def _accepted(ctx: Context, thread_id: str, message_id: str) -> dict[str, Any]:
+    """방금 올린 이벤트를 **절차가 받아들였는가** — 올린 것과 반영된 것은 다르다.
+
+    ★★**이 자리가 비어 있었다**(2026-08-25 FR-1 knowhow 실물 왕복에서 드러났다):
+      `close` 는 이벤트를 올린 뒤 **무조건** 화면을 닫았다. 그런데 그 이벤트는 절차에서
+      거부될 수 있다(knowhow 는 `solved` 로 못 닫는다 — 사유가 제한돼 있다).
+      결과: **원장은 open 인데 GitHub 화면은 closed** 였다. 관전하는 사람은 끝난 줄 안다.
+    ★S7-2 에서 고친 것의 **거울상**이다. 그때는 「원장 closed · 화면 열림」이었고 이번은 반대다.
+      한 번은 투영을 **안 불러서**, 이번은 투영을 **조건 없이 불러서** — 같은 병의 두 얼굴이고,
+      뿌리는 하나다: **투영이 프로토콜 결과에 매여 있지 않았다.**
+    """
+    reduced = _reduce(ctx, thread_id)
+    accepted = any(e.get("message_id") == message_id for e in reduced.get("events") or [])
+    why = None
+    if not accepted:
+        for q in reduced.get("quarantined") or []:
+            why = q.get("reason")
+    return {"accepted": accepted, "state": reduced.get("state"), "why": why,
+            "solved_by": reduced.get("solved_by")}
 
 
 def _node_id_of(ctx: Context, thread_id: str, message_id: str) -> str | None:
@@ -591,6 +623,11 @@ def abort(ctx: Context, *, thread_id: str, reason: str) -> dict[str, Any]:
     state, prev, expected = _head_and_state(ctx, thread_id)
     out = _publish(ctx, kind="abort", thread_id=thread_id, payload={"reason": reason},
                    prev=prev, expected_state=expected, category=state["type"])
+    verdict = _accepted(ctx, thread_id, out["message_id"])
+    if not verdict["accepted"]:
+        return {"ok": False, "message_id": out["message_id"], "usage": out["usage"],
+                "why": verdict["why"], "state": verdict["state"],
+                "projection": {"sent": False, "verified": False, "why": "not_accepted"}}
     projection = _project(ctx, thread_id=thread_id, state="closed",
                           close_reason="aborted")
     return {"ok": True, "message_id": out["message_id"], "usage": out["usage"],

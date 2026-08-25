@@ -3479,6 +3479,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                  "M223-audit-hides-drift-flags"),
     # ★계약에 있는데 낼 자리가 없던 절차 개입 2종(발신자 0 → 운영 동작으로 배선).
     "목록정직": ("M228-threads-drops-orphans-silently",),
+    # ★화면이 프로토콜보다 앞서 나가던 자리(S7-2 의 거울상).
+    "투영정합": ("M229-close-projects-unconditionally", "M230-acceptance-always-true"),
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
                  "M227-operator-may-delegate-anytime"),
@@ -6473,6 +6475,38 @@ def _case_threads_shows_what_it_could_not_verify() -> None:
             f"scanned={out['scanned']} items={len(out['items'])} 고아={len(orphans)}")
 
 
+def _case_rejected_close_does_not_touch_the_screen() -> None:
+    """절차가 **거부한** 종결은 화면을 닫지 않는다(2026-08-25 FR-1 knowhow 실물에서 드러났다).
+
+    ★사고: `close` 가 이벤트를 올린 뒤 **무조건** 화면을 닫았다. 그런데 knowhow 는 `solved` 로
+      못 닫는다(사유가 제한돼 있다). 결과 = **원장은 open 인데 GitHub 화면은 closed.**
+      관전하는 사람은 끝난 줄 안다.
+    ★S7-2 에서 고친 것의 **거울상**이다 — 그때는 투영을 **안 불러서**(원장 closed·화면 열림),
+      이번은 투영을 **조건 없이 불러서**. 뿌리는 하나다: 투영이 프로토콜 결과에 안 매여 있었다.
+    ★양쪽으로 잰다: 거부된 종결은 화면을 **안 건드리고**, 허용된 사유는 **닫는다.**
+      한쪽만 재면 아무것도 안 닫는 구현도 초록이다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="knowhow")
+    out = _with_key(f["key_a"], lambda: tools.close(ctx, thread_id=tid, reason="solved"))
+    if out.get("ok"):
+        raise AssertionError("절차가 거부한 종결을 성공으로 보고했다")
+    if (out.get("projection") or {}).get("sent") is not False:
+        raise AssertionError(f"거부된 종결이 화면을 건드렸다: {out.get('projection')}")
+    if ctx.store.thread_status(thread_id=tid).get("closed"):
+        raise AssertionError("운반층이 닫혔다 — 원장은 열려 있는데 화면만 닫혔다")
+    if tools.read(ctx, thread_id=tid)["state"]["state"] != "open":
+        raise AssertionError("거부된 종결이 상태를 바꿨다")
+
+    ok = _with_key(f["key_a"], lambda: tools.close(ctx, thread_id=tid, reason="archived"))
+    if not ok.get("ok"):
+        raise AssertionError("허용된 사유인데 종결이 안 됐다 — 픽스처가 축을 못 짚었다")
+    if not ctx.store.thread_status(thread_id=tid).get("closed"):
+        raise AssertionError("받아들여진 종결이 화면에 안 갔다")
+
+
 # ── 배선 대조 자체를 상시 케이스로(master 승인 2026-08-26) ───────────────────
 
 WIRING_ALLOWLIST = "tests/wiring-allowlist.txt"
@@ -6904,6 +6938,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("운영: 만료를 운영자가 되살린다", _case_expired_debate_is_resumed_by_an_operator, None),
     ("게이트: 증거로 든 그물이 실재한다", _case_gate_evidence_names_are_real, None),
     ("목록: 못 세운 것을 말한다",      _case_threads_shows_what_it_could_not_verify, None),
+    ("투영: 거부된 종결은 안 닫는다",  _case_rejected_close_does_not_touch_the_screen, None),
 )
 
 
@@ -7815,6 +7850,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                             stale=reduced.get("stale"))',
      "                             stale=None)",
      "읽기: 진 글도 audit 에 나온다"),
+    ("M229-close-projects-unconditionally", "agora/tools.py",
+     '    verdict = _accepted(ctx, thread_id, out["message_id"])\n    if not verdict["accepted"]:\n        return {"ok": False, "message_id": out["message_id"], "usage": out["usage"],\n                "why": verdict["why"], "state": verdict["state"],\n                "projection": {"sent": False, "verified": False, "why": "not_accepted"}}\n    projection = _project(ctx, thread_id=thread_id, state="closed", close_reason=reason)',
+     '    projection = _project(ctx, thread_id=thread_id, state="closed", close_reason=reason)',
+     "투영: 거부된 종결은 안 닫는다"),
+    ("M230-acceptance-always-true", "agora/tools.py",
+     '    accepted = any(e.get("message_id") == message_id for e in reduced.get("events") or [])',
+     "    accepted = True",
+     "투영: 거부된 종결은 안 닫는다"),
     ("M228-threads-drops-orphans-silently", "agora/tools.py",
      '            unverifiable.append({"number": row["number"], "thread_id": thread_id,\n                                 "why": reduced.get("reason") or "no_state"})',
      "            pass",
