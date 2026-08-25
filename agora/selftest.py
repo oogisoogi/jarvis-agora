@@ -3469,6 +3469,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                "M208-brief-drops-single-source"),
     # ★진 글이 어디에도 안 나오던 자리(실물 2026-08-26).
     "읽기정직2": ("M209-audit-hides-lost-races", "M210-read-does-not-pass-stale"),
+    # ★거부 이벤트 하나로 스레드를 영구 동결시킬 수 있던 자리(실물 #4).
+    "사슬교착": ("M211-head-advances-on-accepted-only",),
 }
 
 S5_AXES: dict[str, tuple[str, ...]] = {
@@ -5918,6 +5920,45 @@ def _case_audit_shows_the_races_that_were_lost() -> None:
         raise AssertionError(f"진 글이 사유와 함께 안 나온다: {lost}")
 
 
+def _case_rejected_event_does_not_wedge_the_chain() -> None:
+    """절차에서 **거부된 이벤트가 사슬을 막지 않는다**(L-1 · master 결정 2026-08-26 (a)안).
+
+    ★사고의 모양: 2단(정렬·경합)은 거부 여부를 **모른 채** `prev` 만 보고 승자를 고른다.
+      그래서 절차에서 거부된 이벤트도 경합에서는 **이미 이겨 있다.** head 가 「받아들인
+      이벤트」에서만 전진하던 판에서는, 다음 사람이 그 이긴 이벤트의 **앞자리**를 가리키게 되어
+      **영원히 진다** — 구성원 1명이 이벤트 1건으로 스레드를 **영구 동결**시킬 수 있었다.
+    ★실물에서 났다(원격 #4): 발언 3건이 rc 0 과 URL 을 받고 **전부 stale** 이었다.
+    ★두 방향으로 잰다: 거부 뒤 정상 발언이 **유효**로 실리고, **거부는 여전히 거부**다
+      (사유와 함께 격리에 남는다). 한쪽만 재면 「막으려던 것을 통과시키는」 수리도 초록이다.
+    """
+    from agora import reducer as red
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")          # 요청자 = operator-a
+    other = _tools_ctx(store=ctx.store, participant_id="operator-b")
+
+    # ⑴ 요청자가 **아닌** 사람이 해결 표시를 낸다 → 절차 거부(permission).
+    state, prev, expected = tools._head_and_state(other, tid)
+    _with_key(f["key_b"], lambda: tools._publish(
+        other, kind="answer_selected", thread_id=tid,
+        payload={"post_message_id": "0" * 32},
+        prev=prev, expected_state=expected, category=state["type"]))
+
+    # ⑵ 그 뒤의 **정상 발언**이 실려야 한다.
+    _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="거부 뒤의 정상 발언"))
+    view = tools.read(ctx, thread_id=tid, audit=True)
+    bodies = " ".join(e["body"] or "" for e in view["events"])
+    if "거부 뒤의 정상 발언" not in bodies:
+        raise AssertionError("거부된 이벤트 하나가 사슬을 막았다 — 정상 발언이 stale 이다")
+    # ⑶ 그리고 거부는 **여전히 거부**다.
+    if not any(q.get("reason") == red.PERMISSION and q.get("stage") == "transition"
+               for q in view.get("quarantined") or []):
+        raise AssertionError(f"거부가 사라졌다: {view.get('quarantined')}")
+    if any(e["kind"] == "answer_selected" for e in view["events"]):
+        raise AssertionError("막으려던 것을 통과시켰다 — 권한 없는 해결 표시가 유효로 실렸다")
+
+
 # ── 배선 대조 자체를 상시 케이스로(master 승인 2026-08-26) ───────────────────
 
 WIRING_ALLOWLIST = "tests/wiring-allowlist.txt"
@@ -6294,6 +6335,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("배선: 설정 예산이 판정까지",    _case_reducer_counts_with_the_configured_budget, None),
     ("배선: 본문은 데이터 표식",      _case_read_wraps_bodies_as_untrusted_data, None),
     ("읽기: 진 글도 audit 에 나온다",  _case_audit_shows_the_races_that_were_lost, None),
+    ("사슬: 거부가 막지 않는다",       _case_rejected_event_does_not_wedge_the_chain, None),
     ("배선: 안 불리는 정의 0",        _case_no_unwired_production_definitions, None),
 )
 
@@ -7161,6 +7203,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "배선: 본문은 데이터 표식"),
     # ★배선 대조기 자신을 재는 그물: 배선 하나를 끊으면 정의 하나가 고아가 된다.
     #   (이 변이는 브리프 단일 출처 케이스도 함께 잡는다 — 귀속은 배선 쪽으로 둔다.)
+    # ★master 동봉 조건 ⑴ — head 전진을 accepted-only 로 되돌리면 교착이 재현돼야 한다.
+    ("M211-head-advances-on-accepted-only", "agora/reducer.py",
+     '        state["head"] = entry["hash"]\n\n    for entry in chain[1:]:',
+     "\n    for entry in chain[1:]:",
+     "사슬: 거부가 막지 않는다"),
     ("M209-audit-hides-lost-races", "agora/reducer.py",
      '        view["stale"] = list(stale or [])',
      "        pass",

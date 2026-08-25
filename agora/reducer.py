@@ -459,6 +459,18 @@ def apply(ordered: dict[str, Any], *,
         quarantined.append({"node_id": entry["node_id"],
                             "created_at": entry["created_at"],
                             "reason": reason, "stage": "transition", "detail": detail})
+        # ★★**거부돼도 사슬은 지나갔다** — head 를 여기서도 전진시킨다(L-1 · master 결정 2026-08-26 (a)안).
+        #   왜: 2단(정렬·경합)은 **거부 여부를 모른 채** `prev` 만 보고 승자를 고른다.
+        #   그래서 절차에서 거부된 이벤트도 **경합에서는 이미 이겨 있다.** 그런데 head 가
+        #   「받아들인 이벤트」에서만 전진하면, 다음 사람은 그 이긴 이벤트의 **앞자리**를 가리키게 되고
+        #   **영원히 진다.** ⇒ 구성원 1명이 이벤트 1건으로 스레드를 **영구 동결**시킬 수 있었다
+        #   (실물 #4 에서 실제로 났다 — 발언 3건이 rc 0·URL 을 받고 전부 stale).
+        #   ★두 층이 「머리」를 다르게 보면 그 틈이 곧 교착이다. 층을 맞춘다.
+        # ⚠상태는 **안 바뀐다**(거부는 여전히 거부다 · 사유는 `read --audit` 에 남는다).
+        #   바뀌는 것은 「다음 글이 어디에 붙는가」뿐이다. 그 대가로 거부 이벤트도
+        #   `state_hash` 를 흔들어 동시 작성자에게 code 9(재read)를 강제한다 —
+        #   그것은 정상 동작이고, 잔여 위험으로 THREAT-MODEL 에 적었다.
+        state["head"] = entry["hash"]
 
     for entry in chain[1:]:
         kind, ev, who = entry["kind"], entry["event"], entry["from"]
