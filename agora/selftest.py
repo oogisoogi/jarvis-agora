@@ -2207,8 +2207,12 @@ def _case_clean_event_reaches_store() -> None:
     store = MockStore()
     ev = _r2_genesis()
     f = _fixtures()
+    # ★S3-4 가 쓰기 경로에 **승인 게이트**를 넣었다. 이 케이스가 재는 것은 게이트가 아니라
+    #   「깨끗하면 끝까지 간다」이므로 승인을 명시로 통과시킨다 —
+    #   승인 축은 승인 케이스가 따로 잰다. 안 그러면 이 케이스가 두 가지를 뭉쳐 재게 된다.
     out = _with_key(f["key_a"], lambda: core.publish_event(
-        store=store, event=ev, category="debate", is_genesis=True))
+        store=store, event=ev, category="debate", is_genesis=True,
+        isatty=lambda: True, prompt=lambda: True))
     if store.append_calls != 1 or not out.get("node_id"):
         raise AssertionError(f"쓰기 계수 {store.append_calls} · 결과 {out}")
     collected = _r2_collect(store)
@@ -2317,6 +2321,110 @@ def _case_envelope_check_returns_not_raises() -> None:
         raise AssertionError(f"사유를 모아서 주지 않는다: {out['errors']}")
     if out["scrub_report"] is None:
         raise AssertionError("스크럽 보고서가 비었다")
+
+# ── S3-4 human_approval(기본 on) ────────────────────────────────────────────
+# ★기계가 못 잡는 것이 남기 때문에 있는 문이다. 그래서 「띄울 수 없으면 보내지 않는다」가
+#   이 문의 전부다 — 조용한 자동 승인은 문이 없는 것보다 나쁘다(있다고 믿게 만든다).
+
+def _case_approval_default_is_on() -> None:
+    """설정이 **없을 때** 기본값이 on 임을 단언한다(AC ①).
+
+    ★기본값은 「적혀 있는 값」이 아니라 「아무도 안 적었을 때 일어나는 일」이다.
+    """
+    from agora import contract_open, core
+    if contract_open.DEFAULT_HUMAN_APPROVAL is not True:
+        raise AssertionError("계약 기본값이 on 이 아니다")
+    try:
+        core.approval_gate(config=None, isatty=lambda: False)
+    except AgoraError as e:
+        if (e.detail or {}).get("reason") != contract_open.HUMAN_APPROVAL_REQUIRED:
+            raise AssertionError(f"사유가 다르다: {e.detail}") from None
+    else:
+        raise AssertionError("설정 부재인데 승인 없이 통과했다")
+
+
+def _case_approval_no_tty_is_code3_with_reason() -> None:
+    """TTY 부재 → code 3 **+ 사유 문자열까지** 단언(AC ③).
+
+    ★코드만 보면 스크럽 차단과 구별되지 않는다. 사유 문자열이 그 둘을 가른다.
+    """
+    from agora.contract_open import HUMAN_APPROVAL_REQUIRED
+    from agora import core
+    try:
+        core.approval_gate(config={}, isatty=lambda: False)
+    except AgoraError as e:
+        if e.code != errors.GATE_REJECT:
+            raise AssertionError(f"code {e.code} != 3") from None
+        if (e.detail or {}).get("reason") != HUMAN_APPROVAL_REQUIRED:
+            raise AssertionError(f"사유 문자열: {e.detail}") from None
+        return
+    raise AssertionError("TTY 없이 통과했다")
+
+
+def _case_approval_denied_writes_nothing() -> None:
+    """승인 거부 → 저장층 쓰기 **0**(AC ②) · 사유는 거부로 구별된다."""
+    from agora import core
+    from agora.store_mock import MockStore
+    f = _fixtures()
+    store = MockStore()
+    ev = _r2_genesis()
+    try:
+        _with_key(f["key_a"], lambda: core.publish_event(
+            store=store, event=ev, category="debate", is_genesis=True,
+            isatty=lambda: True, prompt=lambda: False))
+    except AgoraError as e:
+        if (e.detail or {}).get("reason") != "human_approval_denied":
+            raise AssertionError(f"사유: {e.detail}") from None
+    else:
+        raise AssertionError("거부했는데 올라갔다")
+    if store.append_calls != 0:
+        raise AssertionError(f"거부했는데 저장층을 {store.append_calls}회 호출했다")
+
+
+def _case_approval_granted_writes_once() -> None:
+    """대조군 — 승인하면 같은 경로로 실제로 올라간다."""
+    from agora import core
+    from agora.store_mock import MockStore
+    f = _fixtures()
+    store = MockStore()
+    out = _with_key(f["key_a"], lambda: core.publish_event(
+        store=store, event=_r2_genesis(), category="debate", is_genesis=True,
+        isatty=lambda: True, prompt=lambda: True))
+    if store.append_calls != 1 or out["approval"]["approved"] is not True:
+        raise AssertionError(f"승인했는데 안 올라갔다: {store.append_calls} {out.get('approval')}")
+
+
+def _case_approval_off_only_via_config() -> None:
+    """끄는 길은 `config.json` 하나뿐 — 환경변수·인자로 끄는 경로가 0건이어야 한다(AC ④).
+
+    ★「급해서 한 번만」 끄는 길을 열어 두면 그 한 번이 기본값이 된다.
+      정적으로 잰다: 승인 코드가 환경변수를 읽지 않는다.
+    """
+    from agora import core
+    with open(os.path.join(_ROOT, "agora", "core.py"), encoding="utf-8") as fh:
+        src = fh.read()
+    for needle in ("environ", "getenv", "argv"):
+        if needle in src:
+            raise AssertionError(f"승인 경로가 {needle} 를 읽는다 — 끄는 길이 둘이 된다")
+    off = core.approval_gate(config={"human_approval": False}, isatty=lambda: False)
+    if off["approved"] is not True or off["why"] != "config.json":
+        raise AssertionError(f"config 로 끄는 길이 막혔다: {off}")
+
+
+def _case_approval_no_silent_auto_pass() -> None:
+    """조용한 자동 승인 경로 0건(AC ③ 후단) — 승인 없이 True 를 돌려주는 자리가 없다.
+
+    ★기본 인자로 「승인됨」을 넣어 두는 실수가 가장 흔하다. 그래서 프롬프트가 없으면
+      **거부**로 떨어지는지 직접 본다.
+    """
+    from agora import core
+    try:
+        core.approval_gate(config={}, isatty=lambda: True, prompt=None)
+    except AgoraError as e:
+        if (e.detail or {}).get("reason") != "human_approval_denied":
+            raise AssertionError(f"사유: {e.detail}") from None
+        return
+    raise AssertionError("프롬프트가 없는데 승인으로 통과했다")
 
 # ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
 
@@ -2513,6 +2621,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("봉투: 로그 발췌 4KB → 3",       _case_envelope_log_excerpt_cap, None),
     ("봉투: 서식이 그대로 통과",      _case_envelope_template_round_trips, None),
     ("봉투: 사유를 모아서 돌려준다",  _case_envelope_check_returns_not_raises, None),
+    ("승인: 기본값 on",               _case_approval_default_is_on, None),
+    ("승인: TTY 부재 → 3(사유)",      _case_approval_no_tty_is_code3_with_reason, None),
+    ("승인: 거부면 쓰기 0",           _case_approval_denied_writes_nothing, None),
+    ("승인: 승인하면 올라간다",       _case_approval_granted_writes_once, None),
+    ("승인: 끄는 길은 config 하나",   _case_approval_off_only_via_config, None),
+    ("승인: 조용한 자동 통과 0건",    _case_approval_no_silent_auto_pass, None),
 )
 
 
@@ -2731,6 +2845,26 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M84-approval-default-off", "agora/contract_open.py",
+     "DEFAULT_HUMAN_APPROVAL = True",
+     "DEFAULT_HUMAN_APPROVAL = False",
+     "승인: 기본값 on"),
+    ("M85-no-tty-passes-silently", "agora/core.py",
+     '    if not tty:\n        raise AgoraError(errors.GATE_REJECT, "승인을 받을 수 없다 — 전송하지 않는다",\n                         {"reason": HUMAN_APPROVAL_REQUIRED})',
+     '    if not tty:\n        return {"required": True, "approved": True, "why": "no_tty"}',
+     "승인: TTY 부재 → 3(사유)"),
+    ("M86-denial-ignored", "agora/core.py",
+     '    if not (prompt or (lambda: False))():',
+     "    if False:",
+     "승인: 거부면 쓰기 0"),
+    ("M87-approval-skipped-in-publish", "agora/core.py",
+     "    approval = approval_gate(config=config, prompt=prompt, isatty=isatty)   # ⑶ 승인",
+     '    approval = {"required": False, "approved": True, "why": "skipped"}',
+     "승인: 거부면 쓰기 0"),
+    ("M88-prompt-defaults-to-approved", "agora/core.py",
+     "    if not (prompt or (lambda: False))():",
+     "    if not (prompt or (lambda: True))():",
+     "승인: 조용한 자동 통과 0건"),
     ("M83-allow-max-bytes-unchecked", "agora/scrub.py",
      '        if "max_bytes" in spec:',
      "        if False:",
@@ -3026,7 +3160,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S3-3(봉투 스키마·envelope_check)"
+            "슬라이스": "S3-4(human_approval)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
