@@ -1105,6 +1105,158 @@ def _case_reducer_paginates_and_order_independent() -> None:
         raise AssertionError("수집 순서가 createdAt 순이 아니다")
 
 
+# ── S2-3 reducer 2단 — 정렬·경합 ────────────────────────────────────────────
+# ★경합에서 **진 것**과 **자격이 없는 것**은 다른 사건이다. 이 절의 케이스는
+#   그 둘이 끝까지 다른 목록에 남는지도 함께 잰다.
+
+def _r3_store(items: list[tuple[str, str]]) -> Any:
+    """(본문, createdAt) 목록을 그 순서대로 운반층에 넣는다 — 시각과 순서를 따로 준다."""
+    from agora.store_mock import MockStore
+    s = MockStore()
+    for body, created in items:
+        s.inject_raw(thread_id=_T1, body=body, created_at=created)
+    return s
+
+
+def _r3_race(n: int, *, same_time: bool = False) -> dict[str, Any]:
+    """같은 `prev` 를 가진 post 를 n 건 만들어 넣고 수집·정렬까지 마친다."""
+    from agora import reducer
+    from agora.event import event_hash
+    g = _r2_genesis()
+    ghash = event_hash(g)
+    items = [(_r2_signed(g), "2026-01-01T00:00:00Z")]
+    for i in range(n):
+        post = _r2_event("post", {"round": 1, "body": f"경합 발언 {i}"},
+                         f"{i + 1:032x}", prev=ghash)
+        created = "2026-01-01T00:00:05Z" if same_time else f"2026-01-01T00:00:{i + 5:02d}Z"
+        items.append((_r2_signed(post), created))
+    return reducer.order(_r2_collect(_r3_store(items)))
+
+
+def _case_reducer_race_two_one_winner() -> None:
+    """같은 prev 2건 → 승자 1(§8 픽스처)."""
+    out = _r3_race(2)
+    if len(out["chain"]) != 2 or len(out["stale"]) != 1:
+        raise AssertionError(f"경합 2건: chain={len(out['chain'])} stale={out['stale']}")
+    if out["stale"][0]["reason"] != "lost_race":
+        raise AssertionError(f"사유가 다르다: {out['stale'][0]}")
+    if out["chain"][1]["created_at"] != "2026-01-01T00:00:05Z":
+        raise AssertionError("이르게 온 쪽이 이기지 않았다")
+
+
+def _case_reducer_race_three_two_stale() -> None:
+    """같은 prev 3건 → 승자 1 · stale 2."""
+    out = _r3_race(3)
+    if len(out["chain"]) != 2 or len(out["stale"]) != 2:
+        raise AssertionError(f"경합 3건: chain={len(out['chain'])} stale={len(out['stale'])}")
+    winners = {s["winner_node_id"] for s in out["stale"]}
+    if winners != {out["chain"][1]["node_id"]}:
+        raise AssertionError(f"진 쪽이 가리키는 승자가 사슬의 승자와 다르다: {winners}")
+
+
+def _case_reducer_race_tie_is_deterministic() -> None:
+    """createdAt 동률 → node_id 사전순 · 같은 입력을 100번 섞어도 같은 승자(AC ②).
+
+    ★수집을 100번 다시 하지 않고 **정렬만** 100번 돌린다. 재는 것이 정렬의 결정론이기 때문이다
+      (서명 검증을 100번 돌리면 몇 분이 든다 — 느린 하네스는 안전하지도 않다).
+    """
+    import random
+    from agora import reducer
+    from agora.event import event_hash
+    g = _r2_genesis()
+    ghash = event_hash(g)
+    items = [(_r2_signed(g), "2026-01-01T00:00:00Z")]
+    for i in range(3):
+        items.append((_r2_signed(_r2_event("post", {"round": 1, "body": f"동시 발언 {i}"},
+                                           f"{i + 1:032x}", prev=ghash)),
+                      "2026-01-01T00:00:05Z"))          # ★셋 다 같은 시각
+    collected = _r2_collect(_r3_store(items))
+    expected = min((v["node_id"] for v in collected["valid"] if v["kind"] == "post"))
+    rng = random.Random(20260825)
+    for _ in range(100):
+        shuffled = dict(collected)
+        shuffled["valid"] = list(collected["valid"])
+        rng.shuffle(shuffled["valid"])
+        out = reducer.order(shuffled)
+        if len(out["chain"]) != 2:
+            raise AssertionError(f"사슬 길이가 흔들린다: {len(out['chain'])}")
+        if out["chain"][1]["node_id"] != expected:
+            raise AssertionError(
+                f"승자가 바뀐다: {out['chain'][1]['node_id']} != {expected} "
+                "— 목록에 담긴 순서가 승패를 정하고 있다")
+
+
+def _case_reducer_loser_descendant_unreachable() -> None:
+    """진 이벤트를 `prev` 로 가리키는 글은 사슬에 못 붙는다 → unreachable.
+
+    ★이것을 안 가르면 진 쪽 가지가 사슬에 조용히 이어붙는다.
+    """
+    from agora import reducer
+    from agora.event import event_hash
+    g = _r2_genesis()
+    ghash = event_hash(g)
+    winner = _r2_event("post", {"round": 1, "body": "이긴 발언"}, "1" * 32, prev=ghash)
+    loser = _r2_event("post", {"round": 1, "body": "진 발언"}, "2" * 32, prev=ghash)
+    child = _r2_event("post", {"round": 1, "body": "진 쪽에 붙은 발언"}, "3" * 32,
+                      prev=event_hash(loser))
+    out = reducer.order(_r2_collect(_r3_store([
+        (_r2_signed(g), "2026-01-01T00:00:00Z"),
+        (_r2_signed(winner), "2026-01-01T00:00:05Z"),
+        (_r2_signed(loser), "2026-01-01T00:00:06Z"),
+        (_r2_signed(child), "2026-01-01T00:00:07Z"),
+    ])))
+    if len(out["chain"]) != 2:
+        raise AssertionError(f"사슬에 진 쪽 가지가 붙었다: {len(out['chain'])}")
+    reasons = sorted(s["reason"] for s in out["stale"])
+    if reasons != ["lost_race", "unreachable"]:
+        raise AssertionError(f"사유 구성이 다르다: {out['stale']}")
+
+
+def _case_reducer_stale_is_not_quarantine() -> None:
+    """진 것과 자격 없는 것은 **끝까지 다른 목록**이다.
+
+    같은 묶음에 경합 1건과 무서명 1건을 함께 넣고, 서로의 목록에 섞이지 않는지 본다.
+    """
+    from agora import reducer
+    from agora.event import event_hash, render_post
+    g = _r2_genesis()
+    ghash = event_hash(g)
+    out = reducer.order(_r2_collect(_r3_store([
+        (_r2_signed(g), "2026-01-01T00:00:00Z"),
+        (_r2_signed(_r2_event("post", {"round": 1, "body": "이긴 발언"}, "1" * 32,
+                              prev=ghash)), "2026-01-01T00:00:05Z"),
+        (_r2_signed(_r2_event("post", {"round": 1, "body": "진 발언"}, "2" * 32,
+                              prev=ghash)), "2026-01-01T00:00:06Z"),
+        (render_post(_r2_event("post", {"round": 1, "body": "무서명 발언"}, "3" * 32,
+                               prev=ghash), None), "2026-01-01T00:00:07Z"),
+    ])))
+    if [s["reason"] for s in out["stale"]] != ["lost_race"]:
+        raise AssertionError(f"경합 목록에 다른 것이 섞였다: {out['stale']}")
+    if [q["reason"] for q in out["quarantined"]] != ["signature"]:
+        raise AssertionError(f"격리 목록이 변했다: {out['quarantined']}")
+    if len(out["chain"]) != 2:
+        raise AssertionError(f"사슬 길이: {len(out['chain'])}")
+
+
+def _case_reducer_no_genesis_no_chain() -> None:
+    """genesis 가 없으면 사슬은 비고, 나머지는 전부 닿지 않는 것이 된다.
+
+    ★빈 사슬을 「정상 0건」으로 조용히 넘기면, genesis 가 격리된 스레드가 **깨끗한 빈 스레드**로 보인다.
+    """
+    from agora import reducer
+    from agora.event import event_hash
+    g = _r2_genesis()
+    ghash = event_hash(g)
+    out = reducer.order(_r2_collect(_r3_store([
+        (_r2_signed(_r2_event("post", {"round": 1, "body": "홀로 남은 발언"}, "1" * 32,
+                              prev=ghash)), "2026-01-01T00:00:05Z"),
+    ])))
+    if out["chain"]:
+        raise AssertionError(f"genesis 없이 사슬이 생겼다: {out['chain']}")
+    if [s["reason"] for s in out["stale"]] != ["unreachable"]:
+        raise AssertionError(f"사유가 다르다: {out['stale']}")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -1177,6 +1329,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("reducer: 격리는 audit 에만",    _case_reducer_quarantine_hidden_by_default, None),
     ("reducer: 격리는 삭제가 아니다", _case_reducer_quarantine_does_not_delete, None),
     ("reducer: 페이지 전건·순서 무관", _case_reducer_paginates_and_order_independent, None),
+    ("경합: 같은 prev 2건 → 승자 1",  _case_reducer_race_two_one_winner, None),
+    ("경합: 같은 prev 3건 → stale 2", _case_reducer_race_three_two_stale, None),
+    ("경합: 동률 → node_id(100회)",   _case_reducer_race_tie_is_deterministic, None),
+    ("경합: 진 쪽 후손 → unreachable", _case_reducer_loser_descendant_unreachable, None),
+    ("경합: stale ≠ 격리",            _case_reducer_stale_is_not_quarantine, None),
+    ("경합: genesis 없으면 사슬 없음", _case_reducer_no_genesis_no_chain, None),
 )
 
 
@@ -1347,6 +1505,22 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    rows = sorted(fetch_all(store, thread_id, limit=limit), key=_order_key)",
      "    rows = fetch_all(store, thread_id, limit=limit)",
      "reducer: 재게시 → 뒤엣것 격리"),
+    ("M42-race-winner-inverted", "agora/reducer.py",
+     "        winner = min(candidates, key=_winner_key)",
+     "        winner = max(candidates, key=_winner_key)",
+     "경합: 같은 prev 2건 → 승자 1"),
+    ("M43-race-tiebreak-dropped", "agora/reducer.py",
+     '    return (str(entry.get("created_at") or ""), str(entry.get("node_id") or ""))',
+     '    return (str(entry.get("created_at") or ""), "")',
+     "경합: 동률 → node_id(100회)"),
+    ("M44-unreachable-not-detected", "agora/reducer.py",
+     '        if e["hash"] not in seen_hashes and e["node_id"] not in lost_nodes',
+     "        if False",
+     "경합: 진 쪽 후손 → unreachable"),
+    ("M45-stale-merged-into-quarantine", "agora/reducer.py",
+     '            "quarantined": collected["quarantined"]}',
+     '            "quarantined": collected["quarantined"] + stale}',
+     "경합: stale ≠ 격리"),
 )
 
 
@@ -1518,7 +1692,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S2-2(reducer 검증 파이프·격리)"
+            "슬라이스": "S2-3(정렬·경합 판정)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
