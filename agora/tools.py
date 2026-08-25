@@ -532,6 +532,56 @@ def vote(ctx: Context, *, thread_id: str, target: str, value: int) -> dict[str, 
     return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
 
 
+# ── 운영 동작(CLI 전용 · 도구 표 밖) ────────────────────────────────────────
+# ★**도구 11종은 §4 에서 동결이다**(master 결정 2026-08-26 (b)안). 아래 둘은 도구가 아니라
+#   **절차 개입**이다 — 참가자의 발언이 아니라 「의장이 죽었으니 갈아 끼운다」·「이 대화를
+#   중단한다」이다. 그래서 MCP 표면에 올리지 않는다: 대리인 세션 손에 「의장을 갈아치워라」를
+#   쥐어 주지 않는다(`mcp-serve` 와 같은 자리).
+# ⚠**정직한 대가**: 의장이 죽은 스레드를 **에이전트 스스로는 못 살린다.** 운영자(사람·CLI)의
+#   개입이 반드시 필요하다 — 이것은 결함이 아니라 **의도한 경계**다(master 명시).
+
+
+def _require_operator(ctx: Context, what: str) -> None:
+    """운영자 명부(K-3) 검사 — **보내기 전에** 막는다(code 5).
+
+    ★reducer 도 같은 것을 본다(그쪽이 진짜 판정이다). 두 겹인 이유는 예산과 같다:
+      로컬 겹이 없으면 권한 없는 사람의 글이 **올라간 뒤에** 사라지고, 그 사람은 왜인지 모른다.
+      표식이 서로 다르다 — 여기는 code 5(안 나감) · reducer 는 `permission` 격리(나갔다 사라짐).
+    ★명부가 **비어 있으면 아무도 못 한다.** 그것이 「명부를 안 실었다」와 같은 모양이라
+      이번 세션에 명부 배선을 먼저 고쳤다(B-3) — 이 문이 뜻을 가지려면 그게 먼저였다.
+    """
+    if ctx.participant_id not in ctx.operators:
+        raise AgoraError(errors.PERMISSION, "운영자만 할 수 있다",
+                         {"action": what, "from": ctx.participant_id,
+                          "operators": len(ctx.operators)})
+
+
+def delegate_chair(ctx: Context, *, thread_id: str, new_chair: str) -> dict[str, Any]:
+    """의장 승계 — **운영자가**, **만료된 동안만**(§2-2 · 설계 결정 2026-08-25).
+
+    ★조건이 규칙의 절반이다: 조건이 없으면 운영자가 아무 때나 의장을 갈아치울 수 있고,
+      그러면 의장 권한이 형해화된다. 그 조건은 reducer 가 본다 — 여기서는 명부만 본다.
+    """
+    _require_operator(ctx, "delegate_chair")
+    state, prev, expected = _head_and_state(ctx, thread_id)
+    out = _publish(ctx, kind="delegate_chair", thread_id=thread_id,
+                   payload={"new_chair": new_chair},
+                   prev=prev, expected_state=expected, category=state["type"])
+    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
+
+
+def abort(ctx: Context, *, thread_id: str, reason: str) -> dict[str, Any]:
+    """대화 중단 — 운영자만(K-3). 상태는 `closed` · 사유는 `aborted` 로 남는다."""
+    _require_operator(ctx, "abort")
+    state, prev, expected = _head_and_state(ctx, thread_id)
+    out = _publish(ctx, kind="abort", thread_id=thread_id, payload={"reason": reason},
+                   prev=prev, expected_state=expected, category=state["type"])
+    projection = _project(ctx, thread_id=thread_id, state="closed",
+                          close_reason="aborted")
+    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"],
+            "projection": projection}
+
+
 def promote_knowhow(ctx: Context, *, parent_thread_id: str, title: str, body: str,
                     envelope: dict[str, Any]) -> dict[str, Any]:
     """problem 에서 배운 것을 knowhow 로 **승격**한다(04-tasks S6-5 AC ③).

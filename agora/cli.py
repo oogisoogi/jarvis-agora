@@ -49,11 +49,17 @@ COMMANDS: dict[str, dict[str, Any]] = {
     #   ⇒ 도구가 아니라 **운영 동작**이므로 core=False 이고 MCP 에 노출하지 않는다
     #     (서버를 띄우는 명령을 서버가 노출하면 대리인이 서버를 또 띄운다).
     "mcp-serve":      {"core": False, "built": True,  "slice": "S6-6"},
+    # ★계약 확장 3(master 결정 2026-08-26 (b)안) — **절차 개입** 2종.
+    #   계약 kind 9종 중 `delegate_chair`·`abort` 는 **내보낼 자리가 없었다**(발신자 0).
+    #   그래서 만료된 스레드를 되살릴 수도, 운영자가 중단할 수도 없었다 — 받을 준비만 돼 있었다.
+    #   도구가 아니라 운영 동작으로 둔다(§4 도구 11종 동결 문면 불변 · MCP 표면 11종 유지).
+    "delegate-chair": {"core": False, "built": True,  "slice": "S7-3"},
+    "abort":          {"core": False, "built": True,  "slice": "S7-3"},
 }
 
 # MCP 에 노출하지 않는 것 — 설계 §4 가 예외로 명시한 4종.
 MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
-                        "reconcile", "mcp-serve"})
+                        "reconcile", "mcp-serve", "delegate-chair", "abort"})
 
 # ── 역할별 노출표(설계 §5 「수신 격리」 H-3 · NFR-2) ─────────────────────────
 # ★**여기가 「도구 목록」의 단일 출처다.** 대리인 브리프(S6-3 `brief-reader.md`)는 이 표를
@@ -114,6 +120,21 @@ BOOL_ARGS = frozenset({"audit", "answered", "once"})
 #   언제나 이런 충돌이 생긴다.** 칸 이름은 계약이 정하고, 계약은 충돌하지 않는다.
 JSON_ARGS = frozenset({"envelope", "deadlines", "counter", "refs", "parent",
                        "dissent", "recommended_actions", "arguments"})
+
+
+def _run_operator(name: str, rest: list[str]) -> Any:
+    """운영 동작 2종 — 도구가 아니라 **절차 개입**이다(§4 아래 절 · master 결정 2026-08-26).
+
+    ★도구 표(`tools.CORE_TOOLS`)를 거치지 않는다. 거기 넣으면 계약이 13종이 되고
+      MCP 표면에 올라간다 — 대리인 세션 손에 「의장을 갈아치워라」가 쥐어진다.
+    """
+    from agora import tools
+    kw = _kv(rest)
+    ctx = tools.context_from_config(kw.pop("dir", None))
+    if name == "delegate-chair":
+        return tools.delegate_chair(ctx, thread_id=kw["thread_id"],
+                                    new_chair=kw["new_chair"])
+    return tools.abort(ctx, thread_id=kw["thread_id"], reason=kw["reason"])
 
 
 def _run_local(name: str, rest: list[str]) -> Any:
@@ -217,6 +238,8 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
         from agora import mcp_server
         mcp_server.serve()
         return None
+    if name in ("delegate-chair", "abort"):
+        return _run_operator(name, list(args.rest) if hasattr(args, "rest") else [])
     if name in ("watch", "reconcile", "export", "import"):
         return _run_local(name, list(args.rest) if hasattr(args, "rest") else [])
     if meta["core"]:

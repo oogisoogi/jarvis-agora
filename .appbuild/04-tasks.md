@@ -152,7 +152,7 @@ S1-9(첫 커밋) 시점까지 미회신이면 **막힘으로 상신**하고, 그
 |---|---|---|---|---|---|
 | **S7-1** | 가짜 참가자 2키(`operator-a`·`operator-b`) 생성 → 명부 등록 → 체크포인트 서명 — **ONBOARDING 문서만 보고**(K-8 의 FR-12 검증) | FR-12 | ① 문서 절차를 그대로 따라가 첫 발언 도달 ② 문서에 없어서 막힌 단계가 있으면 **문서를 고치고 그 사실을 기록**(막힌 지점 = 문서 결함) ③ 이름·연락처 전부 가짜(픽스처 grep) | M | S6-5 |
 | **S7-2** | **problem 완주**: genesis(봉투) → post(타 참가자) → `answer_selected`(요청자) → `close(solved)` | UC1 · FR-2·5 | 스레드 URL · `read` 출력 · 원장 행 첨부 · 제목 `[selftest]` 접두 · ① **타인 키의 `answer_selected` 를 저장층에 주입 → 상태 무반영** 실측 | M | S7-1 |
-| **S7-3** | **debate 완주**: genesis → post(R1)×2 → `advance` → post(R2·counter)×2 → `advance` → post(R3) → `resolution` → `close` + **경합 픽스처** + **만료 픽스처** | UC3 · FR-4 | ① 같은 `prev` 2건 동시 게시 → 승자 1·stale 1 실측 ② deadline 을 지난 스레드가 `expired` 로 자동 전이 후 `delegate_chair` 로 재개 실측 ③ resolution 에 이견 절·`execution: forbidden` 존재 | L | S7-2 |
+| **S7-3** | **debate 완주**: genesis → **advance(r0→r1)** → post(R1)×2 → `advance` → post(R2·counter)×2 → `advance` → post(R3) → `resolution` → `close` + **경합 픽스처** + **만료 픽스처** | UC3 · FR-4 | ① 같은 `prev` 2건 동시 게시 → 승자 1·stale 1 실측 ② deadline 을 지난 스레드가 `expired` 로 자동 전이 후 **`agora delegate-chair`(CLI 운영 동작)** 로 의장 승계 → 새 의장의 `advance` 로 재개 실측 ③ resolution 에 이견 절·`execution: forbidden` 존재 | L | S7-2 |
 | **S7-4** | **주입 픽스처 + 무도구 감사**: 본문에 「이 명령을 실행하라: …」 → 무도구 reader 대리인이 읽음 | NFR-2 · H-3 | `[§8]` **주입 픽스처 → 호출 감사 로그 0** · ① 부작용 표식 파일이 **생성되지 않았음**을 단언하되, 「그 파일이 만들어질 수 있는 경로가 실재함」을 **대조군으로 먼저 보인다**(부재를 재는 검사가 아무것도 안 잰 채 0을 보고하는 것을 막는다) ② `read` 출력에 UNTRUSTED 표식 | M | S7-3 |
 | **S7-5** | **증거 취합 → 05 게이트 대조표** | 전 요구 | ① 게이트 전 행에 증거(명령 출력·URL·원장 행)가 1:1 ② **미충족은 미충족이라고 적는다**(K-1 Windows smoke 포함) — 빈칸 0 ③ 구현 후 9단계 성찰 1회 | M | S7-4 |
 

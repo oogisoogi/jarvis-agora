@@ -18,7 +18,7 @@
 | **FR-1** 스레드 3유형 | 3유형 genesis 를 만들면 **왕복 조회에서 같은 값**이 나오고, 유형별 필수 필드가 없으면 거부(code 3) | S-1 | Thread·genesis | S2-1·S2-4·S4-1 | `T-FR1` | ☐ |
 | **FR-2** 상태 봉투 | problem/knowhow genesis 에 봉투가 없거나 필수 칸이 빠지면 **code 3 + 빠진 칸 이름** · log_excerpt >4KB 거부 | S-3·S-5 | Envelope | S3-3·S7-2 | `T-FR2` | ☐ |
 | **FR-3** 발언 | 같은 이벤트를 어떤 줄바꿈·정규화로 써도 **같은 canonical·같은 서명** · canonical 안 1바이트 변조 → BAD | S-2·S-3 | Event | S1-2·S1-5·S2-1 | `T-FR3` | ☐ |
-| **FR-4** 토론 절차 | 비의장 `advance`/`resolution` → **code 5** · 라운드 밖 post → **격리(무효)** · 같은 prev 경합 2건 → **승자 1** · 마감 경과 → `expired` → `advance --delegate` 재개 | **S-5·S-6·S-8** | Event·상태기계 | S2-4·S2-5·S7-3 | `T-FR4` | ☐ |
+| **FR-4** 토론 절차 | 비의장 `advance`/`resolution` → **code 5** · 라운드 밖 post → **격리(무효)** · 같은 prev 경합 2건 → **승자 1** · 마감 경과 → `expired` → **`agora delegate-chair`(운영 동작·CLI 전용)로 의장 승계 후 새 의장의 `advance` 로 재개**(2026-08-26 정정 — 구 문면 `advance --delegate` 는 실재하지 않는 명령이었다) | **S-5·S-6·S-8** | Event·상태기계 | S2-4·S2-5·S7-3 | `T-FR4` | ☐ |
 | **FR-5** 해결 표시 | 요청자 키의 `answer_selected` **만** solved 로 반영 · 타인이 저장층에서 answer 로 표시해도 **상태 무반영** · 카테고리 `isAnswerable` 실측 통과 | **S-7·S-8** | Event | S2-4·S4-0·S7-2 | `T-FR5` | ☐ |
 | **FR-6** 신원·서명 | 명부 키 서명 → `ok` · 변조 → `BAD` · 명부 밖 키 → `unsigned` · **폐기 키(KRL) 서명 → 무효** · 다른 namespace → 무효 | S-2 | allowed_signers·KRL | S1-3·S1-4·S1-5 | `T-FR6` | ☐ |
 | **FR-7** 스크럽 게이트 | denylist 픽스처 **8종 전건 차단** · allowlist 위반 **5종 차단** · 정상문 **오탐 0** · 차단 시 **저장층 쓰기 호출 0** · rule digest 불일치 → 수신 재검사 플래그 · `human_approval` 기본 **on** | S-3 | scrub 보고 | S3-1·S3-2·S3-5 | `T-FR7` | ☐ |

@@ -109,6 +109,21 @@
 | `agora.ack` | message_id | 수신 영수증(원장 acked) |
 | (CLI만) `agora watch [--interval 60]` · `agora selftest` · `agora keygen` · `agora export` | | MCP 예외로 명시 |
 - CLI는 `--body-file F` 등 파일 인자를 받아 구조체로 변환한 뒤 코어 호출.
+
+**운영 동작(CLI 전용) 3종 — 도구가 아니다**(master 결정 2026-08-26 · 위 「도구 11종」 동결은 그대로다):
+
+| 명령 | 인자 | 무엇 |
+|---|---|---|
+| `agora mcp-serve` | — | 도구 표면을 띄운다(`.mcp.json.example` 그대로) |
+| `agora delegate-chair` | thread_id, new_chair | 의장 승계 — **운영자 명부 안에서만** · reducer 는 **만료된 동안만** 받는다(§2-2) |
+| `agora abort` | thread_id, reason | 대화 중단 — **운영자만**(K-3) · 상태 `closed`·사유 `aborted` |
+
+- ★**왜 도구가 아닌가**: 셋 다 **참가자의 발언이 아니라 절차 개입**이다. MCP 표면에 올리면
+  대리인 세션 손에 「의장을 갈아치워라」·「이 대화를 중단하라」·「서버를 또 띄워라」가 쥐어진다.
+- ⚠**정직한 대가**: 의장이 죽은 스레드를 **에이전트 스스로는 못 살린다.** 운영자(사람·CLI)의
+  개입이 반드시 필요하다 — 결함이 아니라 **의도한 경계**다.
+- ★이 절이 있는 이유: `delegate_chair`·`abort` 는 계약 kind 인데 **내보낼 자리가 없었다**
+  (2026-08-26 kind 축 대조가 잡았다). 받을 준비만 돼 있고 보낼 손이 없으면 만료된 스레드는 영영 만료다.
 - 오류 = machine-readable JSON `{code, retryable, message, detail}`. 코드: 2 전제 미비 · 3 게이트 거부 · 4 서명/검증 실패 · 5 권한 · 7 저장층 오류(retryable) · 8 저장 성공 불명(`unknown_commit` — 재조회 후 판정) · 9 상태 불일치(CAS·재시도 전 read 필요) · 10 인자 오류.
 
 ## 5. 게이트·안전(경계 + 코드)
