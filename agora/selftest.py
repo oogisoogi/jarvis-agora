@@ -1945,6 +1945,60 @@ def _case_spawn_is_proposal_only() -> None:
 
 
 
+# ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
+
+# S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
+# ★이 표가 없으면 「4축을 쟀다」가 사람의 기억에 남는다. 표로 두면 **뮤테이션을 지우는 순간**
+#   이 케이스가 적색이 된다 — 그물을 걷어 낸 것이 조용히 지나가지 않는다.
+S2_AXES: dict[str, tuple[str, ...]] = {
+    "경합": ("M41-reducer-order-unstable", "M42-race-winner-inverted",
+             "M43-race-tiebreak-dropped", "M44-unreachable-not-detected",
+             "M45-stale-merged-into-quarantine"),
+    "권한": ("M46-chair-check-off", "M50-requester-check-off",
+             "M57-delegate-chair-check-off", "M58-abort-operator-check-off",
+             "M61-operator-delegate-unconditional"),
+    "라운드": ("M47-out-of-round-allowed", "M48-counter-not-required",
+               "M56-time-beats-event", "M59-expired-never-fires"),
+    "예산": ("M62-budget-not-enforced", "M63-budget-hardcoded",
+             "M64-budget-chars-ignored", "M65-budget-config-unvalidated"),
+}
+
+
+def _case_s2_axes_have_nets() -> None:
+    """S2 의 4축이 각각 실제 뮤테이션으로 덮여 있고, 그 뮤테이션이 표에 실재한다."""
+    ids = {m[0] for m in MUTATIONS}
+    missing = {axis: sorted(set(want) - ids) for axis, want in S2_AXES.items()}
+    missing = {a: v for a, v in missing.items() if v}
+    if missing:
+        raise AssertionError(f"그물이 사라진 축: {missing}")
+    for axis, want in S2_AXES.items():
+        if not want:
+            raise AssertionError(f"축에 뮤테이션이 하나도 없다: {axis}")
+
+
+def _case_quarantine_reasons_are_named() -> None:
+    """격리 사유는 **이름을 먼저 받는다** — 목록에 없는 사유가 코드에서 나오면 적색.
+
+    ★사유가 목록 밖에서 늘어나면 「왜 안 보이나」에 답하는 어휘가 사람마다 달라진다.
+    """
+    import re
+    from agora import reducer
+    src_path = os.path.join(_ROOT, "agora", "reducer.py")
+    with open(src_path, encoding="utf-8") as fh:
+        src = fh.read()
+    used = set(re.findall(r"reject\(entry, ([A-Z_]+)", src))
+    used |= set(re.findall(r"drop\(row, ([A-Z_]+)", src))
+    named = {n for n in dir(reducer)
+             if n.isupper() and isinstance(getattr(reducer, n), str)}
+    unknown = used - named
+    if unknown:
+        raise AssertionError(f"이름 없는 사유: {sorted(unknown)}")
+    values = {getattr(reducer, n) for n in used if n in named}
+    if not values <= set(reducer.REASONS):
+        raise AssertionError(f"REASONS 에 없는 사유: {sorted(values - set(reducer.REASONS))}")
+
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -2063,6 +2117,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("관계: 절차를 바꾸지 않는다",    _case_relations_do_not_change_procedure, None),
     ("관계: 없는 곳을 가리켜도 된다", _case_relations_may_point_nowhere, None),
     ("관계: spawn 은 제안뿐",         _case_spawn_is_proposal_only, None),
+    ("S2: 4축 그물 실재",             _case_s2_axes_have_nets, None),
+    ("S2: 격리 사유는 이름을 받는다", _case_quarantine_reasons_are_named, None),
 )
 
 
@@ -2514,7 +2570,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S2-7(스레드 관계 필드)"
+            "슬라이스": "S2-8(S2 완주)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
