@@ -75,9 +75,18 @@ def publish_event(*, store: Any, event: dict[str, Any], category: str,
     body = render_post(event, signed["signature"])
     if before_write is not None:
         before_write()                         # ⑸ 마지막 관문(CAS 등) — 던지면 안 쓴다
-    result = store.append(thread_id=event["thread_id"], category=category,
-                          title=title or event["payload"].get("title", ""),
-                          body=body, is_genesis=is_genesis)   # ⑷ 쓰기
+    try:
+        result = store.append(thread_id=event["thread_id"], category=category,
+                              title=title or event["payload"].get("title", ""),
+                              body=body, is_genesis=is_genesis)   # ⑷ 쓰기
+    except AgoraError as e:
+        if e.code != errors.UNKNOWN_COMMIT:
+            raise
+        # ★**여전히 삼키지 않는다** — 그대로 올린다. 다만 호출자가 재조회 판정
+        #   (`settle_unknown`)을 할 수 있도록 **해시를 실어** 보낸다. 그 값은 발신자의
+        #   주장이 아니라 **서명기가 직접 잰 것**이다(M-11) — 판정의 근거는 잰 값이어야 한다.
+        raise AgoraError(e.code, e.message,
+                         {**(e.detail or {}), "event_hash": signed["hash"]}) from None
     row = None
     if ledger is not None:
         row = record_sent(ledger=ledger, event=event, event_hash=signed["hash"],

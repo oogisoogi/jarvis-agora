@@ -65,6 +65,12 @@ class MockStore:
             self._record(thread_id, category, title, body, is_genesis)
             raise AgoraError(errors.UNKNOWN_COMMIT, "저장 성공 불명 — 재조회 후 판정하라",
                              {"thread_id": thread_id})
+        if self.fail_next_append == "unknown_lost":
+            # ★같은 code 8 인데 **저장까지 안 된** 쪽. 두 갈래를 다 열 수 있어야
+            #   재조회 판정이 「올라갔다」와 「안 올라갔다」를 실제로 가르는지 잰다.
+            self.fail_next_append = None
+            raise AgoraError(errors.UNKNOWN_COMMIT, "저장 성공 불명 — 재조회 후 판정하라",
+                             {"thread_id": thread_id})
         return self._record(thread_id, category, title, body, is_genesis)
 
     def _record(self, thread_id: str, category: str, title: str,

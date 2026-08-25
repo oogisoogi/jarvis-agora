@@ -24,8 +24,7 @@ path_like_arguments # MCP 노출면 감사 — 사람이 「경로형 인자가 
 inject_raw          # MockStore — 깨진 글을 심는 픽스처. 프로덕션 경로에 있으면 그게 사고다.
 delete_node         # MockStore — 삭제(tombstone) 픽스처. 위와 같다.
 
-# ── 🔴미배선 — 부를 수 있는 사람이 **지금 없다**(master 보고 2026-08-26) ─────
+# ── 🔴미배선 — 부를 수 있는 사람이 **지금 없다** ─────────────────────────────
+#    (2026-08-26 보고분 4건 중 serve·deliver·settle_unknown 은 같은 날 배선돼 빠졌다.)
 write_all           # 브리프 파일 재생성. CLI 명령이 없어 `python3 -c` 로만 부를 수 있다(파일↔렌더 대조는 시험이 한다).
-deliver             # 수신 영수증의 「건넸다」. watch 는 spool 에 FETCHED 까지만 적고 DELIVERED·원문 보관을 **안 부른다** ⇒ 실사용에 배달 영수증이 없다.
-settle_unknown      # code 8(저장 성공 불명) 마무리. 던지는 곳은 셋인데(store_github×2·store_mock) **재조회로 판정하는 곳이 0** 이다.
 checkpoint          # 명부 3종 체크포인트 해시. 이벤트의 `roster` 칸은 계약상 allowed_signers 해시만 쓴다(§2-1a) — 이 함수는 H-13 체크포인트 서명용이고 그 슬라이스가 아직 없다.

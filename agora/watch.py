@@ -19,6 +19,7 @@ import json
 import os
 from typing import Any
 
+from agora import ack as ack_mod
 from agora import spool as spool_mod
 from agora.event import parse_post
 
@@ -86,9 +87,15 @@ def poll_once(*, store: Any, spool: Any, cursor: Cursor,
                 continue
             spool.record(node_id=node_id, stage=spool_mod.FETCHED,
                          thread_id=item.get("thread_id"))
-            new_events.append({"node_id": node_id, "number": row["number"],
-                               "created_at": item.get("created_at"),
-                               "summary": _summarize(item.get("body") or "")})
+            event = {"node_id": node_id, "number": row["number"],
+                     "created_at": item.get("created_at"),
+                     "summary": _summarize(item.get("body") or "")}
+            # ★영수증에 필요한 것을 **여기서** 챙긴다(원문·message_id·thread_id).
+            #   나중에 다시 물으면 그 사이에 운반층이 글을 고칠 수 있고, 그러면
+            #   「무엇을 받았다고 했는가」가 우리가 실제로 본 것과 달라진다(§D1).
+            #   ⚠우리 서식이 아닌 글은 영수증이 없다 — 영수증은 **우리 이벤트**의 것이다.
+            event["_receipt"] = _receipt_of(item)
+            new_events.append(event)
 
     if latest:
         cursor.write(latest)
@@ -116,14 +123,26 @@ def run(*, store: Any, spool: Any, cursor: Cursor, ledger: Any = None,
     out = emit or _emit
     napper = sleep or _sleep
     rounds = 0
-    totals = {"new": 0, "duplicates": 0, "reconciled": 0, "tombstoned": 0}
+    totals = {"new": 0, "duplicates": 0, "reconciled": 0, "tombstoned": 0,
+              "delivered": 0}
     while True:
         rounds += 1
         result = poll_once(store=store, spool=spool, cursor=cursor)
         totals["new"] += result["new"]
         totals["duplicates"] += result["duplicates"]
         for event in result["events"]:
+            receipt = event.pop("_receipt", None)
             out(format_line(event))
+            # ★★**건넨 뒤에** 적는다(S5-3 · 배선 2026-08-26). 여기가 「배달」의 순간이다 —
+            #   앞에서 적으면 줄을 못 내보내고 죽은 경우까지 「건넸다」가 되고, 그건
+            #   spool 이 단계를 나눠 둔 이유를 지우는 것이다.
+            # ★원장이 없으면 **적지 않는다.** 원장 없이 「건넸다」를 spool 에만 남기면
+            #   나중에 「무엇을 받았다고 했는가」에 댈 원문이 없다 — 영수증이 아니라 메모다.
+            if receipt is not None and ledger is not None:
+                totals["delivered"] += 1
+                ack_mod.deliver(ledger=ledger, spool=spool, node_id=event["node_id"],
+                                thread_id=receipt["thread_id"],
+                                message_id=receipt["message_id"], raw=receipt["raw"])
         if ledger is not None and every and rounds % every == 0:
             for thread_id in _threads_seen(spool):
                 verdict = rec.reconcile(store=store, ledger=ledger, thread_id=thread_id,
@@ -135,6 +154,20 @@ def run(*, store: Any, spool: Any, cursor: Cursor, ledger: Any = None,
         if once:
             return {"rounds": rounds, "delivery": DELIVERY, **totals}
         napper(interval)
+
+
+def _receipt_of(item: dict[str, Any]) -> dict[str, Any] | None:
+    """운반층 행에서 영수증 재료를 뽑는다. **우리 서식이 아니면 None.**"""
+    from agora.event import parse_post
+    try:
+        parsed = parse_post(item.get("body") or "")
+    except Exception:      # noqa: BLE001 — 우리 서식이 아니면 그냥 아니다
+        return None
+    event = parsed["event"]
+    if not event.get("message_id") or not event.get("thread_id"):
+        return None
+    return {"message_id": event["message_id"], "thread_id": event["thread_id"],
+            "raw": parsed["raw"]}
 
 
 def _threads_seen(spool: Any) -> list[str]:

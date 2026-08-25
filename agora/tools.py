@@ -116,14 +116,46 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
         """
         reducer.require_state(_reduce(ctx, thread_id), expected_state)
 
-    out = core.publish_event(store=ctx.store, event=event, category=category,
-                             title=title, is_genesis=is_genesis,
-                             config=ctx.config, prompt=ctx.prompt,
-                             isatty=ctx.isatty, ledger=ctx.ledger,
-                             # genesis 에는 견줄 앞 상태가 없다(K-4 · expected_state = "")
-                             before_write=None if is_genesis else cas)
+    try:
+        out = core.publish_event(store=ctx.store, event=event, category=category,
+                                 title=title, is_genesis=is_genesis,
+                                 config=ctx.config, prompt=ctx.prompt,
+                                 isatty=ctx.isatty, ledger=ctx.ledger,
+                                 # genesis 에는 견줄 앞 상태가 없다(K-4 · expected_state = "")
+                                 before_write=None if is_genesis else cas)
+    except AgoraError as e:
+        if e.code != errors.UNKNOWN_COMMIT:
+            raise
+        out = _settle_unknown(ctx, event, e)
     out["usage"] = usage_of(event)
     return out
+
+
+def _settle_unknown(ctx: Context, event: dict[str, Any],
+                    err: AgoraError) -> dict[str, Any]:
+    """code 8(저장 성공 불명)의 **뒤처리** — 재조회로 판정한다(설계 §4).
+
+    ★★코어는 이것을 **일부러 안 한다**: 「보냈는데 응답이 안 왔다」를 성공이나 실패로
+      단정하면 ⑴안 올라간 글을 올라갔다고 믿거나 ⑵이미 올라간 글을 다시 올린다.
+      그래서 코어는 그대로 올리고, **판정은 여기서** 한다 — 근거는 우리 기록이 아니라
+      **운반층에 그 message_id 가 실재하는가** 하나뿐이다(기록으로 판정하면 순환이다).
+    ★★이 자리가 **비어 있었다**(2026-08-26 배선 전수조사): code 8 을 던지는 곳은 셋인데
+      재조회로 판정하는 곳이 **0** 이었다. `settle_unknown` 은 구현돼 있었고 시험도 있었다 —
+      아무도 부르지 않았을 뿐이다. 「구현했다」와 「배선됐다」는 다른 말이다.
+    ★**확정된 부재는 「불명」이 아니다.** 재조회로 안 올라간 것이 확인되면 code 7(저장층
+      실패·재시도 가능)로 **좁힌다** — 8 인 채로 두면 호출자는 영원히 「모르겠다」를 받는다.
+    """
+    settled = core.settle_unknown(store=ctx.store, ledger=ctx.ledger, event=event,
+                                  event_hash=(err.detail or {}).get("event_hash") or "")
+    if settled["verdict"] != core.COMMITTED:
+        raise AgoraError(errors.STORE, "저장되지 않았다 — 재조회로 확인했다",
+                         {"settled": settled["verdict"],
+                          "message_id": event["message_id"]}) from None
+    # 올라가 있었다. 다만 **응답을 못 받았으므로 node_id·url 은 없다** — 없는 것을 지어내지 않는다.
+    return {"message_id": event["message_id"],
+            "hash": (err.detail or {}).get("event_hash"),
+            "settled": core.COMMITTED, "ledger_row": settled["ledger_row"],
+            "node_id": None, "url": None}
 
 
 def usage_of(event: dict[str, Any]) -> dict[str, Any]:

@@ -3473,6 +3473,12 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "사슬교착": ("M211-head-advances-on-accepted-only",),
     # ★띄울 방법이 없던 도구 표면(S6-2 AC ② 미충족分).
     "도구표면": ("M212-mcp-serve-prints-return-value", "M213-mcp-serve-exposed-as-tool"),
+    # ★실사용에 배달 영수증이 없던 자리(부인 방지가 실물에서 비어 있었다).
+    "배달영수증": ("M214-watch-does-not-deliver", "M215-delivery-without-ledger",
+                   "M216-receipt-taken-from-any-body"),
+    # ★code 8 을 던지는 곳은 셋인데 판정하는 곳이 0 이던 자리.
+    "불명판정": ("M217-tool-does-not-settle-code8", "M218-settle-assumes-committed",
+                 "M219-settle-invents-a-url"),
 }
 
 S5_AXES: dict[str, tuple[str, ...]] = {
@@ -6017,6 +6023,104 @@ def _case_mcp_serve_is_not_itself_a_tool() -> None:
         raise AssertionError("서버 기동이 CLI 등록표에 없다 — 띄울 방법이 다시 사라졌다")
 
 
+def _case_watch_writes_the_delivery_receipt() -> None:
+    """감시가 줄을 내보낼 때 **영수증을 남긴다**(S5-3 · 배선 2026-08-26).
+
+    ★`ack.deliver` 는 처음부터 있었는데 **아무도 안 불렀다.** watch 는 spool 에 `fetched`
+      까지만 적었고, 그래서 실사용에는 **배달 영수증이 없었다** — 원장에 행도, 원문 보관도.
+      부인 방지는 「받았다고 말한 것」이 아니라 **「무엇을 받았다고 했는가」를 댈 수 있는 것**이다.
+    ★세 가지를 함께 잰다(하나만 재면 나머지가 비어도 초록이다):
+      ⑴ spool 단계가 `delivered` 로 간다 ⑵ 원장에 `recv/delivered` 행이 있다
+      ⑶ **원문이 보관돼** 다시 꺼낼 수 있다.
+    ★그리고 반대쪽: **우리 서식이 아닌 글에는 영수증이 없다**(영수증은 우리 이벤트의 것이다).
+    """
+    from agora import ack as ack_mod
+    from agora import spool as spool_mod
+    from agora import watch
+    from agora.ledger import Ledger
+    store, spool, cursor, d = _w_env()
+    ledger = Ledger(d)
+    _w_post(store, "t1", 1, 1)
+    store.inject_raw(thread_id="t1", body="웹에서 손으로 쓴 글",
+                     created_at="2026-01-01T00:02:00Z")
+    out = watch.run(store=store, spool=spool, cursor=cursor, ledger=ledger,
+                    once=True, emit=lambda _l: None)
+    if out["new"] != 2:
+        raise AssertionError(f"두 건이 아니다: {out}")
+    if out["delivered"] != 1:
+        raise AssertionError(f"영수증은 우리 이벤트 1건이어야 한다: {out['delivered']}")
+    mid = f"{1:032x}"
+    stages = {row.get("stage") for row in spool.state().values()}
+    if spool_mod.DELIVERED not in stages:
+        raise AssertionError(f"spool 이 fetched 에 멈췄다: {stages}")
+    if not ledger.has(mid, direction=ack_mod.DIRECTION, stage=spool_mod.DELIVERED):
+        raise AssertionError("원장에 배달 행이 없다")
+    if not ack_mod._read_event_raw(ledger, "t1", mid):
+        raise AssertionError("원문이 보관되지 않았다 — 「무엇을 받았다고 했는가」에 못 댄다")
+
+
+def _case_delivery_receipt_needs_a_ledger() -> None:
+    """원장 없이는 **「건넸다」를 적지 않는다.**
+
+    ★spool 에만 남기면 그건 영수증이 아니라 메모다 — 나중에 댈 원문이 없다.
+      그래서 원장이 없으면 **아무것도 적지 않고**, 그 사실이 계수(`delivered`)에 드러난다.
+    """
+    from agora import spool as spool_mod
+    from agora import watch
+    store, spool, cursor, _d = _w_env()
+    _w_post(store, "t1", 1, 1)
+    out = watch.run(store=store, spool=spool, cursor=cursor,
+                    once=True, emit=lambda _l: None)
+    if out["delivered"] != 0:
+        raise AssertionError(f"원장이 없는데 건넸다고 적었다: {out}")
+    stages = {row.get("stage") for row in spool.state().values()}
+    if stages != {spool_mod.FETCHED}:
+        raise AssertionError(f"원장 없이 단계를 올렸다: {stages}")
+
+
+def _case_unknown_commit_is_settled_by_the_tool() -> None:
+    """code 8 은 **도구 경계에서 판정된다**(배선 2026-08-26).
+
+    ★코어는 일부러 판정하지 않는다(성공으로 바꾸면 그 거짓이 원장에 박힌다). 그래서
+      판정은 도구가 해야 하는데 — **아무도 안 했다.** 던지는 곳은 셋인데 재조회로
+      판정하는 곳이 0 이었고, 사용자는 「모르겠다」를 받고 끝났다.
+    ★두 갈래를 **각각** 연다(한쪽만 재면 나머지 갈래가 비어도 초록이다):
+      ⑴ 응답만 유실됐고 **실제로는 올라간** 경우 → 성공으로 마무리 + 원장에 발신 행 1개.
+      ⑵ 재조회로 **정말 없는** 경우 → 「불명」이 아니라 code 7(재시도 가능)로 좁힌다.
+    ★그리고 URL 을 **지어내지 않는다** — 응답을 못 받았으므로 없는 것이 사실이다.
+    """
+    from agora import core, tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")
+    before = len(list(ctx.ledger.rows()))
+
+    ctx.store.fail_next_append = "unknown"          # 응답 유실 — 저장은 됐다
+    out = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="응답이 유실된 글"))
+    if out.get("url") is not None:
+        raise AssertionError(f"응답을 못 받았는데 URL 을 지어냈다: {out}")
+    if len(list(ctx.ledger.rows())) != before + 1:
+        raise AssertionError("저장이 확인됐는데 원장에 발신 행이 없다")
+    view = tools.read(ctx, thread_id=tid)
+    if not any("응답이 유실된 글" in (e["body"] or "") for e in view["events"]):
+        raise AssertionError("올라간 글이 사슬에 없다 — 픽스처가 이 갈래를 못 열었다")
+
+    # ⑵ 이번엔 **정말 안 올라간** 경우.
+    ctx.store.fail_next_append = "unknown_lost"
+    rows_before = len(list(ctx.ledger.rows()))
+    try:
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="정말 안 올라간 글"))
+    except AgoraError as e:
+        if e.code != errors.STORE:
+            raise AssertionError(f"확정된 부재를 code {e.code} 로 냈다") from None
+        if (e.detail or {}).get("settled") != core.ABSENT:
+            raise AssertionError(f"판정 결과를 안 적었다: {e.detail}")
+    else:
+        raise AssertionError("안 올라간 글을 성공으로 넘겼다")
+    if len(list(ctx.ledger.rows())) != rows_before:
+        raise AssertionError("안 올라간 글을 원장에 적었다")
+
+
 # ── 배선 대조 자체를 상시 케이스로(master 승인 2026-08-26) ───────────────────
 
 WIRING_ALLOWLIST = "tests/wiring-allowlist.txt"
@@ -6396,6 +6500,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("사슬: 거부가 막지 않는다",       _case_rejected_event_does_not_wedge_the_chain, None),
     ("MCP: 예시대로 서버가 뜬다",      _case_example_mcp_config_actually_starts_the_server, None),
     ("MCP: 기동은 도구가 아니다",      _case_mcp_serve_is_not_itself_a_tool, None),
+    ("영수증: 감시가 배달을 적는다",   _case_watch_writes_the_delivery_receipt, None),
+    ("영수증: 원장 없으면 안 적는다",  _case_delivery_receipt_needs_a_ledger, None),
+    ("code 8: 도구가 판정한다",        _case_unknown_commit_is_settled_by_the_tool, None),
     ("배선: 안 불리는 정의 0",        _case_no_unwired_production_definitions, None),
 )
 
@@ -7052,7 +7159,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "                         hash_of=ledger_mod.HASH_STORED_RAW)",
      "원장: 해시의 종류를 적는다"),
     ("M160-watch-batches-output", "agora/watch.py",
-     '        for event in result["events"]:\n            out(format_line(event))',
+     '        for event in result["events"]:\n            receipt = event.pop("_receipt", None)\n            out(format_line(event))',
      "        pass",
      "감시: 한 줄이 한 사건"),
     ("M161-watch-reconciles-every-round", "agora/watch.py",
@@ -7264,6 +7371,30 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     # ★배선 대조기 자신을 재는 그물: 배선 하나를 끊으면 정의 하나가 고아가 된다.
     #   (이 변이는 브리프 단일 출처 케이스도 함께 잡는다 — 귀속은 배선 쪽으로 둔다.)
     # ★master 동봉 조건 ⑴ — head 전진을 accepted-only 로 되돌리면 교착이 재현돼야 한다.
+    ("M217-tool-does-not-settle-code8", "agora/tools.py",
+     "        out = _settle_unknown(ctx, event, e)",
+     "        raise",
+     "code 8: 도구가 판정한다"),
+    ("M218-settle-assumes-committed", "agora/tools.py",
+     '    if settled["verdict"] != core.COMMITTED:',
+     "    if False:",
+     "code 8: 도구가 판정한다"),
+    ("M219-settle-invents-a-url", "agora/tools.py",
+     '            "node_id": None, "url": None}',
+     '            "node_id": "unknown", "url": "unknown://"}',
+     "code 8: 도구가 판정한다"),
+    ("M214-watch-does-not-deliver", "agora/watch.py",
+     "            if receipt is not None and ledger is not None:",
+     "            if False:",
+     "영수증: 감시가 배달을 적는다"),
+    ("M215-delivery-without-ledger", "agora/watch.py",
+     "            if receipt is not None and ledger is not None:",
+     "            if receipt is not None or ledger is None:",
+     "영수증: 원장 없으면 안 적는다"),
+    ("M216-receipt-taken-from-any-body", "agora/watch.py",
+     '    except Exception:      # noqa: BLE001 — 우리 서식이 아니면 그냥 아니다\n        return None\n    event = parsed["event"]',
+     '    except Exception:      # noqa: BLE001\n        return {"message_id": "0" * 32, "thread_id": "t1", "raw": b""}\n    event = parsed["event"]',
+     "영수증: 감시가 배달을 적는다"),
     ("M212-mcp-serve-prints-return-value", "agora/cli.py",
      "        mcp_server.serve()\n        return None",
      "        return mcp_server.serve()",
