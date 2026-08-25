@@ -2530,6 +2530,21 @@ def _case_receiver_no_flag_when_matching() -> None:
 # S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
 # ★이 표가 없으면 「4축을 쟀다」가 사람의 기억에 남는다. 표로 두면 **뮤테이션을 지우는 순간**
 #   이 케이스가 적색이 된다 — 그물을 걷어 낸 것이 조용히 지나가지 않는다.
+# S3(스크럽·게이트)의 4축(04-tasks S3-6) — 같은 규율을 그대로 적용한다.
+S3_AXES: dict[str, tuple[str, ...]] = {
+    "allowlist": ("M69-allow-length-unchecked", "M70-allow-forbidden-off",
+                  "M71-allow-url-host-unchecked", "M72-allow-empty-domains-fail-open",
+                  "M73-allow-missing-file-passes", "M83-allow-max-bytes-unchecked"),
+    "denylist": ("M17-scrub-rules-missing-passes", "M74-broken-rules-file-passes",
+                 "M76-name-list-ignored", "M77-names-count-hidden"),
+    "human_approval": ("M84-approval-default-off", "M85-no-tty-passes-silently",
+                       "M86-denial-ignored", "M87-approval-skipped-in-publish",
+                       "M88-prompt-defaults-to-approved"),
+    "재검사": ("M13-signer-scrub-not-enforced", "M89-signer-records-claim-not-measure",
+               "M90-claim-mismatch-hidden", "M91-receiver-recheck-flag-off",
+               "M92-declare-one-layer-only"),
+}
+
 S2_AXES: dict[str, tuple[str, ...]] = {
     "경합": ("M41-reducer-order-unstable", "M42-race-winner-inverted",
              "M43-race-tiebreak-dropped", "M44-unreachable-not-detected",
@@ -2544,16 +2559,25 @@ S2_AXES: dict[str, tuple[str, ...]] = {
 }
 
 
-def _case_s2_axes_have_nets() -> None:
-    """S2 의 4축이 각각 실제 뮤테이션으로 덮여 있고, 그 뮤테이션이 표에 실재한다."""
+def _axes_have_nets(table: dict[str, tuple[str, ...]], label: str) -> None:
     ids = {m[0] for m in MUTATIONS}
-    missing = {axis: sorted(set(want) - ids) for axis, want in S2_AXES.items()}
+    missing = {axis: sorted(set(want) - ids) for axis, want in table.items()}
     missing = {a: v for a, v in missing.items() if v}
     if missing:
-        raise AssertionError(f"그물이 사라진 축: {missing}")
-    for axis, want in S2_AXES.items():
+        raise AssertionError(f"{label}: 그물이 사라진 축: {missing}")
+    for axis, want in table.items():
         if not want:
-            raise AssertionError(f"축에 뮤테이션이 하나도 없다: {axis}")
+            raise AssertionError(f"{label}: 축에 뮤테이션이 하나도 없다: {axis}")
+
+
+def _case_s2_axes_have_nets() -> None:
+    """S2 의 4축이 각각 실제 뮤테이션으로 덮여 있고, 그 뮤테이션이 표에 실재한다."""
+    _axes_have_nets(S2_AXES, "S2")
+
+
+def _case_s3_axes_have_nets() -> None:
+    """S3 의 4축(allowlist·denylist·human_approval·재검사)도 같은 방식으로 덮인다."""
+    _axes_have_nets(S3_AXES, "S3")
 
 
 def _case_quarantine_reasons_are_named() -> None:
@@ -2732,6 +2756,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("주장: 한 겹이 아니라 묶음",     _case_declaration_carries_bundle_not_one_layer, None),
     ("수신: digest 불일치 → 플래그",  _case_receiver_flags_digest_mismatch, None),
     ("수신: 일치하면 플래그 없음",    _case_receiver_no_flag_when_matching, None),
+    ("S3: 4축 그물 실재",             _case_s3_axes_have_nets, None),
 )
 
 
@@ -3281,7 +3306,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S3-5(서명기 재검사·M-11)"
+            "슬라이스": "S3-6(S3 완주)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
