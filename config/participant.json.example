@@ -1,0 +1,7 @@
+{
+  "id": "operator-example",
+  "display_name": "예시 운영자",
+  "key_fingerprint": "SHA256:여기에 ssh-keygen -lf 로 얻은 지문을 넣는다",
+  "namespace": "jarvis-agora@godmeyou.kr",
+  "operator": false
+}

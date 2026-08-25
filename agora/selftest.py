@@ -43,14 +43,15 @@ def _case_unbuilt_subcommand() -> None:
       그래서 이 분기에만 있는 `detail.reason` 까지 단언한다.
     """
     from agora.cli import COMMANDS, dispatch
-    # ★대상을 **박아 두지 않고 표에서 고른다.** 슬라이스가 진행되면 미구현 목록이 줄어드는데,
-    #   이름을 박아 두면 그 명령이 구현되는 날 이 케이스가 「거부하지 않는다」고 거짓 신고를 한다
-    #   (S6-1 에서 실제로 났다 — `threads` 가 구현되자 적색이 됐다).
-    unbuilt = [n for n, m in COMMANDS.items() if not m["built"]]
-    if not unbuilt:
-        return          # 전부 구현되면 이 케이스는 잴 것이 없다(그때는 표가 그렇게 말한다)
+    # ★대상을 **표에서 고르지도, 이름으로 박아 두지도 않는다.** 둘 다 해 봤고 둘 다 틀렸다:
+    #   ⑴이름을 박으면(`threads`) 그 명령이 구현되는 날 「거부하지 않는다」고 거짓 신고를 한다(S6-1).
+    #   ⑵표에서 고르면 **미구현이 0 이 되는 날 잴 것이 없어진다**(S6-2 에서 실제로 그날이 왔다).
+    #   ⇒ 재려는 것은 「지금 무엇이 미구현인가」가 아니라 **「미구현을 만나면 거부하는가」**이므로,
+    #     그 상황을 **직접 만들어** 잰다. 표는 원래대로 돌려놓는다.
+    probe = "__미구현_탐침__"
+    COMMANDS[probe] = {"core": False, "built": False, "slice": "S0-0"}
     try:
-        dispatch(unbuilt[0], None)
+        dispatch(probe, None)
     except AgoraError as e:
         reason = (e.detail or {}).get("reason")
         if reason != "slice_not_built":
@@ -58,6 +59,8 @@ def _case_unbuilt_subcommand() -> None:
                 f"코드는 맞지만 분기가 다르다: reason={reason!r}"
             ) from None
         raise
+    finally:
+        COMMANDS.pop(probe, None)      # ★표를 원래대로 — 시험이 프로그램을 바꿔 놓지 않는다
 
 
 def _case_bad_error_code() -> None:
@@ -4455,6 +4458,307 @@ def _case_cli_does_not_guess_types() -> None:
         raise AssertionError("key=value 가 아닌 인자가 통과했다")
 
 
+# ── S6-2 CLI · 설정 · export/import ─────────────────────────────────────────
+# ★반출물은 **남에게 건네지는 물건**이다. 한 번 건넨 것은 되부를 수 없다 —
+#   그래서 이 블록에서 제일 많이 재는 것은 「담았는가」가 아니라 **「안 담았는가」**다.
+
+def _io_env() -> tuple[Any, Any, str]:
+    """(ledger, spool, dir) — 발신 1행 + 수신 2행이 들어 있는 원장 한 벌."""
+    import tempfile
+    from agora import ack as ack_mod, tools
+    from agora.ledger import Ledger
+    from agora.spool import FETCHED, Spool
+    from agora.store_mock import MockStore
+    f = _fixtures()
+    d = tempfile.mkdtemp(prefix="agora-io-")
+    ledger, spool = Ledger(d), Spool(d)
+    ctx = tools.Context(store=MockStore(), ledger=ledger, spool=spool,
+                        allowed_signers_path=f["roster_ab"],
+                        participant_id="operator-a", config={"human_approval": False})
+    out = _with_key(f["key_a"], lambda: tools.propose(
+        ctx, type="debate", title="가짜 제목", body="가짜 발제"))
+    tid = out["thread_id"]
+    mid = "b" * 32
+    spool.record(node_id="N1", stage=FETCHED, thread_id=tid, message_id=mid)
+    ack_mod.deliver(ledger=ledger, spool=spool, node_id="N1", thread_id=tid,
+                    message_id=mid, raw=b'{"message_id": "' + mid.encode() + b'"}')
+    ack_mod.ack(ledger=ledger, spool=spool, message_id=mid)
+    return ledger, spool, d
+
+
+def _case_ledger_says_what_the_hash_is() -> None:
+    """원장 행은 **그 해시가 무엇의 것인지** 적는다(발신 = canonical · 수신 = 보관 원문).
+
+    ★한 칸에 두 계산법이 섞여 있으면 검증하는 쪽이 무엇과 대조할지 모른다.
+      export/import 가 그것을 하려다 걸렸다 — 오늘 세 번째 「이름을 갈라라」다.
+    """
+    from agora.ledger import HASH_EVENT_CANONICAL, HASH_STORED_RAW, Ledger
+    ledger, _s, d = _io_env()
+    kinds = {(r["dir"], r["stage"]): r.get("hash_of") for r in Ledger(d).rows()}
+    if kinds.get(("sent", "sent")) != HASH_EVENT_CANONICAL:
+        raise AssertionError(f"발신 행: {kinds}")
+    if kinds.get(("recv", "acked")) != HASH_STORED_RAW:
+        raise AssertionError(f"수신 행: {kinds}")
+    if len({k for k in kinds.values() if k}) < 2:
+        raise AssertionError("두 종류가 실제로 갈리지 않았다")
+
+
+def _case_export_carries_ledger_and_events() -> None:
+    """반출물은 원장 줄과 **보관된 원문**을 담는다 — 계수로 확인한다."""
+    from agora import export as ex
+    _l, _s, d = _io_env()
+    doc = ex.build(directory=d)
+    if doc["counts"]["ledger_rows"] != 3:
+        raise AssertionError(f"원장 줄: {doc['counts']}")
+    if doc["counts"]["events"] != 1:
+        raise AssertionError(f"원문: {doc['counts']}")
+    verdict = ex.verify_doc(doc)
+    if not verdict["ok"] or verdict["hash_checked"] < 1:
+        raise AssertionError(f"자기 검증 실패: {verdict}")
+
+
+def _case_export_refuses_when_secret_shaped() -> None:
+    """★비밀 **모양**이 보이면 파일을 **만들지 않는다**(code 3).
+
+    ★쓰고 나서 지우는 순서가 아니다 — 그 사이에 죽으면 비밀이 든 파일이 남는다.
+      그래서 「파일이 없다」까지 단언한다.
+    """
+    import os as _os
+    import tempfile
+    from agora import export as ex
+    ledger, _s, d = _io_env()
+    # 원문 자리에 비밀 모양을 심는다(운반층에서 그런 글이 올 수 있다 — 우리가 막는 자리다).
+    ledger.store_event("t9", "c" * 32,
+                       b"-----BEGIN OPENSSH PRIVATE KEY-----\nZmFrZQ==\n")
+    out_path = _os.path.join(tempfile.mkdtemp(), "export.json")
+    try:
+        ex.dump(directory=d, out_path=out_path)
+    except AgoraError as e:
+        if e.code != errors.GATE_REJECT:
+            raise AssertionError(f"다른 코드로 막았다: {e.code}") from None
+        if not (e.detail or {}).get("patterns"):
+            raise AssertionError("무엇에 걸렸는지 안 알려 준다")
+    else:
+        raise AssertionError("비밀 모양을 담고도 내보냈다")
+    if _os.path.exists(out_path):
+        raise AssertionError("막고도 파일을 남겼다")
+
+
+def _case_export_round_trip_keeps_chain() -> None:
+    """반출 → 반입 왕복에서 사슬이 그대로다(빈 곳에 복원)."""
+    import os as _os
+    import tempfile
+    from agora import export as ex
+    from agora.ledger import Ledger
+    _l, _s, d = _io_env()
+    path = _os.path.join(tempfile.mkdtemp(), "export.json")
+    ex.dump(directory=d, out_path=path)
+    import json as _json
+    with open(path, encoding="utf-8") as fh:
+        doc = _json.load(fh)
+    dst = tempfile.mkdtemp(prefix="agora-restore-")
+    res = ex.load(doc=doc, directory=dst)
+    if res["restored_rows"] != 3 or res["events"] != 1:
+        raise AssertionError(f"복원 계수: {res}")
+    if not Ledger(dst).verify()["ok"]:
+        raise AssertionError("복원 후 사슬이 깨졌다")
+    if Ledger(dst).verify()["head"] != Ledger(d).verify()["head"]:
+        raise AssertionError("같은 원장인데 머리가 다르다")
+
+
+def _case_import_refuses_broken_chain() -> None:
+    """칸 하나가 고쳐진 원장은 **안 들인다** — 그리고 아무것도 쓰지 않는다."""
+    import os as _os
+    import tempfile
+    from agora import export as ex
+    _l, _s, d = _io_env()
+    doc = ex.build(directory=d)
+    doc["ledger"][1]["ts"] = "2000-01-01T00:00:00Z"          # 본문 한 칸만 고친다
+    dst = tempfile.mkdtemp(prefix="agora-restore-")
+    try:
+        ex.load(doc=doc, directory=dst)
+    except AgoraError as e:
+        if (e.detail or {}).get("reason") != "row_body_altered":
+            raise AssertionError(f"다른 사유: {e.detail}") from None
+    else:
+        raise AssertionError("고쳐진 원장을 들였다")
+    if _os.path.exists(_os.path.join(dst, "ledger.jsonl")):
+        raise AssertionError("거부하고도 파일을 만들었다")
+
+
+def _case_import_refuses_hash_mismatch() -> None:
+    """원문이 바뀌었으면 거부한다 — 사슬은 멀쩡해도 **가리키는 물건이 다르다.**
+
+    ★이 축**만**을 고립시킨다: 원장은 손대지 않고 **원문만** 바꾼다.
+      사슬 검사만 있으면 여기를 통과한다(사슬은 원문을 안 본다).
+    """
+    import base64
+    import tempfile
+    from agora import export as ex
+    _l, _s, d = _io_env()
+    doc = ex.build(directory=d)
+    key = next(iter(doc["events"]))
+    doc["events"][key] = base64.b64encode('{"바뀐": "원문"}'.encode("utf-8")).decode()
+    verdict = ex.verify_doc(doc)
+    if verdict["ok"] or verdict["reason"] != "event_hash_mismatch":
+        raise AssertionError(f"바뀐 원문을 통과시켰다: {verdict}")
+    try:
+        ex.load(doc=doc, directory=tempfile.mkdtemp())
+    except AgoraError:
+        pass
+    else:
+        raise AssertionError("바뀐 원문을 들였다")
+
+
+def _case_import_does_not_append() -> None:
+    """이미 원장이 있는 곳에는 **이어붙이지 않는다**(code 2).
+
+    ★이으면 `prev` 가 안 맞아 두 사슬이 다 깨진다. 이으려면 다시 써야 하는데,
+      다시 쓸 수 있는 원장은 원장이 아니다.
+    """
+    from agora import export as ex
+    _l, _s, d = _io_env()
+    doc = ex.build(directory=d)
+    try:
+        ex.load(doc=doc, directory=d)              # 자기 자신에게 다시 들이기
+    except AgoraError as e:
+        if (e.detail or {}).get("reason") != "ledger_not_empty":
+            raise AssertionError(f"다른 사유: {e.detail}") from None
+    else:
+        raise AssertionError("원장이 있는 곳에 덮어썼다")
+
+
+def _case_import_counts_what_it_could_not_check() -> None:
+    """**못 잰 것을 잰 것으로 세지 않는다** — `hash_of` 없는 옛 행은 미측정으로 계수한다."""
+    from agora import export as ex
+    _l, _s, d = _io_env()
+    doc = ex.build(directory=d)
+    verdict = ex.verify_doc(doc)
+    if verdict["hash_checked"] + verdict["hash_not_applicable"] != verdict["rows"]:
+        raise AssertionError(f"계수가 줄 수와 안 맞는다: {verdict}")
+    if verdict["hash_not_applicable"] < 1:
+        raise AssertionError("발신 행은 원문 대조 대상이 아닌데 그렇게 안 셌다")
+
+
+def _case_watch_emits_line_per_event() -> None:
+    """감시는 **한 줄이 한 사건**이다(Monitor 연동) — 모아 두지 않는다."""
+    from agora import watch
+    store, spool, cursor, _d = _w_env()
+    for i in range(3):
+        store.inject_raw(thread_id="t1", body=f"글 {i}",
+                         created_at=f"2026-01-01T00:00:0{i}Z")
+    lines: list[str] = []
+    out = watch.run(store=store, spool=spool, cursor=cursor, once=True,
+                    emit=lines.append)
+    if out["new"] != 3 or len(lines) != 3:
+        raise AssertionError(f"새 글 {out['new']}건 · 출력 {len(lines)}줄")
+    if not all(watch.DELIVERY in line for line in lines):
+        raise AssertionError("출력 줄이 전달 보장을 안 밝힌다")
+
+
+def _case_watch_reconciles_on_period_only() -> None:
+    """대조는 **매 주기가 아니다** — N 회마다 한 번(비용 · master 결정).
+
+    ★이 축**만**을 고립시키려고 같은 입력으로 두 번 돌린다: 주기 20 에서는 대조 0,
+      주기 1 에서는 대조가 실제로 돈다. 「돌았나 안 돌았나」를 계수로 가른다.
+    """
+    from agora import watch
+    store, spool, cursor, d = _w_env()
+    from agora.ledger import Ledger
+    store.inject_raw(thread_id="t1", body="글", created_at="2026-01-01T00:00:00Z")
+    quiet = watch.run(store=store, spool=spool, cursor=cursor, ledger=Ledger(d),
+                      once=True, emit=lambda _l: None, reconcile_every=20)
+    if quiet["reconciled"] != 0:
+        raise AssertionError(f"주기 20 인데 첫 회에 대조했다: {quiet}")
+    often = watch.run(store=store, spool=spool, cursor=cursor, ledger=Ledger(d),
+                      once=True, emit=lambda _l: None, reconcile_every=1)
+    if often["reconciled"] < 1:
+        raise AssertionError(f"주기 1 인데 대조를 안 했다: {often}")
+
+
+def _case_watch_period_default_is_pinned() -> None:
+    """대조 주기 기본값은 **못 박혀 있다**(master 결정 20 · 바뀌면 여기서 적색).
+
+    ★결정을 대화에만 남기면 다음 사람이 다시 묻는다. 숫자를 시험에 박아 두면
+      **바꾸는 일이 의식적인 행동이 된다.**
+    """
+    from agora import reconcile as rec
+    if rec.RECONCILE_EVERY != 20:
+        raise AssertionError(f"주기 기본값이 바뀌었다: {rec.RECONCILE_EVERY} — 결정 이력을 확인하라")
+
+
+def _case_config_comes_from_config_json() -> None:
+    """운영 설정은 **`config.json`** 에서 온다 — 참가자 파일이 아니다.
+
+    ★참가자 파일은 계약된 칸만 허용하므로, 설정을 거기 넣으면 **파일 전체가 거부된다.**
+      처음엔 실제로 거기서 읽으려 했고, 그 경로는 **항상 빈 설정으로 조용히 돌고 있었다.**
+    """
+    import json as _json
+    import os as _os
+    import tempfile
+    from agora import tools
+    d = tempfile.mkdtemp(prefix="agora-cfg-")
+    if tools.load_config(d) != {}:
+        raise AssertionError("없는 설정이 비어 있지 않다")
+    with open(_os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+        _json.dump({"human_approval": False}, fh)
+    if tools.load_config(d).get("human_approval") is not False:
+        raise AssertionError("config.json 을 안 읽었다")
+
+
+def _case_missing_config_still_requires_approval() -> None:
+    """★**설정 파일이 없어도 승인은 켜져 있다.**
+
+    ★파일이 없다고 게이트가 열리면 **설정을 지우는 것이 게이트를 끄는 방법**이 된다.
+    """
+    import tempfile
+    from agora import core, tools
+    d = tempfile.mkdtemp(prefix="agora-cfg-")
+    try:
+        core.approval_gate(config=tools.load_config(d), isatty=lambda: False)
+    except AgoraError as e:
+        if (e.detail or {}).get("reason") != "human_approval_required":
+            raise AssertionError(f"다른 사유로 막았다: {e.detail}") from None
+    else:
+        raise AssertionError("설정이 없자 승인 없이 통과했다")
+
+
+def _case_config_examples_match_contract() -> None:
+    """예시 설정이 **계약과 일치**한다 — 예시가 거부당하면 아무도 예시를 안 믿는다."""
+    import json as _json
+    import os as _os
+    import tempfile
+    from agora.contract_open import PARTICIPANT_FIELDS
+    from agora.participant import load
+    example = _os.path.join(_ROOT, "config", "participant.json.example")
+    with open(example, encoding="utf-8") as fh:
+        doc = _json.load(fh)
+    if set(doc) != set(PARTICIPANT_FIELDS):
+        raise AssertionError(f"예시 칸이 계약과 다르다: {sorted(set(doc) ^ set(PARTICIPANT_FIELDS))}")
+    d = tempfile.mkdtemp(prefix="agora-ex-")
+    _os.chmod(d, 0o700)
+    path = _os.path.join(d, "participant.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump(doc, fh)
+    _os.chmod(path, 0o600)
+    load(d)          # ★예시가 **그대로 통과**해야 한다(S3-3 의 봉투 서식과 같은 규율)
+
+
+def _case_local_commands_are_not_tools() -> None:
+    """CLI 전용 명령은 **도구 표에 없다** — 대리인 세션의 손에 운영 동작을 쥐어 주지 않는다."""
+    from agora import cli, tools
+    local = {"watch", "reconcile", "selftest", "keygen", "export", "import"}
+    if cli.MCP_EXEMPT != frozenset(local):
+        raise AssertionError(f"예외 목록: {sorted(cli.MCP_EXEMPT)}")
+    if local & set(tools.CORE_TOOLS):
+        raise AssertionError(f"운영 동작이 도구 표에 있다: {sorted(local & set(tools.CORE_TOOLS))}")
+    if set(cli.COMMANDS) != local | set(tools.CORE_TOOLS):
+        raise AssertionError("등록표가 도구 + 운영 동작과 다르다")
+    unbuilt = [n for n, m in cli.COMMANDS.items() if not m["built"]]
+    if unbuilt:
+        raise AssertionError(f"S6-2 뒤에도 미구현이 남았다: {unbuilt}")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -4685,6 +4989,21 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("도구: 계약 밖 이름 거부",       _case_tool_unknown_name_is_rejected, None),
     ("도구: 영수증엔 spool 필요",     _case_tool_ack_needs_spool, None),
     ("CLI: 타입을 추측 안 한다",      _case_cli_does_not_guess_types, None),
+    ("원장: 해시의 종류를 적는다",    _case_ledger_says_what_the_hash_is, None),
+    ("반출: 원장과 원문을 담는다",    _case_export_carries_ledger_and_events, None),
+    ("반출: 비밀 모양이면 안 만든다", _case_export_refuses_when_secret_shaped, None),
+    ("반출입: 왕복에 사슬 유지",      _case_export_round_trip_keeps_chain, None),
+    ("반입: 깨진 사슬은 거부",        _case_import_refuses_broken_chain, None),
+    ("반입: 바뀐 원문은 거부",        _case_import_refuses_hash_mismatch, None),
+    ("반입: 이어붙이지 않는다",       _case_import_does_not_append, None),
+    ("반입: 못 잰 것을 센다",         _case_import_counts_what_it_could_not_check, None),
+    ("감시: 한 줄이 한 사건",         _case_watch_emits_line_per_event, None),
+    ("감시: 대조는 주기마다",         _case_watch_reconciles_on_period_only, None),
+    ("감시: 주기 기본값 고정",        _case_watch_period_default_is_pinned, None),
+    ("설정: config.json 에서 온다",   _case_config_comes_from_config_json, None),
+    ("설정: 없어도 승인은 켜짐",      _case_missing_config_still_requires_approval, None),
+    ("설정: 예시가 계약과 일치",      _case_config_examples_match_contract, None),
+    ("CLI: 전용 명령은 도구 아니다",  _case_local_commands_are_not_tools, None),
 )
 
 
@@ -5310,6 +5629,55 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "def say(ctx: Context, *, thread_id: str, body: str, round: int | None = None,",
      "def say(ctx: Context, thread_id: str, *, body: str, round: int | None = None,",
      "계약: ctx 가 첫 인자"),
+    # ── S6-2 CLI · 설정 · export/import ─────────────────────────────────────
+    ("M153-export-scan-skips-events", "agora/export.py",
+     '    for value in doc["events"].values():',
+     "    for value in []:",
+     "반출: 비밀 모양이면 안 만든다"),
+    ("M154-import-skips-chain-check", "agora/export.py",
+     '        if row_hash(row) != row["row_hash"]:',
+     "        if False:",
+     "반입: 깨진 사슬은 거부"),
+    ("M155-import-skips-event-hash", "agora/export.py",
+     '        if hashlib.sha256(raw).hexdigest() != row.get("hash"):',
+     "        if False:",
+     "반입: 바뀐 원문은 거부"),
+    ("M156-import-appends-to-ledger", "agora/export.py",
+     "    if os.path.exists(ledger.path) and list(ledger.rows()):",
+     "    if False:",
+     "반입: 이어붙이지 않는다"),
+    ("M157-unknown-counted-as-checked", "agora/export.py",
+     "            unknown += 1",
+     "            checked += 1",
+     "반입: 못 잰 것을 센다"),
+    ("M158-ledger-drops-hash-kind", "agora/ledger.py",
+     '                    "hash_of": hash_of,\n                }',
+     "                }",
+     "원장: 해시의 종류를 적는다"),
+    ("M159-sent-labeled-as-raw", "agora/core.py",
+     "                         hash_of=ledger_mod.HASH_EVENT_CANONICAL)",
+     "                         hash_of=ledger_mod.HASH_STORED_RAW)",
+     "원장: 해시의 종류를 적는다"),
+    ("M160-watch-batches-output", "agora/watch.py",
+     '        for event in result["events"]:\n            out(format_line(event))',
+     "        pass",
+     "감시: 한 줄이 한 사건"),
+    ("M161-watch-reconciles-every-round", "agora/watch.py",
+     "        if ledger is not None and every and rounds % every == 0:",
+     "        if ledger is not None:",
+     "감시: 대조는 주기마다"),
+    ("M162-reconcile-period-changed", "agora/reconcile.py",
+     "RECONCILE_EVERY = 20",
+     "RECONCILE_EVERY = 5",
+     "감시: 주기 기본값 고정"),
+    ("M163-config-read-from-participant", "agora/tools.py",
+     '    path = _os.path.join(directory, "config.json")',
+     '    path = _os.path.join(directory, "participant.json")',
+     "설정: config.json 에서 온다"),
+    ("M164-local-command-becomes-tool", "agora/cli.py",
+     'MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",\n                        "reconcile"})',
+     'MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import"})',
+     "CLI: 전용 명령은 도구 아니다"),
 )
 
 
@@ -5481,7 +5849,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S6-1(도구 11종·계약 대조)"
+            "슬라이스": "S6-2(CLI·설정·반출입)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

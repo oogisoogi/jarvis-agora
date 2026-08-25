@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agora import errors, schema, scrub, sign
+from agora import errors, ledger as ledger_mod, schema, scrub, sign
 from agora.contract_open import DEFAULT_HUMAN_APPROVAL, HUMAN_APPROVAL_REQUIRED
 from agora.errors import AgoraError
 from agora.event import render_post
@@ -170,7 +170,8 @@ def record_sent(*, ledger: Any, event: dict[str, Any], event_hash: str,
     if ledger.has(event["message_id"]):
         return None
     return ledger.append(direction="sent", message_id=event["message_id"],
-                         event_hash=event_hash, stage="sent", node_id=node_id)
+                         event_hash=event_hash, stage="sent", node_id=node_id,
+                         hash_of=ledger_mod.HASH_EVENT_CANONICAL)
 
 
 def settle_unknown(*, store: Any, ledger: Any, event: dict[str, Any],

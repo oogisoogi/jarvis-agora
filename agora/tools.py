@@ -373,7 +373,33 @@ def context_from_config(directory: str | None = None, *,
         store = GitHubStore()
     return Context(store=store, ledger=Ledger(d), spool=Spool(d),
                    allowed_signers_path=_os.path.join(d, "allowed_signers"),
-                   participant_id=doc["id"], config=doc.get("config") or {})
+                   participant_id=doc["id"], config=load_config(d))
+
+
+def load_config(directory: str) -> dict[str, Any]:
+    """`config.json` — 승인 게이트 같은 **운영 설정**(§5 「끄는 길은 config.json 하나뿐」).
+
+    ★참가자 파일(`participant.json`)과 **다른 파일**이다. 처음엔 참가자 파일에서 읽으려 했는데,
+      그 파일은 계약된 칸만 허용하므로(`load` 가 모르는 칸을 거부한다) **설정을 넣는 순간
+      파일 전체가 거부된다.** 즉 그 경로는 「항상 빈 설정」으로 조용히 돌고 있었고,
+      그러면 「끈 적 없는데 켜져 있다」와 「켠 적 없는데 꺼져 있다」를 구별할 수 없다.
+    ★**없으면 빈 설정이다 — 그리고 빈 설정의 기본은 승인 on 이다**(`core.approval_gate`).
+      파일이 없다고 게이트가 열리면, 설정을 지우는 것이 곧 게이트를 끄는 방법이 된다.
+    """
+    import json as _json
+    import os as _os
+    path = _os.path.join(directory, "config.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = _json.load(fh)
+    except OSError:
+        return {}
+    except ValueError as e:
+        raise AgoraError(errors.PRECONDITION, "config.json 파싱 실패",
+                         {"error": str(e)}) from None
+    if type(doc) is not dict:
+        raise AgoraError(errors.PRECONDITION, "config.json 은 객체여야 한다", None)
+    return doc
 
 
 def call(name: str, ctx: Context, kwargs: dict[str, Any]) -> Any:

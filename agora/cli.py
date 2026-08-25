@@ -34,14 +34,19 @@ COMMANDS: dict[str, dict[str, Any]] = {
     "vote":           {"core": True,  "built": True,  "slice": "S3-4"},
     "envelope-check": {"core": True,  "built": True,  "slice": "S3-3"},
     "ack":            {"core": True,  "built": True,  "slice": "S5-3"},
-    "watch":          {"core": False, "built": False, "slice": "S5-2"},
+    "watch":          {"core": False, "built": True,  "slice": "S6-2"},
+    # ★계약 확장(master 결정 2026-08-25 · S5-5 회신) — 수동 대조를 CLI 로 둔다.
+    #   설계 §4 의 CLI 전용 4종에 하나가 더해졌다. 조용히 늘리지 않고 여기 근거를 적는다.
+    "reconcile":      {"core": False, "built": True,  "slice": "S6-2"},
     "selftest":       {"core": False, "built": True,  "slice": "S1-8"},
     "keygen":         {"core": False, "built": True,  "slice": "S1-4"},
-    "export":         {"core": False, "built": False, "slice": "S6-2"},
+    "export":         {"core": False, "built": True,  "slice": "S6-2"},
+    "import":         {"core": False, "built": True,  "slice": "S6-2"},
 }
 
 # MCP 에 노출하지 않는 것 — 설계 §4 가 예외로 명시한 4종.
-MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export"})
+MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
+                        "reconcile"})
 
 # ── 역할별 노출표(설계 §5 「수신 격리」 H-3 · NFR-2) ─────────────────────────
 # ★**여기가 「도구 목록」의 단일 출처다.** 대리인 브리프(S6-3 `brief-reader.md`)는 이 표를
@@ -93,8 +98,50 @@ def build_parser() -> argparse.ArgumentParser:
 # ★왜 목록인가: 「숫자처럼 보이면 정수」로 하면 **제목 「2026」이 정수가 된다.**
 #   그러면 스키마가 「title 은 문자열이어야 한다」로 거절하고, 사용자는 자기가 문자열을 줬다고
 #   믿는다 — 틀린 곳과 탓하는 곳이 어긋난다. 처음 쓴 파서가 실제로 그랬다.
-INT_ARGS = frozenset({"round", "to_round", "value", "limit"})
-BOOL_ARGS = frozenset({"audit", "answered"})
+INT_ARGS = frozenset({"round", "to_round", "value", "limit", "interval"})
+BOOL_ARGS = frozenset({"audit", "answered", "once"})
+
+
+def _run_local(name: str, rest: list[str]) -> Any:
+    """MCP 에 없는 CLI 전용 명령들(§4 예외). 이것들은 **도구가 아니라 운영 동작**이다.
+
+    ★그래서 도구 표에 넣지 않는다. 넣으면 대리인 세션의 손에 「감시를 멈춰라」·「원장을 들여라」가
+      쥐어지고, 그것은 참가자가 아니라 **운영자가 할 일**이다.
+    """
+    from agora import tools
+    kw = _kv(rest)
+    d = kw.pop("dir", None)
+    ctx = tools.context_from_config(d)
+    if name == "watch":
+        from agora.watch import Cursor, run
+        return run(store=ctx.store, spool=ctx.spool, cursor=Cursor(_config_dir(d)),
+                   ledger=ctx.ledger,
+                   interval=int(kw.get("interval", 60)),
+                   once=bool(kw.get("once", False)))
+    if name == "reconcile":
+        from agora import reconcile as rec
+        thread_id = kw.get("thread_id")
+        if not thread_id:
+            raise AgoraError(errors.ARGUMENT, "reconcile 은 thread_id 가 필요하다", None)
+        return rec.reconcile(store=ctx.store, ledger=ctx.ledger, thread_id=thread_id,
+                             spool=ctx.spool)
+    from agora import export as export_mod
+    if name == "export":
+        out_path = kw.get("out")
+        if not out_path:
+            raise AgoraError(errors.ARGUMENT, "export 는 out=<경로> 가 필요하다", None)
+        return export_mod.dump(directory=_config_dir(d), out_path=out_path)
+    src = kw.get("file")
+    if not src:
+        raise AgoraError(errors.ARGUMENT, "import 는 file=<경로> 가 필요하다", None)
+    with open(src, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    return export_mod.load(doc=doc, directory=_config_dir(d))
+
+
+def _config_dir(explicit: str | None) -> str:
+    from agora.participant import config_dir
+    return explicit or config_dir()
 
 
 def _kv(rest: list[str]) -> dict[str, Any]:
@@ -150,6 +197,8 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
     if name == "keygen":
         from agora import keygen as kg
         return kg.run(args.rest if hasattr(args, "rest") else [])
+    if name in ("watch", "reconcile", "export", "import"):
+        return _run_local(name, list(args.rest) if hasattr(args, "rest") else [])
     if meta["core"]:
         # ★코어 도구는 **한 줄로** 넘긴다. 도구마다 여기에 분기를 만들면 그 분기가
         #   두 번째 계약이 되고, 언젠가 표와 갈라진다(그때 갈라진 쪽이 조용히 이긴다).

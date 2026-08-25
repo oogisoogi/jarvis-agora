@@ -31,7 +31,7 @@ import hashlib
 import os
 from typing import Any
 
-from agora import errors, spool as spool_mod
+from agora import errors, ledger as ledger_mod, spool as spool_mod
 from agora.errors import AgoraError
 
 TOMBSTONE = "tombstone"
@@ -119,7 +119,8 @@ def reconcile(*, store: Any, ledger: Any, thread_id: str, spool: Any = None,
         raw = _read_raw(ledger, thread_id, mid)
         written.append(ledger.append(direction=DIRECTION, message_id=mid,
                                      event_hash=hashlib.sha256(raw).hexdigest(),
-                                     stage=TOMBSTONE, node_id=None))
+                                     stage=TOMBSTONE, node_id=None,
+                                     hash_of=ledger_mod.HASH_STORED_RAW))
     return {"verdict": COMPARED, "thread_id": thread_id,
             "local": len(local), "remote": remote["items"], "pages": remote["pages"],
             "missing": missing, "tombstoned": written,

@@ -29,7 +29,7 @@ import hashlib
 import os
 from typing import Any
 
-from agora import errors, spool as spool_mod
+from agora import errors, ledger as ledger_mod, spool as spool_mod
 from agora.errors import AgoraError
 
 DIRECTION = "recv"
@@ -63,7 +63,8 @@ def deliver(*, ledger: Any, spool: Any, node_id: str, thread_id: str,
     if not ledger.has(message_id, direction=DIRECTION, stage=spool_mod.DELIVERED):
         row = ledger.append(direction=DIRECTION, message_id=message_id,
                             event_hash=hashlib.sha256(raw).hexdigest(),
-                            stage=spool_mod.DELIVERED, node_id=node_id)
+                            stage=spool_mod.DELIVERED, node_id=node_id,
+                            hash_of=ledger_mod.HASH_STORED_RAW)
     return {"message_id": message_id, "node_id": node_id, "ledger_row": row}
 
 
@@ -95,7 +96,8 @@ def ack(*, ledger: Any, spool: Any, message_id: str) -> dict[str, Any]:
     if not ledger.has(message_id, direction=DIRECTION, stage=spool_mod.ACKED):
         receipt = ledger.append(direction=DIRECTION, message_id=message_id,
                                 event_hash=hashlib.sha256(raw).hexdigest(),
-                                stage=spool_mod.ACKED, node_id=row.get("node_id"))
+                                stage=spool_mod.ACKED, node_id=row.get("node_id"),
+                                hash_of=ledger_mod.HASH_STORED_RAW)
         # ★원장 다음에 spool 을 민다. 순서가 뒤집히면 「소비했다고 spool 엔 적혔는데
         #   영수증은 없는」 상태가 남고, 그 차이는 계수로 안 보인다(둘 다 acked 로 세니까).
         spool.record(node_id=row["node_id"], stage=spool_mod.ACKED,

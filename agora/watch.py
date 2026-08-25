@@ -96,6 +96,64 @@ def poll_once(*, store: Any, spool: Any, cursor: Cursor,
             "duplicates": duplicates, "events": new_events}
 
 
+def run(*, store: Any, spool: Any, cursor: Cursor, ledger: Any = None,
+        interval: int = 60, once: bool = False, sleep: Any = None,
+        emit: Any = None, reconcile_every: int | None = None) -> dict[str, Any]:
+    """폴링 루프 — 한 줄씩 **곧바로 흘려보낸다**(Monitor 연동 · 설계 §S5).
+
+    ★출력은 **한 줄이 한 사건**이고 즉시 flush 한다. 모아서 내보내면 감시하는 쪽에서는
+      아무 일도 안 일어나는 것처럼 보이다가 한꺼번에 쏟아진다 — spool 이 막으려던 그 현상이다.
+
+    ★`reconcile` 은 **매 주기가 아니라 N 회마다** 돈다(기본 `RECONCILE_EVERY`=20 · master 결정
+      2026-08-25). 삭제 검사는 스레드의 전 페이지를 읽으므로 watch 가 아끼려던 비용을 다시 쓴다
+      (S4-2 실측). 그렇다고 아예 안 돌면 tombstone 은 영영 안 잡힌다 — 그래서 주기로 둔다.
+
+    ★`once` 는 시험을 위한 것이 아니라 **운영을 위한 것**이기도 하다(cron 으로 한 번씩 돌리는 방식).
+      그래서 예외가 아니라 계약의 일부로 둔다.
+    """
+    from agora import reconcile as rec
+    every = rec.RECONCILE_EVERY if reconcile_every is None else reconcile_every
+    out = emit or _emit
+    napper = sleep or _sleep
+    rounds = 0
+    totals = {"new": 0, "duplicates": 0, "reconciled": 0, "tombstoned": 0}
+    while True:
+        rounds += 1
+        result = poll_once(store=store, spool=spool, cursor=cursor)
+        totals["new"] += result["new"]
+        totals["duplicates"] += result["duplicates"]
+        for event in result["events"]:
+            out(format_line(event))
+        if ledger is not None and every and rounds % every == 0:
+            for thread_id in _threads_seen(spool):
+                verdict = rec.reconcile(store=store, ledger=ledger, thread_id=thread_id,
+                                        spool=spool)
+                totals["reconciled"] += 1
+                totals["tombstoned"] += len(verdict["tombstoned"])
+                for row in verdict["tombstoned"]:
+                    out(f"[agora tombstone] {row['message_id']} · {thread_id}")
+        if once:
+            return {"rounds": rounds, "delivery": DELIVERY, **totals}
+        napper(interval)
+
+
+def _threads_seen(spool: Any) -> list[str]:
+    """spool 이 아는 스레드들 — 대조 대상은 **우리가 실제로 받은 것**뿐이다."""
+    seen = {row.get("thread_id") for row in spool.state().values()}
+    return sorted(t for t in seen if t)
+
+
+def _emit(line: str) -> None:
+    import sys
+    print(line, flush=True)      # ★버퍼에 두지 않는다 — 감시자는 줄 단위로 읽는다
+    sys.stdout.flush()
+
+
+def _sleep(seconds: int) -> None:
+    import time
+    time.sleep(seconds)
+
+
 def _summarize(body: str) -> dict[str, Any]:
     """한 줄 출력을 위한 최소 정보. **본문을 해석하지 않는다**(§5 「글은 데이터」).
 

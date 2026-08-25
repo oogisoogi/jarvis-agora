@@ -28,6 +28,18 @@ SENT = "sent"
 RECV = "recv"
 STAGES = ("fetched", "delivered", "acked", "sent", "tombstone")
 
+# ★`hash` 칸이 **무엇의 해시인지**(2026-08-25 S6-2 에서 드러난 결함의 처방).
+#   같은 칸에 두 계산법이 섞여 있었다: 발신 행은 **이벤트 canonical** 해시(서명 대상)이고,
+#   수신·묘비 행은 **보관된 원문(raw)** 의 sha256 이다. 값이 다른데 이름이 같으니,
+#   검증하는 쪽은 무엇과 대조해야 하는지 알 수 없다 — export/import 가 그것을 하려다 걸렸다.
+#   ⇒ **구분해야 하는 것은 이름을 가른다.** 오늘 세 번째 같은 형태다(뮤테이션 번호·nonce 계보).
+#   ⚠옛 행에는 이 칸이 없다. 그때는 `UNKNOWN` 으로 읽고 **검증을 건너뛰되 그 수를 보고한다**
+#     — 못 잰 것을 잰 것으로 세지 않는다.
+HASH_EVENT_CANONICAL = "event_canonical"
+HASH_STORED_RAW = "stored_raw"
+HASH_UNKNOWN = "unknown"
+HASH_KINDS = (HASH_EVENT_CANONICAL, HASH_STORED_RAW)
+
 GENESIS_LINK = "0" * 64
 _ROW_HASH = "row_hash"
 
@@ -98,13 +110,17 @@ class Ledger:
     # ── 쓰기(append 전용) ───────────────────────────────────────────────────
     def append(self, *, direction: str, message_id: str, event_hash: str,
                stage: str, node_id: str | None = None,
-               ts: str | None = None) -> dict[str, Any]:
+               ts: str | None = None,
+               hash_of: str = HASH_UNKNOWN) -> dict[str, Any]:
         if direction not in (SENT, RECV):
             raise AgoraError(errors.ARGUMENT, "방향은 sent/recv 뿐이다",
                              {"direction": direction})
         if stage not in STAGES:
             raise AgoraError(errors.ARGUMENT, "계약에 없는 단계",
                              {"stage": stage, "allowed": list(STAGES)})
+        if hash_of not in HASH_KINDS + (HASH_UNKNOWN,):
+            raise AgoraError(errors.ARGUMENT, "해시 종류가 계약 밖",
+                             {"hash_of": hash_of, "allowed": list(HASH_KINDS)})
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
         with open(self.lock_path, "a+") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -118,6 +134,7 @@ class Ledger:
                     "node_id": node_id,
                     "ts": ts or now_iso(),
                     "stage": stage,
+                    "hash_of": hash_of,
                 }
                 row[_ROW_HASH] = row_hash(row)
                 with open(self.path, "a", encoding="utf-8") as fh:   # ★append 만

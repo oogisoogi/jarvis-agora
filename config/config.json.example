@@ -1,0 +1,5 @@
+{
+  "human_approval": true,
+  "budget": {"posts_per_round": 2, "max_chars_per_round": 6000},
+  "watch": {"interval_seconds": 60, "reconcile_every": 20}
+}
