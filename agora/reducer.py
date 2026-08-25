@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from agora import errors, schema, sign
+from agora import errors, protocol, schema, sign
 from agora.errors import AgoraError
 from agora.event import parse_post
 
@@ -36,11 +36,12 @@ PERMISSION = "permission"              # 의장·요청자·운영자가 아닌�
 KIND_NOT_ALLOWED = "kind_not_allowed"  # 이 유형의 스레드가 받지 않는 kind
 BAD_TRANSITION = "bad_transition"      # 지금 상태에서 갈 수 없는 자리
 UNKNOWN_TARGET = "unknown_target"      # 가리키는 이벤트가 사슬에 없다
+BUDGET_EXCEEDED = "budget_exceeded"    # 라운드당 발언 예산을 넘겼다
 AFTER_CLOSE = "after_close"            # 닫힌 뒤에 온 이벤트
 
 REASONS = (UNPARSEABLE, OVERSIZE, SCHEMA, THREAD_MISMATCH, SIGNATURE, REPLAY,
            OUT_OF_ROUND, COUNTER_REQUIRED, PERMISSION, KIND_NOT_ALLOWED,
-           BAD_TRANSITION, UNKNOWN_TARGET, AFTER_CLOSE)
+           BAD_TRANSITION, UNKNOWN_TARGET, AFTER_CLOSE, BUDGET_EXCEEDED)
 
 
 def _order_key(item: dict[str, Any]) -> tuple[str, str]:
@@ -242,6 +243,7 @@ def order(collected: dict[str, Any]) -> dict[str, Any]:
 #   실행할 때마다 다른 상태를 내고, 그것은 재현할 수 없는 판정이 된다.
 
 EXPIRED = "expired"
+DEBATE_ROUNDS = ("r0", "r1", "r2", "r3")
 
 
 def _parse_ts(value: str, where: str) -> Any:
@@ -251,6 +253,19 @@ def _parse_ts(value: str, where: str) -> Any:
     except (ValueError, AttributeError):
         raise AgoraError(errors.ARGUMENT, "시각 형식이 아니다",
                          {"where": where, "value": str(value)[:40]}) from None
+
+
+def is_expired_now(gtype: str, state_name: str, deadlines: dict[str, Any],
+                   now: str | None) -> bool:
+    """지금 이 순간 이 스레드가 만료 상태인가 — **한 곳에서만** 답한다.
+
+    ★루프 안(운영자 위임이 열리는가)과 루프 뒤(최종 상태)가 같은 질문을 한다.
+      두 곳에 따로 적으면 「위임은 받았는데 상태는 만료가 아닌」 어긋난 판정이 나온다.
+    """
+    if gtype != "debate" or not now or state_name not in DEBATE_ROUNDS:
+        return False
+    due = deadlines.get(state_name)
+    return bool(due and deadline_passed(due, now))
 
 
 def deadline_passed(deadline: str, now: str, *, grace_seconds: int | None = None) -> bool:
@@ -284,7 +299,6 @@ ALLOWED_KINDS: dict[str, frozenset[str]] = {
 # 조용히 무시하면 「받아서 아무 일도 안 일어난 것」과 「아직 안 만든 것」이 구별되지 않는다.
 DEFERRED_KINDS: frozenset[str] = frozenset()
 
-DEBATE_ROUNDS = ("r0", "r1", "r2", "r3")
 KNOWHOW_CLOSE_REASONS = frozenset({"superseded", "archived"})
 
 
@@ -334,7 +348,8 @@ def _state_hash(state: dict[str, Any]) -> str:
 
 def apply(ordered: dict[str, Any], *,
           operators: frozenset[str] = frozenset(),
-          now: str | None = None) -> dict[str, Any]:
+          now: str | None = None,
+          budget: dict[str, int] | None = None) -> dict[str, Any]:
     """사슬 → 상태(§6). 절차에서 걸린 것은 사유와 함께 격리 목록에 더한다.
 
     ⛔여기서도 `expected_state` 는 아직 대조하지 않는다 — 쓰기 경로(CAS)가 생기는 S2-5·S4 의 몫이다.
@@ -363,6 +378,10 @@ def apply(ordered: dict[str, Any], *,
     accepted = [chain[0]]
     deferred: list[dict[str, Any]] = []
     post_ids = {chain[0]["message_id"]}
+    # 예산은 **설정에서** 온다(§5 · AC ②). 참가자·라운드별로 따로 센다.
+    limits = protocol.load_budget() if budget is None else dict(budget)
+    deadlines = genesis["payload"].get("deadlines") or {}
+    usage: dict[str, dict[str, int]] = {}
 
     def reject(entry: dict[str, Any], reason: str, detail: Any = None) -> None:
         quarantined.append({"node_id": entry["node_id"],
@@ -400,6 +419,17 @@ def apply(ordered: dict[str, Any], *,
                     # R2 는 반론 라운드다 — 대상 없는 발언은 라운드의 뜻을 비운다.
                     reject(entry, COUNTER_REQUIRED, {"round": 2})
                     continue
+            # ★예산은 **유효 post 만** 센다(R-2). 여기까지 온 것이 유효 post 다 —
+            #   경합에서 진 글·무효 글은 애초에 이 사슬에 없다.
+            slot = f"{who}@r{state['round']}" if gtype == "debate" else who
+            used = usage.setdefault(slot, {"posts": 0, "chars": 0})
+            over = protocol.would_exceed(body=payload.get("body") or "",
+                                         used=used, budget=limits)
+            if over:
+                reject(entry, BUDGET_EXCEEDED, over)
+                continue
+            used["posts"] += 1
+            used["chars"] += len(payload.get("body") or "")
             post_ids.add(entry["message_id"])
             accepted.append(entry)
 
@@ -454,12 +484,16 @@ def apply(ordered: dict[str, Any], *,
             accepted.append(entry)
 
         elif kind == "delegate_chair":
-            # ★현 의장만 넘길 수 있다(§2-2 「delegate_chair | 의장」).
-            #   만료된 스레드를 운영자가 대신 넘길 수 있는지는 설계가 말하지 않는다 —
-            #   권한 경계를 내가 넓히지 않는다(【결정필요】로 올렸다).
+            # 의장은 언제나 넘길 수 있다. 운영자는 **만료된 동안만** 대신 넘길 수 있다
+            # (설계 §2-2 · 운영자 결정 2026-08-25). 조건이 없으면 운영자가 아무 때나
+            # 의장을 갈아치울 수 있어 의장 권한이 형해화된다 — 그래서 조건이 규칙의 절반이다.
             if who != state["chair"]:
-                reject(entry, PERMISSION, {"chair": state["chair"], "from": who})
-                continue
+                if not (who in operators
+                        and is_expired_now(gtype, state["state"], deadlines, now)):
+                    reject(entry, PERMISSION,
+                           {"chair": state["chair"], "from": who,
+                            "operator_needs": "expired"})
+                    continue
             state["chair"] = payload["new_chair"]
             accepted.append(entry)
 
@@ -477,15 +511,14 @@ def apply(ordered: dict[str, Any], *,
 
     # ★만료는 **이벤트가 없을 때만** 발동한다. 지금 라운드의 마감만 본다 —
     #   앞 라운드의 마감은 advance 가 이미 지나갔으므로 따질 일이 없다(이벤트가 시간을 이긴다).
-    deadlines = genesis["payload"].get("deadlines") or {}
-    if gtype == "debate" and now and state["state"] in DEBATE_ROUNDS:
-        due = deadlines.get(state["state"])
-        if due and deadline_passed(due, now):
-            state["state"] = EXPIRED
+    if is_expired_now(gtype, state["state"], deadlines, now):
+        state["state"] = EXPIRED
 
     result = dict(state)
     result.update({"thread_id": ordered["thread_id"],
                    "events": accepted, "deferred": deferred,
+                   # NFR-7(K-6) — 쓴 만큼이 남는다. 토큰 단위 사용량은 도구 경계(S6-1)에서 붙는다.
+                   "usage": usage, "budget": limits,
                    "stale": ordered["stale"], "quarantined": quarantined})
     result["state_hash"] = _state_hash(state)
     return result

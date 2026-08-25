@@ -62,7 +62,7 @@
 | `resolution` | 의장 | summary·dissent:[{from,message_id,quote}]·recommended_actions:[{text,"execution":"forbidden"}] |
 | `answer_selected` | **요청자(genesis.from)** | post message_id — ★대응: PRD FR-5 「해결 표시」 = 도구 `agora.mark_solved` = 이벤트 `answer_selected`(한 사건·세 이름·F-07) |
 | `close` | 의장/요청자/운영자 | reason(solved/unresolved/superseded/aborted/expired) |
-| `delegate_chair` | 의장 | new_chair |
+| `delegate_chair` | 의장 · ★**운영자 키(⛔`state == expired` 일 때만 · master 채택 2026-08-25 14:48 · S2-5)** | new_chair — 운영자 위임은 「만료된 토론을 죽이지 않고 살리는」 출구(운영자는 이미 abort 를 가지므로 새 권한 부여 아님) · 만료 아닌 스레드에서의 운영자 위임 = code 5(의장 권한 형해화 방지 · 뮤턴트 고정) |
 | `abort` | 운영자 키 | reason |
 | `vote` | 참가자 | target message_id · value(+1/0) — 구속력 없음(M-7) |
 
@@ -71,7 +71,7 @@
 1. 저장층에서 스레드의 이벤트 후보 전건 fetch(top-level + reply 모두) → 서명·명부(체크포인트 시점 명부·KRL)·`(from,message_id)` 중복·`thread_id`·크기 검증 → 무효는 **격리 목록**에 기록(표시만).
 2. `prev`·`expected_state`로 정렬·경합 판정: 같은 `prev`를 가진 이벤트가 여럿이면 **GitHub createdAt → node_id 사전순** 승자, 나머지는 「stale」로 무효(H-9). 늦은 라운드 발언(advance 이후의 이전 round post) = 무효.
 3. 유형별 전이표(§6)로 상태 계산 → `state_hash`. GitHub 라벨·close·answer 표시는 **투영**(reducer 결과를 쓰는 쪽)이지 입력이 아니다(H-7·H-14).
-4. 마감(deadline) 경과 + 의장 `advance` 부재 → `expired` 상태로 자동 전이 → 운영자 `abort` 또는 `delegate_chair`로 재개(H-10). ★**이벤트가 시간을 이긴다(R-3)**: 유효 `advance`가 존재하면 그 라운드의 expired 판정보다 **언제나 우선**(시간 전이는 이벤트 부재 시에만 발동하는 보조 규칙) · 노드 시계 오차 흡수 = grace window **300초**(deadline+300s 전 advance는 정시로 간주).
+4. 마감(deadline) 경과 + 의장 `advance` 부재 → `expired` 상태로 자동 전이 → 운영자 `abort` 또는 `delegate_chair`(의장 · **expired 한정 운영자**)로 위임 → ★**재개는 `advance` 가 한다**(위임만으로는 안 풀린다 · S2-5)(H-10). ★**이벤트가 시간을 이긴다(R-3)**: 유효 `advance`가 존재하면 그 라운드의 expired 판정보다 **언제나 우선**(시간 전이는 이벤트 부재 시에만 발동하는 보조 규칙) · 노드 시계 오차 흡수 = grace window **300초**(deadline+300s 전 advance는 정시로 간주).
 
 ## 3. 서식
 ### 3-1. GitHub 게시물(운반 형식)

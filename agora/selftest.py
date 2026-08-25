@@ -1634,6 +1634,169 @@ def _case_deadlines_schema_closed() -> None:
         raise AssertionError("없는 라운드의 마감이 통과했다")
 
 
+# ── S2-5 후속: 운영자 위임(만료 한정) ───────────────────────────────────────
+
+def _case_operator_delegate_only_when_expired() -> None:
+    """운영자는 **만료된 동안만** 의장을 대신 넘길 수 있다(운영자 결정 2026-08-25).
+
+    ★조건이 규칙의 절반이다. 조건이 없으면 운영자가 아무 때나 의장을 갈아치울 수 있어
+      의장 권한이 형해화된다.
+    """
+    ops = frozenset({"operator-b"})
+    expired_case = _r5_debate(
+        [("delegate_chair", {"new_chair": "operator-b"}, "operator-b")],
+        now=_AFTER, operators=ops)
+    if expired_case["chair"] != "operator-b":
+        raise AssertionError(f"만료 중 운영자 위임이 막혔다: {expired_case['chair']} "
+                             f"거부={_r4_reasons(expired_case)}")
+
+    live_case = _r5_debate(
+        [("delegate_chair", {"new_chair": "operator-b"}, "operator-b")],
+        now=_BEFORE, operators=ops)          # 아직 만료 아님
+    if live_case["chair"] != "operator-a" or _r4_reasons(live_case) != ["permission"]:
+        raise AssertionError(f"만료 아닌데 운영자 위임이 통과했다: "
+                             f"chair={live_case['chair']} 거부={_r4_reasons(live_case)}")
+
+
+# ── S2-6 프로토콜 예산 ──────────────────────────────────────────────────────
+# ★AC ① 이 요구하는 것은 「**로컬 검사를 끄고**」 재는 것이다. 그래서 이 절의 픽스처는
+#   사전 검사를 아예 부르지 않고 저장층에 직접 넣는다 — reducer 만으로 막히는지 본다.
+
+def _case_budget_local_precheck_is_code3() -> None:
+    """로컬 사전 검사 — 보내기 전에 code 3 으로 막는다(§8 FR-10)."""
+    from agora import protocol
+    protocol.precheck(body="가짜 발언", used={"posts": 2, "chars": 0},
+                      budget={"posts_per_round": 2, "max_chars_per_round": 6000})
+
+
+def _case_budget_reducer_rejects_without_precheck() -> None:
+    """사전 검사를 **끄고** 3번째 발언을 저장층에 직접 주입 → reducer 가 무효 처리(AC ①).
+
+    ★로컬 검사에 의존하지 않는다는 증명이다. 저장층은 비신뢰다 —
+      검사를 지운 클라이언트가 언제든 있을 수 있다.
+    """
+    out = _r5_debate([
+        ("post", {"round": 0, "body": "첫 발언"}, "operator-a"),
+        ("post", {"round": 0, "body": "둘째 발언"}, "operator-a"),
+        ("post", {"round": 0, "body": "셋째 발언"}, "operator-a"),
+    ], deadlines={})
+    if _r4_reasons(out) != ["budget_exceeded"]:
+        raise AssertionError(f"3번째 발언: 거부={_r4_reasons(out)}")
+    if out["usage"]["operator-a@r0"]["posts"] != 2:
+        raise AssertionError(f"계수가 다르다: {out['usage']}")
+
+
+def _case_budget_comes_from_settings() -> None:
+    """상한은 설정에서 온다 — 값을 바꾸면 결과가 바뀐다(AC ② · 하드코딩 아님)."""
+    from agora import reducer
+    from agora.event import event_hash
+    payload = {"type": "debate", "title": "가짜 제목", "body": "가짜 발제",
+               "chair": "operator-a"}
+    g = _r2_event("genesis", payload, "a" * 32)
+    items = [(_r2_signed(g), "2026-01-01T00:00:00Z")]
+    prev = event_hash(g)
+    for i in range(2):
+        ev = _r2_event("post", {"round": 0, "body": f"발언 {i}"}, f"{i + 1:032x}",
+                       prev=prev)
+        items.append((_r2_signed(ev), f"2026-01-01T00:01:{i:02d}Z"))
+        prev = event_hash(ev)
+    collected = _r2_collect(_r3_store(items))
+    ordered = reducer.order(collected)
+
+    two = reducer.apply(ordered, budget={"posts_per_round": 2,
+                                         "max_chars_per_round": 6000})
+    one = reducer.apply(ordered, budget={"posts_per_round": 1,
+                                         "max_chars_per_round": 6000})
+    if [q["reason"] for q in two["quarantined"] if q.get("stage") == "transition"]:
+        raise AssertionError("상한 2 인데 2건이 거부됐다")
+    if [q["reason"] for q in one["quarantined"] if q.get("stage") == "transition"] \
+            != ["budget_exceeded"]:
+        raise AssertionError("상한 1 로 낮췄는데 결과가 그대로다 — 설정을 안 읽는다")
+
+
+def _case_budget_counts_chars_too() -> None:
+    """글자 수 상한도 같은 규칙으로 막힌다."""
+    out = _r5_debate([("post", {"round": 0, "body": "가" * 50}, "operator-a")],
+                     deadlines={})
+    if _r4_reasons(out):
+        raise AssertionError(f"기본 상한 안인데 막혔다: {_r4_reasons(out)}")
+    from agora import reducer
+    from agora.event import event_hash
+    g = _r2_event("genesis", {"type": "debate", "title": "가짜", "body": "가짜",
+                              "chair": "operator-a"}, "a" * 32)
+    ev = _r2_event("post", {"round": 0, "body": "가" * 50}, "1" * 32,
+                   prev=event_hash(g))
+    ordered = reducer.order(_r2_collect(_r3_store([
+        (_r2_signed(g), "2026-01-01T00:00:00Z"),
+        (_r2_signed(ev), "2026-01-01T00:01:00Z")])))
+    tight = reducer.apply(ordered, budget={"posts_per_round": 9,
+                                           "max_chars_per_round": 10})
+    over = [q for q in tight["quarantined"] if q.get("stage") == "transition"]
+    if [q["reason"] for q in over] != ["budget_exceeded"]:
+        raise AssertionError(f"글자 상한이 안 걸린다: {tight['quarantined']}")
+    if over[0]["detail"]["limit"] != "max_chars_per_round":
+        raise AssertionError(f"걸린 축이 다르다: {over[0]['detail']}")
+
+
+def _case_budget_not_spent_by_losers() -> None:
+    """경합에서 진 글은 예산을 쓰지 않는다(R-2).
+
+    ★안 그러면 남이 경합을 걸어 **내 예산을 태울** 수 있다.
+    """
+    from agora import reducer
+    from agora.event import event_hash
+    g = _r2_genesis()
+    ghash = event_hash(g)
+    winner = _r2_event("post", {"round": 0, "body": "이긴 발언"}, "1" * 32, prev=ghash)
+    loser = _r2_event("post", {"round": 0, "body": "진 발언"}, "2" * 32, prev=ghash)
+    second = _r2_event("post", {"round": 0, "body": "둘째 발언"}, "3" * 32,
+                       prev=event_hash(winner))
+    out = reducer.apply(reducer.order(_r2_collect(_r3_store([
+        (_r2_signed(g), "2026-01-01T00:00:00Z"),
+        (_r2_signed(winner), "2026-01-01T00:00:05Z"),
+        (_r2_signed(loser), "2026-01-01T00:00:06Z"),
+        (_r2_signed(second), "2026-01-01T00:00:07Z"),
+    ]))), budget={"posts_per_round": 2, "max_chars_per_round": 6000})
+    if _r4_reasons(out):
+        raise AssertionError(f"진 글이 예산을 태웠다: {out['quarantined']}")
+    if out["usage"]["operator-a@r0"]["posts"] != 2:
+        raise AssertionError(f"계수: {out['usage']}")
+
+
+def _case_budget_is_per_participant_and_round() -> None:
+    """예산은 참가자별·라운드별이다 — 남의 발언이 내 몫을 깎지 않는다."""
+    out = _r5_debate([
+        ("post", {"round": 0, "body": "a 의 첫 발언"}, "operator-a"),
+        ("post", {"round": 0, "body": "a 의 둘째 발언"}, "operator-a"),
+        ("post", {"round": 0, "body": "b 의 첫 발언"}, "operator-b"),
+    ], deadlines={})
+    if _r4_reasons(out):
+        raise AssertionError(f"남의 예산을 깎았다: {out['quarantined']}")
+    if sorted(out["usage"]) != ["operator-a@r0", "operator-b@r0"]:
+        raise AssertionError(f"계수 칸: {sorted(out['usage'])}")
+
+
+def _case_budget_value_must_be_sane() -> None:
+    """설정의 예산 값이 0 이상의 정수가 아니면 인자 오류(10)."""
+    from agora import protocol
+    protocol.load_budget({"budget": {"posts_per_round": "둘"}})
+
+
+def _case_usage_field_exists(): 
+    """NFR-7(K-6) — 사용량 수집 칸이 결과에 **실재**한다.
+
+    ★토큰 단위 사용량은 코어가 잴 수 없다(토크나이저가 없다) — 도구 경계(S6-1)에서 붙는다.
+      여기서 재는 것은 프로토콜이 실제로 셀 수 있는 것(발언 수·글자 수)이 남는가다.
+    """
+    out = _r5_debate([("post", {"round": 0, "body": "가짜 발언"}, "operator-a")],
+                     deadlines={})
+    if "usage" not in out or "budget" not in out:
+        raise AssertionError(f"사용량·예산 칸이 없다: {sorted(out)}")
+    row = out["usage"].get("operator-a@r0")
+    if not row or sorted(row) != ["chars", "posts"]:
+        raise AssertionError(f"사용량 칸 구성: {row}")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -1738,6 +1901,15 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("승계: 재개는 advance 가 한다",  _case_expired_resumes_by_advance_not_by_delegate, None),
     ("중단: 운영자 명부만 abort",     _case_abort_requires_operator, None),
     ("마감: deadlines 표는 닫혀 있다", _case_deadlines_schema_closed, None),
+    ("승계: 운영자는 만료 때만",      _case_operator_delegate_only_when_expired, None),
+    ("예산: 로컬 사전 검사 → 3",      _case_budget_local_precheck_is_code3, errors.GATE_REJECT),
+    ("예산: 사전 검사 없이도 무효",   _case_budget_reducer_rejects_without_precheck, None),
+    ("예산: 설정에서 읽는다",         _case_budget_comes_from_settings, None),
+    ("예산: 글자 수 상한",            _case_budget_counts_chars_too, None),
+    ("예산: 진 글은 안 쓴다",         _case_budget_not_spent_by_losers, None),
+    ("예산: 참가자·라운드별",         _case_budget_is_per_participant_and_round, None),
+    ("예산: 설정 값 검증 → 10",       _case_budget_value_must_be_sane, errors.ARGUMENT),
+    ("예산: 사용량 칸 실재",          _case_usage_field_exists, None),
 )
 
 
@@ -1956,25 +2128,47 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M61-operator-delegate-unconditional", "agora/reducer.py",
+     '                if not (who in operators\n                        and is_expired_now(gtype, state["state"], deadlines, now)):',
+     "                if not (who in operators):",
+     "승계: 운영자는 만료 때만"),
+    ("M62-budget-not-enforced", "agora/reducer.py",
+     "            if over:\n                reject(entry, BUDGET_EXCEEDED, over)\n                continue",
+     "            if False:\n                pass",
+     "예산: 사전 검사 없이도 무효"),
+    ("M63-budget-hardcoded", "agora/reducer.py",
+     "    limits = protocol.load_budget() if budget is None else dict(budget)",
+     "    limits = protocol.load_budget()",
+     "예산: 설정에서 읽는다"),
+    ("M64-budget-chars-ignored", "agora/protocol.py",
+     '    if used["chars"] + len(body) > budget["max_chars_per_round"]:',
+     "    if False:",
+     "예산: 글자 수 상한"),
+    ("M65-budget-config-unvalidated", "agora/protocol.py",
+     "            if type(value) is not int or value < 0:",
+     "            if False:",
+     "예산: 설정 값 검증 → 10"),
     ("M55-grace-ignored", "agora/reducer.py",
      "    return _parse_ts(now, \"now\") > _parse_ts(deadline, \"deadline\") + timedelta(seconds=grace)",
      "    return _parse_ts(now, \"now\") > _parse_ts(deadline, \"deadline\")",
      "마감: 유예 안에서는 진행"),
+    # ★재조준 2026-08-25: S2-6 에서 만료 판정을 is_expired_now 한 곳으로 모으면서
+    #   M56·M57·M59 의 대상 문자열이 옮겨갔다(NOT-APPLIED 3건으로 드러났다).
     ("M56-time-beats-event", "agora/reducer.py",
-     '        due = deadlines.get(state["state"])',
-     '        due = deadlines.get("r0")',
+     '    due = deadlines.get(state_name)',
+     '    due = deadlines.get("r0")',
      "마감: 이벤트가 시간을 이긴다"),
     ("M57-delegate-chair-check-off", "agora/reducer.py",
-     '            if who != state["chair"]:\n                reject(entry, PERMISSION, {"chair": state["chair"], "from": who})\n                continue\n            state["chair"] = payload["new_chair"]',
-     '            if False:\n                pass\n            state["chair"] = payload["new_chair"]',
+     '            if who != state["chair"]:\n                if not (who in operators',
+     '            if False:\n                if not (who in operators',
      "승계: 비의장 위임 → 무효"),
     ("M58-abort-operator-check-off", "agora/reducer.py",
      "            if who not in operators:",
      "            if False:",
      "중단: 운영자 명부만 abort"),
     ("M59-expired-never-fires", "agora/reducer.py",
-     "            state[\"state\"] = EXPIRED",
-     "            pass",
+     '    if is_expired_now(gtype, state["state"], deadlines, now):\n        state["state"] = EXPIRED',
+     '    if False:\n        state["state"] = EXPIRED',
      "마감: advance 부재 → expired"),
     ("M60-deadline-rounds-open", "agora/schema.py",
      '        _closed(dl, DEADLINE_ROUNDS, "genesis.deadlines")',
@@ -2155,7 +2349,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S2-5(마감·만료·의장 승계)"
+            "슬라이스": "S2-6(프로토콜 예산)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
