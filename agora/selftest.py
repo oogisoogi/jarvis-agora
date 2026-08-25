@@ -2674,21 +2674,73 @@ def _case_github_transport_error_is_retryable() -> None:
         raise
 
 
-def _case_github_projection_is_not_silently_ok() -> None:
-    """아직 안 만든 투영이 **조용히 성공**을 돌려주지 않는다.
+def _case_github_projection_admits_what_it_did_not_do() -> None:
+    """투영은 **안 한 것을 「했다」로 적지 않는다.**
 
-    ★「반영했다」는 거짓이 화면과 상태를 갈라놓는다 — 그 거짓은 아무도 못 본다.
+    ★S4-1 에서 이 케이스는 「미구현이 조용히 성공을 돌려주지 않는가」를 쟀다.
+      S4-4 가 close·answer 를 실제로 붙였으므로 이제 재는 축이 바뀐다 —
+      **라벨은 여전히 안 한다**(라벨 생성 = 저장소 수준 변경 · 승인 범위 밖)는 사실이
+      결과에 이유와 함께 남는지. 케이스를 지우지 않고 방향을 돌린다.
     """
     from agora.store_github import GitHubStore
+    log: list = []
+
+    def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        if "search(" in query:
+            return {"search": {"nodes": [{"id": "D_1", "number": 7, "title": "t"}]}}
+        log.append("close" if "closeDiscussion" in query else "answer")
+        return {}
+
     store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
-                        transport=_fake_transport([]))
-    try:
-        store.project(thread_id="a" * 32, state="open")
-    except AgoraError as e:
-        if (e.detail or {}).get("reason") != "slice_not_built":
-            raise AssertionError(f"사유가 다르다: {e.detail}") from None
-        return
-    raise AssertionError("미구현 투영이 성공을 돌려줬다")
+                        transport=transport)
+    out = store.project(thread_id="a" * 32, state="open")
+    if out.get("labels") != "not_implemented" or not out.get("labels_why"):
+        raise AssertionError(f"안 한 것을 안 적었다: {out}")
+    if log:
+        raise AssertionError(f"열린 스레드인데 화면을 건드렸다: {log}")
+
+
+def _case_github_projection_closes_and_marks() -> None:
+    """상태가 닫힘이면 닫고, 답이 정해졌으면 표시한다 — 그리고 **사유를 좁혀서** 보낸다."""
+    from agora.store_github import GitHubStore
+    log: list = []
+
+    def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        if "search(" in query:
+            return {"search": {"nodes": [{"id": "D_1", "number": 7, "title": "t"}]}}
+        log.append(("close" if "closeDiscussion" in query else "answer",
+                    variables.get("reason")))
+        return {}
+
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=transport)
+    out = store.project(thread_id="a" * 32, state="closed", close_reason="superseded",
+                        answer_node_id="DC_1")
+    if out.get("closed") != "DUPLICATE":
+        raise AssertionError(f"종결 사유를 안 좁혔다: {out}")
+    if out.get("answer") != "marked":
+        raise AssertionError(f"답 표시가 안 됐다: {out}")
+    if [k for k, _r in log] != ["answer", "close"]:
+        raise AssertionError(f"호출 구성: {log}")
+
+
+def _case_github_projection_failure_is_not_an_exception() -> None:
+    """투영 실패는 **예외로 올리지 않는다** — 화면이 못 따라온 것과 상태가 틀린 것은 다른 사건이다.
+
+    ★예외로 올리면 호출자가 그 둘을 뭉치고, 「반영 실패」를 「프로토콜 실패」로 오해한다.
+    """
+    from agora.store_github import GitHubStore
+
+    def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        if "search(" in query:
+            return {"search": {"nodes": [{"id": "D_1", "number": 7, "title": "t"}]}}
+        raise AgoraError(errors.STORE, "가짜 투영 실패", {"stderr": "nope"})
+
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=transport)
+    out = store.project(thread_id="a" * 32, state="closed", close_reason="solved")
+    if out.get("closed") != "failed" or "close_error" not in out:
+        raise AssertionError(f"실패를 결과에 안 적었다: {out}")
 
 
 def _case_github_store_satisfies_contract() -> None:
@@ -2975,6 +3027,18 @@ def _case_verdict_comes_from_store_not_ledger() -> None:
 # ★이 표가 없으면 「4축을 쟀다」가 사람의 기억에 남는다. 표로 두면 **뮤테이션을 지우는 순간**
 #   이 케이스가 적색이 된다 — 그물을 걷어 낸 것이 조용히 지나가지 않는다.
 # S3(스크럽·게이트)의 4축(04-tasks S3-6) — 같은 규율을 그대로 적용한다.
+# S4(운반층)의 4축 — 페이지·한도·불명·투영.
+S4_AXES: dict[str, tuple[str, ...]] = {
+    "페이지": ("M93-github-first-page-only", "M94-github-replies-skipped",
+               "M95-github-reply-first-page-only", "M96-github-lookup-not-cached"),
+    "한도": ("M99-backoff-constant-interval", "M100-everything-is-retried",
+             "M101-retries-not-counted", "M102-no-actual-waiting"),
+    "불명": ("M97-github-empty-create-is-ok", "M103-ledger-duplicate-allowed",
+             "M104-settle-assumes-committed", "M105-resolve-matches-anything"),
+    "투영": ("M98-projection-claims-labels-done", "M106-projection-closes-open-thread",
+             "M107-projection-reason-not-narrowed", "M108-projection-failure-raises"),
+}
+
 S3_AXES: dict[str, tuple[str, ...]] = {
     "allowlist": ("M69-allow-length-unchecked", "M70-allow-forbidden-off",
                   "M71-allow-url-host-unchecked", "M72-allow-empty-domains-fail-open",
@@ -3022,6 +3086,11 @@ def _case_s2_axes_have_nets() -> None:
 def _case_s3_axes_have_nets() -> None:
     """S3 의 4축(allowlist·denylist·human_approval·재검사)도 같은 방식으로 덮인다."""
     _axes_have_nets(S3_AXES, "S3")
+
+
+def _case_s4_axes_have_nets() -> None:
+    """S4 의 4축(페이지·한도·불명·투영)도 같은 방식으로 덮인다."""
+    _axes_have_nets(S4_AXES, "S4")
 
 
 def _case_quarantine_reasons_are_named() -> None:
@@ -3207,7 +3276,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("운반층: 번호 조회 캐시",        _case_github_lookup_is_cached, None),
     ("운반층: 빈 응답 → 8",           _case_github_empty_result_is_unknown_commit, errors.UNKNOWN_COMMIT),
     ("운반층: 오류 → 7(retryable)",   _case_github_transport_error_is_retryable, errors.STORE),
-    ("운반층: 투영은 조용하지 않다",  _case_github_projection_is_not_silently_ok, None),
+    ("투영: 안 한 것을 적는다",       _case_github_projection_admits_what_it_did_not_do, None),
+    ("투영: 닫고 답을 표시한다",      _case_github_projection_closes_and_marks, None),
+    ("투영: 실패는 예외가 아니다",    _case_github_projection_failure_is_not_an_exception, None),
     ("운반층: Store 계약 충족",       _case_github_store_satisfies_contract, None),
     ("한도: 곱으로 늘어나는 대기",    _case_backoff_waits_multiplying, None),
     ("한도: 재시도 후 결과 반환",     _case_backoff_eventually_succeeds, None),
@@ -3221,6 +3292,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("불명: 두 번 정산해도 1행",      _case_settle_twice_leaves_one_row, None),
     ("원장: 정상 발신은 1행",         _case_success_path_writes_ledger_row, None),
     ("불명: 판정은 운반층이 한다",    _case_verdict_comes_from_store_not_ledger, None),
+    ("S4: 4축 그물 실재",             _case_s4_axes_have_nets, None),
 )
 
 
@@ -3487,10 +3559,24 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            if not node.get("id"):\n                # 성공도 실패도 단정하지 않는다 — 재조회 후에만 판정한다(S4-3).',
      '            if False:\n                # 성공도 실패도 단정하지 않는다 — 재조회 후에만 판정한다(S4-3).',
      "운반층: 빈 응답 → 8"),
-    ("M98-github-projection-silently-ok", "agora/store_github.py",
-     '        raise AgoraError(errors.PRECONDITION, "투영은 아직 구현되지 않았다",\n                         {"reason": "slice_not_built", "slice": "S4-4"})',
-     '        return {"ok": True}',
-     "운반층: 투영은 조용하지 않다"),
+    # ★재조준: S4-4 가 투영을 실제로 붙이면서 「미구현이 조용히 성공」 축이 사라졌다.
+    #   같은 자리에서 재는 것을 「안 한 것을 했다고 적기」로 바꾼다.
+    ("M98-projection-claims-labels-done", "agora/store_github.py",
+     '        done: dict[str, Any] = {"labels": "not_implemented",',
+     '        done: dict[str, Any] = {"labels": "done",',
+     "투영: 안 한 것을 적는다"),
+    ("M106-projection-closes-open-thread", "agora/store_github.py",
+     '        if state == "closed":',
+     "        if True:",
+     "투영: 안 한 것을 적는다"),
+    ("M107-projection-reason-not-narrowed", "agora/store_github.py",
+     '            reason = self.CLOSE_REASONS.get(close_reason or "", "RESOLVED")',
+     '            reason = "RESOLVED"',
+     "투영: 닫고 답을 표시한다"),
+    ("M108-projection-failure-raises", "agora/store_github.py",
+     '                done["closed"] = "failed"\n                done["close_error"] = e.detail',
+     "                raise",
+     "투영: 실패는 예외가 아니다"),
     ("M89-signer-records-claim-not-measure", "agora/signer.py",
      '        "scrub": report,\n        "scrub_claim": _claim_of(event),',
      '        "scrub": _claim_of(event),\n        "scrub_claim": _claim_of(event),',
@@ -3822,7 +3908,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S4-3(unknown_commit 재조회 판정)"
+            "슬라이스": "S4-4(투영 · S4 완주)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

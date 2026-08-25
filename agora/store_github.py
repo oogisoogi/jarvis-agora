@@ -89,6 +89,22 @@ query($id: ID!, $cursor: String) {
 }
 """
 
+_CLOSE = """
+mutation($id: ID!, $reason: DiscussionCloseReason!) {
+  closeDiscussion(input: {discussionId: $id, reason: $reason}) {
+    discussion { id closed closedAt }
+  }
+}
+"""
+
+_ANSWER = """
+mutation($id: ID!) {
+  markDiscussionCommentAsAnswer(input: {id: $id}) {
+    discussion { id isAnswered }
+  }
+}
+"""
+
 _CREATE = """
 mutation($repo: ID!, $category: ID!, $title: String!, $body: String!) {
   createDiscussion(input: {repositoryId: $repo, categoryId: $category,
@@ -280,14 +296,44 @@ class GitHubStore:
             page_cursor = page.get("endCursor")
         return {"items": rows, "next_cursor": None}
 
-    def project(self, *, thread_id: str, state: str,
-                answer_node_id: str | None = None) -> dict[str, Any]:
-        """투영은 **아직 하지 않는다**(S4-1 범위 밖).
+    # reducer 상태 → GitHub 종결 사유. 우리 어휘가 그쪽 어휘보다 넓으므로 좁혀서 보낸다.
+    CLOSE_REASONS = {"solved": "RESOLVED", "answered": "RESOLVED",
+                     "unresolved": "OUTDATED", "superseded": "DUPLICATE",
+                     "archived": "OUTDATED", "aborted": "OUTDATED",
+                     "expired": "OUTDATED"}
 
-        ★조용히 성공을 돌려주지 않는다. 「반영했다」는 거짓이 화면과 상태를 갈라놓는다.
+    def project(self, *, thread_id: str, state: str,
+                answer_node_id: str | None = None,
+                close_reason: str | None = None) -> dict[str, Any]:
+        """reducer 가 계산한 상태를 **화면에 반영만** 한다(§D1 · H-7).
+
+        ★이것은 **투영이지 입력이 아니다.** 여기서 실패해도 프로토콜 상태는 그대로다 —
+          그래서 실패를 예외로 올리지 않고 **결과에 적어** 돌려준다. 화면이 못 따라온 것과
+          상태가 틀린 것은 다른 사건인데, 예외로 올리면 호출자가 그 둘을 뭉치게 된다.
+
+        ★라벨은 **하지 않는다.** 라벨을 붙이려면 없는 라벨을 만들어야 하고, 그것은
+          스레드가 아니라 **저장소를 바꾸는 일**이라 승인 범위 밖이다.
+          안 한 것을 「했다」로 적지 않고, 결과에 그 사실과 이유를 남긴다.
         """
-        raise AgoraError(errors.PRECONDITION, "투영은 아직 구현되지 않았다",
-                         {"reason": "slice_not_built", "slice": "S4-4"})
+        done: dict[str, Any] = {"labels": "not_implemented",
+                                "labels_why": "라벨 생성 = 저장소 수준 변경 · 승인 범위 밖"}
+        _number, disc_id = self._locate(thread_id)
+        if answer_node_id:
+            try:
+                self._run(_ANSWER, id=answer_node_id)
+                done["answer"] = "marked"
+            except AgoraError as e:
+                done["answer"] = "failed"
+                done["answer_error"] = e.detail
+        if state == "closed":
+            reason = self.CLOSE_REASONS.get(close_reason or "", "RESOLVED")
+            try:
+                self._run(_CLOSE, id=disc_id, reason=reason)
+                done["closed"] = reason
+            except AgoraError as e:
+                done["closed"] = "failed"
+                done["close_error"] = e.detail
+        return done
 
     def categories(self) -> dict[str, Any]:
         return {name: {"id": cid, "is_answerable": name == "problem"}
