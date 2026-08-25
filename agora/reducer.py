@@ -219,6 +219,13 @@ def read_view(collected: dict[str, Any], *, state: Any, audit: bool = False,
         #   `audit` 을 켜도 **아무 데도 안 나왔다.** 쓴 사람 화면에는 rc 0 과 URL 이 찍히고,
         #   글은 영영 안 보이며, 왜인지 물을 자리가 없다. 그것이 이 저장소가 쫓는 바로 그 형태다.
         view["stale"] = list(stale or [])
+        # ★★「그때의 명부·규칙」과 「지금」이 다른 글에 **표시**를 단다(§2-1 · H-13).
+        #   이 두 칸은 collect 가 오래전부터 계산했는데 **아무 데도 안 실렸다** —
+        #   즉 계산은 되는데 볼 수가 없었다. 격리로 올리지는 않는다(오탐이 더 크다) ·
+        #   대신 `audit` 에서 보이게 한다. 안 보이면 없는 것과 같다.
+        for row, src in zip(view["events"], source, strict=False):
+            row["roster_stale"] = bool(src.get("roster_stale"))
+            row["scrub_recheck"] = bool(src.get("scrub_recheck"))
     return view
 
 

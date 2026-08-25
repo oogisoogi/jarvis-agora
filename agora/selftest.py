@@ -3474,6 +3474,9 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     # ★띄울 방법이 없던 도구 표면(S6-2 AC ② 미충족分).
     "도구표면": ("M212-mcp-serve-prints-return-value", "M213-mcp-serve-exposed-as-tool",
                  "M220-vote-loses-its-emitter"),
+    # ★인자 하나가 안 넘어가 그 검사만 조용히 꺼져 있던 자리들.
+    "인자배선": ("M221-reduce-drops-now", "M222-reduce-drops-roster-checkpoint",
+                 "M223-audit-hides-drift-flags"),
     # ★실사용에 배달 영수증이 없던 자리(부인 방지가 실물에서 비어 있었다).
     "배달영수증": ("M214-watch-does-not-deliver", "M215-delivery-without-ledger",
                    "M216-receipt-taken-from-any-body"),
@@ -6122,6 +6125,105 @@ def _case_unknown_commit_is_settled_by_the_tool() -> None:
         raise AssertionError("안 올라간 글을 원장에 적었다")
 
 
+# ── 배선 대조 3층: 인자 ─────────────────────────────────────────────────────
+# ★앞의 두 그물(정의·kind)은 이 결손을 **못 잡는다.** 함수는 불리고 있고 kind 도 나가는데,
+#   **계약된 인자 하나가 안 넘어가서** 그 인자가 켜는 검사만 조용히 꺼져 있는 형태다.
+#   2026-08-26 실측으로 이 형태만 다섯 번 나왔다: `revoked_path`(폐기) · `budget`(예산) ·
+#   `now`(**만료 전체**) · `roster_checkpoint`(명부 낡음) · `scrub_bundle`(규칙 낡음).
+#   ★공통점: **아무 오류도 안 난다.** 그 검사만 없어질 뿐이다.
+
+REDUCE_CALLS = (("collect", "reducer.collect"), ("apply", "reducer.apply"))
+
+
+def _case_reduce_passes_every_contracted_knob() -> None:
+    """`tools._reduce` 가 reducer 의 **계약된 인자를 하나도 안 빠뜨린다**.
+
+    ★인자를 안 넘기면 그 인자가 켜는 검사가 **조용히 꺼진다** — 오류도, 표시도 없다.
+      사람 눈으로는 호출이 멀쩡해 보인다(그래서 이 다섯이 오래 살아남았다).
+    ★기본값으로 두는 것이 맞는 인자는 허용목록에 `param:` 로 사유와 함께 적는다.
+      나중에 넘기게 되면 **그것도 적색**이다(목록이 썩는 것을 막는다).
+    """
+    import ast
+    import inspect
+    from agora import reducer, tools
+    src = inspect.getsource(tools._reduce)
+    tree = ast.parse(src.strip())
+    passed: dict[str, set[str]] = {name: set() for name, _ in REDUCE_CALLS}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr in passed:
+            passed[node.func.attr] = {kw.arg for kw in node.keywords if kw.arg}
+    allowed = {n.split(":", 1)[1] for n in _wiring_allowed() if n.startswith("param:")}
+    checked = 0
+    for name, label in REDUCE_CALLS:
+        params = inspect.signature(getattr(reducer, name)).parameters
+        optional = {p.name for p in params.values()
+                    if p.default is not inspect.Parameter.empty}
+        if not optional:
+            raise AssertionError(f"{label} 에 선택 인자가 하나도 없다 — 검사가 고장났다")
+        checked += len(optional)
+        missing = sorted(optional - passed[name] - allowed)
+        if missing:
+            raise AssertionError(f"{label} 에 안 넘기는 계약 인자: {missing}")
+        stale = sorted(allowed & passed[name])
+        if stale:
+            raise AssertionError(f"허용목록이 낡았다 — 이제 넘기는 인자: {stale}")
+    if checked < 5:
+        raise AssertionError(f"선택 인자를 {checked}개밖에 못 찾았다 — 검사가 고장났다")
+
+
+def _case_expiry_fires_through_the_tool() -> None:
+    """마감이 지나면 **도구가 읽은 상태**가 `expired` 가 된다(S2-5 · 배선 2026-08-26).
+
+    ★`is_expired_now` 는 `now` 없이는 **항상 False** 다. 그런데 `tools._reduce` 가 `now` 를
+      안 넘겼다 ⇒ 마감·만료·의장 승계가 **통째로 실사용에서 죽어 있었다.**
+      시험은 reducer 에 `now` 를 직접 넘겨 재고 있었으므로 전건 초록이었다.
+    ★양쪽으로 잰다: 지난 마감은 `expired` 로 가고, **안 지난 마감은 안 간다.**
+      한쪽만 재면 모든 스레드를 만료로 만드는 구현도 초록이다.
+    """
+    from agora import tools
+    f = _fixtures()
+
+    def state_with(deadline: str) -> str:
+        ctx = _tools_ctx()
+        out = _with_key(f["key_a"], lambda: tools.propose(
+            ctx, type="debate", title="마감 픽스처", body="가짜",
+            deadlines={"r1": deadline}))
+        tid = out["thread_id"]
+        _with_key(f["key_a"], lambda: tools.advance(ctx, thread_id=tid, to_round=1))
+        return tools.read(ctx, thread_id=tid)["state"]["state"]
+
+    if state_with("2000-01-01T00:00:00Z") != "expired":
+        raise AssertionError("지난 마감인데 만료가 안 됐다 — now 가 안 넘어간다")
+    if state_with("2999-01-01T00:00:00Z") != "r1":
+        raise AssertionError("안 지난 마감인데 만료로 갔다")
+
+
+def _case_audit_shows_roster_and_rule_drift() -> None:
+    """「그때의 명부」와 「지금 명부」가 다르면 `audit` 에 **표시**가 뜬다(H-13).
+
+    ★`collect` 는 이 값을 오래전부터 계산했는데 **아무 데도 안 실렸고**, 게다가 그 계산에
+      필요한 인자(`roster_checkpoint`)도 안 넘어가 **영원히 False** 였다. 두 겹이 동시에
+      비어 있으면 어느 쪽을 고쳐도 화면은 그대로다 — 그래서 둘 다 고치고 여기서 함께 잰다.
+    ★양쪽으로 잰다: 명부가 그대로면 표시가 **안 뜨고**, 바뀌면 뜬다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")
+    _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="명부가 그대로일 때의 글"))
+    before = tools.read(ctx, thread_id=tid, audit=True)["events"]
+    if any(e.get("roster_stale") for e in before):
+        raise AssertionError("명부가 안 바뀌었는데 낡았다고 표시했다")
+
+    with open(ctx.allowed_signers_path, "a", encoding="utf-8") as fh:
+        fh.write("# 명부가 바뀌었다\n")          # 내용 해시가 바뀐다
+    after = tools.read(ctx, thread_id=tid, audit=True)["events"]
+    if not all(e.get("roster_stale") for e in after):
+        raise AssertionError("명부가 바뀌었는데 표시가 안 뜬다")
+
+
 # ── 배선 대조 자체를 상시 케이스로(master 승인 2026-08-26) ───────────────────
 
 WIRING_ALLOWLIST = "tests/wiring-allowlist.txt"
@@ -6234,7 +6336,8 @@ def _case_no_unwired_production_definitions() -> None:
     allowed = _wiring_allowed()
     if not allowed:
         raise AssertionError(f"허용목록이 비었거나 사유 없는 줄뿐이다: {WIRING_ALLOWLIST}")
-    names = {n for n in allowed if not n.startswith("kind:")}   # kind 축은 다른 케이스가 본다
+    # ★다른 축(`kind:`·`param:`)은 각자의 케이스가 본다 — 한 목록을 쓰되 축은 갈라 읽는다.
+    names = {n for n in allowed if ":" not in n}
     fresh = [n for n in unwired if n not in names]
     if fresh:
         raise AssertionError(f"부르는 곳이 없는 새 정의: {fresh}")
@@ -6543,6 +6646,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("code 8: 도구가 판정한다",        _case_unknown_commit_is_settled_by_the_tool, None),
     ("배선: 안 불리는 정의 0",        _case_no_unwired_production_definitions, None),
     ("배선: 모든 kind 에 발신자",     _case_every_contracted_kind_has_an_emitter, None),
+    ("배선: 계약 인자 전건 전달",     _case_reduce_passes_every_contracted_knob, None),
+    ("만료: 도구 경로에서 발동",      _case_expiry_fires_through_the_tool, None),
+    ("감사: 명부 낡음 표시",          _case_audit_shows_roster_and_rule_drift, None),
 )
 
 
@@ -7358,8 +7464,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "투영: 미반영을 적는다"),
     # ── S7-2b 배선 대조(2026-08-26 전수조사) ────────────────────────────────
     ("M197-reduce-ignores-revocation", "agora/tools.py",
-     "                                revoked_path=ctx.revoked_path)",
-     "                                revoked_path=None)",
+     "                                revoked_path=ctx.revoked_path,",
+     "                                revoked_path=None,",
      "배선: 폐기 키가 실제로 막힌다"),
     ("M198-context-drops-operators", "agora/tools.py",
      '                   operators=roster.operators(path=_os.path.join(d, "operators")),',
@@ -7392,8 +7498,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                          reducer.usage_slot(state, "누구도아님"))',
      "배선: 예산 로컬 겹"),
     ("M204-reduce-ignores-config-budget", "agora/tools.py",
-     "                            budget=protocol.load_budget(ctx.config))",
-     "                            budget=None)",
+     "                            budget=protocol.load_budget(ctx.config),",
+     "                            budget=None,",
      "배선: 설정 예산이 판정까지"),
     ("M205-usage-slot-ignores-round", "agora/reducer.py",
      '    if state.get("type") == "debate":',
@@ -7454,6 +7560,18 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                             stale=reduced.get("stale"))',
      "                             stale=None)",
      "읽기: 진 글도 audit 에 나온다"),
+    ("M221-reduce-drops-now", "agora/tools.py",
+     "                            now=now_iso())",
+     "                            now=None)",
+     "만료: 도구 경로에서 발동"),
+    ("M222-reduce-drops-roster-checkpoint", "agora/tools.py",
+     "                                roster_checkpoint=_roster_digest(ctx),",
+     "                                roster_checkpoint=None,",
+     "감사: 명부 낡음 표시"),
+    ("M223-audit-hides-drift-flags", "agora/reducer.py",
+     '            row["roster_stale"] = bool(src.get("roster_stale"))',
+     '            row["roster_stale"] = False',
+     "감사: 명부 낡음 표시"),
     ("M220-vote-loses-its-emitter", "agora/tools.py",
      '    out = _publish(ctx, kind="vote", thread_id=thread_id,',
      '    out = _publish(ctx, kind="post", thread_id=thread_id,',

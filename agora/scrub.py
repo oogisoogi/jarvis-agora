@@ -253,6 +253,16 @@ def check(payload: Any, rules: Rules | None = None,
     }
 
 
+def current_bundle() -> str:
+    """지금 이 노드가 쓰는 **규칙 묶음 해시**.
+
+    ★이 값이 필요한 이유: 받은 이벤트가 「어떤 규칙으로 걸렀다」고 주장하는지를 **지금 규칙과
+      대조**해야 `scrub_recheck` 를 켤 수 있다. 대조할 값을 못 구하면 그 칸은 영원히 False 다
+      — 즉 「규칙이 바뀐 뒤에 온 옛 글」을 아무도 못 알아본다(2026-08-26 실측: 그 상태였다).
+    """
+    return check({"payload": {}})["bundle"]
+
+
 def enforce(payload: Any, rules: Rules | None = None,
             allow: AllowRules | None = None,
             names: frozenset[str] | None = None) -> dict[str, Any]:

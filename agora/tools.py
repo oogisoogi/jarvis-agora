@@ -64,14 +64,24 @@ class Context:
 # ── 상태 읽기(모든 도구의 출발점) ───────────────────────────────────────────
 
 def _reduce(ctx: Context, thread_id: str) -> dict[str, Any]:
+    from agora import scrub
     collected = reducer.collect(store=ctx.store, thread_id=thread_id,
                                 allowed_signers_path=ctx.allowed_signers_path,
-                                revoked_path=ctx.revoked_path)
+                                revoked_path=ctx.revoked_path,
+                                # ★이 둘이 없으면 `roster_stale`·`scrub_recheck` 가
+                                #   **영원히 False** 다 — 「명부·규칙이 바뀐 뒤에 온 옛 글」을
+                                #   아무도 못 알아본다. 칸은 있는데 늘 비어 있는 상태였다.
+                                roster_checkpoint=_roster_digest(ctx),
+                                scrub_bundle=scrub.current_bundle())
     # ★예산도 **설정에서** 온다(§5). 안 넘기면 reducer 가 계약 기본값으로 돌고,
     #   `config.json` 의 `budget` 칸은 **적어도 아무 일도 안 하는 칸**이 된다
     #   (예시 설정 파일이 그 칸을 광고하고 있으므로 더 나쁘다 — 껐다고 믿게 만든다).
     reduced = reducer.apply(reducer.order(collected), operators=ctx.operators,
-                            budget=protocol.load_budget(ctx.config))
+                            budget=protocol.load_budget(ctx.config),
+                            # ★★`now` 가 없으면 **만료가 아예 안 일어난다**(`is_expired_now` 가
+                            #   `now` 없이는 항상 False). 마감·만료·의장 승계(S2-5)가 통째로
+                            #   실사용에서 죽어 있었다 — 시험은 `now` 를 직접 넘겨 재고 있었다.
+                            now=now_iso())
     reduced["collected"] = collected
     return reduced
 
