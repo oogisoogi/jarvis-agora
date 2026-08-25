@@ -70,6 +70,23 @@ def _check_envelope(env: dict[str, Any]) -> None:
             _fail("재현 단계는 문자열이어야 한다", {"where": f"envelope.repro_steps[{i}]"})
 
 
+def _check_link(link: dict[str, Any], where: str, *, need_why: bool) -> None:
+    """스레드 관계 링크(§2-1b) — `parent` 와 `refs[]` 가 같은 모양을 쓴다.
+
+    ★**가리키는 스레드가 있는지는 보지 않는다.** 아직 안 만들어진 스레드를 가리킬 수 있고,
+      그것을 거부하면 「먼저 열고 나중에 잇는다」가 불가능해진다.
+      대신 `read` 가 미해소 링크로 표시한다(설계 §2-1b · S2-7 AC ④).
+    """
+    allowed = ("thread_id", "message_id", "why") if need_why else ("thread_id", "message_id")
+    _closed(link, allowed, where)
+    if not is_id(_need(link, "thread_id", str, where)):
+        _fail("id 형식이 아니다", {"where": f"{where}.thread_id"})
+    if "message_id" in link and not is_id(_need(link, "message_id", str, where)):
+        _fail("id 형식이 아니다", {"where": f"{where}.message_id"})
+    if need_why:
+        _need(link, "why", str, where)
+
+
 def _check_genesis(p: dict[str, Any]) -> None:
     _closed(p, ("type", "title", "body", "envelope", "deadlines", "chair", "parent"),
             "genesis")
@@ -90,8 +107,9 @@ def _check_genesis(p: dict[str, Any]) -> None:
         _closed(dl, DEADLINE_ROUNDS, "genesis.deadlines")
         for k in dl:
             _need(dl, k, str, "genesis.deadlines")
-    if "parent" in p:   # §2-1b 관계 — 상세 검증은 S2-7
-        _need(p, "parent", dict, "genesis")
+    if "parent" in p:
+        _check_link(_need(p, "parent", dict, "genesis"), "genesis.parent",
+                    need_why=False)
 
 
 def _check_post(p: dict[str, Any]) -> None:
@@ -100,6 +118,11 @@ def _check_post(p: dict[str, Any]) -> None:
     if r not in ROUNDS:
         _fail("라운드가 계약 밖", {"round": r, "allowed": list(ROUNDS)})
     _need(p, "body", str, "post")
+    if "refs" in p:
+        for i, r in enumerate(_need(p, "refs", list, "post")):
+            if type(r) is not dict:
+                _fail("인용 항목은 객체여야 한다", {"where": f"post.refs[{i}]"})
+            _check_link(r, f"post.refs[{i}]", need_why=True)
     if "counter" in p:
         for i, c in enumerate(_need(p, "counter", list, "post")):
             if type(c) is not dict:
@@ -137,6 +160,17 @@ def _check_resolution(p: dict[str, Any]) -> None:
             _fail("권고 항목은 객체여야 한다", {"where": f"resolution.recommended_actions[{i}]"})
         _closed(a, ("text", "execution", "spawn"), f"resolution.recommended_actions[{i}]")
         _need(a, "text", str, f"resolution.recommended_actions[{i}]")
+        if "spawn" in a:
+            where = f"resolution.recommended_actions[{i}].spawn"
+            sp = _need(a, "spawn", dict, f"resolution.recommended_actions[{i}]")
+            _closed(sp, ("type", "title"), where)
+            t = _need(sp, "type", str, where)
+            # ★열 수 있는 것은 problem·knowhow 뿐이다. debate 를 자동 제안하면
+            #   수렴이 또 다른 수렴을 낳는 고리가 열린다.
+            if t not in ("problem", "knowhow"):
+                _fail("spawn 유형이 계약 밖", {"where": where, "type": t,
+                                                "allowed": ["problem", "knowhow"]})
+            _need(sp, "title", str, where)
         # ★NFR-8 — 아고라의 결론은 언제나 권고다. 집행 금지 표식이 없으면 정책 위반(3).
         if a.get("execution") != "forbidden":
             _fail("권고에 집행 금지 표식이 없다",

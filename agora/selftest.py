@@ -1797,6 +1797,154 @@ def _case_usage_field_exists():
         raise AssertionError(f"사용량 칸 구성: {row}")
 
 
+# ── S2-7 스레드 관계 필드(§2-1b) ────────────────────────────────────────────
+# ★관계는 **연결**이지 **절차**가 아니다. 이 절의 케이스는 그 경계가 지켜지는지를 잰다.
+
+_OTHER_THREAD = "9" * 32
+
+
+def _case_relations_three_fields_ok() -> None:
+    """parent · refs[] · spawn 각각 정상 1건이 통과한다(AC ①)."""
+    from agora import schema
+    ok = [
+        ("parent", _fake_event("genesis", {
+            "type": "knowhow", "title": "가짜", "body": "가짜",
+            "envelope": _fake_envelope(),
+            "parent": {"thread_id": _OTHER_THREAD, "message_id": "b" * 32}})),
+        ("refs", _fake_event("post", {
+            "round": 1, "body": "가짜 발언",
+            "refs": [{"thread_id": _OTHER_THREAD, "why": "가짜 인용 사유"}]})),
+        ("spawn", _fake_event("resolution", {
+            "summary": "가짜 요약", "dissent": [],
+            "recommended_actions": [{"text": "가짜 권고", "execution": "forbidden",
+                                     "spawn": {"type": "problem",
+                                               "title": "가짜 후속 제목"}}]})),
+    ]
+    for name, ev in ok:
+        try:
+            schema.validate(ev)
+        except AgoraError as e:
+            raise AssertionError(f"{name} 정상건이 거부됐다: {e.to_json()}") from None
+
+
+def _case_relations_schema_violations() -> None:
+    """세 필드 각각 스키마 위반 1건 → code 10(AC ①)."""
+    from agora import schema
+    bad = [
+        ("parent 에 없는 칸", _fake_event("genesis", {
+            "type": "knowhow", "title": "가짜", "body": "가짜",
+            "envelope": _fake_envelope(),
+            "parent": {"thread_id": _OTHER_THREAD, "note": "계약에 없는 칸"}})),
+        ("refs 에 why 없음", _fake_event("post", {
+            "round": 1, "body": "가짜 발언",
+            "refs": [{"thread_id": _OTHER_THREAD}]})),
+        ("spawn 유형이 debate", _fake_event("resolution", {
+            "summary": "가짜 요약", "dissent": [],
+            "recommended_actions": [{"text": "가짜 권고", "execution": "forbidden",
+                                     "spawn": {"type": "debate", "title": "가짜"}}]})),
+    ]
+    for name, ev in bad:
+        try:
+            schema.validate(ev)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"{name}: code {e.code} != 10") from None
+        else:
+            raise AssertionError(f"{name} 이 통과했다")
+
+
+def _case_relations_do_not_change_procedure() -> None:
+    """관계 필드를 더해도 **절차 상태**는 그대로다(AC ②).
+
+    ★`state_hash` 는 달라진다 — 그 안에 사슬의 머리가 들어 있고, 관계를 더하면
+      이벤트 바이트가 달라지기 때문이다(S2-4 의 CAS 결정). 그래서 재는 축은 **절차 칸**이다.
+      한 값으로 두 질문에 답하려 하면 둘 중 하나는 반드시 거짓말이 된다.
+      대신 머리를 뺀 나머지가 같은지까지 확인해 「달라진 것은 머리뿐」임을 못박는다.
+    """
+    from agora import reducer
+
+    def build(with_relations: bool) -> dict[str, Any]:
+        from agora.event import event_hash
+        gp: dict[str, Any] = {"type": "debate", "title": "가짜 제목",
+                              "body": "가짜 발제", "chair": "operator-a"}
+        pp: dict[str, Any] = {"round": 0, "body": "가짜 발언"}
+        if with_relations:
+            gp["parent"] = {"thread_id": _OTHER_THREAD}
+            pp["refs"] = [{"thread_id": _OTHER_THREAD, "why": "가짜 인용 사유"}]
+        g = _r2_event("genesis", gp, "a" * 32)
+        post = _r2_event("post", pp, "1" * 32, prev=event_hash(g))
+        return reducer.apply(reducer.order(_r2_collect(_r3_store([
+            (_r2_signed(g), "2026-01-01T00:00:00Z"),
+            (_r2_signed(post), "2026-01-01T00:01:00Z")]))))
+
+    plain, linked = build(False), build(True)
+    if reducer.procedure_snapshot(plain) != reducer.procedure_snapshot(linked):
+        raise AssertionError(f"관계가 절차를 바꿨다: "
+                             f"{reducer.procedure_snapshot(plain)} != "
+                             f"{reducer.procedure_snapshot(linked)}")
+    if len(plain["events"]) != len(linked["events"]) or linked["quarantined"]:
+        raise AssertionError("관계가 사슬·격리를 바꿨다")
+    if plain["state_hash"] == linked["state_hash"]:
+        raise AssertionError("사슬 바이트가 달라졌는데 상태 해시가 그대로다 — CAS 가 눈먼다")
+
+
+def _case_relations_may_point_nowhere() -> None:
+    """없는 스레드를 가리켜도 **거부하지 않는다** — 대신 미해소 링크로 표시한다(AC ④).
+
+    ★거부하면 「먼저 열고 나중에 잇는다」가 불가능해진다.
+    """
+    from agora import reducer
+    from agora.event import event_hash
+    g = _r2_event("genesis", {"type": "debate", "title": "가짜", "body": "가짜",
+                              "chair": "operator-a",
+                              "parent": {"thread_id": _OTHER_THREAD}}, "a" * 32)
+    post = _r2_event("post", {"round": 0, "body": "가짜 발언",
+                              "refs": [{"thread_id": _OTHER_THREAD,
+                                        "why": "가짜 인용 사유"}]},
+                     "1" * 32, prev=event_hash(g))
+    out = reducer.apply(reducer.order(_r2_collect(_r3_store([
+        (_r2_signed(g), "2026-01-01T00:00:00Z"),
+        (_r2_signed(post), "2026-01-01T00:01:00Z")]))))
+    if out["quarantined"]:
+        raise AssertionError(f"없는 스레드를 가리켰다고 거부했다: {out['quarantined']}")
+    links = reducer.links_of(out)
+    if sorted(l["role"] for l in links) != ["parent", "ref"]:
+        raise AssertionError(f"링크 목록: {links}")
+    if any(l["resolved"] for l in links):
+        raise AssertionError("아무것도 모르는데 해소됐다고 표시했다")
+    known = reducer.links_of(out, known_threads=frozenset({_OTHER_THREAD}))
+    if not all(l["resolved"] for l in known):
+        raise AssertionError("아는 스레드인데 미해소로 남았다")
+
+
+def _case_spawn_is_proposal_only() -> None:
+    """spawn 은 **제안일 뿐** — 스레드를 자동으로 여는 코드 경로가 0건이어야 한다(AC ③).
+
+    ★부재를 증명하는 축이라 변이 대상이 없다(없는 코드는 바꿀 수 없다). 그래서 정적 검사로 잰다:
+      **spawn 값을 읽는 코드가 검증기 말고는 없어야 한다.** 아무도 안 읽으면 아무도 못 움직인다.
+
+    ★처음엔 「spawn 을 언급하는 파일에 `.append(` 가 있으면 적색」으로 짰는데,
+      리스트의 `.append` 와 주석의 단어까지 걸려 **깨끗한 파일이 위반으로 떴다**.
+      검사기가 고장나면 그 출력은 아무것도 증명하지 않는다 — 읽는 행위 자체를 좁혀서 잡는다.
+      나중에 렌더러(S6-5)가 spawn 을 읽어야 하면 이 목록에 이름을 **일부러** 더하게 된다.
+    """
+    import re
+    allowed = {"schema.py", "selftest.py"}      # 검증기와 이 파일만
+    reads_spawn = re.compile(r"""\[\s*["']spawn["']\s*\]|\.get\(\s*["']spawn["']""")
+    offenders: list[str] = []
+    for dirpath, _dirs, files in os.walk(os.path.join(_ROOT, "agora")):
+        for fn in files:
+            if not fn.endswith(".py") or fn in allowed:
+                continue
+            path = os.path.join(dirpath, fn)
+            with open(path, encoding="utf-8") as fh:
+                if reads_spawn.search(fh.read()):
+                    offenders.append(os.path.relpath(path, _ROOT))
+    if offenders:
+        raise AssertionError(f"spawn 값을 읽는 코드: {offenders}")
+
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -1910,6 +2058,11 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("예산: 참가자·라운드별",         _case_budget_is_per_participant_and_round, None),
     ("예산: 설정 값 검증 → 10",       _case_budget_value_must_be_sane, errors.ARGUMENT),
     ("예산: 사용량 칸 실재",          _case_usage_field_exists, None),
+    ("관계: 세 필드 정상",            _case_relations_three_fields_ok, None),
+    ("관계: 세 필드 위반 → 10",       _case_relations_schema_violations, None),
+    ("관계: 절차를 바꾸지 않는다",    _case_relations_do_not_change_procedure, None),
+    ("관계: 없는 곳을 가리켜도 된다", _case_relations_may_point_nowhere, None),
+    ("관계: spawn 은 제안뿐",         _case_spawn_is_proposal_only, None),
 )
 
 
@@ -2128,6 +2281,18 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M66-link-schema-open", "agora/schema.py",
+     "    _closed(link, allowed, where)",
+     "    pass",
+     "관계: 세 필드 위반 → 10"),
+    ("M67-spawn-type-unchecked", "agora/schema.py",
+     '            if t not in ("problem", "knowhow"):',
+     "            if False:",
+     "관계: 세 필드 위반 → 10"),
+    ("M68-links-always-resolved", "agora/reducer.py",
+     '                        "resolved": link["thread_id"] in known_threads})',
+     '                        "resolved": True})',
+     "관계: 없는 곳을 가리켜도 된다"),
     ("M61-operator-delegate-unconditional", "agora/reducer.py",
      '                if not (who in operators\n                        and is_expired_now(gtype, state["state"], deadlines, now)):',
      "                if not (who in operators):",
@@ -2349,7 +2514,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S2-6(프로토콜 예산)"
+            "슬라이스": "S2-7(스레드 관계 필드)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

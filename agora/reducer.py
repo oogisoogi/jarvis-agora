@@ -144,6 +144,45 @@ def collect(*, store: Any, thread_id: str, allowed_signers_path: str,
             "valid": valid, "quarantined": quarantined}
 
 
+PROCEDURAL_FIELDS = ("type", "state", "round", "chair", "requester", "solved_by",
+                     "close_reason")
+
+
+def procedure_snapshot(reduced: dict[str, Any]) -> dict[str, Any]:
+    """**절차만** 떼어 본 상태(§2-1b 불변식용).
+
+    ★관계 필드(parent·refs·spawn)는 절차를 바꾸지 않아야 한다. 그것을 재려면
+      「사슬의 바이트」가 아니라 「절차 칸」을 비교해야 한다 — 관계를 더하면 이벤트 바이트가
+      달라지므로 `state_hash` 는 **당연히** 달라진다(그 안에 사슬의 머리가 들어 있다).
+      두 질문을 한 값으로 답하려 하면 둘 중 하나는 반드시 거짓말이 된다.
+    """
+    return {k: reduced.get(k) for k in PROCEDURAL_FIELDS}
+
+
+def links_of(reduced: dict[str, Any], *,
+             known_threads: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    """이 스레드가 가리키는 관계 링크 목록 — 해소 여부를 함께 준다(§2-1b · AC ④).
+
+    ★없는 스레드를 가리키는 것은 **오류가 아니다.** 아직 안 열린 스레드를 가리킬 수 있다.
+      그래서 거부하지 않고 `resolved: false` 로 표시만 한다.
+    """
+    out: list[dict[str, Any]] = []
+    for entry in reduced.get("events") or []:
+        payload = entry["event"]["payload"]
+        found: list[tuple[str, dict[str, Any]]] = []
+        if entry["kind"] == "genesis" and payload.get("parent"):
+            found.append(("parent", payload["parent"]))
+        for ref in payload.get("refs") or []:
+            found.append(("ref", ref))
+        for role, link in found:
+            out.append({"role": role, "from_message_id": entry["message_id"],
+                        "thread_id": link["thread_id"],
+                        "message_id": link.get("message_id"),
+                        "why": link.get("why"),
+                        "resolved": link["thread_id"] in known_threads})
+    return out
+
+
 def read_view(collected: dict[str, Any], *, state: Any, audit: bool = False) -> dict[str, Any]:
     """`agora.read` 가 돌려줄 모양(§4) — 격리는 `audit` 에서만 드러난다(§3-1).
 
