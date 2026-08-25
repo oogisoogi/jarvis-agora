@@ -189,7 +189,8 @@ def links_of(reduced: dict[str, Any], *,
 
 def read_view(collected: dict[str, Any], *, state: Any, audit: bool = False,
               accepted: list[dict[str, Any]] | None = None,
-              quarantined: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+              quarantined: list[dict[str, Any]] | None = None,
+              stale: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """`agora.read` 가 돌려줄 모양(§4) — 격리는 `audit` 에서만 드러난다(§3-1).
 
     ★숨기는 것과 지우는 것은 다르다. 여기서 하는 일은 **기본 화면에서 빼는 것**뿐이고,
@@ -213,6 +214,11 @@ def read_view(collected: dict[str, Any], *, state: Any, audit: bool = False,
     if audit:
         view["quarantined"] = list(collected["quarantined"] if quarantined is None
                                    else quarantined)
+        # ★★**진 글도 보여 준다**(2026-08-26 실물에서 드러났다). 격리와 stale 은 다른 사건이라
+        #   목록을 갈라 뒀는데, `read` 는 **둘 중 하나만** 실었다 — 그래서 경합에서 진 글은
+        #   `audit` 을 켜도 **아무 데도 안 나왔다.** 쓴 사람 화면에는 rc 0 과 URL 이 찍히고,
+        #   글은 영영 안 보이며, 왜인지 물을 자리가 없다. 그것이 이 저장소가 쫓는 바로 그 형태다.
+        view["stale"] = list(stale or [])
     return view
 
 
@@ -374,6 +380,18 @@ def require_requester(state: dict[str, Any], participant_id: str) -> None:
                          {"requester": state.get("requester"), "from": participant_id})
 
 
+def usage_slot(state: dict[str, Any], participant_id: str) -> str:
+    """예산 계수의 **칸 이름** — 누구의, 어느 라운드 예산인가.
+
+    ★두 겹(로컬 사전 검사·reducer 판정)이 **같은 칸**을 봐야 한다. 각자 문자열을 만들면
+      어느 날 한쪽만 바뀌고, 그때 로컬 검사는 **남의 칸을 보며 통과**시킨다 —
+      그리고 그 어긋남은 예산이 실제로 넘칠 때까지 아무 표시도 내지 않는다.
+    """
+    if state.get("type") == "debate":
+        return f"{participant_id}@r{state.get('round')}"
+    return participant_id
+
+
 def require_state(reduced: dict[str, Any], expected_state: str) -> None:
     """쓰기 경로의 CAS 게이트(§4 code 9) — 내가 본 상태가 지금 상태와 다르면 거부.
 
@@ -475,8 +493,7 @@ def apply(ordered: dict[str, Any], *,
                     continue
             # ★예산은 **유효 post 만** 센다(R-2). 여기까지 온 것이 유효 post 다 —
             #   경합에서 진 글·무효 글은 애초에 이 사슬에 없다.
-            slot = f"{who}@r{state['round']}" if gtype == "debate" else who
-            used = usage.setdefault(slot, {"posts": 0, "chars": 0})
+            used = usage.setdefault(usage_slot(state, who), {"posts": 0, "chars": 0})
             over = protocol.would_exceed(body=payload.get("body") or "",
                                          used=used, budget=limits)
             if over:

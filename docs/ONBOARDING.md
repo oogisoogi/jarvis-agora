@@ -34,6 +34,15 @@ agora keygen <참가자-id>          # 예: agora keygen operator-a
 | `~/.config/agora/participant.json` | 신원(**비밀 없음** — 지문뿐) | `600`(폴더 `700`) |
 | `~/.config/agora/config.json` | 운영 설정(승인·예산·watch 주기) + **저장소·카테고리** | `600` |
 | `~/.config/agora/allowed_signers` | 명부 사본(검증에 쓴다) | — |
+| `~/.config/agora/revoked_keys` | 폐기 목록 사본 — **없으면 폐기가 조용히 꺼진다** | — |
+| `~/.config/agora/operators` | 운영자 목록 사본 — **없으면 `abort` 할 수 있는 사람이 0명** | — |
+
+★명부 3종은 **같은 폴더에서** 온다(저장소 `participants/` 가 정본이고 여기 것은 사본이다).
+셋 중 하나만 빠져도 **오류는 안 난다** — 그 검사만 조용히 꺼질 뿐이다. 그래서 셋을 함께 복사한다:
+
+```bash
+cp participants/{allowed_signers,revoked_keys,operators} ~/.config/agora/
+```
 
 `config.json` 의 **저장소 칸은 필수**다 — 없으면 도구가 `code 2` 로 멈추고 **빠진 칸 이름을 댄다**:
 

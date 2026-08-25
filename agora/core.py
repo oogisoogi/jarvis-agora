@@ -55,17 +55,26 @@ def publish_event(*, store: Any, event: dict[str, Any], category: str,
                   title: str = "", is_genesis: bool = False,
                   config: dict[str, Any] | None = None,
                   prompt: Any = None, isatty: Any = None,
-                  ledger: Any = None) -> dict[str, Any]:
+                  ledger: Any = None,
+                  before_write: Any = None) -> dict[str, Any]:
     """한 이벤트를 운반층에 올린다 — 위 5단계를 그 순서대로.
 
     ★code 8(저장 성공 불명)은 **삼키지 않는다.** 그대로 올려 호출자가 재조회로 판정하게 한다
       (`settle_unknown`). 여기서 성공으로 바꿔 주면 그 거짓이 원장에 그대로 박힌다.
+
+    ★★`before_write` = **쓰기 직전의 마지막 관문**(호출자가 준다 · 없으면 안 부른다).
+      왜 여기냐면, 이 함수 안에 **사람이 기다리는 구간**이 있기 때문이다(⑶ 승인 게이트).
+      호출자가 상태를 읽고 → 승인을 기다리고 → 쓰는 동안 남이 같은 자리에 글을 올릴 수 있고,
+      그 창은 **분 단위**다. 호출 **전에** 검사하면 그 창을 못 덮는다.
+      던지면 그대로 올라간다 — 여기서 삼키면 CAS 가 있으나 마나가 된다.
     """
     schema.validate(event)                     # ⑴ 계약
     report = scrub.enforce(event)              # ⑵ 게이트 — 여기서 막히면 아래로 못 간다
     approval = approval_gate(config=config, prompt=prompt, isatty=isatty)   # ⑶ 승인
     signed = sign.sign_event(event)            # ⑷ 서명(서명기가 게이트를 재검사한다)
     body = render_post(event, signed["signature"])
+    if before_write is not None:
+        before_write()                         # ⑸ 마지막 관문(CAS 등) — 던지면 안 쓴다
     result = store.append(thread_id=event["thread_id"], category=category,
                           title=title or event["payload"].get("title", ""),
                           body=body, is_genesis=is_genesis)   # ⑷ 쓰기

@@ -52,22 +52,41 @@ def checkpoint(root: str | None = None) -> str:
     return h.hexdigest()
 
 
-def operators(root: str | None = None) -> frozenset[str]:
-    root = root or _ROOT
-    text = _read(_path(root, ROSTER_OPERATORS)).decode("utf-8", "replace")
+def operators(root: str | None = None, *, path: str | None = None) -> frozenset[str]:
+    """운영자 목록(K-3).
+
+    ★`path` 로 **파일을 직접** 줄 수 있다. 참가자는 저장소를 체크아웃한 채 도는 것이 아니라
+      설정 폴더에 명부 **사본**을 두고 돌기 때문이다(ONBOARDING §파일). 그 경로를 못 주면
+      이 함수는 저장소 루트만 볼 수 있고, 그러면 **실사용에서 운영자가 0명**이 된다 —
+      그 상태로도 아무 오류가 안 난다(`abort` 할 수 있는 사람이 없을 뿐이다).
+    """
+    text = _read(path or _path(root or _ROOT, ROSTER_OPERATORS)).decode("utf-8", "replace")
     return frozenset(
         line.strip() for line in text.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     )
 
 
-def is_operator(participant_id: str, root: str | None = None) -> bool:
-    return participant_id in operators(root)
+def _has_key_lines(path: str) -> bool:
+    """주석·빈 줄 말고 **키가 한 줄이라도** 있는가."""
+    text = _read(path).decode("utf-8", "replace")
+    return any(line.strip() and not line.lstrip().startswith("#")
+               for line in text.splitlines())
 
 
 def _fingerprints_of(path: str) -> frozenset[str]:
-    """공개키 파일의 지문 집합. 파일이 없거나 비면 공집합이다."""
+    """공개키 파일의 지문 집합. 파일이 없거나 **키가 한 줄도 없으면** 공집합이다.
+
+    ★★「키가 없는 파일」과 「못 읽는 파일」을 가른다(2026-08-26 실물에서 터졌다).
+      `ssh-keygen -l -f` 는 **주석뿐인 파일**에 `is not a public key file` 로 실패한다.
+      그런데 이 저장소의 `participants/revoked_keys` 정본이 바로 그 모양이다(설명 주석 3줄) —
+      즉 **명부를 문서대로 복사한 참가자는 모든 읽기가 code 2 로 죽었다.**
+    ⚠그렇다고 실패를 통째로 삼키면 안 된다. 삼키는 순간 **폐기가 조용히 꺼지고**,
+      그것이 이 파일이 막으려는 바로 그 사고다. 그래서 **키 줄이 있을 때의 실패만** 올린다.
+    """
     if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return frozenset()
+    if not _has_key_lines(path):
         return frozenset()
     proc = subprocess.run(["ssh-keygen", "-l", "-f", path],
                           capture_output=True, text=True, timeout=30)
@@ -83,14 +102,6 @@ def _fingerprints_of(path: str) -> frozenset[str]:
     return frozenset(out)
 
 
-def revoked_fingerprints(root: str | None = None) -> frozenset[str]:
-    root = root or _ROOT
-    return _fingerprints_of(_path(root, ROSTER_REVOKED_KEYS))
-
-
 def allowed_signers_path(root: str | None = None) -> str:
     return _path(root or _ROOT, ROSTER_ALLOWED_SIGNERS)
 
-
-def revoked_keys_path(root: str | None = None) -> str:
-    return _path(root or _ROOT, ROSTER_REVOKED_KEYS)

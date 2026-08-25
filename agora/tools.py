@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from agora import ack as ack_mod
-from agora import core, errors, reducer
+from agora import brief, core, errors, protocol, reducer, roster
 from agora.contract_open import GENESIS_EXPECTED_STATE, GENESIS_PREV
 from agora.errors import AgoraError
 from agora.event import new_id
@@ -43,6 +43,7 @@ class Context:
 
     def __init__(self, *, store: Any, ledger: Any, spool: Any = None,
                  allowed_signers_path: str, participant_id: str,
+                 revoked_path: str | None = None,
                  config: dict[str, Any] | None = None,
                  operators: frozenset[str] = frozenset(),
                  prompt: Any = None, isatty: Any = None) -> None:
@@ -50,6 +51,9 @@ class Context:
         self.ledger = ledger
         self.spool = spool
         self.allowed_signers_path = allowed_signers_path
+        # ★명부는 **두 파일**이다 — 누가 참가자인가(allowed_signers)와 어느 키가 죽었나(revoked).
+        #   한 쪽만 들고 다니면 폐기가 **조용히 꺼진다**(검증 함수는 지원하는데 인자가 안 간다).
+        self.revoked_path = revoked_path
         self.participant_id = participant_id
         self.config = config or {}
         self.operators = operators
@@ -61,8 +65,13 @@ class Context:
 
 def _reduce(ctx: Context, thread_id: str) -> dict[str, Any]:
     collected = reducer.collect(store=ctx.store, thread_id=thread_id,
-                                allowed_signers_path=ctx.allowed_signers_path)
-    reduced = reducer.apply(reducer.order(collected), operators=ctx.operators)
+                                allowed_signers_path=ctx.allowed_signers_path,
+                                revoked_path=ctx.revoked_path)
+    # ★예산도 **설정에서** 온다(§5). 안 넘기면 reducer 가 계약 기본값으로 돌고,
+    #   `config.json` 의 `budget` 칸은 **적어도 아무 일도 안 하는 칸**이 된다
+    #   (예시 설정 파일이 그 칸을 광고하고 있으므로 더 나쁘다 — 껐다고 믿게 만든다).
+    reduced = reducer.apply(reducer.order(collected), operators=ctx.operators,
+                            budget=protocol.load_budget(ctx.config))
     reduced["collected"] = collected
     return reduced
 
@@ -95,10 +104,24 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
         "ts": now_iso(), "payload": payload,
     }
     core.declare_scrub(event)          # ★서명 대상 안에 들어가므로 **만들 때** 채운다
+
+    def cas() -> None:
+        """쓰기 **직전**에 상태를 다시 본다(§4 code 9).
+
+        ★`expected_state` 는 이 호출이 시작될 때 읽은 값이다. 그 뒤 스크럽·**사람 승인**을
+          지나는 동안 남이 같은 자리에 글을 올렸을 수 있고, 승인은 분 단위로 걸린다.
+          그래서 검사를 **쓰기 직전으로** 민다 — 앞에서 하면 창이 열린 채로 남는다.
+        ★값은 한 번 더 읽어 온다(운반층 왕복 1회 추가). 그 비용이 이 검사의 값이다 —
+          「아까 본 상태」로 판정하면 검사하는 시늉만 하는 것이다.
+        """
+        reducer.require_state(_reduce(ctx, thread_id), expected_state)
+
     out = core.publish_event(store=ctx.store, event=event, category=category,
                              title=title, is_genesis=is_genesis,
                              config=ctx.config, prompt=ctx.prompt,
-                             isatty=ctx.isatty, ledger=ctx.ledger)
+                             isatty=ctx.isatty, ledger=ctx.ledger,
+                             # genesis 에는 견줄 앞 상태가 없다(K-4 · expected_state = "")
+                             before_write=None if is_genesis else cas)
     out["usage"] = usage_of(event)
     return out
 
@@ -265,7 +288,8 @@ def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
     view = reducer.read_view(reduced["collected"],
                              state=reducer.procedure_snapshot(reduced), audit=audit,
                              accepted=reduced.get("events"),
-                             quarantined=reduced.get("quarantined"))
+                             quarantined=reduced.get("quarantined"),
+                             stale=reduced.get("stale"))
     if since_event:
         ids = [e["message_id"] for e in view["events"]]
         if since_event not in ids:
@@ -276,6 +300,18 @@ def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
     # ★관계를 **링크로** 싣는다 — `why` 와 함께(AC ②). 왜 인용했는지가 빠지면
     #   읽는 쪽은 그 링크를 따라가 보고서야 관계를 짐작해야 한다.
     view["refs"] = reducer.links_of(reduced)
+    # ★★본문은 **남이 쓴 데이터**다(NFR-2 · 설계 §D1). 경계 표식으로 감싸서 내보낸다.
+    #   ⚠이것은 **보조** 방어다 — 진짜 방어는 수신 대리인의 도구가 0 이라는 것이다(H-3).
+    #     표식은 설득이고, 설득은 방어가 아니다. 그래도 표식이 **없으면** 읽는 쪽에는
+    #     「이건 지시가 아니다」라고 말해 주는 것이 하나도 없다.
+    for entry in view["events"]:
+        body = entry.get("body")
+        if type(body) is not str:
+            continue                     # 본문 없는 이벤트(advance·close 등)는 감쌀 것이 없다
+        wrapped = brief.wrap_untrusted(body)
+        entry["body"] = wrapped["text"]
+        entry["untrusted"] = {"label": wrapped["label"], "marker": wrapped["marker"],
+                              "note": wrapped["note"]}
     view["next_cursor"] = None
     return view
 
@@ -304,8 +340,18 @@ def propose(ctx: Context, *, type: str, title: str, body: str,
 def say(ctx: Context, *, thread_id: str, body: str, round: int | None = None,
         counter: list[dict[str, Any]] | None = None,
         refs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """발언. 라운드를 **안 주면 지금 라운드**다 — 손으로 적게 두면 어긋난 라운드가 나간다."""
+    """발언. 라운드를 **안 주면 지금 라운드**다 — 손으로 적게 두면 어긋난 라운드가 나간다.
+
+    ★예산은 **두 겹**이다(§5). 여기가 로컬 겹 — 넘치는 글을 **보내기 전에** code 3 으로 막는다.
+      진짜 판정은 reducer 가 한다(그쪽은 `budget_exceeded` 로 격리한다 · 표식이 서로 다르다).
+      로컬 겹이 없으면 사람이 쓴 글이 **올라간 뒤에** 사라지고, 그 사람은 왜 사라졌는지 모른다.
+    """
     state, prev, expected = _head_and_state(ctx, thread_id)
+    protocol.precheck(body=body,
+                      used=(state.get("usage") or {}).get(
+                          reducer.usage_slot(state, ctx.participant_id))
+                      or {"posts": 0, "chars": 0},
+                      budget=state.get("budget") or protocol.load_budget(ctx.config))
     payload: dict[str, Any] = {"round": state["round"] or 0 if round is None else round,
                                "body": body}
     if counter is not None:
@@ -487,9 +533,13 @@ def context_from_config(directory: str | None = None, *,
     cfg = load_config(d)
     if store is None:
         store = _store_from_config(cfg)
+    # ★명부 3종은 **설정 폴더의 사본**이다(ONBOARDING §파일 · 저장소가 정본).
+    #   셋을 **같은 폴더에서** 집는다 — 하나만 다른 데서 읽으면 「그때의 명부」가 갈라진다.
     return Context(store=store, ledger=Ledger(d), spool=Spool(d),
                    allowed_signers_path=_os.path.join(d, "allowed_signers"),
-                   participant_id=doc["id"], config=load_config(d))
+                   revoked_path=_os.path.join(d, "revoked_keys"),
+                   operators=roster.operators(path=_os.path.join(d, "operators")),
+                   participant_id=doc["id"], config=cfg)
 
 
 def _store_from_config(cfg: dict[str, Any]) -> Any:
