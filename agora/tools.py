@@ -342,21 +342,97 @@ def resolve(ctx: Context, *, thread_id: str, summary: str,
 
 
 def mark_solved(ctx: Context, *, thread_id: str, post_message_id: str) -> dict[str, Any]:
-    """해결 표시 — **요청자만**(§8 FR-5 · code 5)."""
+    """해결 표시 — **요청자만**(§8 FR-5 · code 5). 그리고 **화면에 투영**한다."""
     state, prev, expected = _head_and_state(ctx, thread_id)
     reducer.require_requester(state, ctx.participant_id)
     out = _publish(ctx, kind="answer_selected", thread_id=thread_id,
                    payload={"post_message_id": post_message_id},
                    prev=prev, expected_state=expected, category=state["type"])
-    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
+    # ★답으로 고른 글의 **운반층 node_id** 를 찾아 넘긴다 — 없으면 화면에 답 표시가 안 된다.
+    #   우리는 `message_id` 로 말하고 운반층은 `node_id` 로 말한다(그 둘을 잇는 자리가 여기다).
+    projection = _project(ctx, thread_id=thread_id, state="solved",
+                          answer_node_id=_node_id_of(ctx, thread_id, post_message_id))
+    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"],
+            "projection": projection}
 
 
 def close(ctx: Context, *, thread_id: str, reason: str) -> dict[str, Any]:
-    """종결. 사유는 계약 목록 안에서만(스키마가 막는다)."""
+    """종결. 사유는 계약 목록 안에서만(스키마가 막는다). 그리고 **화면에 투영**한다."""
     state, prev, expected = _head_and_state(ctx, thread_id)
     out = _publish(ctx, kind="close", thread_id=thread_id, payload={"reason": reason},
                    prev=prev, expected_state=expected, category=state["type"])
-    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
+    projection = _project(ctx, thread_id=thread_id, state="closed", close_reason=reason)
+    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"],
+            "projection": projection}
+
+
+def _node_id_of(ctx: Context, thread_id: str, message_id: str) -> str | None:
+    """message_id → 운반층 node_id. 못 찾으면 None(투영이 답 표시를 건너뛴다)."""
+    for entry in _reduce(ctx, thread_id)["collected"]["valid"]:
+        if entry["message_id"] == message_id:
+            return entry.get("node_id")
+    return None
+
+
+def _project(ctx: Context, *, thread_id: str, state: str,
+             answer_node_id: str | None = None,
+             close_reason: str | None = None) -> dict[str, Any]:
+    """reducer 상태를 **화면에 반영만** 한다(§D1) — 그리고 **반영됐는지 재조회로 확인**한다.
+
+    ★**이 자리가 비어 있었다**(S7-2 실물 대조에서 드러났다): `project` 는 S4-4 에서 구현됐는데
+      **아무도 부르지 않았다.** 그래서 우리 원장·reducer 는 `closed` 인데 **GitHub 화면은 열린 채**였고,
+      관전하는 사람은 끝난 대화를 진행 중으로 본다. 「구현했다」와 「배선됐다」는 다른 말이다
+      (`reconcile` 에 이어 두 번째 같은 형태 · 그쪽은 미배선이라고 **적어 두기라도 했다**).
+
+    ★**투영 실패는 예외로 올리지 않는다**(§D1 · S4-4 가 정한 것). 화면이 못 따라온 것과
+      상태가 틀린 것은 다른 사건이고, 예외로 올리면 호출자가 그 둘을 뭉친다.
+    ★**그리고 「했다」고 적지 않는다** — 보낸 것과 반영된 것은 다르다. 재조회해서
+      **실제로 그렇게 보이는지** 확인하고, 확인 못 하면 `verified: False` 와 사유를 남긴다.
+    ⛔원장에는 **적지 않는다.** 원장은 「무엇을 보냈나」의 사슬이고 투영은 화면이다 —
+      섞으면 「화면이 안 따라왔으니 보낸 적 없다」는 잘못된 읽기가 생긴다.
+    """
+    try:
+        kwargs: dict[str, Any] = {"thread_id": thread_id, "state": state,
+                                  "answer_node_id": answer_node_id}
+        if close_reason is not None and "close_reason" in _project_params(ctx.store):
+            kwargs["close_reason"] = close_reason
+        sent = ctx.store.project(**kwargs)
+    except Exception as e:      # noqa: BLE001 — 투영 실패는 프로토콜 실패가 아니다
+        return {"sent": False, "verified": False, "why": type(e).__name__}
+    verified, why = _verify_projection(ctx, thread_id=thread_id, state=state)
+    return {"sent": True, "result": sent, "verified": verified, "why": why}
+
+
+def _project_params(store: Any) -> frozenset[str]:
+    """그 저장층의 `project` 가 받는 칸 — **계약보다 넓은 칸은 있으면 쓰고 없으면 안 쓴다.**
+
+    ★`close_reason` 은 GitHub 구현에만 있다(우리 종결 사유를 GitHub 어휘로 좁히는 자리).
+      계약(`store_base`)에는 없으므로, **있는지 보고 넘긴다** — 없는 저장층에 넘기면 터진다.
+    """
+    import inspect
+    try:
+        return frozenset(inspect.signature(store.project).parameters)
+    except (TypeError, ValueError):
+        return frozenset()
+
+
+def _verify_projection(ctx: Context, *, thread_id: str,
+                       state: str) -> tuple[bool, str | None]:
+    """운반층에 **실제로 그렇게 보이는지** 되묻는다. 못 물으면 「못 물었다」고 답한다."""
+    check = getattr(ctx.store, "thread_status", None)
+    if check is None:
+        return False, "store_cannot_report_status"
+    try:
+        status = check(thread_id=thread_id)
+    except Exception as e:      # noqa: BLE001
+        return False, type(e).__name__
+    if state == "closed":
+        return bool(status.get("closed")), None if status.get("closed") else "still_open"
+    if state == "solved":
+        # ★여기도 **되묻는다.** 처음엔 무조건 True 를 돌려줬는데, 그러면 답 표시가 안 됐어도
+        #   「반영됐다」고 적힌다 — 이 함수가 막으려던 바로 그 거짓이다.
+        return bool(status.get("answered")), None if status.get("answered") else "not_answered"
+    return False, "unknown_state"
 
 
 def vote(ctx: Context, *, thread_id: str, target: str, value: int) -> dict[str, Any]:

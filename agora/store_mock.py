@@ -35,6 +35,7 @@ class MockStore:
         # ★읽기도 실패할 수 있어야 한다. 「조회가 실패한 것」을 「지워진 것」으로 적는지
         #   재려면 mock 이 읽기에서도 나쁘게 굴어야 한다(S5-4).
         self.fail_next_fetch: str | None = None
+        self.fail_projection = False     # ★투영은 받았는데 화면은 안 바뀌는 상황(S7-2 실물)
         if path and os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 self._items = json.load(fh)
@@ -132,6 +133,18 @@ class MockStore:
             self._numbers[thread_id] = number
             self._by_number[number] = thread_id
         self._updated[thread_id] = updated_at
+
+    def thread_status(self, *, thread_id: str) -> dict[str, Any]:
+        """**투영된 것만** 반영해서 돌려준다 — mock 이 착하게 굴면 방어를 안 재게 된다.
+
+        ★`fail_projection` 을 켜면 투영을 받아 놓고 **화면은 안 바뀐 것처럼** 답한다.
+          실물에서 실제로 그랬다(투영을 아무도 안 불러 원장만 닫혀 있었다).
+        """
+        if self.fail_projection:
+            return {"closed": False, "answered": False}
+        last = [p for p in self.projections if p["thread_id"] == thread_id]
+        state = last[-1]["state"] if last else "open"
+        return {"closed": state == "closed", "answered": state in ("solved", "closed")}
 
     def categories(self) -> dict[str, Any]:
         return {name: {"id": f"MOCKCAT_{name}", "is_answerable": name in self._answerable}

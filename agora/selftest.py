@@ -3457,6 +3457,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                    "M190-unexpected-error-leaks-message"),
     "읽기정직": ("M191-read-shows-rejected-as-valid",
                  "M192-audit-hides-procedure-rejects"),
+    "투영배선": ("M193-close-does-not-project", "M194-projection-claims-verified",
+                 "M195-projection-failure-raises", "M196-close-verify-always-true"),
 }
 
 S5_AXES: dict[str, tuple[str, ...]] = {
@@ -5531,6 +5533,91 @@ def _case_read_hides_procedure_rejects_from_valid() -> None:
         raise AssertionError("audit 없이도 격리가 보인다 — 기본 화면 규약 위반")
 
 
+def _case_close_projects_to_the_screen() -> None:
+    """★종결이 **화면까지 간다** — 그리고 「보냈다」가 아니라 **「반영됐다」를 되묻는다**.
+
+    ★S7-2 실물 대조에서 드러난 결함이다: `project` 는 S4-4 에 있었는데 **아무도 부르지 않았다.**
+      우리 원장은 `closed` 인데 GitHub 화면은 열린 채였고, 관전하는 사람은 **끝난 대화를
+      진행 중으로** 봤다. 「구현했다」와 「배선됐다」는 다른 말이다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")
+    out = _with_key(f["key_a"], lambda: tools.close(ctx, thread_id=tid, reason="solved"))
+    projection = out.get("projection") or {}
+    if not projection.get("sent"):
+        raise AssertionError(f"투영을 보내지 않았다: {projection}")
+    if not projection.get("verified"):
+        raise AssertionError(f"반영을 확인하지 못했다: {projection}")
+    if not ctx.store.thread_status(thread_id=tid)["closed"]:
+        raise AssertionError("화면이 안 닫혔다")
+    if not [p for p in ctx.store.projections if p["thread_id"] == tid]:
+        raise AssertionError("저장층에 투영이 안 갔다")
+
+
+def _case_projection_not_reflected_is_admitted() -> None:
+    """★반영이 **안 됐으면 안 됐다고 적는다**(`verified: False` + 사유).
+
+    ★이 축**만**을 고립시키려고 mock 이 **투영을 받아 놓고 화면은 안 바꾼다.**
+      실물에서 실제로 그랬다 — 그리고 그때 아무도 그것을 몰랐다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")
+    ctx.store.fail_projection = True
+    out = _with_key(f["key_a"], lambda: tools.close(ctx, thread_id=tid, reason="solved"))
+    projection = out.get("projection") or {}
+    if projection.get("verified") is not False:
+        raise AssertionError(f"반영 안 됐는데 확인됐다고 적었다: {projection}")
+    if projection.get("why") != "still_open":
+        raise AssertionError(f"사유가 없다: {projection}")
+    if not out["ok"]:
+        raise AssertionError("화면이 못 따라왔다고 프로토콜 결과가 실패로 바뀌었다")
+
+
+def _case_projection_failure_is_not_protocol_failure() -> None:
+    """투영이 **터져도** 프로토콜 상태는 그대로다(§D1) — 예외로 올리지 않는다."""
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")
+
+    def boom(**_kw: Any) -> Any:
+        raise RuntimeError("화면이 죽었다")
+
+    ctx.store.project = boom
+    out = _with_key(f["key_a"], lambda: tools.close(ctx, thread_id=tid, reason="solved"))
+    if not out["ok"] or not out.get("message_id"):
+        raise AssertionError("투영 실패가 프로토콜 실패로 번졌다")
+    projection = out.get("projection") or {}
+    if projection.get("sent") is not False or projection.get("why") != "RuntimeError":
+        raise AssertionError(f"실패를 적지 않았다: {projection}")
+    view = tools.read(ctx, thread_id=tid)
+    if view["state"]["state"] != "closed":
+        raise AssertionError(f"프로토콜 상태가 흔들렸다: {view['state']}")
+
+
+def _case_projection_does_not_touch_the_ledger() -> None:
+    """⛔투영은 **원장에 적지 않는다** — 원장은 「무엇을 보냈나」의 사슬이고 투영은 화면이다.
+
+    ★섞으면 「화면이 안 따라왔으니 보낸 적 없다」는 잘못된 읽기가 생긴다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")
+    before = len(list(ctx.ledger.rows()))
+    ctx.store.fail_projection = True
+    _with_key(f["key_a"], lambda: tools.close(ctx, thread_id=tid, reason="solved"))
+    after = len(list(ctx.ledger.rows()))
+    if after - before != 1:
+        raise AssertionError(f"원장 증가가 발신 1행이 아니다: {after - before}")
+    if any(r.get("stage") == "projection" for r in ctx.ledger.rows()):
+        raise AssertionError("투영이 원장에 실렸다")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -5811,6 +5898,10 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("CLI: 뜻밖의 예외도 JSON",       _case_cli_wraps_unexpected_errors_as_json, None),
     ("문서: 온보딩이 절차와 맞다",    _case_onboarding_matches_real_procedure, None),
     ("읽기: 거부된 글은 유효 아님",   _case_read_hides_procedure_rejects_from_valid, None),
+    ("투영: 종결이 화면까지",         _case_close_projects_to_the_screen, None),
+    ("투영: 미반영을 적는다",         _case_projection_not_reflected_is_admitted, None),
+    ("투영: 실패는 프로토콜 실패 아님", _case_projection_failure_is_not_protocol_failure, None),
+    ("투영: 원장에 안 적는다",        _case_projection_does_not_touch_the_ledger, None),
     ("S7: 축 그물 실재",              _case_s7_axes_have_nets, None),
 )
 
@@ -6609,6 +6700,22 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                             quarantined=reduced.get("quarantined"))',
      "                             quarantined=None)",
      "읽기: 거부된 글은 유효 아님"),
+    ("M193-close-does-not-project", "agora/tools.py",
+     '    projection = _project(ctx, thread_id=thread_id, state="closed", close_reason=reason)',
+     '    projection = {"sent": True, "verified": True}',
+     "투영: 종결이 화면까지"),
+    ("M194-projection-claims-verified", "agora/tools.py",
+     "    verified, why = _verify_projection(ctx, thread_id=thread_id, state=state)",
+     "    verified, why = True, None",
+     "투영: 미반영을 적는다"),
+    ("M195-projection-failure-raises", "agora/tools.py",
+     '        return {"sent": False, "verified": False, "why": type(e).__name__}',
+     "        raise",
+     "투영: 실패는 프로토콜 실패 아님"),
+    ("M196-close-verify-always-true", "agora/tools.py",
+     '        return bool(status.get("closed")), None if status.get("closed") else "still_open"',
+     "        return True, None",
+     "투영: 미반영을 적는다"),
 )
 
 

@@ -57,6 +57,16 @@ class Store(Protocol):
         """
         ...
 
+    def thread_status(self, *, thread_id: str) -> dict[str, Any]:
+        """운반층에서 **지금 어떻게 보이는가** — {closed, answered}.
+
+        ★**투영을 되묻기 위해 신설했다(S7-2)**. 인터페이스를 넓히는 것은 가볍지 않으므로 이유를 적는다:
+          `project` 는 「보냈다」까지만 안다. 보낸 것과 **반영된 것**은 다르고, 그 차이는
+          실제로 났다 — 우리 원장은 `closed` 인데 화면은 열린 채였다(아무도 투영을 안 불렀기 때문).
+          「했다」고 적지 않으려면 **되물을 수단**이 계약에 있어야 한다.
+        """
+        ...
+
     def categories(self) -> dict[str, Any]:
         """{name: {id, is_answerable}} — 카테고리 실측용."""
         ...

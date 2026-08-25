@@ -160,6 +160,15 @@ def gh_transport(query: str, variables: dict[str, Any], *,
     return doc.get("data") or {}
 
 
+_STATUS = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    discussion(number: $number) { closed closedAt isAnswered }
+  }
+}
+"""
+
+
 class GitHubStore:
     def __init__(self, owner: str, name: str, categories: dict[str, str],
                  transport: Any = None, sleep: Any = None,
@@ -372,6 +381,15 @@ class GitHubStore:
                 done["closed"] = "failed"
                 done["close_error"] = e.detail
         return done
+
+    def thread_status(self, *, thread_id: str) -> dict[str, Any]:
+        """운반층에 **지금 어떻게 보이는지** 되묻는다(§D1 투영 확인 · S7-2)."""
+        number, _disc_id = self._locate(thread_id)
+        data = self._run(_STATUS, owner=self.owner, name=self.name, number=number)
+        node = (((data.get("repository") or {}).get("discussion")) or {})
+        return {"closed": bool(node.get("closed")),
+                "answered": bool(node.get("isAnswered")),
+                "closed_at": node.get("closedAt")}
 
     def categories(self) -> dict[str, Any]:
         return {name: {"id": cid, "is_answerable": name == "problem"}
