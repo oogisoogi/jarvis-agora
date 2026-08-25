@@ -3779,6 +3779,265 @@ def _case_ack_is_registered_and_built() -> None:
         raise AssertionError(f"계약과 다른 오류를 냈다: {emitted}")
 
 
+# ── S5-4 tombstone · reconciliation ─────────────────────────────────────────
+# ★★이 블록에서 제일 위험한 축은 「없어졌다」가 아니라 **「못 봤다를 없어졌다로 적는 것」**이다.
+#   원장은 append-only 라 그 거짓을 지울 수 없다. 그래서 「적지 않았다」를 재는 케이스가
+#   「적었다」를 재는 케이스보다 많다.
+
+def _rec_env() -> tuple[Any, Any, str]:
+    """(store, ledger, dir). 운반층은 mock 이고 **나쁘게 굴 수 있다**(조회 실패·빈 응답)."""
+    import tempfile
+    from agora.ledger import Ledger
+    from agora.store_mock import MockStore
+    d = tempfile.mkdtemp(prefix="agora-rec-")
+    return MockStore(), Ledger(d), d
+
+
+def _rec_put(store: Any, ledger: Any, thread_id: str, message_id: str) -> str:
+    """운반층에 한 건 올리고 **로컬에도 원문을 보관**한다(= 받아서 갖고 있는 상태)."""
+    raw = ('{"message_id": "%s", "thread_id": "%s"}' % (message_id, thread_id)).encode()
+    res = store.append(thread_id=thread_id, category="debate", title="t",
+                       body=raw.decode(), is_genesis=False)
+    ledger.store_event(thread_id, message_id, raw)
+    return res["node_id"]
+
+
+_MID = ("a" * 32, "b" * 32, "c" * 32)
+
+
+class _OnePerPage:
+    """한 번에 한 건씩만 돌려주는 운반층 — **페이지 경계를 강제한다.**
+
+    ★mock 의 기본 `limit` 은 100 이라 픽스처 3건이 한 페이지에 다 들어간다.
+      그대로 두면 「페이지를 끝까지 도는가」도 「절단이면 보류하는가」도 **한 번도 안 재진다**
+      (실제로 그랬다 — 절단 케이스가 초록이 아니라 빨강으로 그것을 알렸다).
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.pages = 0
+
+    def fetch(self, **kw: Any) -> dict[str, Any]:
+        self.pages += 1
+        kw["limit"] = 1
+        return self.inner.fetch(**kw)
+
+
+def _case_tombstone_marks_only_the_missing() -> None:
+    """운반층에서 사라진 것**만** tombstone 이 된다 — 남아 있는 것은 건드리지 않는다."""
+    from agora import reconcile as rec
+    store, ledger, _d = _rec_env()
+    nodes = [_rec_put(store, ledger, "t1", m) for m in _MID]
+    store.delete_node(nodes[1])                       # 가운데 하나가 사라진다
+    out = rec.reconcile(store=store, ledger=ledger, thread_id="t1")
+    if out["verdict"] != rec.COMPARED:
+        raise AssertionError(f"판정이 안 났다: {out}")
+    if out["missing"] != [_MID[1]]:
+        raise AssertionError(f"사라진 것 지목이 틀렸다: {out['missing']}")
+    rows = [r for r in ledger.rows() if r.get("stage") == rec.TOMBSTONE]
+    if len(rows) != 1 or rows[0]["message_id"] != _MID[1]:
+        raise AssertionError(f"tombstone 행: {rows}")
+    if rows[0].get("dir") != "recv":
+        raise AssertionError(f"방향이 recv 가 아니다: {rows[0].get('dir')}")
+
+
+def _case_tombstone_keeps_the_stored_event() -> None:
+    """tombstone 은 **삭제가 아니다** — 보관된 원문은 그대로 남는다.
+
+    ★지워졌다는 기록을 남기면서 내용을 함께 지우면, 무엇이 지워졌는지 아무도 못 댄다.
+    """
+    import hashlib
+    from agora import reconcile as rec
+    store, ledger, _d = _rec_env()
+    node = _rec_put(store, ledger, "t1", _MID[0])
+    _rec_put(store, ledger, "t1", _MID[1])
+    path = os.path.join(ledger.events_dir, "t1", _MID[0] + ".json")
+    with open(path, "rb") as fh:
+        before = fh.read()
+    store.delete_node(node)
+    rec.reconcile(store=store, ledger=ledger, thread_id="t1")
+    if not os.path.exists(path):
+        raise AssertionError("원문이 함께 지워졌다")
+    with open(path, "rb") as fh:
+        if fh.read() != before:
+            raise AssertionError("원문이 바뀌었다")
+    row = [r for r in ledger.rows() if r.get("stage") == rec.TOMBSTONE][0]
+    if row.get("hash") != hashlib.sha256(before).hexdigest():
+        raise AssertionError("tombstone 이 무엇이 사라졌는지 못 댄다")
+
+
+def _case_tombstone_written_once() -> None:
+    """같은 삭제를 매 주기 다시 적지 않는다(원장은 append-only 라 부풀기만 한다)."""
+    from agora import reconcile as rec
+    store, ledger, _d = _rec_env()
+    node = _rec_put(store, ledger, "t1", _MID[0])
+    _rec_put(store, ledger, "t1", _MID[1])
+    store.delete_node(node)
+    first = rec.reconcile(store=store, ledger=ledger, thread_id="t1")
+    second = rec.reconcile(store=store, ledger=ledger, thread_id="t1")
+    rows = [r for r in ledger.rows() if r.get("stage") == rec.TOMBSTONE]
+    if len(rows) != 1:
+        raise AssertionError(f"두 번째 대조가 또 적었다: {len(rows)}")
+    if len(first["tombstoned"]) != 1 or second["tombstoned"] != []:
+        raise AssertionError(f"두 번째 답이 첫 번째와 구별되지 않는다: {second}")
+    if second["missing"] != [_MID[0]]:
+        raise AssertionError("이미 적었다고 사라진 사실까지 감추면 안 된다")
+
+
+def _case_empty_response_is_not_deletion() -> None:
+    """★**빈 응답을 「전부 지워졌다」로 적지 않는다.** 조회 실패와 모양이 같다.
+
+    ★이 케이스**만**이 재는 축: 페이지는 끝까지 돌았고(complete) items 가 0 인 경우.
+      아래 「조회 실패」는 예외가 나는 경우고, 「페이지 절단」은 끝까지 못 돈 경우다 — 셋 다 다른 문이다.
+    """
+    from agora import reconcile as rec
+    store, ledger, _d = _rec_env()
+    for m in _MID:
+        _rec_put(store, ledger, "t1", m)
+    store.fail_next_fetch = "empty"
+    out = rec.reconcile(store=store, ledger=ledger, thread_id="t1")
+    if out["verdict"] != rec.INCONCLUSIVE or out["why"] != "empty_response":
+        raise AssertionError(f"빈 응답을 판정했다: {out}")
+    if out["missing"] or out["tombstoned"]:
+        raise AssertionError(f"판정 못 하면서 적었다: {out}")
+    if [r for r in ledger.rows() if r.get("stage") == rec.TOMBSTONE]:
+        raise AssertionError("원장에 tombstone 이 남았다")
+
+
+def _case_fetch_failure_is_not_deletion() -> None:
+    """조회가 **실패**하면 아무것도 적지 않는다 — 오류가 그대로 올라간다(code 7).
+
+    ★삼켜서 「없더라」로 바꾸면, 잠깐의 네트워크 실패가 원장에 영구 삭제 기록을 남긴다.
+    """
+    from agora import reconcile as rec
+    store, ledger, _d = _rec_env()
+    for m in _MID:
+        _rec_put(store, ledger, "t1", m)
+    store.fail_next_fetch = "store"
+    try:
+        rec.reconcile(store=store, ledger=ledger, thread_id="t1")
+    except AgoraError as e:
+        if e.code != errors.STORE:
+            raise AssertionError(f"다른 코드로 났다: {e.code}") from None
+    else:
+        raise AssertionError("조회 실패를 삼켰다")
+    if list(ledger.rows()):
+        raise AssertionError("실패했는데 원장에 줄이 남았다")
+
+
+def _case_truncated_pages_give_no_verdict() -> None:
+    """페이지를 **끝까지 못 돌면** 판정하지 않는다(뒤쪽 페이지가 통째로 「사라진 것」이 된다).
+
+    ★이 축**만**을 고립시키려고 상한을 1페이지로 낮춘다 — 글은 하나도 안 지웠다.
+      절단을 판정하면 **지우지도 않은 글**에 tombstone 이 찍힌다.
+    """
+    from agora import reconcile as rec
+    store, ledger, _d = _rec_env()
+    for m in _MID:
+        _rec_put(store, ledger, "t1", m)
+    paged = _OnePerPage(store)          # ★한 건씩 → 3페이지가 되고 상한 1에 걸린다
+    out = rec.reconcile(store=paged, ledger=ledger, thread_id="t1", max_pages=1)
+    if paged.pages != 1:
+        raise AssertionError(f"상한을 넘겨 더 돌았다: {paged.pages}")
+    if out["verdict"] != rec.INCONCLUSIVE or out["why"] != "pages_truncated":
+        raise AssertionError(f"절단인데 판정했다: {out}")
+    if [r for r in ledger.rows() if r.get("stage") == rec.TOMBSTONE]:
+        raise AssertionError("절단 상태에서 tombstone 을 적었다")
+
+
+def _case_all_pages_are_walked() -> None:
+    """페이지가 여럿이어도 **뒤 페이지의 글은 살아 있는 것**으로 센다.
+
+    ★한 페이지만 보고 판정하면 2페이지 이후가 전부 삭제로 보인다 —
+      이 케이스는 `limit` 을 1로 만든 순회에서 tombstone 이 **0** 인지로 그것을 잡는다.
+    """
+    from agora import reconcile as rec
+    store, ledger, _d = _rec_env()
+    for m in _MID:
+        _rec_put(store, ledger, "t1", m)
+
+    paged = _OnePerPage(store)
+    out = rec.reconcile(store=paged, ledger=ledger, thread_id="t1")
+    if paged.pages < 3:
+        raise AssertionError(f"페이지를 다 안 돌았다: {paged.pages}")
+    if out["verdict"] != rec.COMPARED or out["missing"]:
+        raise AssertionError(f"살아 있는 글을 삭제로 셌다: {out}")
+
+
+def _case_looping_cursor_is_stopped() -> None:
+    """커서가 **제자리를 돌면** 멈춘다(code 7) — 운반층을 믿지 않는다는 말은 이런 것도 포함한다."""
+    from agora import reconcile as rec
+    _s, ledger, _d = _rec_env()
+
+    class LoopingStore:
+        def fetch(self, **kw: Any) -> dict[str, Any]:
+            return {"items": [{"body": "{}"}], "next_cursor": "제자리"}
+
+    try:
+        rec.reconcile(store=LoopingStore(), ledger=ledger, thread_id="t1")
+    except AgoraError as e:
+        if e.code != errors.STORE:
+            raise AssertionError(f"다른 코드로 났다: {e.code}") from None
+    else:
+        raise AssertionError("무한 순회를 막지 못했다")
+
+
+def _case_acked_but_gone_is_counted_apart() -> None:
+    """**소비까지 한 글이 사라진** 경우를 따로 센다(수신 증거는 남고 실물만 없다)."""
+    from agora import ack as ack_mod
+    from agora import reconcile as rec
+    from agora.spool import FETCHED, Spool
+    store, ledger, d = _rec_env()
+    spool = Spool(d)
+    nodes = [_rec_put(store, ledger, "t1", m) for m in _MID]
+    for node, mid in zip(nodes, _MID):
+        spool.record(node_id=node, stage=FETCHED, thread_id="t1", message_id=mid)
+        with open(os.path.join(ledger.events_dir, "t1", mid + ".json"), "rb") as fh:
+            raw = fh.read()
+        ack_mod.deliver(ledger=ledger, spool=spool, node_id=node, thread_id="t1",
+                        message_id=mid, raw=raw)
+    ack_mod.ack(ledger=ledger, spool=spool, message_id=_MID[0])     # 하나만 소비했다
+    store.delete_node(nodes[0])
+    store.delete_node(nodes[1])
+    out = rec.reconcile(store=store, ledger=ledger, thread_id="t1", spool=spool)
+    if sorted(out["missing"]) != sorted([_MID[0], _MID[1]]):
+        raise AssertionError(f"사라진 것: {out['missing']}")
+    if out["acked_but_gone"] != [_MID[0]]:
+        raise AssertionError(f"소비한 것과 아닌 것을 안 갈랐다: {out['acked_but_gone']}")
+
+
+def _case_tombstone_keeps_chain_intact() -> None:
+    """tombstone 행이 섞여도 원장 사슬은 링크·본문 둘 다 성립한다."""
+    from agora import reconcile as rec
+    store, ledger, _d = _rec_env()
+    nodes = [_rec_put(store, ledger, "t1", m) for m in _MID]
+    store.delete_node(nodes[0])
+    store.delete_node(nodes[2])
+    rec.reconcile(store=store, ledger=ledger, thread_id="t1")
+    verdict = ledger.verify()
+    if not verdict["ok"] or verdict["rows"] != 2:
+        raise AssertionError(f"사슬 검증: {verdict}")
+
+
+def _case_local_count_comes_from_stored_events() -> None:
+    """로컬 기준은 **보관된 원문 파일**이다 — 원장 행이 아니다.
+
+    ★원장 행으로 세면 「적혀 있으니 있다」가 되어 자기참조가 된다(§8 고스트).
+      파일을 하나 지우면 그 글은 대조 대상에서 빠져야 한다(있지도 않은 것을 잃었다고 하지 않는다).
+    """
+    from agora import reconcile as rec
+    store, ledger, _d = _rec_env()
+    for m in _MID:
+        _rec_put(store, ledger, "t1", m)
+    if rec.local_message_ids(ledger=ledger, thread_id="t1") != sorted(_MID):
+        raise AssertionError("보관본 목록이 틀렸다")
+    os.remove(os.path.join(ledger.events_dir, "t1", _MID[2] + ".json"))
+    if rec.local_message_ids(ledger=ledger, thread_id="t1") != sorted(_MID[:2]):
+        raise AssertionError("파일을 지웠는데 목록이 그대로다")
+    if rec.local_message_ids(ledger=ledger, thread_id="없는스레드") != []:
+        raise AssertionError("없는 스레드에 보관본이 있다고 한다")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -3981,6 +4240,17 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("spool: 딸린 값 이월",           _case_spool_carries_thread_id_forward, None),
     ("노출: reader 는 무도구",        _case_reader_role_has_no_tools, None),
     ("ack: 등록·구현·배선",           _case_ack_is_registered_and_built, None),
+    ("묘비: 사라진 것만 적는다",      _case_tombstone_marks_only_the_missing, None),
+    ("묘비: 원문은 남는다",           _case_tombstone_keeps_the_stored_event, None),
+    ("묘비: 한 번만 적는다",          _case_tombstone_written_once, None),
+    ("묘비: 빈 응답은 삭제가 아니다", _case_empty_response_is_not_deletion, None),
+    ("묘비: 조회 실패는 삭제가 아냐", _case_fetch_failure_is_not_deletion, None),
+    ("묘비: 절단이면 판정 보류",      _case_truncated_pages_give_no_verdict, None),
+    ("묘비: 페이지를 끝까지 돈다",    _case_all_pages_are_walked, None),
+    ("묘비: 제자리 커서는 멈춘다",    _case_looping_cursor_is_stopped, None),
+    ("묘비: 소비한 것은 따로 센다",   _case_acked_but_gone_is_counted_apart, None),
+    ("묘비: 사슬이 안 깨진다",        _case_tombstone_keeps_chain_intact, None),
+    ("묘비: 기준은 보관 원문이다",    _case_local_count_comes_from_stored_events, None),
 )
 
 
@@ -4516,6 +4786,47 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            if stage is not None and r.get("stage") != stage:',
      "            if False:",
      "ack: 원장 recv·acked 1행"),
+    # ── S5-4 tombstone · reconciliation ─────────────────────────────────────
+    ("M129-empty-response-tombstoned", "agora/reconcile.py",
+     '    if remote["items"] == 0:',
+     "    if False:",
+     "묘비: 빈 응답은 삭제가 아니다"),
+    ("M130-truncated-pages-tombstoned", "agora/reconcile.py",
+     '    if not remote["complete"]:',
+     "    if False:",
+     "묘비: 절단이면 판정 보류"),
+    ("M131-first-page-only", "agora/reconcile.py",
+     "        if not cursor:",
+     "        if True:",
+     "묘비: 페이지를 끝까지 돈다"),
+    ("M132-tombstone-written-twice", "agora/reconcile.py",
+     "        if ledger.has(mid, direction=DIRECTION, stage=TOMBSTONE):",
+     "        if False:",
+     "묘비: 한 번만 적는다"),
+    ("M133-event-removed-with-tombstone", "agora/reconcile.py",
+     "        raw = _read_raw(ledger, thread_id, mid)",
+     '        raw = _read_raw(ledger, thread_id, mid)\n        os.remove(os.path.join(ledger.events_dir, thread_id, mid + ".json"))',
+     "묘비: 원문은 남는다"),
+    ("M134-tombstone-hash-blank", "agora/reconcile.py",
+     "                                     event_hash=hashlib.sha256(raw).hexdigest(),",
+     '                                     event_hash="",',
+     "묘비: 원문은 남는다"),
+    ("M135-looping-cursor-allowed", "agora/reconcile.py",
+     "        if cursor in seen_cursors:",
+     "        if False:",
+     "묘비: 제자리 커서는 멈춘다"),
+    ("M136-acked-not-separated", "agora/reconcile.py",
+     '        if row and row.get("stage") == spool_mod.ACKED:',
+     "        if row:",
+     "묘비: 소비한 것은 따로 센다"),
+    ("M137-local-scans-whole-events-dir", "agora/reconcile.py",
+     "    d = os.path.join(ledger.events_dir, thread_id)",
+     "    d = ledger.events_dir",
+     "묘비: 기준은 보관 원문이다"),
+    ("M138-fetch-error-swallowed", "agora/reconcile.py",
+     "        page = store.fetch(thread_id=thread_id, cursor=cursor)",
+     '        try:\n            page = store.fetch(thread_id=thread_id, cursor=cursor)\n        except AgoraError:\n            return {"ids": found, "complete": True, "pages": pages, "items": items}',
+     "묘비: 조회 실패는 삭제가 아냐"),
 )
 
 
@@ -4687,7 +4998,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S5-3(ack 영수증·수신 격리)"
+            "슬라이스": "S5-4(tombstone·reconciliation)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

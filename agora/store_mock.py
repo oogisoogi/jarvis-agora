@@ -32,6 +32,9 @@ class MockStore:
         self._numbers: dict[str, int] = {}
         self._updated: dict[str, str] = {}
         self.fail_next_append: str | None = None
+        # ★읽기도 실패할 수 있어야 한다. 「조회가 실패한 것」을 「지워진 것」으로 적는지
+        #   재려면 mock 이 읽기에서도 나쁘게 굴어야 한다(S5-4).
+        self.fail_next_fetch: str | None = None
         if path and os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 self._items = json.load(fh)
@@ -87,6 +90,13 @@ class MockStore:
         if thread_id is None:
             raise AgoraError(errors.ARGUMENT, "thread_id 나 number 가 필요하다", None)
         self.fetch_calls += 1
+        if self.fail_next_fetch == "store":
+            self.fail_next_fetch = None
+            raise AgoraError(errors.STORE, "조회 실패(주입)", {"retry": True})
+        if self.fail_next_fetch == "empty":
+            # 스레드가 통째로 안 보이는 상황 — 「전부 지워졌다」와 모양이 같다.
+            self.fail_next_fetch = None
+            return {"items": [], "next_cursor": None}
         rows = [i for i in self._items if i["thread_id"] == thread_id]
         start = int(cursor) if cursor else 0
         page = rows[start:start + limit]
