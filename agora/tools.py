@@ -22,11 +22,13 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from agora import ack as ack_mod
 from agora import brief, core, errors, protocol, reducer, roster
-from agora.contract_open import GENESIS_EXPECTED_STATE, GENESIS_PREV
+from agora.contract_open import (GENESIS_EXPECTED_STATE, GENESIS_PREV,
+                                 READ_PAGE_BYTES, READ_PAGE_EVENTS)
 from agora.errors import AgoraError
 from agora.event import new_id
 from agora.ledger import now_iso
@@ -375,8 +377,40 @@ def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
         seen = getattr(ctx.store, "locate_candidates", None) or {}
         if thread_id in seen:
             view["transport_candidates"] = list(seen[thread_id])
-    view["next_cursor"] = None
+    # ★★M-d(codex 2026-08-26) — `cursor` 인자는 있는데 **아무도 안 쓰고** `next_cursor` 는
+    #   늘 None 이었다. 즉 응답에 **상한이 없었다**: 스레드가 길어지면 한 호출이 얼마든 커지고,
+    #   부르는 쪽은 나눠 받을 방법이 없다(인자가 있으니 **있는 줄 안다** — 더 나쁘다).
+    # ★⚠자르는 것은 **화면뿐**이다. 상태·격리 판정은 위에서 이미 **전건으로** 끝났다.
+    #   자른 뒤의 상태는 상태가 아니다 — 그 실수를 하면 페이지마다 다른 사실이 생긴다.
+    view["events"], view["next_cursor"] = _page(view["events"], cursor)
     return view
+
+
+def _page(events: list[dict[str, Any]],
+          cursor: str | None) -> tuple[list[dict[str, Any]], str | None]:
+    """이어 읽기 — `cursor` 다음부터, 건수·바이트 상한까지.
+
+    ★커서는 **마지막으로 건넨 `message_id`** 다. 불투명한 토큰을 쓰지 않는 이유는
+      사람이 그 값을 보고 「어디까지 봤는지」 말할 수 있어야 하기 때문이다(원장·보고에 그대로 실린다).
+    ★모르는 커서는 **조용히 처음부터**가 아니라 인자 오류다 — 조용히 되감으면
+      부르는 쪽은 같은 페이지를 영원히 받으면서 진행하고 있다고 믿는다.
+    """
+    start = 0
+    if cursor:
+        ids = [e.get("message_id") for e in events]
+        if cursor not in ids:
+            raise AgoraError(errors.ARGUMENT, "그 cursor 가 이 스레드에 없다",
+                             {"cursor": cursor})
+        start = ids.index(cursor) + 1
+    out: list[dict[str, Any]] = []
+    used = 0
+    for entry in events[start:]:
+        size = len(json.dumps(entry, ensure_ascii=False).encode("utf-8"))
+        if out and (len(out) >= READ_PAGE_EVENTS or used + size > READ_PAGE_BYTES):  # noqa: E501
+            return out, out[-1].get("message_id")
+        out.append(entry)
+        used += size
+    return out, None
 
 
 def propose(ctx: Context, *, type: str, title: str, body: str,

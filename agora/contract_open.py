@@ -20,6 +20,12 @@ GENESIS_EXPECTED_STATE = ""
 # 설계 §D4 — canonical JSON 상한.
 MAX_EVENT_BYTES = 64 * 1024
 
+# ★읽기 한 쪽의 상한(M-d · codex 2026-08-26). `read` 는 인자에 `cursor` 를 두고도
+#   응답을 자르지 않아 **상한이 없었다** — 스레드가 길어지면 한 번의 호출이 얼마든 커진다.
+#   ⚠자르는 것은 **화면**뿐이다. 상태는 언제나 전건으로 계산한다(자른 뒤의 상태는 상태가 아니다).
+READ_PAGE_EVENTS = 50
+READ_PAGE_BYTES = 64 * 1024
+
 # 설계 §3-2 — 봉투 로그 발췌 상한.
 MAX_LOG_EXCERPT_BYTES = 4 * 1024
 

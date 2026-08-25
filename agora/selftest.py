@@ -3681,6 +3681,10 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "수락판정": ("M241-delegate-claims-success",),
     # ★쓰는 쪽에만 있고 받는 쪽에 없던 계약 칸.
     "CAS판정": ("M242-expected-state-unchecked",),
+    # ★남이 보낸 한 줄로 남의 서버가 꺼지던 자리.
+    "서버생존": ("M243-no-last-resort-boundary",),
+    # ★인자는 계약에 있는데 동작이 없던 자리.
+    "읽기상한": ("M244-read-never-pages", "M245-page-forgets-the-rest"),
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
                  "M227-operator-may-delegate-anytime"),
@@ -6107,6 +6111,57 @@ def _publish_racing_pair(ctx: Any, tid: str, state: dict[str, Any],
                            config=ctx.config, ledger=ctx.ledger)
 
 
+def _case_read_pages_with_cursor() -> None:
+    """읽기에 **상한이 있고 배선돼 있다** — 이어 읽으면 빠짐 없이 이어진다(M-d · codex 2026-08-26).
+
+    ★`cursor` 인자는 있는데 아무도 안 쓰고 `next_cursor` 는 늘 None 이었다.
+      ⇒ 응답에 상한이 없었고, 부르는 쪽은 **나눌 수 있다고 믿으면서** 못 나눴다.
+      **인자만 있고 동작이 없는 것은 없는 것보다 나쁘다.**
+    ★★처음엔 `_page` 를 **직접** 불러서 쟀는데 M244(배선 되돌림)가 **살아남았다** —
+      함수는 맞게 도는데 `read` 가 그 함수를 안 불러도 초록이었다.
+      이 저장소가 오늘 열두 번 겪은 그 병이다. ⇒ **반드시 `read` 를 통해서 잰다.**
+    ★상한은 시험을 위해 낮춰 잡는다(상수를 잠깐 바꾼다) — 50건짜리 픽스처를 쌓는 것보다
+      **경계를 하나 넘은 자리**에서 재는 것이 싸고 정확하다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="knowhow")
+    _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="첫째 발언"))
+    _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="둘째 발언"))
+
+    whole = tools.read(ctx, thread_id=tid)
+    if len(whole["events"]) != 3 or whole["next_cursor"] is not None:
+        raise AssertionError(f"상한 안인데 잘렸다: {len(whole['events'])} · "
+                             f"{whole['next_cursor']}")
+
+    keep = tools.READ_PAGE_EVENTS
+    try:
+        tools.READ_PAGE_EVENTS = 2
+        first = tools.read(ctx, thread_id=tid)
+        if len(first["events"]) != 2 or not first["next_cursor"]:
+            raise AssertionError(f"상한에서 안 잘렸다: {len(first['events'])} · "
+                                 f"{first['next_cursor']}")
+        # ★상태는 **전건으로** 계산된다 — 잘린 화면의 상태는 상태가 아니다.
+        if first["state"] != whole["state"]:
+            raise AssertionError("자른 페이지가 상태를 바꿨다")
+        rest = tools.read(ctx, thread_id=tid, cursor=first["next_cursor"])
+        got = [e["message_id"] for e in first["events"] + rest["events"]]
+        if got != [e["message_id"] for e in whole["events"]]:
+            raise AssertionError("이어 받았는데 원본과 다르다")
+        if rest["next_cursor"] is not None:
+            raise AssertionError("끝인데 커서가 남았다")
+        try:
+            tools.read(ctx, thread_id=tid, cursor="없는-커서")
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"코드가 {e.code}") from None
+        else:
+            raise AssertionError("모르는 커서를 조용히 처음부터로 읽었다")
+    finally:
+        tools.READ_PAGE_EVENTS = keep
+
+
 def _case_audit_shows_transport_candidates() -> None:
     """후보가 여럿이었다는 사실이 **화면까지** 온다(H1 · R-13 · 구현≠배선).
 
@@ -6758,6 +6813,18 @@ def _case_rejected_close_does_not_touch_the_screen() -> None:
 #   ⇒ 여기서는 **손으로 쓴 JSON-RPC 프레임**을 프로세스에 흘려 넣고, 나온 줄만 본다.
 #     `handle()`·`rpc_dispatch()` 를 부르지 않는다 — 부르는 순간 다시 우리끼리 맞추는 것이다.
 
+# ★M-c(codex 2026-08-26) — 계약 밖 인자는 **우리 오류가 아니라** 파이썬 `TypeError` 로 온다.
+#   그 예외가 루프를 뚫으면 **프로세스가 끝난다** ⇒ 남이 보낸 한 줄로 남의 서버가 꺼진다.
+#   그래서 「그 요청 뒤에도 서버가 대답하는가」를 **다음 프레임으로** 잰다.
+RPC_BAD_ARG_FRAMES = (
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":'
+    '{"protocolVersion":"2025-06-18","capabilities":{},'
+    '"clientInfo":{"name":"selftest","version":"0"}}}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":'
+    '{"name":"agora.envelope_check","arguments":{"계약에":"없는 칸"}}}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/list"}',
+)
+
 RPC_FRAMES = (
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":'
     '{"protocolVersion":"2025-06-18","capabilities":{},'
@@ -6793,6 +6860,32 @@ def _rpc_roundtrip(frames: tuple[str, ...], directory: str) -> list[dict[str, An
         except ValueError as e:
             raise AssertionError(f"응답이 JSON 이 아니다: {e} · {raw[:120]}") from None
     return out
+
+
+def _case_mcp_survives_a_bad_argument() -> None:
+    """계약 밖 인자 한 줄이 **서버를 죽이지 못한다**(M-c · codex 2026-08-26).
+
+    ★여기는 `AgoraError` 만 잡고 있었다. 도구 인자가 계약과 다르면 파이썬이 먼저
+      `TypeError` 를 던지는데 그건 우리 오류가 아니라 **루프를 뚫고 나간다** ⇒ 프로세스 종료.
+      붙어 있던 클라이언트는 **이유 없이 연결을 잃는다.**
+    ★★판정을 「오류 응답이 왔는가」로만 하면 안 된다 — 죽은 서버도 그 전까지의 응답은 남긴다.
+      **죽지 않았다는 증거는 「그 뒤에도 대답하는가」뿐이다.** 그래서 뒤에 `tools/list` 를 둔다.
+    ★그리고 삼키지 않았는지도 잰다: 응답에 **예외 종류**가 실려 있어야 한다(감춘 것이 아니라 옮긴 것).
+    """
+    d = _config_dir_fixture(operators_text=None)
+    lines = _rpc_roundtrip(RPC_BAD_ARG_FRAMES, d)      # 서버가 죽으면 여기서 적색
+    if [l.get("id") for l in lines] != [1, 2, 3]:
+        raise AssertionError(f"응답이 짝이 안 맞는다 — 죽었을 수 있다: "
+                             f"{[l.get('id') for l in lines]}")
+    bad = lines[1]
+    if "error" not in bad:
+        raise AssertionError(f"계약 밖 인자가 성공으로 갔다: {bad}")
+    if bad["error"].get("code") != -32602:
+        raise AssertionError(f"인자 오류인데 코드가 {bad['error'].get('code')}")
+    if not (bad["error"].get("data") or {}).get("exception"):
+        raise AssertionError("무엇이 났는지 감췄다 — 최후 경계는 옮기는 것이지 삼키는 것이 아니다")
+    if "result" not in lines[2]:
+        raise AssertionError("그 뒤 요청에 답하지 못했다 — 서버가 반쯤 죽었다")
 
 
 def _case_mcp_speaks_jsonrpc_not_our_dialect() -> None:
@@ -7304,6 +7397,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("배선: 설정 예산이 판정까지",    _case_reducer_counts_with_the_configured_budget, None),
     ("배선: 본문은 데이터 표식",      _case_read_wraps_bodies_as_untrusted_data, None),
     ("읽기: 진 글도 audit 에 나온다",  _case_audit_shows_the_races_that_were_lost, None),
+    ("읽기: 커서로 나눠 준다",         _case_read_pages_with_cursor, None),
     ("결박: 후보가 화면까지 온다",     _case_audit_shows_transport_candidates, None),
     ("사슬: 거부가 막지 않는다",       _case_rejected_event_does_not_wedge_the_chain, None),
     ("MCP: 예시대로 서버가 뜬다",      _case_example_mcp_config_actually_starts_the_server, None),
@@ -7324,6 +7418,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("게이트: 증거로 든 그물이 실재한다", _case_gate_evidence_names_are_real, None),
     ("목록: 못 세운 것을 말한다",      _case_threads_shows_what_it_could_not_verify, None),
     ("투영: 거부된 종결은 안 닫는다",  _case_rejected_close_does_not_touch_the_screen, None),
+    ("MCP: 나쁜 인자에도 산다",        _case_mcp_survives_a_bad_argument, None),
     ("MCP: 규약으로 말한다",           _case_mcp_speaks_jsonrpc_not_our_dialect, None),
     ("MCP: 판본 협상은 규약대로",     _case_mcp_negotiates_protocol_the_way_the_spec_says, None),
 )
@@ -8341,6 +8436,20 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if not ok:\n            reject(entry, STALE_EXPECTED,\n                   {"expected_state": seen, "at_that_point": _state_hash(state)})\n            continue',
      '        if False:\n            pass',
      "CAS: 거짓 상태 칸 → 격리"),
+    # ★M-c — 최후 예외 경계가 없어 한 요청이 서버를 끄던 자리.
+    ("M243-no-last-resort-boundary", "agora/mcp_server.py",
+     '        except Exception as e:                # noqa: BLE001 — 최후 경계는 넓어야 한다',
+     '        except AgoraError as e:  # 되돌림',
+     "MCP: 나쁜 인자에도 산다"),
+    # ★M-d — 인자만 있고 동작이 없던 자리(응답 상한 부재).
+    ("M244-read-never-pages", "agora/tools.py",
+     '    view["events"], view["next_cursor"] = _page(view["events"], cursor)',
+     '    view["next_cursor"] = None',
+     "읽기: 커서로 나눠 준다"),
+    ("M245-page-forgets-the-rest", "agora/tools.py",
+     '            return out, out[-1].get("message_id")',
+     '            return out, None',
+     "읽기: 커서로 나눠 준다"),
 )
 
 

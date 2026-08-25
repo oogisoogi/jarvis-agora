@@ -127,6 +127,7 @@ SERVER_INFO = {"name": "agora", "version": "0.1.0"}
 RPC_PARSE_ERROR = -32700
 RPC_INVALID_REQUEST = -32600
 RPC_METHOD_NOT_FOUND = -32601
+RPC_INVALID_PARAMS = -32602
 RPC_INTERNAL_ERROR = -32603
 
 
@@ -218,6 +219,26 @@ def serve(stdin: Any = None, stdout: Any = None, *, ctx: Any = None) -> int:
                              e.message,
                              {"agora_code": e.code, "name": errors.NAMES.get(e.code),
                               "detail": e.detail})})
+            continue
+        except Exception as e:                # noqa: BLE001 — 최후 경계는 넓어야 한다
+            # ★★M-c(codex 2026-08-26) — **한 요청이 서버 전체를 죽이던 자리.**
+            #   여기는 `AgoraError` 만 잡고 있었다. 그런데 도구 인자가 계약과 다르면
+            #   파이썬이 먼저 `TypeError` 를 던진다(우리 오류가 아니다) ⇒ 루프를 뚫고 나가
+            #   **프로세스가 끝난다.** 붙어 있던 클라이언트는 이유 없이 연결을 잃는다.
+            #   ⇒ 남이 보낸 한 줄로 남의 서버를 끌 수 있다는 뜻이다.
+            # ★그래서 최후 경계는 **넓게** 잡는다: 모르는 실패도 **응답으로** 만들고 계속 산다.
+            #   ⚠넓게 잡는 대가 = 진짜 결함이 조용해진다. 그래서 **삼키지 않는다** —
+            #   예외 종류와 문구를 응답에 실어 보낸다(감춘 것이 아니라 옮긴 것이다).
+            if notification:
+                continue
+            bad_args = isinstance(e, (TypeError, ValueError))
+            # ⚠형태를 위 블록과 **일부러 다르게** 쓴다: 뮤테이션 하네스는 (파일·문자열)로
+            #   조준하므로 같은 모양이 두 번 나오면 그 조준이 **NOT-APPLIED** 로 죽는다
+            #   (여기서 실제로 M233 이 그렇게 됐다 — 고친 것이 아니라 안 재게 된 것이다).
+            failure = _rpc_error(RPC_INVALID_PARAMS if bad_args else RPC_INTERNAL_ERROR,
+                                 "요청을 처리하지 못했다",
+                                 {"exception": type(e).__name__, "why": str(e)[:200]})
+            _write(dst, {"jsonrpc": JSONRPC, "id": request.get("id"), "error": failure})
             continue
         if notification:
             continue                         # ⛔성공해도 알림에는 응답 없음
