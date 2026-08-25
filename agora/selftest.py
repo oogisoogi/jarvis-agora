@@ -3478,6 +3478,7 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "인자배선": ("M221-reduce-drops-now", "M222-reduce-drops-roster-checkpoint",
                  "M223-audit-hides-drift-flags"),
     # ★계약에 있는데 낼 자리가 없던 절차 개입 2종(발신자 0 → 운영 동작으로 배선).
+    "목록정직": ("M228-threads-drops-orphans-silently",),
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
                  "M227-operator-may-delegate-anytime"),
@@ -6400,6 +6401,78 @@ def _case_expired_debate_is_resumed_by_an_operator() -> None:
         raise AssertionError(f"의장만 갈리고 재개는 안 됐다: {resumed}")
 
 
+def _case_gate_evidence_names_are_real() -> None:
+    """05 게이트의 **증거 칸이 지어낸 그물을 들지 못하게** 한다(S7-5 AC ①).
+
+    ★「증거 없는 초록 없음」이 게이트의 첫 규칙인데, 증거 칸은 **사람이 쓰는 자유문**이다.
+      케이스 이름을 하나 틀리게 적거나, 있었다가 사라진 그물을 계속 인용해도 **문서는 초록으로
+      보인다.** 그리고 그 문서가 곧 「다 됐다」의 근거가 된다.
+    ★그래서 증거 칸의 백틱 이름을 전부 뽑아 **실재 케이스와 대조**한다.
+      ⚠백틱 안에 명령·파일명도 들어가므로, **케이스 이름처럼 생긴 것만** 본다:
+      우리 케이스 이름에는 전부 `:` 나 `→` 가 있다(등록표가 그 규약으로 적혀 있다).
+      ⇒ 그래서 증거 칸에서 **백틱은 「그물 이름」 전용**이다. 값·플래그는 백틱 없이 적는다
+      (`isAnswered:true` 같은 JSON 조각을 백틱에 넣으면 여기서 고스트로 잡힌다 — 실제로 잡혔다).
+    ★그리고 **빈칸 0**을 함께 잰다 — 채운 척과 채운 것을 가른다.
+    """
+    import re
+    path = os.path.join(_ROOT, ".appbuild", "05-gate.md")
+    text = _read_text(path)
+    body = text[text.index("## A. 기능별 수용"):text.index("**A 가게이트**")]
+    if "| ☐ |" in body:
+        raise AssertionError("게이트 A 표에 빈 증거 칸이 남아 있다")
+    rows = [ln for ln in body.splitlines() if ln.startswith("| **FR-")]
+    if len(rows) != 15:
+        raise AssertionError(f"요구 행이 15개가 아니다: {len(rows)}")
+    known = {c[0] for c in CASES}
+    cited: set[str] = set()
+    for row in rows:
+        evidence = row.rsplit("|", 2)[1]
+        for token in re.findall(r"`([^`]+)`", evidence):
+            if ":" in token or "→" in token:
+                cited.add(token.strip())
+    if len(cited) < 20:
+        raise AssertionError(f"증거로 든 그물이 {len(cited)}개뿐이다 — 추출이 고장났다")
+    ghosts = sorted(cited - known)
+    if ghosts:
+        raise AssertionError(f"실재하지 않는 그물을 증거로 들었다: {ghosts}")
+
+
+def _case_threads_shows_what_it_could_not_verify() -> None:
+    """목록이 **자기가 못 세운 것을 말한다**(master 지적 2026-08-26 · 실물 #1·#2).
+
+    ★사고의 모양: 상태를 못 세우는 스레드를 목록에서 **말없이 뺐다.** 그러면 `scanned` 는 6인데
+      보이는 것은 4가 되고, **그 차이를 설명하는 것이 아무 데도 없다.**
+      이 저장소가 스스로 정한 「안 보이면 없는 것과 같다」를 우리가 어긴 자리였다.
+      (실물 #2 = 구 안정키 genesis ⇒ 지금 명부로는 검증 불가 ⇒ 상태 없음.)
+    ★`items` 가 아니라 **따로 싣는다**: `items` 는 필터를 지나는데 고아는 유형도 상태도 없어서
+      **필터가 도로 지워 버린다** — 같은 사고가 「필터를 걸었을 때만」 다시 난다.
+    ★계수가 **맞아떨어지는지**까지 잰다(`scanned == 보이는 것 + 고아`). 목록만 늘리고 수가
+      안 맞으면 여전히 어딘가가 조용히 사라진 것이다.
+    """
+    from agora.event import render_post
+    from agora import tools
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")            # 정상 스레드 하나
+    # 서명 없는 genesis 만 있는 스레드 — 서식은 우리 것이라 thread_id 는 읽히는데 상태는 못 선다.
+    ctx.store.inject_raw(thread_id=_T1, body=render_post(_r2_genesis(), None),
+                         created_at="2026-01-01T00:00:00Z")
+    out = tools.threads(ctx)
+    seen = {i["thread_id"] for i in out["items"]}
+    if tid not in seen:
+        raise AssertionError("정상 스레드가 목록에서 빠졌다")
+    orphans = out.get("unverifiable")
+    if orphans is None:
+        raise AssertionError("못 세운 것을 적는 칸이 아예 없다")
+    if _T1 in seen:
+        raise AssertionError("상태 없는 스레드를 유효 목록에 실었다")
+    if not any(o.get("thread_id") == _T1 and o.get("why") for o in orphans):
+        raise AssertionError(f"고아를 사유와 함께 안 적었다: {orphans}")
+    if out["scanned"] != len(out["items"]) + len(orphans):
+        raise AssertionError(
+            f"계수가 안 맞는다 — 어딘가가 조용히 사라졌다: "
+            f"scanned={out['scanned']} items={len(out['items'])} 고아={len(orphans)}")
+
+
 # ── 배선 대조 자체를 상시 케이스로(master 승인 2026-08-26) ───────────────────
 
 WIRING_ALLOWLIST = "tests/wiring-allowlist.txt"
@@ -6829,6 +6902,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("주입: 읽는 쪽에 손이 없다",      _case_reader_has_no_hands_and_writer_does, None),
     ("운영: 중단은 명부 안에서만",     _case_operator_actions_are_gated_by_the_roster, None),
     ("운영: 만료를 운영자가 되살린다", _case_expired_debate_is_resumed_by_an_operator, None),
+    ("게이트: 증거로 든 그물이 실재한다", _case_gate_evidence_names_are_real, None),
+    ("목록: 못 세운 것을 말한다",      _case_threads_shows_what_it_could_not_verify, None),
 )
 
 
@@ -7740,6 +7815,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                             stale=reduced.get("stale"))',
      "                             stale=None)",
      "읽기: 진 글도 audit 에 나온다"),
+    ("M228-threads-drops-orphans-silently", "agora/tools.py",
+     '            unverifiable.append({"number": row["number"], "thread_id": thread_id,\n                                 "why": reduced.get("reason") or "no_state"})',
+     "            pass",
+     "목록: 못 세운 것을 말한다"),
     ("M224-abort-without-operator-check", "agora/tools.py",
      '    _require_operator(ctx, "abort")',
      "    pass",

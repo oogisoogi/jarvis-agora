@@ -220,6 +220,7 @@ def threads(ctx: Context, *, type: str | None = None, status: str | None = None,
     """스레드 목록. **연 만큼만 안다** — 그 사실을 결과에 적는다."""
     listed = ctx.store.list_threads(limit=limit, cursor=cursor)
     items: list[dict[str, Any]] = []
+    unverifiable: list[dict[str, Any]] = []
     links_by_thread: dict[str, list[str]] = {}
     opened = 0
     for row in listed["items"]:
@@ -227,10 +228,22 @@ def threads(ctx: Context, *, type: str | None = None, status: str | None = None,
         opened += 1
         thread_id = _thread_id_of(page["items"])
         if not thread_id:
+            # 우리 서식이 아예 아닌 글(웹에서 손으로 연 토론 등). 스레드로 세지 않되 **센다**.
+            unverifiable.append({"number": row["number"], "thread_id": None,
+                                 "why": "not_our_format"})
             continue
         reduced = _reduce(ctx, thread_id)
         if not reduced.get("state"):
-            continue                      # 상태를 못 세우는 스레드는 목록에 싣지 않는다
+            # ★★**말없이 빼지 않는다**(master 지적 2026-08-26). 상태를 못 세우는 스레드는
+            #   목록에서 사라지는데, 그러면 `scanned` 는 6 인데 보이는 것은 5 가 되고
+            #   **그 차이를 설명하는 것이 아무 데도 없다** — 「안 보이면 없는 것과 같다」의
+            #   우리 자신의 위반이다. 실물 #2 가 그랬다(구 안정키 genesis = 지금 명부로 검증 불가).
+            # ★`items` 가 아니라 **따로 싣는 이유**: `items` 는 필터(type·status…)를 지나는데
+            #   고아는 유형도 상태도 없어서 **필터가 도로 지워 버린다.** 그러면 같은 사고가
+            #   「필터를 걸었을 때만」 다시 난다. 필터가 안 닿는 칸에 둔다.
+            unverifiable.append({"number": row["number"], "thread_id": thread_id,
+                                 "why": reduced.get("reason") or "no_state"})
+            continue
         genesis = _genesis_payload(reduced)
         rnd = reduced["round"]
         item = {"thread_id": thread_id, "number": row["number"],
@@ -251,7 +264,9 @@ def threads(ctx: Context, *, type: str | None = None, status: str | None = None,
             # ★열어 본 수와 「필터가 이 범위 안에서만 돌았다」를 함께 준다.
             #   이 두 칸이 없으면 「결과 0건」이 「그런 스레드 없음」으로 읽힌다.
             "scanned": opened,
-            "filtered_within_scanned": True}
+            "filtered_within_scanned": True,
+            # ★열었지만 **상태를 못 세운** 것들. 필터를 안 지난다(위 주석 참조).
+            "unverifiable": unverifiable}
 
 
 def _thread_id_of(items: list[dict[str, Any]]) -> str | None:
