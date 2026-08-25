@@ -21,6 +21,7 @@ from typing import Any
 
 from agora import ack as ack_mod
 from agora import spool as spool_mod
+from agora.errors import AgoraError
 from agora.event import parse_post
 
 DELIVERY = "at-least-once"          # ★문서·출력이 인용하는 한 곳
@@ -62,15 +63,48 @@ def _minus_overlap(ts: str | None, seconds: int) -> str | None:
     return (moment - timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
+def _verified(item: dict[str, Any], allowed_signers_path: str | None,
+              revoked_path: str | None) -> tuple[bool, str | None]:
+    """이 글이 **우리 계약대로, 명부에 있는 살아 있는 키로** 쓰였는가.
+
+    ★★M-e(codex 2026-08-26) — 그전까지 watch 는 **서명 블록이 있다는 것만** 보고
+      알림을 내보내고 배달 원장을 적었다. 즉 **아무나 쓴 글이 「받았다」로 기록**됐다.
+      부인 방지 원장의 값어치는 「우리가 받았다고 적은 것이 진짜 그 사람 것」이라는 데 있는데,
+      그 전제가 비어 있었다.
+    ★검증 자료가 없으면 **통과가 아니라 미검증**이다 — 못 잰 것을 잰 것으로 세지 않는다.
+    """
+    if not allowed_signers_path:
+        return False, "no_roster_path"
+    from agora import schema, sign
+    from agora.event import parse_post
+    try:
+        parsed = parse_post(item.get("body") or "")
+    except Exception:      # noqa: BLE001 — 우리 서식이 아니면 그냥 아니다
+        return False, "unparseable"
+    event = parsed["event"]
+    try:
+        schema.validate(event)
+    except AgoraError:
+        return False, "schema"
+    verdict = sign.verify_detail(parsed["raw"], parsed["signature"], event.get("from"),
+                                 allowed_signers_path, revoked_path)
+    if verdict["verdict"] != sign.OK:
+        return False, verdict["reason"]
+    return True, None
+
+
 def poll_once(*, store: Any, spool: Any, cursor: Cursor,
-              overlap_seconds: int = OVERLAP_SECONDS) -> dict[str, Any]:
-    """한 주기 — 목록에서 바뀐 것을 고르고, 그것만 읽고, 새 것만 spool 에 남긴다."""
+              overlap_seconds: int = OVERLAP_SECONDS,
+              allowed_signers_path: str | None = None,
+              revoked_path: str | None = None) -> dict[str, Any]:
+    """한 주기 — 목록에서 바뀐 것을 고르고, 그것만 읽고, **검증 통과분만** 알린다."""
     seen_until = cursor.read()
     since = _minus_overlap(seen_until, overlap_seconds)
 
     listed = store.list_threads(updated_since=since)["items"]
     new_events: list[dict[str, Any]] = []
     duplicates = 0
+    unverified = 0
     latest = seen_until or ""
 
     for row in listed:
@@ -84,6 +118,15 @@ def poll_once(*, store: Any, spool: Any, cursor: Cursor,
                 # ★겹쳐 물었으니 나오는 것이 정상이다. 조용히 지나가되 **센다** —
                 #   0 이 아닌 값이 보여야 겹치기가 실제로 돌고 있다는 것을 안다.
                 duplicates += 1
+                continue
+            ok, why = _verified(item, allowed_signers_path, revoked_path)
+            if not ok:
+                # ★버리지 않는다 — **다른 단계 이름으로** 남긴다. 버리면 매 주기 다시 읽고,
+                #   「본 적 없다」와 「보고 물리쳤다」가 같아진다.
+                #   ⚠이 단계는 알림도 배달 영수증도 만들지 않는다. 본 것은 본 것일 뿐이다.
+                spool.record(node_id=node_id, stage=spool_mod.UNVERIFIED_SEEN,
+                             thread_id=item.get("thread_id"))
+                unverified += 1
                 continue
             spool.record(node_id=node_id, stage=spool_mod.FETCHED,
                          thread_id=item.get("thread_id"))
@@ -100,12 +143,14 @@ def poll_once(*, store: Any, spool: Any, cursor: Cursor,
     if latest:
         cursor.write(latest)
     return {"delivery": DELIVERY, "listed": len(listed), "new": len(new_events),
-            "duplicates": duplicates, "events": new_events}
+            "duplicates": duplicates, "unverified": unverified, "events": new_events}
 
 
 def run(*, store: Any, spool: Any, cursor: Cursor, ledger: Any = None,
         interval: int = 60, once: bool = False, sleep: Any = None,
-        emit: Any = None, reconcile_every: int | None = None) -> dict[str, Any]:
+        emit: Any = None, reconcile_every: int | None = None,
+        allowed_signers_path: str | None = None,
+        revoked_path: str | None = None) -> dict[str, Any]:
     """폴링 루프 — 한 줄씩 **곧바로 흘려보낸다**(Monitor 연동 · 설계 §S5).
 
     ★출력은 **한 줄이 한 사건**이고 즉시 flush 한다. 모아서 내보내면 감시하는 쪽에서는
@@ -123,13 +168,18 @@ def run(*, store: Any, spool: Any, cursor: Cursor, ledger: Any = None,
     out = emit or _emit
     napper = sleep or _sleep
     rounds = 0
-    totals = {"new": 0, "duplicates": 0, "reconciled": 0, "tombstoned": 0,
+    # ★`unverified` 도 **총계에 싣는다**(M-e). 안 실으면 「미검증 0건」과
+    #   「미검증을 안 센다」가 운영 화면에서 같아진다 — 조용한 것이 안전한 것으로 읽힌다.
+    totals = {"new": 0, "duplicates": 0, "unverified": 0, "reconciled": 0, "tombstoned": 0,
               "delivered": 0}
     while True:
         rounds += 1
-        result = poll_once(store=store, spool=spool, cursor=cursor)
+        result = poll_once(store=store, spool=spool, cursor=cursor,
+                           allowed_signers_path=allowed_signers_path,
+                           revoked_path=revoked_path)
         totals["new"] += result["new"]
         totals["duplicates"] += result["duplicates"]
+        totals["unverified"] += result["unverified"]
         for event in result["events"]:
             receipt = event.pop("_receipt", None)
             out(format_line(event))

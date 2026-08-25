@@ -149,10 +149,14 @@ def _run_local(name: str, rest: list[str]) -> Any:
     ctx = tools.context_from_config(d)
     if name == "watch":
         from agora.watch import Cursor, run
+        # ★명부 경로를 **실어 준다**(M-e). 안 실으면 검증이 자료 없이 돌고, 모든 글이
+        #   미검증으로 떨어져 알림이 통째로 조용해진다 — 인자를 만든 것으로 배선이 되지 않는다.
         return run(store=ctx.store, spool=ctx.spool, cursor=Cursor(_config_dir(d)),
                    ledger=ctx.ledger,
                    interval=int(kw.get("interval", 60)),
-                   once=bool(kw.get("once", False)))
+                   once=bool(kw.get("once", False)),
+                   allowed_signers_path=ctx.allowed_signers_path,
+                   revoked_path=ctx.revoked_path)
     if name == "reconcile":
         from agora import reconcile as rec
         thread_id = kw.get("thread_id")

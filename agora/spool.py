@@ -30,13 +30,18 @@ from agora import errors
 from agora.errors import AgoraError
 from agora.ledger import now_iso
 
+# ★M-e(2026-08-26) — **본 것과 받은 것을 가른다.** 검증을 통과하지 못한 글도 「봤다」는
+#   사실은 남겨야 한다(안 남기면 매 주기 다시 읽고, 「본 적 없다」와 「보고 물리쳤다」가 같아진다).
+#   그러나 그것은 **수신이 아니다** — 알림도 배달 영수증도 여기서 끝난다.
+UNVERIFIED_SEEN = "unverified_seen"
 FETCHED = "fetched"
 DELIVERED = "delivered"
 ACKED = "acked"
 
 # 순서가 있는 단계다. 뒤로 가는 전이는 거부한다 —
 # 「소비했다」가 「건넸다」로 되돌아가면 수신 증거가 조용히 사라진다.
-STAGES = (FETCHED, DELIVERED, ACKED)
+# ⚠`unverified_seen` 을 **맨 앞**에 둔다: 명부가 바뀌어 나중에 검증되면 앞으로 갈 수 있어야 한다.
+STAGES = (UNVERIFIED_SEEN, FETCHED, DELIVERED, ACKED)
 _RANK = {stage: i for i, stage in enumerate(STAGES)}
 
 

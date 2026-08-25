@@ -3401,6 +3401,22 @@ def _w_env() -> tuple[Any, Any, Any, str]:
     return MockStore(), Spool(d), Cursor(d), d
 
 
+def _wt(name: str) -> str:
+    """짧은 이름 → **계약대로 생긴** thread_id(32 hex).
+
+    ★M-e 이후 watch 가 스키마까지 보므로 `"t1"` 같은 이름은 그 자리에서 거부된다.
+      픽스처가 계약을 안 지키면 그 픽스처가 재려던 축(전달·중복·겹치기)이 **통째로 안 재진다** —
+      오늘 CAS 에서 겪은 것과 같은 자리다. **이름은 사람이 읽고, 값은 계약대로.**
+    """
+    return (name.encode("utf-8").hex() + "0" * 32)[:32]
+
+
+def _w_roster() -> dict[str, Any]:
+    """watch 검증에 필요한 명부 경로 한 벌(M-e 이후 · 없으면 전부 미검증이다)."""
+    f = _fixtures()
+    return {"allowed_signers_path": f["roster_ab"], "revoked_path": None}
+
+
 def _w_post(store: Any, tid: str, i: int, minute: int) -> str:
     """서명된 발언 하나를 운반층에 넣는다. 시각을 직접 준다."""
     ev = _r2_post(f"{i:032x}", f"발언 {i}", thread_id=tid)
@@ -3438,8 +3454,8 @@ def _case_watch_three_posts_three_events() -> None:
     from agora import watch
     store, spool, cursor, _d = _w_env()
     for i in range(3):
-        _w_post(store, "t1", i + 1, i + 1)
-    out = watch.poll_once(store=store, spool=spool, cursor=cursor)
+        _w_post(store, _wt("t1"), i + 1, i + 1)
+    out = watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())
     if out["new"] != 3:
         raise AssertionError(f"이벤트 {out['new']}건: {out}")
     if out["delivery"] != "at-least-once":
@@ -3459,14 +3475,14 @@ def _case_watch_reads_only_changed_threads() -> None:
     # ★두 스레드의 시각을 **겹치기 창(120초)보다 넓게** 벌린다.
     #   안 벌리면 겹치기가 옛 스레드를 정당하게 다시 끌어와서, 이 케이스가
     #   「전부 읽기」와 「바뀐 것만 읽기」를 구별하지 못한다(처음에 그렇게 실패했다).
-    _w_post(store, "t1", 1, 1)
-    _w_post(store, "t2", 2, 10)
-    watch.poll_once(store=store, spool=spool, cursor=cursor)   # 둘 다 읽는다
+    _w_post(store, _wt("t1"), 1, 1)
+    _w_post(store, _wt("t2"), 2, 10)
+    watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())   # 둘 다 읽는다
     first_reads = store.fetch_calls
     if first_reads != 2:
         raise AssertionError(f"첫 주기 읽기 {first_reads}회")
-    _w_post(store, "t2", 3, 30)          # t2 만 바뀐다
-    watch.poll_once(store=store, spool=spool, cursor=cursor)
+    _w_post(store, _wt("t2"), 3, 30)          # t2 만 바뀐다
+    watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())
     if store.fetch_calls - first_reads != 1:
         raise AssertionError(
             f"바뀐 것은 하나인데 {store.fetch_calls - first_reads}개를 읽었다")
@@ -3476,10 +3492,10 @@ def _case_watch_dedupes_repeat_delivery() -> None:
     """같은 글이 두 번 실려 와도 이벤트는 한 번이다(§8 dedupe 1)."""
     from agora import watch
     store, spool, cursor, _d = _w_env()
-    _w_post(store, "t1", 1, 1)
-    first = watch.poll_once(store=store, spool=spool, cursor=cursor)
-    store.touch("t1", "2026-01-01T00:30:00Z")      # 같은 글, 다시 실려 온다
-    second = watch.poll_once(store=store, spool=spool, cursor=cursor)
+    _w_post(store, _wt("t1"), 1, 1)
+    first = watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())
+    store.touch(_wt("t1"), "2026-01-01T00:30:00Z")      # 같은 글, 다시 실려 온다
+    second = watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())
     if first["new"] != 1:
         raise AssertionError(f"첫 주기: {first}")
     if second["new"] != 0 or second["duplicates"] != 1:
@@ -3494,18 +3510,18 @@ def _case_watch_overlap_does_not_miss_boundary() -> None:
     """
     from agora import watch
     store, spool, cursor, _d = _w_env()
-    _w_post(store, "t1", 1, 10)
-    watch.poll_once(store=store, spool=spool, cursor=cursor)
+    _w_post(store, _wt("t1"), 1, 10)
+    watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())
     seen_until = cursor.read()
     # ★커서보다 **조금 이른** 시각에 놓는다. 같은 시각에 놓으면 겹치기가 없어도 걸리므로
     #   그 축을 못 잰다(M115 가 처음에 그렇게 살아남았다).
     #   이 상황은 실제로 난다: 시계 오차·같은 초에 여러 건·목록의 뒤늦은 반영.
-    _w_post(store, "t2", 2, 10)
+    _w_post(store, _wt("t2"), 2, 10)
     earlier = seen_until.replace("00:10:00", "00:09:30")
     if earlier == seen_until:
         raise AssertionError("픽스처가 시각을 못 옮겼다 — 검사가 무의미하다")
-    store.touch("t2", earlier)
-    out = watch.poll_once(store=store, spool=spool, cursor=cursor)
+    store.touch(_wt("t2"), earlier)
+    out = watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())
     if out["new"] != 1:
         raise AssertionError(f"경계에 걸린 글을 놓쳤다: {out}")
 
@@ -3525,19 +3541,20 @@ def _case_watch_restart_no_loss_no_duplicate() -> None:
     store_path = os.path.join(d, "store.json")
     store = MockStore(store_path)
     for i in range(3):
-        _w_post(store, "t1", i + 1, i + 1)
+        _w_post(store, _wt("t1"), i + 1, i + 1)
 
     script = (
         "import sys; sys.path.insert(0, %r);"
         "from agora.spool import Spool; from agora.store_mock import MockStore;"
         "from agora.watch import Cursor, poll_once;"
-        "out = poll_once(store=MockStore(%r), spool=Spool(%r), cursor=Cursor(%r));"
+        "out = poll_once(store=MockStore(%r), spool=Spool(%r), cursor=Cursor(%r),"
+        "                allowed_signers_path=%r);"
         # ★flush=True 가 **꼭 있어야 한다.** stdout 이 파이프면 블록 버퍼링이라
         #   SIGKILL 이 버퍼째 삼킨다 — 이 픽스처가 처음에 빈 출력으로 실패했다.
         #   spool 이 막으려는 바로 그 현상을 픽스처가 스스로 겪은 것이다.
         "print(out['new'], flush=True);"
         "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"
-    ) % (_ROOT, store_path, d, d)
+    ) % (_ROOT, store_path, d, d, _w_roster()["allowed_signers_path"])
     proc = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True,
                           text=True, timeout=60)
     if proc.returncode == 0:
@@ -3547,11 +3564,13 @@ def _case_watch_restart_no_loss_no_duplicate() -> None:
 
     # 재시작 — 같은 글이 다시 오면 안 되고(중복 0), 새 글은 와야 한다(누락 0).
     from agora import watch as w
-    again = w.poll_once(store=MockStore(store_path), spool=Spool(d), cursor=Cursor(d))
+    again = w.poll_once(store=MockStore(store_path), spool=Spool(d), cursor=Cursor(d),
+                        **_w_roster())
     if again["new"] != 0:
         raise AssertionError(f"재시작에서 중복이 났다: {again}")
-    _w_post(MockStore(store_path), "t1", 9, 40)
-    poll = w.poll_once(store=MockStore(store_path), spool=Spool(d), cursor=Cursor(d))
+    _w_post(MockStore(store_path), _wt("t1"), 9, 40)
+    poll = w.poll_once(store=MockStore(store_path), spool=Spool(d), cursor=Cursor(d),
+                       **_w_roster())
     if poll["new"] != 1:
         raise AssertionError(f"재시작 뒤 새 글을 놓쳤다: {poll}")
 
@@ -3559,9 +3578,10 @@ def _case_watch_restart_no_loss_no_duplicate() -> None:
     #   그래서 커서를 지운 결함은 「중복이 났나」로는 안 보이고(M117 이 그렇게 살아남았다),
     #   **오래된 스레드를 다시 읽었나**로만 보인다. 시각이 멀리 떨어진 스레드를 하나 둔다.
     old_store = MockStore(store_path)
-    _w_post(old_store, "t_old", 20, 1)
-    old_store.touch("t_old", "2026-01-01T00:01:00Z")
-    w.poll_once(store=MockStore(store_path), spool=Spool(d), cursor=Cursor(d))
+    _w_post(old_store, _wt("t9"), 20, 1)
+    old_store.touch(_wt("t9"), "2026-01-01T00:01:00Z")
+    w.poll_once(store=MockStore(store_path), spool=Spool(d), cursor=Cursor(d),
+                **_w_roster())
     metered = MockStore(store_path)
     w.poll_once(store=metered, spool=Spool(d), cursor=Cursor(d))
     if metered.fetch_calls != 1:
@@ -3577,8 +3597,8 @@ def _case_watch_says_at_least_once_everywhere() -> None:
     """
     from agora import watch
     store, spool, cursor, _d = _w_env()
-    _w_post(store, "t1", 1, 1)
-    out = watch.poll_once(store=store, spool=spool, cursor=cursor)
+    _w_post(store, _wt("t1"), 1, 1)
+    out = watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())
     line = watch.format_line(out["events"][0])
     if "at-least-once" not in line:
         raise AssertionError(f"출력 줄에 전달 보장이 없다: {line}")
@@ -3685,6 +3705,9 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "서버생존": ("M243-no-last-resort-boundary",),
     # ★인자는 계약에 있는데 동작이 없던 자리.
     "읽기상한": ("M244-read-never-pages", "M245-page-forgets-the-rest"),
+    # ★아무나 쓴 글이 「받았다」로 적히던 자리.
+    "수신검증": ("M246-watch-notifies-unverified", "M247-verify-passes-without-roster",
+                 "M248-unverified-not-recorded"),
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
                  "M227-operator-may-delegate-anytime"),
@@ -4025,7 +4048,7 @@ def _case_ack_counts_delivered_apart_from_acked() -> None:
     ★한 숫자로 뭉치면 「받아 놓고 아무도 안 읽은 것」이 수신 증거로 계상된다.
     """
     from agora import ack as ack_mod
-    from agora.spool import ACKED, DELIVERED, FETCHED
+    from agora.spool import ACKED, DELIVERED, FETCHED, UNVERIFIED_SEEN
     ledger, spool, _d = _ack_env()
     for i in (1, 2, 3):
         _ack_fetched(spool, node_id=f"N{i}", message_id=f"m{i}")
@@ -4034,8 +4057,12 @@ def _case_ack_counts_delivered_apart_from_acked() -> None:
                         message_id=f"m{i}", raw=b"{}")
     ack_mod.ack(ledger=ledger, spool=spool, message_id="m1")
     counts = ack_mod.receipts(spool=spool)
-    if counts != {FETCHED: 1, DELIVERED: 1, ACKED: 1}:
+    # ★`unverified_seen` 은 **수신이 아니다** — 0 이어야 하고, 칸은 있어야 한다
+    #   (칸이 없으면 「미검증 0건」과 「미검증을 안 센다」가 같아진다).
+    if {k: v for k, v in counts.items() if v} != {FETCHED: 1, DELIVERED: 1, ACKED: 1}:
         raise AssertionError(f"계수가 세 단계를 안 가른다: {counts}")
+    if counts.get(UNVERIFIED_SEEN) != 0:
+        raise AssertionError(f"미검증 칸이 없거나 0이 아니다: {counts}")
     if spool.pending(DELIVERED) != ["N2"]:
         raise AssertionError(f"미소비 지목이 틀렸다: {spool.pending(DELIVERED)}")
 
@@ -4946,11 +4973,12 @@ def _case_watch_emits_line_per_event() -> None:
     """감시는 **한 줄이 한 사건**이다(Monitor 연동) — 모아 두지 않는다."""
     from agora import watch
     store, spool, cursor, _d = _w_env()
+    # ★M-e 이후 **검증 통과분만** 알림이 된다 — 픽스처도 진짜 이벤트를 써야
+    #   이 케이스가 재려던 축(한 줄이 한 사건)을 계속 잰다.
     for i in range(3):
-        store.inject_raw(thread_id="t1", body=f"글 {i}",
-                         created_at=f"2026-01-01T00:00:0{i}Z")
+        _w_post(store, _wt("t1"), i + 1, i)
     lines: list[str] = []
-    out = watch.run(store=store, spool=spool, cursor=cursor, once=True,
+    out = watch.run(store=store, spool=spool, cursor=cursor, **_w_roster(), once=True,
                     emit=lines.append)
     if out["new"] != 3 or len(lines) != 3:
         raise AssertionError(f"새 글 {out['new']}건 · 출력 {len(lines)}줄")
@@ -4967,12 +4995,12 @@ def _case_watch_reconciles_on_period_only() -> None:
     from agora import watch
     store, spool, cursor, d = _w_env()
     from agora.ledger import Ledger
-    store.inject_raw(thread_id="t1", body="글", created_at="2026-01-01T00:00:00Z")
-    quiet = watch.run(store=store, spool=spool, cursor=cursor, ledger=Ledger(d),
+    _w_post(store, _wt("t1"), 1, 0)
+    quiet = watch.run(store=store, spool=spool, cursor=cursor, **_w_roster(), ledger=Ledger(d),
                       once=True, emit=lambda _l: None, reconcile_every=20)
     if quiet["reconciled"] != 0:
         raise AssertionError(f"주기 20 인데 첫 회에 대조했다: {quiet}")
-    often = watch.run(store=store, spool=spool, cursor=cursor, ledger=Ledger(d),
+    often = watch.run(store=store, spool=spool, cursor=cursor, **_w_roster(), ledger=Ledger(d),
                       once=True, emit=lambda _l: None, reconcile_every=1)
     if often["reconciled"] < 1:
         raise AssertionError(f"주기 1 인데 대조를 안 했다: {often}")
@@ -6329,13 +6357,18 @@ def _case_watch_writes_the_delivery_receipt() -> None:
     from agora.ledger import Ledger
     store, spool, cursor, d = _w_env()
     ledger = Ledger(d)
-    _w_post(store, "t1", 1, 1)
-    store.inject_raw(thread_id="t1", body="웹에서 손으로 쓴 글",
+    _w_post(store, _wt("t1"), 1, 1)
+    store.inject_raw(thread_id=_wt("t1"), body="웹에서 손으로 쓴 글",
                      created_at="2026-01-01T00:02:00Z")
-    out = watch.run(store=store, spool=spool, cursor=cursor, ledger=ledger,
+    out = watch.run(store=store, spool=spool, cursor=cursor, **_w_roster(), ledger=ledger,
                     once=True, emit=lambda _l: None)
-    if out["new"] != 2:
-        raise AssertionError(f"두 건이 아니다: {out}")
+    # ★★M-e 이후 **손으로 쓴 글은 수신이 아니다.** 예전에는 그것도 `new` 로 세고
+    #   spool 에 fetched 로 남겼다 — 「받았다」는 기록이 아무나 쓴 글로 채워졌다.
+    #   이제 그것은 `unverified` 로 갈라진다(버리는 것이 아니라 **다른 칸에 적는다**).
+    if out["new"] != 1:
+        raise AssertionError(f"검증 통과분만 와야 한다: {out}")
+    if out["unverified"] != 1:
+        raise AssertionError(f"서식 아닌 글이 미검증으로 안 갈렸다: {out}")
     if out["delivered"] != 1:
         raise AssertionError(f"영수증은 우리 이벤트 1건이어야 한다: {out['delivered']}")
     mid = f"{1:032x}"
@@ -6344,8 +6377,77 @@ def _case_watch_writes_the_delivery_receipt() -> None:
         raise AssertionError(f"spool 이 fetched 에 멈췄다: {stages}")
     if not ledger.has(mid, direction=ack_mod.DIRECTION, stage=spool_mod.DELIVERED):
         raise AssertionError("원장에 배달 행이 없다")
-    if not ack_mod._read_event_raw(ledger, "t1", mid):
+    if not ack_mod._read_event_raw(ledger, _wt("t1"), mid):
         raise AssertionError("원문이 보관되지 않았다 — 「무엇을 받았다고 했는가」에 못 댄다")
+
+
+def _case_watch_notifies_only_verified() -> None:
+    """감시는 **검증 통과분만** 알린다(M-e · codex 2026-08-26).
+
+    ★그전까지 watch 는 **서명 블록이 있다는 것만** 보고 알림을 내보내고 배달 원장을 적었다.
+      즉 **아무나 쓴 글이 「받았다」로 기록**됐다. 부인 방지 원장의 값어치는
+      「우리가 받았다고 적은 것이 진짜 그 사람 것」이라는 데 있는데 그 전제가 비어 있었다.
+    ★세 가지를 함께 잰다: ⑴통과분은 온다 ⑵명부 밖 서명은 **안 온다**
+      ⑶안 온 것도 **버려지지 않는다**(`unverified_seen` 으로 남는다 — 안 남기면
+      매 주기 다시 읽고 「본 적 없다」와 「보고 물리쳤다」가 같아진다).
+    ★그리고 **검증 자료가 없으면 통과가 아니다** — 못 잰 것을 잰 것으로 세지 않는다.
+    """
+    from agora import spool as spool_mod
+    from agora import watch
+    f = _fixtures()
+    store, spool, cursor, _d = _w_env()
+    _w_post(store, _wt("t1"), 1, 1)
+    out = watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())
+    if out["new"] != 1 or out["unverified"] != 0:
+        raise AssertionError(f"통과분이 안 왔다: {out}")
+
+    # 명부 **밖** 키로 서명한 글 — 서명 블록은 멀쩡히 있다.
+    store2, spool2, cursor2, _d2 = _w_env()
+    ev = _r2_post("5" * 32, "명부 밖에서 쓴 글", thread_id=_wt("t2"))
+    ev["from"] = "outsider"          # 명부에 없는 이름 = 명부 밖 키와 같은 판정
+    store2.inject_raw(thread_id=_wt("t2"), body=_r2_signed(ev),
+                      created_at="2026-01-01T00:01:00Z")
+    out2 = watch.poll_once(store=store2, spool=spool2, cursor=cursor2, **_w_roster())
+    if out2["new"] != 0 or out2["unverified"] != 1:
+        raise AssertionError(f"명부 밖 서명이 알림으로 나갔다: {out2}")
+    stages = {row.get("stage") for row in spool2.state().values()}
+    if stages != {spool_mod.UNVERIFIED_SEEN}:
+        raise AssertionError(f"미검증이 다른 단계로 갔다: {stages}")
+
+    # 검증 자료가 없으면 **아무것도 통과하지 않는다.**
+    store3, spool3, cursor3, _d3 = _w_env()
+    _w_post(store3, _wt("t1"), 1, 1)
+    blind = watch.poll_once(store=store3, spool=spool3, cursor=cursor3)
+    if blind["new"] != 0 or blind["unverified"] != 1:
+        raise AssertionError(f"명부 없이 통과시켰다: {blind}")
+    if not f:
+        raise AssertionError("픽스처 없음")
+
+
+def _case_receipt_only_for_our_own_format() -> None:
+    """영수증 재료는 **우리 이벤트에서만** 나온다 — 그 층만의 표식(2026-08-26).
+
+    ★★왜 이 케이스가 새로 필요했나: M-e(검증 통과분만 알림)를 넣자 **M216 이 살아남았다.**
+      서식 아닌 글이 `_receipt_of` 에 **닿지 않게** 됐기 때문이다 — 그 층이 고장 나도
+      위층이 가려 준다. 이 저장소가 아는 병이다: **두 겹이 서로를 가려 주면
+      한 겹이 비어도 초록이다.** ⇒ 처방도 아는 것이다 — **각 층에 그 층만의 표식을 둔다.**
+    ★그래서 여기서는 `_receipt_of` 를 **직접** 부른다. 배선은 위 케이스들이 재고,
+      이 케이스는 **이 함수 하나의 약속**만 잰다.
+    """
+    from agora import watch
+    f = _fixtures()
+    if watch._receipt_of({"body": "웹에서 손으로 쓴 글"}) is not None:
+        raise AssertionError("서식 아닌 글에서 영수증을 만들어 냈다")
+    if watch._receipt_of({"body": ""}) is not None:
+        raise AssertionError("빈 글에서 영수증을 만들어 냈다")
+    ev = _r2_post("7" * 32, "진짜 발언", thread_id=_wt("t1"))
+    got = watch._receipt_of({"body": _r2_signed(ev)})
+    if not got or got["message_id"] != "7" * 32 or got["thread_id"] != _wt("t1"):
+        raise AssertionError(f"우리 이벤트인데 영수증이 안 나온다: {got}")
+    if not got["raw"]:
+        raise AssertionError("원문이 비었다 — 「무엇을 받았다고 했는가」에 못 댄다")
+    if not f:
+        raise AssertionError("픽스처 없음")
 
 
 def _case_delivery_receipt_needs_a_ledger() -> None:
@@ -6357,8 +6459,8 @@ def _case_delivery_receipt_needs_a_ledger() -> None:
     from agora import spool as spool_mod
     from agora import watch
     store, spool, cursor, _d = _w_env()
-    _w_post(store, "t1", 1, 1)
-    out = watch.run(store=store, spool=spool, cursor=cursor,
+    _w_post(store, _wt("t1"), 1, 1)
+    out = watch.run(store=store, spool=spool, cursor=cursor, **_w_roster(),
                     once=True, emit=lambda _l: None)
     if out["delivered"] != 0:
         raise AssertionError(f"원장이 없는데 건넸다고 적었다: {out}")
@@ -7403,6 +7505,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("MCP: 예시대로 서버가 뜬다",      _case_example_mcp_config_actually_starts_the_server, None),
     ("MCP: 기동은 도구가 아니다",      _case_mcp_serve_is_not_itself_a_tool, None),
     ("영수증: 감시가 배달을 적는다",   _case_watch_writes_the_delivery_receipt, None),
+    ("감시: 검증 통과분만 알린다",     _case_watch_notifies_only_verified, None),
+    ("영수증: 서식 아닌 글엔 없다",    _case_receipt_only_for_our_own_format, None),
     ("영수증: 원장 없으면 안 적는다",  _case_delivery_receipt_needs_a_ledger, None),
     ("code 8: 도구가 판정한다",        _case_unknown_commit_is_settled_by_the_tool, None),
     ("배선: 안 불리는 정의 0",        _case_no_unwired_production_definitions, None),
@@ -8311,7 +8415,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("M216-receipt-taken-from-any-body", "agora/watch.py",
      '    except Exception:      # noqa: BLE001 — 우리 서식이 아니면 그냥 아니다\n        return None\n    event = parsed["event"]',
      '    except Exception:      # noqa: BLE001\n        return {"message_id": "0" * 32, "thread_id": "t1", "raw": b""}\n    event = parsed["event"]',
-     "영수증: 감시가 배달을 적는다"),
+     "영수증: 서식 아닌 글엔 없다"),
     ("M212-mcp-serve-prints-return-value", "agora/cli.py",
      "        mcp_server.serve()\n        return None",
      "        return mcp_server.serve()",
@@ -8450,6 +8554,19 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            return out, out[-1].get("message_id")',
      '            return out, None',
      "읽기: 커서로 나눠 준다"),
+    # ★M-e — 서명 블록이 있다는 것만 보고 「받았다」를 적던 자리.
+    ("M246-watch-notifies-unverified", "agora/watch.py",
+     '            ok, why = _verified(item, allowed_signers_path, revoked_path)',
+     '            ok, why = True, None',
+     "감시: 검증 통과분만 알린다"),
+    ("M247-verify-passes-without-roster", "agora/watch.py",
+     '    if not allowed_signers_path:\n        return False, "no_roster_path"',
+     '    if not allowed_signers_path:\n        return True, None',
+     "감시: 검증 통과분만 알린다"),
+    ("M248-unverified-not-recorded", "agora/watch.py",
+     '                spool.record(node_id=node_id, stage=spool_mod.UNVERIFIED_SEEN,\n                             thread_id=item.get("thread_id"))',
+     '                pass',
+     "감시: 검증 통과분만 알린다"),
 )
 
 
