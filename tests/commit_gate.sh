@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# 커밋 전 게이트 — 공개 표현 규약(금칙어 0) + 비밀 누출 0.
+#
+# ★왜 스크립트인가: 이 검사를 손으로 칠 때마다 한 번씩 틀렸다.
+#   `grep -c` 는 0건일 때 "0" 을 찍고 **종료코드 1** 로 끝난다. `|| echo 0` 을 붙이면
+#   출력이 "0\n0" 이 되어 「0이 아니다」가 참이 되고, **깨끗한 파일이 위반으로 보고된다.**
+#   검사기가 고장나면 그 출력은 아무것도 증명하지 않는다 — 그래서 도구로 고정한다.
+#
+# ★금칙어 목록은 tests/forbidden-terms.txt 에 **한 곳에만** 둔다.
+#   그 파일은 정의상 금칙어를 담으므로 검사 대상에서 뺀다 — 그리고 **뺐다는 사실을 출력한다.**
+#   보이지 않는 억제는 미탐과 구별되지 않는다.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+
+TERMS_FILE="tests/forbidden-terms.txt"
+EXCLUDED_FROM_TERM_SCAN=("$TERMS_FILE")
+rc=0
+
+echo "== 공개 표현 규약 =="
+if [ ! -s "$TERMS_FILE" ]; then
+  echo "  FAIL — 금칙어 목록이 비었거나 없다($TERMS_FILE). 검사가 무의미하므로 통과시키지 않는다."
+  exit 3
+fi
+term_count=$(grep -c . "$TERMS_FILE")
+echo "  목록 $term_count 개 · 검사 제외 ${#EXCLUDED_FROM_TERM_SCAN[@]}건: ${EXCLUDED_FROM_TERM_SCAN[*]}"
+
+# 검사 대상 = git 이 추적하거나 추적할 파일(무시 파일 제외). 텍스트만 본다.
+hits=0
+while IFS= read -r f; do
+  case " ${EXCLUDED_FROM_TERM_SCAN[*]} " in *" $f "*) continue ;; esac
+  [ -f "$f" ] || continue
+  n=$(grep -c -f "$TERMS_FILE" -- "$f" 2>/dev/null); [ -n "$n" ] || n=0
+  if [ "$n" -gt 0 ] 2>/dev/null; then
+    echo "  위반 $f: ${n}건"
+    hits=$((hits + n))
+  fi
+done < <(git ls-files --cached --others --exclude-standard)
+echo "  합계 ${hits}건"
+[ "$hits" -eq 0 ] || rc=1
+
+echo "== 비밀 누출 =="
+if command -v gitleaks >/dev/null 2>&1; then
+  if gitleaks dir . --no-banner >/tmp/agora-gitleaks.$$ 2>&1; then
+    echo "  no leaks"
+  else
+    echo "  FAIL — 아래 출력 확인"; tail -20 /tmp/agora-gitleaks.$$; rc=1
+  fi
+  rm -f /tmp/agora-gitleaks.$$
+else
+  # ★없으면 통과가 아니라 실패다. 못 잰 것을 잰 것으로 세지 않는다.
+  echo "  FAIL — 스캐너 부재로 **미측정**(통과 아님)"; rc=1
+fi
+
+echo "== selftest =="
+if ./bin/agora selftest >/tmp/agora-selftest.$$ 2>&1; then
+  python3 -c "
+import json,sys
+r=json.load(open('/tmp/agora-selftest.$$'))
+s=r['요약']; m=r['미측정']
+print('  ', s['케이스'], '·', s['뮤테이션'], '· 슬라이스', s['슬라이스'])
+print('   미측정: NOT-APPLIED', m['뮤테이션_NOT_APPLIED'], '· 미발생 오류코드', m['발생하지_않은_오류코드'])
+"
+else
+  echo "  FAIL — selftest rc != 0"; tail -20 /tmp/agora-selftest.$$; rc=1
+fi
+rm -f /tmp/agora-selftest.$$
+
+echo "== 결과: $([ $rc -eq 0 ] && echo PASS || echo FAIL) =="
+exit $rc

@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""agora — 얇은 실행기. 경로만 세우고 CLI 에 넘긴다."""
+import os
+import sys
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from agora.cli import main  # noqa: E402
+
+raise SystemExit(main())
