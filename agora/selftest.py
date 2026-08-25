@@ -3481,6 +3481,9 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "목록정직": ("M228-threads-drops-orphans-silently",),
     # ★화면이 프로토콜보다 앞서 나가던 자리(S7-2 의 거울상).
     "투영정합": ("M229-close-projects-unconditionally", "M230-acceptance-always-true"),
+    # ★우리 방언으로만 참이던 도구 표면(성찰 I-8).
+    "전송규약": ("M231-rpc-envelope-stripped", "M232-rpc-answers-notifications",
+                 "M233-rpc-error-sent-as-result", "M234-rpc-protocol-silently-coerced"),
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
                  "M227-operator-may-delegate-anytime"),
@@ -6000,7 +6003,11 @@ def _case_example_mcp_config_actually_starts_the_server() -> None:
     argv = [server.get("command")] + list(server.get("args") or [])
     if not server.get("command"):
         raise AssertionError(f"예시에 띄울 명령이 없다: {cfg}")
-    proc = _sp.run(argv, cwd=_ROOT, input='{"method":"tools/list"}\n',
+    # ★프레임도 **진짜 규약**으로 보낸다. 구판은 `{"method":…}` 만 보냈는데, 그것은
+    #   우리가 지은 방언이었고 그래서 이 초록이 「남이 붙을 수 있다」를 증명하지 못했다(성찰 I-8).
+    #   ⚠지금은 `id` 없는 요청 = **알림**이라 응답이 0줄이다 — 규약대로 `id` 를 붙인다.
+    frame = ('{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+    proc = _sp.run(argv, cwd=_ROOT, input=frame + "\n",
                    capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
         raise AssertionError(f"예시대로 띄웠는데 죽었다(rc={proc.returncode}): "
@@ -6013,7 +6020,7 @@ def _case_example_mcp_config_actually_starts_the_server() -> None:
         listed = _json.loads(lines[0])
     except ValueError as e:
         raise AssertionError(f"응답이 JSON 이 아니다: {e} · {lines[0][:120]}") from None
-    names = sorted(t["name"] for t in listed.get("tools") or [])
+    names = sorted(t["name"] for t in (listed.get("result") or {}).get("tools") or [])
     want = sorted(cli.mcp_tool_name(n) for n in tools.CORE_TOOLS)
     if names != want:
         raise AssertionError(f"띄운 서버의 도구 목록이 계약과 다르다: {names}")
@@ -6507,6 +6514,127 @@ def _case_rejected_close_does_not_touch_the_screen() -> None:
         raise AssertionError("받아들여진 종결이 화면에 안 갔다")
 
 
+# ── 전송 규약 준수 — **우리 클라이언트를 쓰지 않고** 잰다 ───────────────────
+# ★이 블록이 있는 이유: 앞선 S6-2 초록은 **우리가 쓴 방언 클라이언트**로 잰 것이었고,
+#   그래서 실제 클라이언트가 첫 줄에서 끊긴다는 사실을 못 봤다(성찰 I-8).
+#   ⇒ 여기서는 **손으로 쓴 JSON-RPC 프레임**을 프로세스에 흘려 넣고, 나온 줄만 본다.
+#     `handle()`·`rpc_dispatch()` 를 부르지 않는다 — 부르는 순간 다시 우리끼리 맞추는 것이다.
+
+RPC_FRAMES = (
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":'
+    '{"protocolVersion":"2025-06-18","capabilities":{},'
+    '"clientInfo":{"name":"selftest","version":"0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    # ★**성공하는 알림**도 넣는다. 위 알림은 dispatch 에서 실패하므로 「오류 알림」 문만 닿고,
+    #   「성공 알림」 문은 안 닿는다 — 그 상태로는 그 문을 지워도 초록이다(M232 가 그렇게 살아남았다).
+    '{"jsonrpc":"2.0","method":"tools/list"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":'
+    '{"name":"agora.envelope_check","arguments":{"envelope":{}}}}',
+    '{"jsonrpc":"2.0","id":4,"method":"nonsense/method"}',
+)
+
+
+def _rpc_roundtrip(frames: tuple[str, ...], directory: str) -> list[dict[str, Any]]:
+    """프레임을 **프로세스에** 흘려 넣고 나온 줄을 그대로 돌려준다."""
+    import json as _json
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ, AGORA_CONFIG_DIR=directory)
+    proc = _sp.run([_os.path.join(_ROOT, "bin", "agora"), "mcp-serve"],
+                   input="\n".join(frames) + "\n", capture_output=True, text=True,
+                   timeout=120, cwd=_ROOT, env=env)
+    if proc.returncode != 0:
+        raise AssertionError(f"서버가 죽었다(rc={proc.returncode}): {proc.stderr[:200]}")
+    out = []
+    for raw in proc.stdout.splitlines():
+        if not raw.strip():
+            continue
+        try:
+            out.append(_json.loads(raw))
+        except ValueError as e:
+            raise AssertionError(f"응답이 JSON 이 아니다: {e} · {raw[:120]}") from None
+    return out
+
+
+def _case_mcp_speaks_jsonrpc_not_our_dialect() -> None:
+    """**실제 MCP 규약**(JSON-RPC 2.0)으로 말한다 — 손으로 쓴 프레임으로 잰다.
+
+    ★2026-08-26 실측으로 드러난 자리: 그전까지 이 서버는 **우리가 지은 방언**을 말했고
+      (`initialize` 에 code 10 · 봉투 없음), 그래서 **어떤 실제 클라이언트도 붙을 수 없었다.**
+      그런데 시험은 초록이었다 — **그 시험의 클라이언트를 우리가 썼기 때문이다.**
+      ⇒ 외부 계약은 **외부 규약으로**, 그것도 **우리가 쓰지 않은 형태로** 재야 한다.
+    ★네 가지를 함께 잰다(하나만 재면 나머지가 깨져도 초록이다):
+      ⑴ 봉투(`jsonrpc`·`id`) ⑵ **알림에는 응답이 0줄** ⑶ `tools/call` 은 `content[]`
+      ⑷ 모르는 메서드는 **규약 오류 코드**(-32601)이되 **우리 code 를 `data` 에 보존**한다.
+    """
+    from agora import cli, mcp_server, tools
+    d = _config_dir_fixture(operators_text=None)
+    lines = _rpc_roundtrip(RPC_FRAMES, d)
+
+    # ⑵ 요청 4건 · 알림 **2건**(하나는 실패하는 알림·하나는 성공하는 알림) → **응답은 4줄**.
+    if len(lines) != 4:
+        raise AssertionError(f"응답 줄 수가 4가 아니다({len(lines)}) — 알림에 답했을 수 있다: "
+                             f"{[l.get('id') for l in lines]}")
+    if [l.get("id") for l in lines] != [1, 2, 3, 4]:
+        raise AssertionError(f"id 가 요청과 짝이 안 맞는다: {[l.get('id') for l in lines]}")
+    # ⑴ 봉투
+    for l in lines:
+        if l.get("jsonrpc") != mcp_server.JSONRPC:
+            raise AssertionError(f"봉투가 없다: {l}")
+        if ("result" in l) == ("error" in l):
+            raise AssertionError(f"result 와 error 는 정확히 하나여야 한다: {l}")
+
+    init = lines[0]["result"]
+    if init.get("protocolVersion") != "2025-06-18":
+        raise AssertionError(f"보낸 판본을 안 돌려준다: {init.get('protocolVersion')}")
+    if "tools" not in (init.get("capabilities") or {}):
+        raise AssertionError(f"도구 능력을 안 밝힌다: {init.get('capabilities')}")
+    if not (init.get("serverInfo") or {}).get("name"):
+        raise AssertionError("serverInfo 가 없다")
+
+    listed = [t["name"] for t in lines[1]["result"]["tools"]]
+    want = sorted(cli.mcp_tool_name(n) for n in tools.CORE_TOOLS)
+    if sorted(listed) != want:
+        raise AssertionError(f"도구 목록이 계약과 다르다: {sorted(listed)}")
+
+    # ⑶ tools/call = content 배열 · 안의 text 는 도구 반환을 담은 JSON
+    content = lines[2]["result"].get("content")
+    if not content or content[0].get("type") != "text":
+        raise AssertionError(f"tools/call 결과가 content 배열이 아니다: {lines[2]['result']}")
+    import json as _json
+    inner = _json.loads(content[0]["text"])
+    if "ok" not in inner:
+        raise AssertionError(f"도구 반환이 안 실렸다: {inner}")
+
+    # ⑷ 모르는 메서드 = 규약 코드 · 우리 code 는 data 에 남는다
+    err = lines[3]["error"]
+    if err.get("code") != mcp_server.RPC_METHOD_NOT_FOUND:
+        raise AssertionError(f"규약 오류 코드가 아니다: {err}")
+    if (err.get("data") or {}).get("agora_code") != errors.ARGUMENT:
+        raise AssertionError(f"우리 code 가 사라졌다: {err}")
+
+
+def _case_mcp_rejects_unknown_protocol_version() -> None:
+    """모르는 규약 판본은 **거부한다** — 조용히 우리 판본으로 바꿔 답하지 않는다.
+
+    ★바꿔 답하면 클라이언트는 자기가 요청한 판본으로 말하고 우리는 다른 판본으로 답한다.
+      그 어긋남은 한참 뒤 엉뚱한 자리에서 터지고, 그때는 원인을 여기까지 못 따라온다.
+    ★양쪽으로 잰다: 아는 판본 2종은 **그대로 되돌려 주고**, 모르는 판본은 오류다.
+    """
+    from agora import mcp_server
+    for version in mcp_server.SUPPORTED_PROTOCOLS:
+        if mcp_server.negotiate(version) != version:
+            raise AssertionError(f"아는 판본을 안 돌려준다: {version}")
+    try:
+        mcp_server.negotiate("1999-01-01")
+    except AgoraError as e:
+        if e.code != errors.ARGUMENT:
+            raise AssertionError(f"다른 코드: {e.code}") from None
+    else:
+        raise AssertionError("모르는 판본을 조용히 받아들였다")
+
+
 # ── 배선 대조 자체를 상시 케이스로(master 승인 2026-08-26) ───────────────────
 
 WIRING_ALLOWLIST = "tests/wiring-allowlist.txt"
@@ -6939,6 +7067,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("게이트: 증거로 든 그물이 실재한다", _case_gate_evidence_names_are_real, None),
     ("목록: 못 세운 것을 말한다",      _case_threads_shows_what_it_could_not_verify, None),
     ("투영: 거부된 종결은 안 닫는다",  _case_rejected_close_does_not_touch_the_screen, None),
+    ("MCP: 규약으로 말한다",           _case_mcp_speaks_jsonrpc_not_our_dialect, None),
+    ("MCP: 모르는 판본은 거부",        _case_mcp_rejects_unknown_protocol_version, None),
 )
 
 
@@ -7850,6 +7980,23 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                             stale=reduced.get("stale"))',
      "                             stale=None)",
      "읽기: 진 글도 audit 에 나온다"),
+    # ★master 동봉 조건 ⑶ — 봉투 제거 · 알림에 응답 · error 를 result 로.
+    ("M231-rpc-envelope-stripped", "agora/mcp_server.py",
+     '        _write(dst, {"jsonrpc": JSONRPC, "id": request.get("id"), "result": result})',
+     "        _write(dst, result)",
+     "MCP: 규약으로 말한다"),
+    ("M232-rpc-answers-notifications", "agora/mcp_server.py",
+     "        if notification:\n            continue                         # ⛔성공해도 알림에는 응답 없음",
+     "        if False:\n            continue",
+     "MCP: 규약으로 말한다"),
+    ("M233-rpc-error-sent-as-result", "agora/mcp_server.py",
+     '            _write(dst, {"jsonrpc": JSONRPC, "id": request.get("id"),\n                         "error": _rpc_error(',
+     '            _write(dst, {"jsonrpc": JSONRPC, "id": request.get("id"),\n                         "result": _rpc_error(',
+     "MCP: 규약으로 말한다"),
+    ("M234-rpc-protocol-silently-coerced", "agora/mcp_server.py",
+     '    raise AgoraError(errors.ARGUMENT, "모르는 규약 판본",',
+     "    return SUPPORTED_PROTOCOLS[0]\n    raise AgoraError(errors.ARGUMENT, \"모르는 규약 판본\",",
+     "MCP: 모르는 판본은 거부"),
     ("M229-close-projects-unconditionally", "agora/tools.py",
      '    verdict = _accepted(ctx, thread_id, out["message_id"])\n    if not verdict["accepted"]:\n        return {"ok": False, "message_id": out["message_id"], "usage": out["usage"],\n                "why": verdict["why"], "state": verdict["state"],\n                "projection": {"sent": False, "verified": False, "why": "not_accepted"}}\n    projection = _project(ctx, thread_id=thread_id, state="closed", close_reason=reason)',
      '    projection = _project(ctx, thread_id=thread_id, state="closed", close_reason=reason)',
