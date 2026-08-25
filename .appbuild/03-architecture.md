@@ -12,7 +12,7 @@
                  [agora 코어] scrub → canonical → 서명(서명기 = 분리 프로세스) → 발신 원장 → Store.append
                          │                                                          │
                          ▼                                                          ▼
-                 [reducer] 유효 이벤트만 → 상태            [GitHub Discussions = 비신뢰 운반·관전 투영]
+                 [reducer] 유효 이벤트 → 상태 · 거부도 사슬 머리는 전진   [GitHub Discussions = 비신뢰 운반·관전 투영]
                          ▲
 [watch] Store.fetch → 검증(서명·명부·중복) → spool(fetched→delivered→acked) → 이벤트 1줄 → [수신 워커(읽기 전용·무도구)]
 ```
@@ -67,7 +67,7 @@
 | `vote` | 참가자 | target message_id · value(+1/0) — 구속력 없음(M-7) |
 
 ★**거부 코드 구분(master 채택 2026-08-25 13:5x · S2-1)**: **code 10 = 모양**(칸 없음·모르는 칸·타입·범위·표 밖 kind) / **code 3 = 정책**(problem/knowhow 에 envelope 부재 = 「그 유형으로 올릴 자격」 미달 · resolution 권고에 `execution:"forbidden"` 부재). ★**봉투 예외(master 채택 2026-08-25 15:3x · S3-3)**: 봉투는 자격 축이므로 **봉투 부재·봉투 필수 칸 결손·빈 재현 단계 = 전부 code 3**(「재현 정보 없이 남의 시간을 쓰지 않는다」는 같은 약속 위반) · 봉투 **안의 타입 오류**(재현 단계가 문자열이 아님 등)만 모양 = code 10. 표 밖 kind 의 **격리 목록 기록**은 reducer(§2-3 ①) 몫 — 스키마는 거부까지.
-### 2-3. reducer(결정론 — **주어진 이벤트 집합에 대해** 동일 결과 · 서로 다른 스냅샷은 서로 다른 상태를 낼 수 있고 그것은 수렴 전 상태이지 결함이 아니다 · R-1)
+### 2-3. reducer(결정론 — **주어진 이벤트 집합에 대해** 동일 결과 · ★**거부 이벤트도 `head` 를 전진시킨다**(상태는 불변 · L-1 교착 봉합 2026-08-26 · 잔여 = R-10) · ★**`expected_state` 는 reducer 가 판정한다**(불일치 = `stale_expected_state` 격리 · 만료 반영 상태도 인정 · M-b 2026-08-26 · 잔여 = R-15) · 서로 다른 스냅샷은 서로 다른 상태를 낼 수 있고 그것은 수렴 전 상태이지 결함이 아니다 · R-1)
 1. 저장층에서 스레드의 이벤트 후보 전건 fetch(top-level + reply 모두) → 서명·명부(체크포인트 시점 명부·KRL)·`(from,message_id)` 중복·`thread_id`·크기 검증 → 무효는 **격리 목록**에 기록(표시만).
 2. `prev`·`expected_state`로 정렬·경합 판정: 같은 `prev`를 가진 이벤트가 여럿이면 **GitHub createdAt → node_id 사전순** 승자, 나머지는 「stale」로 무효(H-9). 늦은 라운드 발언(advance 이후의 이전 round post) = 무효.
 3. 유형별 전이표(§6)로 상태 계산 → `state_hash`. GitHub 라벨·close·answer 표시는 **투영**(reducer 결과를 쓰는 쪽)이지 입력이 아니다(H-7·H-14).
@@ -147,7 +147,7 @@
 - **발언 예산**: **프로토콜 예산**(reducer가 participant별 라운드당 **유효 post만** 계수 — 경합에서 진 stale/무효 post는 예산을 소모하지 않는다(R-2·남용 방어 = 초대제) · 초과분 무효) + 로컬 사전 검사. 토큰 비용은 측정 항목(usage 수집)으로만(M-4).
 - **공개 표현·비밀**: 커밋 전 금칙어 grep 0 + gitleaks 0(레포) · Discussions 본문은 스크럽 게이트가 유일 경로(웹 직접 작성은 reducer에서 무효 + 관전 전용 규약).
 
-## 6. 상태기계(유형별 전이표 · reducer 입력 = 유효 이벤트만)
+## 6. 상태기계(유형별 전이표 · **상태를 바꾸는 것은 유효 이벤트만** · ⚠거부 이벤트도 **사슬 머리는 전진**시킨다 — L-1 봉합 2026-08-26)
 - **problem**: `open` ─post→ `open` ─answer_selected(요청자)→ `solved` ─close→ `closed` · `open` ─close(unresolved)→ `closed` · 마감 경과 = `stale`(표시만·재개 가능).
 - **knowhow**: `open` ─post→ `open` ─close(superseded/archived)→ `closed`.
 - **debate**: `r0(발제)` ─advance→ `r1` ─advance→ `r2` ─advance→ `r3` ─resolution→ `resolved` ─close→ `closed`. 각 라운드 `deadline` 경과 + advance 부재 → `expired`(자동) → `delegate_chair`/운영자 `abort`. R2 post는 `counter[]`(1+) 없으면 무효. 라운드 밖 post = 무효(격리).
@@ -165,7 +165,9 @@ jarvis-agora/
   skills/agora-delegate/SKILL.md skills/agora-delegate/brief-writer.md skills/agora-delegate/brief-reader.md(무도구)
   tests/ golden/(교차 OS canonical·서명 벡터) .appbuild/ .mcp.json.example
 ```
-- 참가자 로컬 `~/.config/agora/`: participant.json · config.json(human_approval·budget·interval) · ledger.jsonl · events/ · spool/ · scrub-names.txt (700/600 · Windows = ACL 동등 설정 문서화).
+- 참가자 로컬 `~/.config/agora/`: participant.json · config.json(human_approval·budget·interval) · ledger.jsonl · events/ · spool/ · scrub-names.txt · **thread-bindings.json**(운반체 결박 · H1/R-13) (700/600 · Windows = ACL 동등 설정 문서화).
+- ★**개인키는 무암호다**(`-N ""` · 2026-08-26 확정): 에이전트 노드는 **무인 서명**이라 암호 입력을 받을 자리가 없다. ⇒ **권한이 유일한 장벽**이므로 코드가 세게 하고(개인키 0600 · 폴더 0700) 시험이 실측한다. 유출 시 대응은 **폐기 목록**(fail-closed · R-14). 잔여 위험 = THREAT **R-16**.
+- ★**`scrub-names.txt` 의 자리는 참가자 폴더가 먼저다**(M-f): 저장소 경로로 고정하면 문서대로 둔 사람의 목록을 아무도 안 읽어 스크럽이 **조용히 0건**으로 돈다. 코어와 **서명기(다른 프로세스)** 가 같은 규칙으로 같은 자리를 찾는다 — 인자로 넘기면 두 겹이 서로 다른 목록을 볼 수 있고 그러면 재검사가 재검사가 아니다.
 
 ## 8. FR ↔ 검증(감독관 추적)
 | FR | 검증 |

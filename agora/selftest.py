@@ -2286,6 +2286,78 @@ def _case_names_absence_is_visible() -> None:
         raise AssertionError(f"이름 계수: {hit['names_loaded']}")
 
 
+def _case_keygen_locks_down_the_files() -> None:
+    """키에 암호가 없으므로 **권한이 유일한 장벽**이다(M-g · codex 2026-08-26 · master 하향).
+
+    ★에이전트 노드는 **무인 서명**이라 암호 입력을 받을 자리가 없다 — 그래서 `-N ""` 는
+      결함이 아니라 **선택**이다. 대신 그 선택의 대가를 **실측으로** 지킨다:
+      개인키 0600 · 설정 폴더 0700. ⚠백업·복사로 파일이 새면 장벽이 없다 —
+      그 경우의 대응은 **폐기 목록**(H2 봉합)이고, THREAT 에 그렇게 적었다.
+    ★선택을 문서로만 적으면 다음 사람이 조용히 되돌린다. **코드가 세게 한다.**
+    """
+    import stat
+    import tempfile
+    from agora import keygen
+    d = os.path.join(tempfile.mkdtemp(prefix="agora-keygen-"), "cfg")
+    old = os.environ.get("AGORA_CONFIG_DIR")
+    os.environ["AGORA_CONFIG_DIR"] = d
+    try:
+        keygen.run(["selftest-perm"])
+    finally:
+        if old is None:
+            os.environ.pop("AGORA_CONFIG_DIR", None)
+        else:
+            os.environ["AGORA_CONFIG_DIR"] = old
+    want = {"id_ed25519": 0o600, "config.json": 0o600}
+    for name, mode in want.items():
+        path = os.path.join(d, name)
+        if not os.path.exists(path):
+            continue                     # 그 파일을 안 만드는 판이면 이 축은 해당 없음
+        got = stat.S_IMODE(os.stat(path).st_mode)
+        if got != mode:
+            raise AssertionError(f"{name} 권한 {oct(got)} — {oct(mode)} 이어야 한다")
+    got = stat.S_IMODE(os.stat(d).st_mode)
+    if got != 0o700:
+        raise AssertionError(f"설정 폴더 권한 {oct(got)}")
+
+
+def _case_name_list_comes_from_the_participant_folder() -> None:
+    """이름 목록은 **참가자 설정 폴더**에서 읽는다(M-f · codex 2026-08-26).
+
+    ★★그전에는 저장소 안 한 경로로 고정돼 있었다. `ONBOARDING` 이 시키는 대로
+      `AGORA_CONFIG_DIR` 에 목록을 둔 사람의 것은 **아무도 안 읽었다** ⇒ 그 사람의 스크럽은
+      **조용히 0건으로** 돌았다. 「안 걸렀다」와 「걸릴 것이 없었다」가 같아지는 자리다.
+    ★두 방향으로 잰다: 참가자 폴더의 목록이 **읽히고**(계수·적발), 폴더에 없으면
+      **저장소 기본으로 돌아간다**(둘 중 하나만 재면 반대쪽이 깨져도 초록이다).
+    ★그리고 **같은 자리를 서명기도 본다** — 경로를 인자로 넘기지 않고 규칙으로 정한 이유다.
+      인자로 넘기면 두 겹이 서로 다른 목록을 볼 수 있고, 그러면 재검사가 재검사가 아니다.
+    """
+    import tempfile
+    from agora import scrub
+    d = tempfile.mkdtemp(prefix="agora-names-")
+    local = os.path.join(d, scrub.NAMES_FILENAME)
+    with open(local, "w", encoding="utf-8") as fh:
+        fh.write("# 이 참가자가 가릴 이름\n라마바\n")
+    keep = os.environ.get("AGORA_CONFIG_DIR")
+    try:
+        os.environ["AGORA_CONFIG_DIR"] = d
+        if scrub.names_path() != local:
+            raise AssertionError(f"참가자 폴더를 안 본다: {scrub.names_path()}")
+        report = scrub.check({"payload": {"body": "라마바 님이 그렇게 말했습니다"}})
+        if [f["rule"] for f in report["findings"]] != ["name-list"]:
+            raise AssertionError(f"참가자 목록이 안 걸린다: {report['findings']}")
+        if report["names_loaded"] != 1:
+            raise AssertionError(f"이름 계수: {report['names_loaded']}")
+        os.environ["AGORA_CONFIG_DIR"] = tempfile.mkdtemp(prefix="agora-empty-")
+        if scrub.names_path() != scrub.DEFAULT_NAMES_PATH:
+            raise AssertionError("없을 때 기본으로 안 돌아간다")
+    finally:
+        if keep is None:
+            os.environ.pop("AGORA_CONFIG_DIR", None)
+        else:
+            os.environ["AGORA_CONFIG_DIR"] = keep
+
+
 def _case_blocked_means_zero_writes() -> None:
     """차단 1건이면 **저장층 쓰기 호출이 0**이다(AC ③).
 
@@ -3708,6 +3780,16 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     # ★아무나 쓴 글이 「받았다」로 적히던 자리.
     "수신검증": ("M246-watch-notifies-unverified", "M247-verify-passes-without-roster",
                  "M248-unverified-not-recorded"),
+    # ★문서대로 둔 목록을 아무도 안 읽던 자리.
+    "목록자리": ("M249-names-path-pinned-to-repo",),
+    # ★암호 없는 키의 유일한 장벽.
+    "키권한": ("M250-key-file-world-readable",),
+    # ★「없다」고 적혀 있어서 아무도 안 재던 구현(FR-11 편입).
+    "검색필터": ("M251-filter-type-ignored", "M252-filter-status-ignored",
+                 "M253-filter-answered-ignored", "M254-filter-os-ignored",
+                 "M255-filter-app-ignored", "M256-filter-tag-ignored",
+                 "M257-filter-query-ignored"),
+
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
                  "M227-operator-may-delegate-anytime"),
@@ -5231,6 +5313,72 @@ DOC_FILES = ("docs/PROTOCOL.md", "docs/ENVELOPE.md", "docs/ONBOARDING.md",
 def _doc(name: str) -> str:
     with open(os.path.join(_ROOT, name), encoding="utf-8") as fh:
         return fh.read()
+
+
+def _case_thread_filters_actually_filter() -> None:
+    """검색 필터 **7종이 실제로 거른다**(FR-11 편입 · agy M2 · master 결정 2026-08-26).
+
+    ★★문면은 「계약 인자만 · 구현은 이월」이라고 적어 뒀고, 그래서 게이트가 **일부러 안 쟀다.**
+      그런데 코드는 이미 거르고 있었다 ⇒ **재지 않는 코드가 실사용 경로(`threads`)에 실려 있었다.**
+      ★「구현했다고 적었는데 없다」는 시험이 잡지만 **「없다고 적었는데 있다」는 시험이 잡을 이유가 없다.**
+      이 방향의 드리프트가 더 위험한 이유다.
+    ★각 필터를 **맞는 값·틀린 값** 두 번씩 잰다 — 한쪽만 재면 「전부 통과」나 「전부 차단」도 초록이다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")     # 봉투에 os·app 이 들어 있다
+    whole = tools.threads(ctx)
+    if len(whole["items"]) != 1:
+        raise AssertionError(f"기준 목록이 1건이 아니다: {whole}")
+    item = whole["items"][0]
+    env = (_envelope_ok().get("env") or {})
+
+    hits = [("type", item["type"]), ("status", item["state"]),
+            ("os", env.get("os")), ("app", env.get("app")),
+            ("query", item["title"][:2]), ("answered", False)]
+    for name, value in hits:
+        if value in (None, ""):
+            raise AssertionError(f"픽스처에 {name} 값이 없다 — 이 축을 못 잰다")
+        got = tools.threads(ctx, **{name: value})
+        if len(got["items"]) != 1:
+            raise AssertionError(f"{name}={value!r} 로 맞는 것을 걸렀다: {got['items']}")
+
+    misses = [("type", "debate"), ("status", "closed"), ("os", "없는OS"),
+              ("app", "없는앱"), ("query", "없는제목"), ("answered", True),
+              ("tag", "없는태그")]
+    for name, value in misses:
+        got = tools.threads(ctx, **{name: value})
+        if got["items"]:
+            raise AssertionError(f"{name}={value!r} 인데 걸러지지 않았다: {got['items']}")
+        if got["scanned"] != 1:
+            raise AssertionError("걸러 놓고 「연 범위」를 안 밝힌다")
+    if not f:
+        raise AssertionError("픽스처 없음")
+
+
+def _case_task_table_covers_the_task_list() -> None:
+    """04 §2 가 「작업 전부가 등장한다」고 **주장한다** — 그 수를 기계가 센다(agy H1 · 2026-08-26).
+
+    ★★그 문장은 **거짓이었다**(실측 9건 부재). 한 번 참이었던 시점 이후로 아무도 다시 안 셌고,
+      증보로 작업이 늘고 밀렸을 때 §1 만 갱신됐다. 추적성 주장은 **한 번 참이면 계속 참으로 읽힌다** —
+      그래서 사람이 아니라 계수기가 지켜야 한다.
+    ★★**문서가 스스로 주장하는 수·집합은 기계가 센다.** 이 저장소가 오늘 배운 문장이다.
+    """
+    import re
+    text = _doc(os.path.join(".appbuild", "04-tasks.md"))
+    ids = set(re.findall(r"S[1-7]-[0-9]+", text))
+    start = text.index("## 2.")
+    section = text[start:text.index("## 3.", start)]
+    missing = sorted(i for i in ids if i not in section)
+    if missing:
+        raise AssertionError(f"§1 에 있는데 §2 표에 없는 작업: {missing}")
+    # ★★검사기 자신을 먼저 의심한다: 0건을 「덮였다」로 읽으면 이 케이스는
+    #   **아무것도 안 재고도 초록**이 된다(이 저장소가 아는 그 병).
+    #   ⚠이 축에는 뮤테이션을 못 단다 — 하네스가 **자기 파일**은 조준하지 못한다(NOT-APPLIED).
+    #   그래서 방어를 케이스 안에 둔다: 읽어 낸 작업 수가 터무니없으면 그 자리에서 적색.
+    if len(ids) < 40:
+        raise AssertionError(f"작업 id 를 못 읽었다({len(ids)}) — 검사기가 고장난 것이다")
 
 
 def _case_docs_five_exist() -> None:
@@ -7334,6 +7482,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("서명기: allowlist 위반 → 3",    _case_signer_refuses_allowlist_violation, errors.GATE_REJECT),
     ("denylist: 픽스처 전건 차단",    _case_denylist_blocks_all_fixtures, None),
     ("denylist: 8범주 규칙 실재",     _case_denylist_covers_eight_categories, None),
+    ("keygen: 권한이 유일한 장벽",    _case_keygen_locks_down_the_files, None),
+    ("scrub: 이름 목록은 참가자 것",  _case_name_list_comes_from_the_participant_folder, None),
     ("denylist: 정상문 오탐 0",       _case_denylist_no_false_positive, None),
     ("denylist: 규칙 파손 → 3",       _case_denylist_broken_rules_file_is_fail_closed, errors.GATE_REJECT),
     ("scrub: 이름 목록 부재는 보인다", _case_names_absence_is_visible, None),
@@ -7460,6 +7610,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("브리프: 수신은 실행 못 한다",   _case_reader_brief_forbids_execution, None),
     ("브리프: 발신은 문을 적는다",    _case_writer_brief_lists_the_gates, None),
     ("브리프: 못 잰 것을 적는다",     _case_brief_admits_what_it_cannot_measure, None),
+    ("목록: 필터 7종이 거른다",        _case_thread_filters_actually_filter, None),
+    ("문서: 작업 표가 목록을 덮는다",  _case_task_table_covers_the_task_list, None),
     ("문서: 5종이 실재한다",          _case_docs_five_exist, None),
     ("문서: 규약은 비대칭 서명",      _case_protocol_is_asymmetric_signing, None),
     ("문서: 오류 코드 표가 코드와",   _case_protocol_error_codes_match_module, None),
@@ -8567,6 +8719,45 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                spool.record(node_id=node_id, stage=spool_mod.UNVERIFIED_SEEN,\n                             thread_id=item.get("thread_id"))',
      '                pass',
      "감시: 검증 통과분만 알린다"),
+    # ★M-f — 참가자가 문서대로 둔 이름 목록을 아무도 안 읽던 자리.
+    ("M249-names-path-pinned-to-repo", "agora/scrub.py",
+     '    local = os.path.join(config_dir(), NAMES_FILENAME)\n    return local if os.path.exists(local) else DEFAULT_NAMES_PATH',
+     '    local = os.path.join(config_dir(), NAMES_FILENAME)\n    return DEFAULT_NAMES_PATH',
+     "scrub: 이름 목록은 참가자 것"),
+    # ★M-g(LOW) — 암호가 없으니 권한이 유일한 장벽이다.
+    ("M250-key-file-world-readable", "agora/keygen.py",
+     '    os.chmod(key_path, 0o600)',
+     '    os.chmod(key_path, 0o644)',
+     "keygen: 권한이 유일한 장벽"),
+    # ★FR-11 편입(agy M2) — 필터별로 하나씩. 뭉뚱그리면 한 축이 죽어도 나머지가 가린다.
+    ("M251-filter-type-ignored", "agora/tools.py",
+     '    if f.get("type") and item["type"] != f["type"]:',
+     '    if False:',
+     "목록: 필터 7종이 거른다"),
+    ("M252-filter-status-ignored", "agora/tools.py",
+     '    if f.get("status") and item["state"] != f["status"]:',
+     '    if False:',
+     "목록: 필터 7종이 거른다"),
+    ("M253-filter-answered-ignored", "agora/tools.py",
+     '    if f.get("answered") is not None:',
+     '    if False:',
+     "목록: 필터 7종이 거른다"),
+    ("M254-filter-os-ignored", "agora/tools.py",
+     '    if f.get("os") and (env.get("env") or {}).get("os") != f["os"]:',
+     '    if False:',
+     "목록: 필터 7종이 거른다"),
+    ("M255-filter-app-ignored", "agora/tools.py",
+     '    if f.get("app") and (env.get("env") or {}).get("app") != f["app"]:',
+     '    if False:',
+     "목록: 필터 7종이 거른다"),
+    ("M256-filter-tag-ignored", "agora/tools.py",
+     '    if f.get("tag") and f["tag"] not in (genesis.get("tags") or []):',
+     '    if False:',
+     "목록: 필터 7종이 거른다"),
+    ("M257-filter-query-ignored", "agora/tools.py",
+     '    if f.get("query") and f["query"] not in item["title"]:',
+     '    if False:',
+     "목록: 필터 7종이 거른다"),
 )
 
 

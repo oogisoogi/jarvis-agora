@@ -33,7 +33,24 @@ DEFAULT_ALLOW_PATH = os.path.join(_ROOT, "config", "allowlist-v1.json")
 DEFAULT_DOMAINS_PATH = os.path.join(_ROOT, "config", "allow-domains.txt")
 # ★이름 목록은 **참가자 로컬**이다(설계 §5·§7). 저장소에는 예시만 둔다 —
 #   「무엇을 가리려 하는지」 자체가 정보이기 때문이다.
-DEFAULT_NAMES_PATH = os.path.join(_ROOT, "config", "scrub-names.txt")
+NAMES_FILENAME = "scrub-names.txt"
+DEFAULT_NAMES_PATH = os.path.join(_ROOT, NAMES_FILENAME.join(("config/", "")))
+
+
+def names_path() -> str:
+    """이름 목록이 실제로 있는 자리 — **참가자 설정 폴더가 먼저**다(M-f · codex 2026-08-26).
+
+    ★★그전에는 저장소 안의 한 경로로 **고정**돼 있었다. 그런데 이름 목록은 참가자 로컬이라
+      `ONBOARDING` 이 시키는 대로 `AGORA_CONFIG_DIR` 에 둔 사람의 목록은 **아무도 안 읽었다.**
+      ⇒ 문서대로 한 사람의 스크럽이 **조용히 0건으로** 돌았다. 「안 걸렀다」와
+      「걸릴 것이 없었다」가 같아지는 자리다(이 파일이 애초에 막으려던 것).
+    ★환경변수로 자리를 정하는 이유: **서명기는 다른 프로세스**다. 인자로 넘기면
+      두 겹(코어·서명기)이 서로 다른 목록을 볼 수 있고, 그러면 재검사가 재검사가 아니다.
+      같은 규칙으로 **같은 자리를** 찾게 두는 것이 두 겹을 진짜 두 겹으로 만든다.
+    """
+    from agora.participant import config_dir
+    local = os.path.join(config_dir(), NAMES_FILENAME)
+    return local if os.path.exists(local) else DEFAULT_NAMES_PATH
 
 # URL 은 호스트만 본다. 경로·질의는 denylist 와 필드 길이가 따로 본다.
 _URL = re.compile(r"(?i)\bhttps?://([^\s/?#\\)\]>'\"]+)")
@@ -189,7 +206,7 @@ def load_names(path: str | None = None) -> frozenset[str]:
       다만 **조용히 다르면 안 되므로** 보고서에 몇 개를 실었는지 적는다 —
       0 이 보이면 「안 걸렀다」와 「걸릴 것이 없었다」를 사람이 구별할 수 있다.
     """
-    path = path or DEFAULT_NAMES_PATH
+    path = path or names_path()
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()

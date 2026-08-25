@@ -18,6 +18,11 @@ __pycache__/
 # ★반영 이력은 사라지지 않는다 — 같은 폴더의 response 문서는 예외로 커밋한다.
 .appbuild/review/*
 !.appbuild/review/codex-design-r1-response.md
+# ★2026-08-26 봉합 라운드 원장 2건은 **예외로 커밋한다** — 실측 금칙어 **0건**이라
+#   위 「영구 충돌」 사유가 이 둘에는 성립하지 않는다(구 codex-design-r1.md 는 1건이라 계속 제외).
+#   ⚠판단 근거는 파일 성격이 아니라 **측정값**이다: 새 원장을 넣을 때도 먼저 재라.
+!.appbuild/review/agy-2026-08-26-agora-final.md
+!.appbuild/review/codex-2026-08-26-agora-final.md
 
 # 뮤테이션 저널 — 강제 종료 시 복원용(런타임 산출물)
 .agora-mutation-journal
