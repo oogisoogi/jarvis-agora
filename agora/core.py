@@ -54,8 +54,13 @@ def approval_gate(*, config: dict[str, Any] | None = None,
 def publish_event(*, store: Any, event: dict[str, Any], category: str,
                   title: str = "", is_genesis: bool = False,
                   config: dict[str, Any] | None = None,
-                  prompt: Any = None, isatty: Any = None) -> dict[str, Any]:
-    """한 이벤트를 운반층에 올린다 — 위 5단계를 그 순서대로."""
+                  prompt: Any = None, isatty: Any = None,
+                  ledger: Any = None) -> dict[str, Any]:
+    """한 이벤트를 운반층에 올린다 — 위 5단계를 그 순서대로.
+
+    ★code 8(저장 성공 불명)은 **삼키지 않는다.** 그대로 올려 호출자가 재조회로 판정하게 한다
+      (`settle_unknown`). 여기서 성공으로 바꿔 주면 그 거짓이 원장에 그대로 박힌다.
+    """
     schema.validate(event)                     # ⑴ 계약
     report = scrub.enforce(event)              # ⑵ 게이트 — 여기서 막히면 아래로 못 간다
     approval = approval_gate(config=config, prompt=prompt, isatty=isatty)   # ⑶ 승인
@@ -64,8 +69,12 @@ def publish_event(*, store: Any, event: dict[str, Any], category: str,
     result = store.append(thread_id=event["thread_id"], category=category,
                           title=title or event["payload"].get("title", ""),
                           body=body, is_genesis=is_genesis)   # ⑷ 쓰기
+    row = None
+    if ledger is not None:
+        row = record_sent(ledger=ledger, event=event, event_hash=signed["hash"],
+                          node_id=result.get("node_id"))
     return {"message_id": event["message_id"], "hash": signed["hash"],
-            "scrub": report, "approval": approval, **result}
+            "scrub": report, "approval": approval, "ledger_row": row, **result}
 
 
 # ── 봉투(설계 §3-2 · FR-2) ──────────────────────────────────────────────────
@@ -126,3 +135,51 @@ def declare_scrub(event: dict[str, Any]) -> dict[str, Any]:
     event["scrub"] = {"rules": report["bundle"], "blocked": report["blocked"],
                       "redacted": report["redacted"]}
     return event
+
+
+# ── 저장 성공 불명(code 8 · S4-3) ───────────────────────────────────────────
+# ★「보냈는데 응답이 안 왔다」는 **성공도 실패도 아니다.** 둘 중 하나로 단정하는 순간
+#   ⑴성공으로 보면 안 올라간 글을 올라갔다고 믿고(대화가 조용히 끊긴다)
+#   ⑵실패로 보면 이미 올라간 글을 다시 올린다(같은 말이 두 번 나간다).
+#   그래서 **재조회로 판정할 때까지 아무 말도 하지 않는다.**
+
+COMMITTED = "committed"
+ABSENT = "absent"
+
+
+def resolve_unknown(*, store: Any, thread_id: str, message_id: str) -> str:
+    """재조회해서 실제로 올라갔는지 판정한다.
+
+    ★판정 근거는 **운반층에 그 message_id 가 실재하는가** 하나뿐이다.
+      우리 기록(원장)으로 판정하면 「보냈다고 적었으니 갔을 것」이라는 순환이 된다.
+    """
+    rows = store.fetch(thread_id=thread_id)["items"]
+    for row in rows:
+        if message_id in (row.get("body") or ""):
+            return COMMITTED
+    return ABSENT
+
+
+def record_sent(*, ledger: Any, event: dict[str, Any], event_hash: str,
+                node_id: str | None) -> dict[str, Any] | None:
+    """원장에 발신 행을 남긴다 — **같은 message_id 는 한 번만**.
+
+    ★재조회로 「저장됨」이 확정되면 같은 이벤트를 다시 기록하려는 흐름이 생긴다.
+      원장은 append-only 라 지울 수 없으므로, **쓰기 전에** 중복을 막아야 한다.
+    """
+    if ledger.has(event["message_id"]):
+        return None
+    return ledger.append(direction="sent", message_id=event["message_id"],
+                         event_hash=event_hash, stage="sent", node_id=node_id)
+
+
+def settle_unknown(*, store: Any, ledger: Any, event: dict[str, Any],
+                   event_hash: str) -> dict[str, Any]:
+    """code 8 을 만난 뒤의 마무리 — 재조회로 판정하고, 저장됐을 때만 원장에 남긴다."""
+    verdict = resolve_unknown(store=store, thread_id=event["thread_id"],
+                              message_id=event["message_id"])
+    row = None
+    if verdict == COMMITTED:
+        row = record_sent(ledger=ledger, event=event, event_hash=event_hash,
+                          node_id=None)
+    return {"verdict": verdict, "ledger_row": row}

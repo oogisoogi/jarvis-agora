@@ -2824,6 +2824,151 @@ def _case_cost_model_marks_unmeasured() -> None:
         if measured not in text:
             raise AssertionError(f"실측 근거 {measured} 이 없다")
 
+# ── S4-3 저장 성공 불명(code 8) ─────────────────────────────────────────────
+# ★「보냈는데 응답이 안 왔다」는 성공도 실패도 아니다. 둘 중 하나로 단정하면
+#   ⑴안 올라간 글을 올라갔다고 믿거나 ⑵이미 올라간 글을 다시 올린다.
+
+def _r43_ledger() -> Any:
+    """원장 하나를 임시 폴더에 만든다(케이스마다 새것 — 앞 케이스의 행이 섞이지 않게)."""
+    import tempfile
+    from agora.ledger import Ledger
+    d = tempfile.mkdtemp(prefix="agora-ledger-")
+    return Ledger(d)
+
+
+def _case_unknown_commit_is_not_swallowed() -> None:
+    """운반층이 성공 불명을 내면 publish 는 **그대로 올린다**(AC ② 전반).
+
+    ★여기서 성공으로 바꿔 주면 그 거짓이 원장에 그대로 박힌다.
+    """
+    from agora import core
+    from agora.store_mock import MockStore
+    f = _fixtures()
+    store = MockStore()
+    store.fail_next_append = "unknown"
+    ledger = _r43_ledger()
+    try:
+        _with_key(f["key_a"], lambda: core.publish_event(
+            store=store, event=_r2_genesis(), category="debate", is_genesis=True,
+            isatty=lambda: True, prompt=lambda: True, ledger=ledger))
+    except AgoraError as e:
+        if e.code != errors.UNKNOWN_COMMIT:
+            raise AssertionError(f"code {e.code} != 8") from None
+    else:
+        raise AssertionError("성공 불명을 성공으로 넘겼다")
+    # ★아직 아무 말도 하지 않았으므로 원장에도 아무것도 없어야 한다.
+    if any(True for _ in ledger.rows()):
+        raise AssertionError("판정 전에 원장에 썼다")
+
+
+def _case_unknown_commit_resolved_by_refetch() -> None:
+    """재조회로 **실제 저장 여부**를 확정한다(AC ①).
+
+    mock 의 「응답 유실」은 실제로는 저장까지 된 상황이다 — 재조회가 그것을 밝혀야 한다.
+    """
+    from agora import core
+    from agora.store_mock import MockStore
+    f = _fixtures()
+    store = MockStore()
+    store.fail_next_append = "unknown"
+    ledger = _r43_ledger()
+    ev = _r2_genesis()
+    signed_hash = None
+    try:
+        _with_key(f["key_a"], lambda: core.publish_event(
+            store=store, event=ev, category="debate", is_genesis=True,
+            isatty=lambda: True, prompt=lambda: True, ledger=ledger))
+    except AgoraError as e:
+        signed_hash = (e.detail or {}).get("hash") or "0" * 64
+    out = core.settle_unknown(store=store, ledger=ledger, event=ev,
+                              event_hash=signed_hash)
+    if out["verdict"] != core.COMMITTED:
+        raise AssertionError(f"저장됐는데 판정이 {out['verdict']}")
+    if out["ledger_row"] is None:
+        raise AssertionError("저장 확정인데 원장에 안 남겼다")
+
+
+def _case_unknown_commit_absent_writes_nothing() -> None:
+    """재조회에서 **없으면** 원장에 남기지 않는다 — 안 올라간 것을 올라갔다고 적지 않는다."""
+    from agora import core
+    from agora.store_mock import MockStore
+    ledger = _r43_ledger()
+    out = core.settle_unknown(store=MockStore(), ledger=ledger,
+                              event=_r2_genesis(), event_hash="0" * 64)
+    if out["verdict"] != core.ABSENT:
+        raise AssertionError(f"없는데 판정이 {out['verdict']}")
+    if out["ledger_row"] is not None or any(True for _ in ledger.rows()):
+        raise AssertionError("없는데 원장에 썼다")
+
+
+def _case_settle_twice_leaves_one_row() -> None:
+    """재조회를 두 번 해도 원장 행은 **하나**다(AC ③).
+
+    ★원장은 append-only 라 지울 수 없다 — 그러니 **쓰기 전에** 막아야 한다.
+    """
+    from agora import core
+    from agora.store_mock import MockStore
+    f = _fixtures()
+    store = MockStore()
+    store.fail_next_append = "unknown"
+    ledger = _r43_ledger()
+    ev = _r2_genesis()
+    try:
+        _with_key(f["key_a"], lambda: core.publish_event(
+            store=store, event=ev, category="debate", is_genesis=True,
+            isatty=lambda: True, prompt=lambda: True, ledger=ledger))
+    except AgoraError:
+        pass
+    core.settle_unknown(store=store, ledger=ledger, event=ev, event_hash="a" * 64)
+    core.settle_unknown(store=store, ledger=ledger, event=ev, event_hash="a" * 64)
+    rows = [r for r in ledger.rows() if r["message_id"] == ev["message_id"]]
+    if len(rows) != 1:
+        raise AssertionError(f"원장 행 {len(rows)}건 — 중복이 생겼다")
+    if not ledger.verify()["ok"]:
+        raise AssertionError("원장 체인이 깨졌다")
+
+
+def _case_success_path_writes_ledger_row() -> None:
+    """대조군 — 정상 발신은 원장에 행을 남긴다(그리고 두 번 불러도 하나다)."""
+    from agora import core
+    from agora.store_mock import MockStore
+    f = _fixtures()
+    store = MockStore()
+    ledger = _r43_ledger()
+    ev = _r2_genesis()
+    out = _with_key(f["key_a"], lambda: core.publish_event(
+        store=store, event=ev, category="debate", is_genesis=True,
+        isatty=lambda: True, prompt=lambda: True, ledger=ledger))
+    if out["ledger_row"] is None:
+        raise AssertionError("정상 발신인데 원장 행이 없다")
+    again = core.record_sent(ledger=ledger, event=ev, event_hash=out["hash"],
+                             node_id=out.get("node_id"))
+    if again is not None:
+        raise AssertionError("같은 message_id 가 두 번 들어갔다")
+
+
+def _case_verdict_comes_from_store_not_ledger() -> None:
+    """판정 근거는 **운반층**이다 — 우리 기록으로 판정하면 순환이 된다.
+
+    ★원장에 「보냈다」가 적혀 있어도, 운반층에 없으면 `absent` 여야 한다.
+    """
+    from agora import core
+    from agora.store_mock import MockStore
+    ledger = _r43_ledger()
+    ev = _r2_genesis()
+    ledger.append(direction="sent", message_id=ev["message_id"],
+                  event_hash="b" * 64, stage="sent", node_id="MOCK_X")
+    # ★운반층을 **비워 두지 않는다.** 빈 저장층에서는 「아무거나 맞다고 하는」 고장도
+    #   똑같이 absent 를 내서 구별되지 않는다(M105 가 처음에 그렇게 살아남았다).
+    #   그래서 **다른 글이 하나 있는** 저장층에서 잰다.
+    store = MockStore()
+    store.inject_raw(thread_id=ev["thread_id"], body="남의 글 — 우리 이벤트가 아니다")
+    verdict = core.resolve_unknown(store=store, thread_id=ev["thread_id"],
+                                   message_id=ev["message_id"])
+    if verdict != core.ABSENT:
+        raise AssertionError(f"운반층에 없는데 {verdict} 로 판정했다 "
+                             "(원장을 봤거나, 아무 글이나 맞다고 했다)")
+
 # ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
 
 # S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
@@ -3070,6 +3215,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("한도: 영구 실패는 안 두드린다", _case_permanent_error_is_not_retried, None),
     ("한도: 계수는 재시도까지",       _case_calls_count_includes_retries, None),
     ("비용: 미측정 칸이 남아 있다",   _case_cost_model_marks_unmeasured, None),
+    ("불명: 8을 삼키지 않는다",       _case_unknown_commit_is_not_swallowed, None),
+    ("불명: 재조회로 확정",           _case_unknown_commit_resolved_by_refetch, None),
+    ("불명: 없으면 안 적는다",        _case_unknown_commit_absent_writes_nothing, None),
+    ("불명: 두 번 정산해도 1행",      _case_settle_twice_leaves_one_row, None),
+    ("원장: 정상 발신은 1행",         _case_success_path_writes_ledger_row, None),
+    ("불명: 판정은 운반층이 한다",    _case_verdict_comes_from_store_not_ledger, None),
 )
 
 
@@ -3288,6 +3439,18 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M103-ledger-duplicate-allowed", "agora/core.py",
+     '    if ledger.has(event["message_id"]):\n        return None',
+     "    if False:\n        return None",
+     "불명: 두 번 정산해도 1행"),
+    ("M104-settle-assumes-committed", "agora/core.py",
+     "    verdict = resolve_unknown(store=store, thread_id=event[\"thread_id\"],\n                              message_id=event[\"message_id\"])",
+     '    verdict = COMMITTED',
+     "불명: 없으면 안 적는다"),
+    ("M105-resolve-matches-anything", "agora/core.py",
+     '        if message_id in (row.get("body") or ""):',
+     "        if True:",
+     "불명: 판정은 운반층이 한다"),
     ("M99-backoff-constant-interval", "agora/store_github.py",
      "                delay *= BACKOFF_FACTOR",
      "                pass",
@@ -3659,7 +3822,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S4-2(한도·backoff·비용 모델)"
+            "슬라이스": "S4-3(unknown_commit 재조회 판정)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
