@@ -42,6 +42,23 @@ def _nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 
 
+def _normalize_newlines(text: str) -> str:
+    """문자열 **안**의 줄바꿈을 LF 로 통일한다.
+
+    ⚠**이것은 설계가 아직 명시하지 않은 자리라, 잠정 채택이고 조율자 확인 대상이다.**
+    (H-12 는 「CRLF 처리 규칙을 명문화하라」고만 했고 어느 쪽인지는 안 정했다.)
+
+    채택 이유: 줄바꿈은 **글쓴 사람의 플랫폼이 남긴 흔적**이지 내용이 아니다.
+    통일하지 않으면 같은 본문을 Windows 에서 쓴 사람과 다른 곳에서 쓴 사람의
+    **해시가 갈라지고**, 「같은 이벤트는 같은 바이트」라는 전제가 OS 경계에서 무너진다.
+    golden 벡터가 증명하려는 것이 정확히 그 전제다.
+
+    잃는 것(정직 고지): 본문에 CR 을 **데이터로** 넣고 싶은 경우를 표현할 수 없다.
+    토론 본문에서 그럴 일이 없다고 보고 통일 쪽을 골랐다. 뒤집으려면 이 함수 하나만 바꾸면 된다.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _canonicalize(node: Any, path: str = "$") -> Any:
     """정규화된 파이썬 구조를 만든다. 여기서 타입을 좁게 잡는 것이 곧 서명 안정성이다."""
     if node is None or type(node) is bool:
@@ -51,7 +68,7 @@ def _canonicalize(node: Any, path: str = "$") -> Any:
     if type(node) is float:
         raise AgoraError(errors.ARGUMENT, "이벤트에 실수를 담을 수 없다", {"path": path})
     if type(node) is str:
-        return _nfc(node)
+        return _nfc(_normalize_newlines(node))
     if type(node) is list:
         return [_canonicalize(v, f"{path}[{i}]") for i, v in enumerate(node)]
     if type(node) is dict:
@@ -59,7 +76,7 @@ def _canonicalize(node: Any, path: str = "$") -> Any:
         for k, v in node.items():
             if type(k) is not str:
                 raise AgoraError(errors.ARGUMENT, "키는 문자열이어야 한다", {"path": path})
-            nk = _nfc(k)
+            nk = _nfc(_normalize_newlines(k))
             if nk in out:
                 # NFD/NFC 로 다르게 쓴 두 키가 정규화 후 같아지는 경우도 중복이다.
                 raise AgoraError(errors.ARGUMENT, "정규화 후 키 충돌",
@@ -99,7 +116,7 @@ def event_hash(event: Any) -> str:
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     seen: dict[str, Any] = {}
     for k, v in pairs:
-        nk = _nfc(k)
+        nk = _nfc(_normalize_newlines(k))
         if nk in seen:
             raise AgoraError(errors.ARGUMENT, "중복 키", {"key": nk})
         seen[nk] = v

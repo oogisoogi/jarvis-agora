@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""agora-signer — 서명 전담 프로세스. 표준 입력으로 요청, 표준 출력으로 결과."""
+import os
+import sys
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from agora.signer import main  # noqa: E402
+
+raise SystemExit(main())

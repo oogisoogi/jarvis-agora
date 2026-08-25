@@ -1,0 +1,2 @@
+# operators — 운영자 participant-id 목록 (한 줄에 하나)
+# 운영자만 `abort` 와 체크포인트 서명을 할 수 있다.

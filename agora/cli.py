@@ -36,7 +36,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
     "ack":            {"core": True,  "built": False, "slice": "S5-3"},
     "watch":          {"core": False, "built": False, "slice": "S5-2"},
     "selftest":       {"core": False, "built": True,  "slice": "S1-8"},
-    "keygen":         {"core": False, "built": False, "slice": "S1-4"},
+    "keygen":         {"core": False, "built": True,  "slice": "S1-4"},
     "export":         {"core": False, "built": False, "slice": "S6-2"},
 }
 
@@ -83,6 +83,9 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
     if name == "selftest":
         from agora import selftest as st
         return st.run()
+    if name == "keygen":
+        from agora import keygen as kg
+        return kg.run(args.rest if hasattr(args, "rest") else [])
     raise AgoraError(errors.PRECONDITION, "실행기 배선 누락", {"command": name})
 
 

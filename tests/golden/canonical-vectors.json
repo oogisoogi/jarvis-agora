@@ -1,0 +1,48 @@
+{
+  "base_event": {
+    "expected_state": "",
+    "from": "operator-a",
+    "kind": "post",
+    "message_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "prev": "genesis",
+    "roster": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "thread_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ts": "2026-08-25T00:00:00Z",
+    "v": 1
+  },
+  "expected_canonical_utf8": "{\"expected_state\":\"\",\"from\":\"operator-a\",\"kind\":\"post\",\"message_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"payload\":{\"body\":\"첫 줄\\n둘째 줄 · ascii mixed\"},\"prev\":\"genesis\",\"roster\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"thread_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"ts\":\"2026-08-25T00:00:00Z\",\"v\":1}",
+  "expected_hash": "d70f5e1b042ccf77204727fe41ee314abb39406017d3010093a1e561c48d7e2b",
+  "principal": "golden-signer",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP6dVxaYNx+e2AkKB1INZShZ2/WPmUhJE7CnZvh2OsG4 golden",
+  "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg/p1XFpg3H57YCQoHUg1lKFnb9Y\n+ZSEkTsKdm+HY6wbgAAAAYamFydmlzLWFnb3JhQGdvZG1leW91LmtyAAAAAAAAAAZzaGE1\nMTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQFhD9Ah3Q4x9VI26ep9I1oOJ8sbABUGW/BH3hm\nCGl3DhgjQy2EDGxn79reDivRjo4MUVF5OFuq+jPm0C7AWhvw8=\n-----END SSH SIGNATURE-----\n",
+  "variants": {
+    "cr-nfc": {
+      "body": "첫 줄\r둘째 줄 · ascii mixed"
+    },
+    "crlf-nfc": {
+      "body": "첫 줄\r\n둘째 줄 · ascii mixed"
+    },
+    "crlf-nfd": {
+      "body": "첫 줄\r\n둘째 줄 · ascii mixed"
+    },
+    "lf-nfc": {
+      "body": "첫 줄\n둘째 줄 · ascii mixed"
+    },
+    "lf-nfd": {
+      "body": "첫 줄\n둘째 줄 · ascii mixed"
+    }
+  },
+  "규칙": {
+    "namespace": "jarvis-agora@godmeyou.kr",
+    "구분자": "공백 없음",
+    "정규화": "NFC",
+    "줄바꿈": "CR·CRLF → LF 통일(잠정 — 조율자 확인 대상)",
+    "키": "정렬"
+  },
+  "생성": {
+    "⚠미실행": "Windows 에서의 **실행** 검증은 하지 않았다(실행 수단 부재 · 결정 F-17/K-1 로 v0.1 이월). 이 파일이 증명하는 것은 「CRLF·NFD 입력이 같은 canonical 로 떨어진다」이지 「Windows 에서 돌려 봤다」가 아니다. 둘을 같은 것으로 읽지 마라.",
+    "개인키": "생성 즉시 버렸다 — 이 벡터는 검증 전용이고 새 서명을 만들 수 없다.",
+    "어디서": "macOS(이 저장소의 개발 기계)",
+    "언제": "2026-08-25"
+  }
+}
