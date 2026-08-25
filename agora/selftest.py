@@ -721,6 +721,195 @@ def _case_store_answerable_only_problem() -> None:
         raise AssertionError(f"answerable 카테고리가 {answerable} — problem 하나여야 한다")
 
 
+# ── S2-1 kind 9종 스키마 ────────────────────────────────────────────────────
+# ★여기서 재는 것은 **모양**뿐이다 — 누가 보냈는지(권한·5)·순서가 맞는지(경합·9)는
+#   S2-2~S2-5 의 몫이다. 그래서 이 픽스처의 이벤트는 서명도 순서도 갖지 않는다.
+#   경계를 안 그으면 스키마 케이스가 reducer 결함까지 「잡은 척」하게 된다.
+#
+# ★픽스처는 전부 가짜다(브리프 §2) — 실제 id·이름·경로를 넣지 않는다.
+
+_ID_A = "0123456789abcdef0123456789abcdef"   # 32자 hex
+_ID_B = "fedcba9876543210fedcba9876543210"
+_PREV = "b" * 64                              # 앞 이벤트 해시 자리
+
+
+def _fake_envelope() -> dict[str, Any]:
+    return {
+        "env": {"os": "fake-os", "app": "fake-app", "version": "0.0.0"},
+        "symptom": "가짜 증상 한 줄",
+        "repro_steps": ["가짜 1단계"],
+        "log_excerpt": "가짜 로그 발췌",
+        "tried": ["가짜 시도"],
+        "questions": ["가짜 질문"],
+    }
+
+
+# kind → (정상 payload, 결손시 뺄 칸, 그때 기대 코드)
+# ★칸 하나를 빼는 이유: 「필수」라고 적어 둔 것이 정말로 필수인지는 **빼 봐야** 안다.
+def _payload_table() -> dict[str, tuple[dict[str, Any], str, int]]:
+    return {
+        "genesis": ({"type": "debate", "title": "가짜 제목", "body": "가짜 본문",
+                     "chair": "operator-a"}, "title", errors.ARGUMENT),
+        "post": ({"round": 1, "body": "가짜 발언"}, "body", errors.ARGUMENT),
+        "advance": ({"from_round": 1, "to_round": 2}, "to_round", errors.ARGUMENT),
+        "resolution": ({"summary": "가짜 요약", "dissent": [],
+                        "recommended_actions": [{"text": "가짜 권고",
+                                                 "execution": "forbidden"}]},
+                       "summary", errors.ARGUMENT),
+        "answer_selected": ({"post_message_id": _ID_B}, "post_message_id",
+                            errors.ARGUMENT),
+        "close": ({"reason": "solved"}, "reason", errors.ARGUMENT),
+        "delegate_chair": ({"new_chair": "operator-b"}, "new_chair", errors.ARGUMENT),
+        "abort": ({"reason": "가짜 중단 사유"}, "reason", errors.ARGUMENT),
+        "vote": ({"target": _ID_B, "value": 1}, "value", errors.ARGUMENT),
+    }
+
+
+def _fake_event(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    genesis = kind == "genesis"
+    return {
+        "v": 1, "kind": kind, "thread_id": _ID_A, "message_id": _ID_B,
+        "prev": contract_open.GENESIS_PREV if genesis else _PREV,
+        "expected_state": contract_open.GENESIS_EXPECTED_STATE if genesis else "c" * 64,
+        "from": "operator-a", "roster": "d" * 64,
+        "scrub": {"rules": "e" * 64, "blocked": 0, "redacted": 0},
+        "ts": "2026-01-01T00:00:00Z", "payload": payload,
+    }
+
+
+def _case_schema_nine_kinds_ok() -> None:
+    """9종 각각 정상 1건이 통과한다 — 그리고 픽스처가 표 전건을 덮는다."""
+    from agora import schema
+    table = _payload_table()
+    if set(table) != set(contract_open.KINDS):
+        raise AssertionError(
+            f"픽스처가 표를 다 안 덮는다: {sorted(set(table) ^ set(contract_open.KINDS))}")
+    for kind, (payload, _drop, _code) in table.items():
+        try:
+            schema.validate(_fake_event(kind, dict(payload)))
+        except AgoraError as e:
+            raise AssertionError(f"{kind} 정상건이 거부됐다: {e.to_json()}") from None
+
+
+def _case_schema_missing_field_rejected() -> None:
+    """9종 각각 필수 칸 1개를 빼면 계약 코드로 거부된다."""
+    from agora import schema
+    for kind, (payload, drop, want) in _payload_table().items():
+        broken = dict(payload)
+        del broken[drop]
+        try:
+            schema.validate(_fake_event(kind, broken))
+        except AgoraError as e:
+            if e.code != want:
+                raise AssertionError(
+                    f"{kind}.{drop} 결손: code {e.code} != {want}") from None
+        else:
+            raise AssertionError(f"{kind}.{drop} 결손이 통과했다")
+
+
+def _case_schema_unknown_kind() -> None:
+    """표(§2-2)에 없는 kind 는 거부한다. 격리 목록에 남기는 것은 reducer(S2-2)의 몫이다."""
+    from agora import schema
+    schema.validate(_fake_event("no-such-kind", {"body": "가짜"}))
+
+
+def _case_schema_closed_rejects_extra() -> None:
+    """모르는 칸은 무시가 아니라 거부다 — 이벤트 최상위·payload 양쪽에서."""
+    from agora import schema
+    probes = [
+        ("event", lambda ev: ev.update({"extra_field": "가짜"})),
+        ("payload", lambda ev: ev["payload"].update({"extra_field": "가짜"})),
+    ]
+    for where, poison in probes:
+        ev = _fake_event("post", {"round": 1, "body": "가짜 발언"})
+        poison(ev)
+        try:
+            schema.validate(ev)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"{where} 잉여 칸: code {e.code} != 10") from None
+        else:
+            raise AssertionError(f"{where} 의 계약 밖 칸이 통과했다")
+
+
+def _case_schema_type_mismatch() -> None:
+    """칸 타입이 다르면 거부한다.
+
+    ★두 갈래를 **따로** 잰다. 처음엔 `round: "1"` 하나로 갈음했는데, 그 값은
+      타입 검사를 꺼도 **범위 검사**(라운드 표 밖)가 대신 잡아 버려 M33 변이가 살아남았다.
+      = 케이스는 초록인데 재려던 그물은 안 쟀다. 그래서 **범위 검사가 없는 칸**(body)을 함께 둔다.
+    """
+    from agora import schema
+    probes = [
+        ("body 가 문자열이 아님", {"round": 1, "body": 123}),      # 타입 검사만이 잡는다
+        ("round 가 문자열", {"round": "1", "body": "가짜 발언"}),   # 타입·범위 어느 쪽이든
+    ]
+    for label, payload in probes:
+        try:
+            schema.validate(_fake_event("post", payload))
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"{label}: code {e.code} != 10") from None
+        else:
+            raise AssertionError(f"{label} 이 통과했다")
+
+
+def _case_schema_resolution_execution_forbidden() -> None:
+    """★NFR-8 — 권고에 집행 금지 표식이 없으면 **정책** 거부(3)다.
+
+    아고라의 결론은 언제나 권고다. 이 한 칸이 「토론 결과가 자동으로 실행되는 길」을 막는다.
+    """
+    from agora import schema
+    schema.validate(_fake_event("resolution", {
+        "summary": "가짜 요약", "dissent": [],
+        "recommended_actions": [{"text": "가짜 권고"}],   # execution 없음
+    }))
+
+
+def _case_schema_problem_needs_envelope() -> None:
+    """봉투 없는 problem 은 모양이 아니라 정책 위반이다 → 3."""
+    from agora import schema
+    schema.validate(_fake_event("genesis", {
+        "type": "problem", "title": "가짜 제목", "body": "가짜 본문"}))
+
+
+def _case_schema_problem_with_envelope_ok() -> None:
+    """봉투를 붙이면 통과한다 — 위 케이스가 「problem 자체를 막는 것」이 아님을 증명한다."""
+    from agora import schema
+    schema.validate(_fake_event("genesis", {
+        "type": "problem", "title": "가짜 제목", "body": "가짜 본문",
+        "envelope": _fake_envelope()}))
+
+
+def _case_schema_genesis_prev_contract() -> None:
+    """genesis 만 `prev=genesis`·`expected_state=""` 를 쓴다(K-4) — 양방향으로 잰다."""
+    from agora import schema
+    probes = [
+        ("genesis 가 계약값을 안 씀",
+         lambda: schema.validate({**_fake_event("genesis", {
+             "type": "debate", "title": "가짜", "body": "가짜"}), "prev": _PREV})),
+        ("genesis 가 아닌데 prev=genesis",
+         lambda: schema.validate({**_fake_event("close", {"reason": "solved"}),
+                                  "prev": contract_open.GENESIS_PREV})),
+    ]
+    for label, probe in probes:
+        try:
+            probe()
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"{label}: code {e.code} != 10") from None
+        else:
+            raise AssertionError(f"{label} 이 통과했다")
+
+
+def _case_schema_table_matches_contract() -> None:
+    """스키마 검사기 표와 계약 kind 목록이 같아야 한다 — 갈라지면 그 자체가 결함이다."""
+    from agora import schema
+    if set(schema._PAYLOAD_CHECKS) != set(contract_open.KINDS):
+        raise AssertionError(
+            f"불일치: {sorted(set(schema._PAYLOAD_CHECKS) ^ set(contract_open.KINDS))}")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -772,6 +961,17 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("저장층: 오류 → 7(retryable)",   _case_store_error_is_retryable, errors.STORE),
     ("저장층: 페이지 전건 회수",       _case_store_pagination_returns_all, None),
     ("저장층: problem 만 answerable", _case_store_answerable_only_problem, None),
+
+    ("스키마: 9종 정상 전건 통과",   _case_schema_nine_kinds_ok,  None),
+    ("스키마: 9종 필수칸 결손 → 10", _case_schema_missing_field_rejected, None),
+    ("스키마: 표 밖 kind → 10",      _case_schema_unknown_kind,   errors.ARGUMENT),
+    ("스키마: 계약 밖 칸 → 10",      _case_schema_closed_rejects_extra, None),
+    ("스키마: 칸 타입 불일치 → 10",  _case_schema_type_mismatch,  None),
+    ("스키마: 권고 집행금지 표식 없음 → 3", _case_schema_resolution_execution_forbidden, errors.GATE_REJECT),
+    ("스키마: 봉투 없는 problem → 3", _case_schema_problem_needs_envelope, errors.GATE_REJECT),
+    ("스키마: 봉투 붙인 problem → 통과", _case_schema_problem_with_envelope_ok, None),
+    ("스키마: genesis prev 계약값",   _case_schema_genesis_prev_contract, None),
+    ("스키마: 표 ↔ 계약 kind 일치",   _case_schema_table_matches_contract, None),
 )
 
 
@@ -890,6 +1090,30 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if type(node) is str:\n        return _nfc(_normalize_newlines(node))",
      "    if isinstance(node, str):\n        return _nfc(_normalize_newlines(node))",
      "canonical: str 서브클래스 → 10"),
+    ("M29-schema-closed-off", "agora/schema.py",
+     "    extra = [k for k in obj if k not in allowed]",
+     "    extra = []",
+     "스키마: 계약 밖 칸 → 10"),
+    ("M30-schema-execution-unchecked", "agora/schema.py",
+     '        if a.get("execution") != "forbidden":',
+     "        if False:",
+     "스키마: 권고 집행금지 표식 없음 → 3"),
+    ("M31-schema-unknown-kind-allowed", "agora/schema.py",
+     "    if kind not in KINDS:",
+     "    if False:",
+     "스키마: 표 밖 kind → 10"),
+    ("M32-schema-required-unchecked", "agora/schema.py",
+     "    if key not in obj:",
+     "    if False:",
+     "스키마: 9종 필수칸 결손 → 10"),
+    ("M33-schema-type-unchecked", "agora/schema.py",
+     "    if type(value) is not typ:",
+     "    if False:",
+     "스키마: 칸 타입 불일치 → 10"),
+    ("M34-schema-envelope-optional", "agora/schema.py",
+     '        if "envelope" not in p:',
+     "        if False:",
+     "스키마: 봉투 없는 problem → 3"),
 )
 
 
@@ -1061,7 +1285,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S1-8(S1 완주)"
+            "슬라이스": "S2-1(kind 9종 스키마)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
