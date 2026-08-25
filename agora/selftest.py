@@ -4889,6 +4889,136 @@ def _case_brief_admits_what_it_cannot_measure() -> None:
         raise AssertionError("표식만으로 안전하다고 읽힐 수 있다")
 
 
+# ── S6-4 문서 5종 · 지원 매트릭스 ───────────────────────────────────────────
+# ★문서는 **가장 조용히 낡는다.** 코드가 바뀌어도 문서는 아무 소리를 내지 않는다.
+#   그래서 문서의 핵심 문장들을 시험이 잡고 있는다 — 빠지면 그 자리에서 적색이 난다.
+
+DOC_FILES = ("docs/PROTOCOL.md", "docs/ENVELOPE.md", "docs/ONBOARDING.md",
+             "docs/THREAT-MODEL.md", "README.md")
+
+
+def _doc(name: str) -> str:
+    with open(os.path.join(_ROOT, name), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _case_docs_five_exist() -> None:
+    """문서 5종이 실재하고 비어 있지 않다(04-tasks S6-4)."""
+    for name in DOC_FILES:
+        path = os.path.join(_ROOT, name)
+        if not os.path.exists(path):
+            raise AssertionError(f"문서가 없다: {name}")
+        if os.path.getsize(path) < 400:
+            raise AssertionError(f"문서가 너무 짧다(자리만 만든 것 아닌가): {name}")
+
+
+def _case_protocol_is_asymmetric_signing() -> None:
+    """PROTOCOL 은 **비대칭 서명** 규약이다 — 공유 비밀 방식 서술이 **0건**(AC ①).
+
+    ★공유 비밀은 한 곳이 새면 전원이 서로를 사칭할 수 있고 **누가 썼는지 증명할 수 없다.**
+      옛 문서에 그런 서술이 남아 있으면, 읽은 사람이 그렇게 구현한다.
+    """
+    text = _doc("docs/PROTOCOL.md")
+    if "allowed_signers" not in text:
+        raise AssertionError("명부 파일 이름이 없다")
+    if "ssh-keygen -Y" not in text:
+        raise AssertionError("서명·검증 명령이 없다")
+    # ★금지 문구는 **반대말을 부분 문자열로 품지 않는 것**이어야 한다.
+    #   처음엔 「대칭 키」를 금지어로 뒀는데, 이 문서의 **「비대칭 키」가 그것을 포함**해서
+    #   올바른 서술이 위반으로 잡혔다. 오늘 네 번째 같은 자리다
+    #   (검사기 → 보고서 → 주석 → 이번엔 문서). ⇒ 금지어는 **그 방식으로만 쓰이는 말**로 좁힌다.
+    for phrase in ("무작위 문자열", "공유 비밀을 나눠", "같은 키를 나눠", "키를 서로 공유"):
+        if phrase in text:
+            raise AssertionError(f"공유 비밀 방식 서술이 남아 있다: {phrase}")
+    if "비대칭" not in text:
+        raise AssertionError("어느 방식인지 문서가 자기 입으로 말하지 않는다")
+    if "개인키는 어디에도 공유하지 않는다" not in text:
+        raise AssertionError("개인키 비공유가 명시되지 않았다")
+
+
+def _case_protocol_error_codes_match_module() -> None:
+    """PROTOCOL 의 오류 코드 표가 **코드와 일치**한다 — 문서만 낡는 것을 막는다."""
+    from agora import errors as err
+    text = _doc("docs/PROTOCOL.md")
+    for code in (2, 3, 4, 5, 7, 8, 9, 10):
+        if f"| {code} |" not in text:
+            raise AssertionError(f"오류 코드 표에 {code} 이 없다")
+    if f"| {err.UNKNOWN_COMMIT} |" not in text:
+        raise AssertionError("저장 성공 불명 코드가 표와 다르다")
+    if f"| {err.STATE_CONFLICT} |" not in text:
+        raise AssertionError("CAS 코드가 표와 다르다")
+
+
+def _case_threat_model_lists_residual_risks() -> None:
+    """★잔여 위험 표에 **지시받은 세 항목**이 들어 있다(master 2026-08-25).
+
+    ★대화에만 남은 지시는 사라진다. 그래서 문서에 넣고, **그 문서를 시험이 잡고 있는다.**
+    """
+    text = _doc("docs/THREAT-MODEL.md")
+    if "잔여 위험" not in text:
+        raise AssertionError("잔여 위험 표가 없다")
+    if "hash_of" not in text:
+        raise AssertionError("hash_of 미상으로 검증 건너뛴 행 항목이 없다")
+    if "경계 표식은 보조" not in text:
+        raise AssertionError("경계 표식이 보조라는 항목이 없다")
+    if "K-1" not in text:
+        raise AssertionError("K-1 미실행 항목이 없다")
+    if "설득은 방어가 아니다" not in text:
+        raise AssertionError("표식만으로 안전하다고 읽힐 수 있다")
+    rows = [line for line in text.splitlines() if line.startswith("| R-")]
+    if len(rows) < 9:
+        raise AssertionError(f"잔여 위험 행이 줄었다: {len(rows)}건 — 조용히 사라지면 안 된다")
+
+
+def _case_threat_model_names_what_machines_miss() -> None:
+    """**기계가 못 잡는 것**을 명시한다(AC ②) — 목록에 없는 실명·주소·자유문."""
+    text = _doc("docs/THREAT-MODEL.md")
+    for phrase in ("실명", "자유문"):
+        if phrase not in text:
+            raise AssertionError(f"기계가 못 잡는 것에 빠진 말: {phrase}")
+    if "주인 승인" not in text:
+        raise AssertionError("그 자리를 무엇이 메우는지 안 적혀 있다")
+
+
+def _case_matrix_keeps_k1_unrun() -> None:
+    """지원 매트릭스에 **K-1 미실행 고지**가 있다(AC ④) — 그리고 지우지 말라고 적혀 있다."""
+    text = _doc("README.md")
+    if "지원 매트릭스" not in text:
+        raise AssertionError("매트릭스가 없다")
+    if "K-1" not in text or "미실행" not in text:
+        raise AssertionError("K-1 미실행 고지가 매트릭스에 없다")
+    if "이 줄을 지우지 마라" not in text:
+        raise AssertionError("삭제 금지 표시가 없다 — 다음 사람이 정리해 버린다")
+    for need in ("8.2", "3.11", "2.40"):
+        if need not in text:
+            raise AssertionError(f"최소 버전이 빠졌다: {need}")
+
+
+def _case_readme_does_not_claim_zero_dependency() -> None:
+    """「**추가 서버 운영 없음**」이라 쓰고 「외부 의존 0」이라 **쓰지 않는다**(AC ③).
+
+    ★둘은 다른 말이다. 운반층·`gh`·OpenSSH 에 의존한다 —
+      의존을 0 이라고 적으면, 그 셋 중 하나가 죽는 날 아무도 원인을 못 찾는다.
+    """
+    text = _doc("README.md")
+    if "추가 서버 운영 없음" not in text:
+        raise AssertionError("무엇을 안 해도 되는지 안 적혀 있다")
+    for phrase in ("외부 의존 0", "의존성 없음", "의존 없음", "아무 의존도 없"):
+        if phrase in text:
+            raise AssertionError(f"의존이 0 이라고 적혀 있다: {phrase}")
+    if "의존이 없는 것은 아니다" not in text:
+        raise AssertionError("의존이 있다는 사실이 안 적혀 있다")
+
+
+def _case_docs_point_at_real_files() -> None:
+    """README 가 가리키는 문서가 **실제로 있다** — 죽은 링크는 문서가 낡았다는 첫 신호다."""
+    import re
+    text = _doc("README.md")
+    for target in re.findall(r"\]\((docs/[A-Za-z-]+\.md)\)", text):
+        if not os.path.exists(os.path.join(_ROOT, target)):
+            raise AssertionError(f"README 가 없는 문서를 가리킨다: {target}")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -5142,6 +5272,14 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("브리프: 수신은 실행 못 한다",   _case_reader_brief_forbids_execution, None),
     ("브리프: 발신은 문을 적는다",    _case_writer_brief_lists_the_gates, None),
     ("브리프: 못 잰 것을 적는다",     _case_brief_admits_what_it_cannot_measure, None),
+    ("문서: 5종이 실재한다",          _case_docs_five_exist, None),
+    ("문서: 규약은 비대칭 서명",      _case_protocol_is_asymmetric_signing, None),
+    ("문서: 오류 코드 표가 코드와",   _case_protocol_error_codes_match_module, None),
+    ("문서: 잔여 위험 세 항목",       _case_threat_model_lists_residual_risks, None),
+    ("문서: 기계가 못 잡는 것",       _case_threat_model_names_what_machines_miss, None),
+    ("문서: 매트릭스에 K-1 미실행",   _case_matrix_keeps_k1_unrun, None),
+    ("문서: 의존 0 이라 안 쓴다",     _case_readme_does_not_claim_zero_dependency, None),
+    ("문서: 링크가 살아 있다",        _case_docs_point_at_real_files, None),
 )
 
 
@@ -5845,6 +5983,35 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        "3. **주인 승인** — 기본 **on**. 띄울 수 없으면(무인·TTY 없음) **보내지 않는다**.",',
      '        "3. 확인 — 기본 on.",',
      "브리프: 발신은 문을 적는다"),
+    # ── S6-4 문서 5종 ──────────────────────────────────────────────────────
+    # ★문서에도 그물을 건다. 문서는 가장 조용히 낡는다 — 지워져도 아무 소리가 안 난다.
+    # ⚠대상은 **문서에 한 번만 나오는 문자열**이어야 한다. 처음엔 `ssh-keygen -Y verify` 를
+    #   골랐는데 문서에 3곳이라 하네스가 「어느 것을 쟀는지 알 수 없다」며 NOT-APPLIED 를 냈다
+    #   — 그 규율이 맞다. 잴 수 있는 축으로 바꿨다.
+    ("M172-protocol-drops-private-key-rule", "docs/PROTOCOL.md",
+     "**개인키는 어디에도 공유하지 않는다.**",
+     "키는 각자 관리한다.",
+     "문서: 규약은 비대칭 서명"),
+    ("M173-threat-drops-hash-row", "docs/THREAT-MODEL.md",
+     "| R-3 | **`hash_of` 미상으로 검증을 건너뛴 원장 행**",
+     "| R-3 | 없음",
+     "문서: 잔여 위험 세 항목"),
+    ("M174-threat-softens-marker-row", "docs/THREAT-MODEL.md",
+     "**경계 표식은 보조다**",
+     "경계 표식이 막는다",
+     "문서: 잔여 위험 세 항목"),
+    ("M175-readme-drops-k1", "docs/../README.md",
+     "⚠**미실행(K-1)**",
+     "지원",
+     "문서: 매트릭스에 K-1 미실행"),
+    ("M176-readme-claims-zero-dependency", "docs/../README.md",
+     "⚠그렇다고 **의존이 없는 것은 아니다**",
+     "외부 의존 0 이다. 다만",
+     "문서: 의존 0 이라 안 쓴다"),
+    ("M177-protocol-code-table-stale", "docs/PROTOCOL.md",
+     "| 9 | 상태 불일치(CAS) |",
+     "| 99 | 상태 불일치(CAS) |",
+     "문서: 오류 코드 표가 코드와"),
 )
 
 
@@ -6016,7 +6183,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S6-3(대리인 스킬 2종)"
+            "슬라이스": "S6-4(문서 5종·지원 매트릭스)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
