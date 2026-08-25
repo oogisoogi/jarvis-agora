@@ -151,3 +151,62 @@ def parse_event(text: str | bytes) -> dict[str, Any]:
 
 def _no_float(literal: str) -> Any:
     raise AgoraError(errors.ARGUMENT, "이벤트에 실수를 담을 수 없다", {"literal": literal})
+
+
+# ── 운반 서식(설계 §3-1) ────────────────────────────────────────────────────
+# GitHub 게시물 = 표식 주석 + 코드펜스 JSON + 서명 블록.
+#
+# ★서명은 **펜스 안 글자**가 아니라 canonical 바이트에 걸린다(§3-1: 「사람 가독용 pretty 허용 —
+#   서명은 canonical 로 재계산」). 그래서 사람이 펜스 안을 예쁘게 고쳐도 검증은 흔들리지 않고,
+#   **내용**을 고치면 canonical 이 달라져 반드시 BAD 로 잡힌다.
+#   ⇒ 읽는 쪽은 「펜스 글자를 믿는다」가 아니라 「펜스에서 구조를 읽고 canonical 로 다시 만든다」다.
+
+POST_MARKER = "<!-- agora-event v1 -->"
+_FENCE_OPEN = "```json"
+_FENCE_CLOSE = "```"
+_SIG_BEGIN = "-----BEGIN SSH SIGNATURE-----"
+_SIG_END = "-----END SSH SIGNATURE-----"
+
+
+def render_post(event: Any, signature: str | None = None, *, pretty: bool = True) -> str:
+    """이벤트 → 운반층 게시물 본문."""
+    canonical_bytes(event)          # 상한·개행·실수는 여기서 먼저 걸린다
+    body = json.dumps(_canonicalize(event), ensure_ascii=False, sort_keys=True,
+                      indent=2 if pretty else None,
+                      separators=None if pretty else (",", ":"))
+    parts = [POST_MARKER, _FENCE_OPEN, body, _FENCE_CLOSE]
+    if signature:
+        parts.append(signature.strip())
+    return "\n".join(parts) + "\n"
+
+
+def parse_post(text: str) -> dict[str, Any]:
+    """운반층 게시물 본문 → {event, signature, raw}.
+
+    ★서식이 아니면 **거부**한다. 웹에서 손으로 쓴 댓글·다른 도구가 올린 글이 전부 여기로 온다 —
+      「비슷하면 받아 준다」로 두면 운반층이 프로토콜을 정하게 된다.
+      서명 블록 부재는 거부가 아니라 `signature=None` 이다(무서명 판정은 검증 단계의 몫).
+    """
+    if type(text) is not str or POST_MARKER not in text:
+        raise AgoraError(errors.ARGUMENT, "이벤트 게시물 서식이 아니다",
+                         {"want_marker": POST_MARKER})
+    after = text.split(POST_MARKER, 1)[1]
+    open_at = after.find(_FENCE_OPEN)
+    if open_at < 0:
+        raise AgoraError(errors.ARGUMENT, "코드펜스가 없다", {"want": _FENCE_OPEN})
+    rest = after[open_at + len(_FENCE_OPEN):]
+    close_at = rest.find(_FENCE_CLOSE)
+    if close_at < 0:
+        raise AgoraError(errors.ARGUMENT, "코드펜스가 닫히지 않았다", {"want": _FENCE_CLOSE})
+    event = parse_event(rest[:close_at].strip())
+
+    signature: str | None = None
+    tail = rest[close_at + len(_FENCE_CLOSE):]
+    begin = tail.find(_SIG_BEGIN)
+    if begin >= 0:
+        end = tail.find(_SIG_END, begin)
+        if end < 0:
+            raise AgoraError(errors.ARGUMENT, "서명 블록이 닫히지 않았다", {"want": _SIG_END})
+        signature = tail[begin:end + len(_SIG_END)] + "\n"
+    # raw = **다시 만든** canonical 바이트. 펜스 안 글자를 그대로 쓰지 않는다.
+    return {"event": event, "signature": signature, "raw": canonical_bytes(event)}

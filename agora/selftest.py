@@ -910,6 +910,201 @@ def _case_schema_table_matches_contract() -> None:
             f"불일치: {sorted(set(schema._PAYLOAD_CHECKS) ^ set(contract_open.KINDS))}")
 
 
+# ── S2-2 reducer 1단 — 검증 파이프·격리 ─────────────────────────────────────
+# ★여기서 재는 것은 「무엇을 상태 계산에 넣어도 되는가」 하나다.
+#   정렬·경합(S2-3)·전이(S2-4)는 아직 없다 — 그 경계를 케이스 이름에도 남긴다.
+
+_T1 = "1" * 32          # 이 스레드
+_T2 = "2" * 32          # 남의 스레드
+
+
+def _r2_event(kind: str, payload: dict[str, Any], message_id: str, *,
+              thread_id: str = _T1, prev: str | None = None,
+              extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    genesis = kind == "genesis"
+    ev: dict[str, Any] = {
+        "v": 1, "kind": kind, "thread_id": thread_id, "message_id": message_id,
+        "prev": contract_open.GENESIS_PREV if genesis else (prev or "b" * 64),
+        "expected_state": contract_open.GENESIS_EXPECTED_STATE if genesis else "c" * 64,
+        "from": "operator-a", "roster": "d" * 64,
+        "scrub": {"rules": "e" * 64, "blocked": 0, "redacted": 0},
+        "ts": "2026-01-01T00:00:00Z", "payload": payload,
+    }
+    if extra:
+        ev.update(extra)
+    return ev
+
+
+def _r2_genesis(mid: str = "a" * 32, thread_id: str = _T1) -> dict[str, Any]:
+    return _r2_event("genesis", {"type": "debate", "title": "가짜 제목",
+                                 "body": "가짜 발제", "chair": "operator-a"},
+                     mid, thread_id=thread_id)
+
+
+def _r2_post(mid: str, body: str = "가짜 발언", thread_id: str = _T1) -> dict[str, Any]:
+    return _r2_event("post", {"round": 1, "body": body}, mid, thread_id=thread_id)
+
+
+def _r2_signed(event: dict[str, Any]) -> str:
+    """서명기를 거쳐 운반층 게시물 본문을 만든다(정상 경로 전체를 탄다)."""
+    from agora.event import render_post
+    from agora.sign import sign_event
+    f = _fixtures()
+    res = _with_key(f["key_a"], lambda: sign_event(event))
+    return render_post(event, res["signature"])
+
+
+def _r2_store(*posts: str, thread_id: str = _T1) -> Any:
+    from agora.store_mock import MockStore
+    s = MockStore()
+    for i, body in enumerate(posts):
+        s.inject_raw(thread_id=thread_id, body=body,
+                     created_at=f"2026-01-01T00:00:{i:02d}Z")
+    return s
+
+
+def _r2_collect(store: Any, thread_id: str = _T1, **kw: Any) -> dict[str, Any]:
+    from agora import reducer
+    f = _fixtures()
+    return reducer.collect(store=store, thread_id=thread_id,
+                           allowed_signers_path=f["roster"], **kw)
+
+
+def _r2_reasons(out: dict[str, Any]) -> list[str]:
+    return [q["reason"] for q in out["quarantined"]]
+
+
+def _case_reducer_valid_pass_through() -> None:
+    """정상 3건은 전건 유효 · 격리 0 — 그물이 정상건을 잡지 않는다는 대조군."""
+    out = _r2_collect(_r2_store(
+        _r2_signed(_r2_genesis()),
+        _r2_signed(_r2_post("b" * 32)),
+        _r2_signed(_r2_post("c" * 32, "또 다른 가짜 발언")),
+    ))
+    if len(out["valid"]) != 3 or out["quarantined"]:
+        raise AssertionError(f"정상 3건: valid={len(out['valid'])} "
+                             f"quarantined={_r2_reasons(out)}")
+
+
+def _case_reducer_unsigned_injection() -> None:
+    """서명 없는 이벤트를 운반층에 직접 주입 — 상태 무반영 + 격리 1건(AC ①)."""
+    from agora.event import render_post
+    out = _r2_collect(_r2_store(
+        _r2_signed(_r2_genesis()),
+        render_post(_r2_post("b" * 32), None),      # 서명 없음 = 웹에서 붙여넣은 글
+    ))
+    if len(out["valid"]) != 1:
+        raise AssertionError(f"무서명이 유효로 셌다: valid={len(out['valid'])}")
+    if _r2_reasons(out) != ["signature"]:
+        raise AssertionError(f"격리 사유가 다르다: {out['quarantined']}")
+
+
+def _case_reducer_foreign_thread_event() -> None:
+    """다른 thread_id 의 **유효 서명** 이벤트를 이 스레드에 붙여넣기 → 무효(AC ②)."""
+    out = _r2_collect(_r2_store(
+        _r2_signed(_r2_genesis()),
+        _r2_signed(_r2_post("b" * 32, thread_id=_T2)),   # 서명은 멀쩡하다
+    ))
+    if len(out["valid"]) != 1 or _r2_reasons(out) != ["thread_mismatch"]:
+        raise AssertionError(f"남의 스레드 이벤트: valid={len(out['valid'])} "
+                             f"quarantined={out['quarantined']}")
+
+
+def _case_reducer_replay_rejected() -> None:
+    """같은 `(from, message_id)` 재게시 → 뒤엣것만 격리(§2-1 replay 방지).
+
+    ★어느 쪽이 남는지도 잰다. 「하나만 남았다」로 만족하면 노드마다 다른 쪽이 남아도 초록이다.
+    """
+    from agora.store_mock import MockStore
+    body = _r2_signed(_r2_post("b" * 32))
+    store = MockStore()
+    store.inject_raw(thread_id=_T1, body=_r2_signed(_r2_genesis()),
+                     created_at="2026-01-01T00:00:00Z")
+    # ★운반층이 **넣은 순서와 다른 시각**을 갖게 둔다. 페이지가 오는 순서는 우리가 못 정한다 —
+    #   나중에 만들어진 글이 먼저 실려 올 수 있다. 넣은 순서에 기대면 노드마다 다른 쪽이 살아남는다.
+    store.inject_raw(thread_id=_T1, body=body, created_at="2026-01-01T00:00:09Z")
+    store.inject_raw(thread_id=_T1, body=body, created_at="2026-01-01T00:00:02Z")
+    out = _r2_collect(store)
+    if len(out["valid"]) != 2 or _r2_reasons(out) != ["replay"]:
+        raise AssertionError(f"재게시: valid={len(out['valid'])} "
+                             f"quarantined={out['quarantined']}")
+    survivor = [v for v in out["valid"] if v["message_id"] == "b" * 32][0]
+    if survivor["created_at"] != "2026-01-01T00:00:02Z":
+        raise AssertionError(f"먼저 온 것이 아니라 {survivor['created_at']} 이 살아남았다 "
+                             "— 운반층이 실어 준 순서를 그대로 믿었다")
+
+
+def _case_reducer_schema_violation_quarantined() -> None:
+    """서명은 유효한데 계약 밖인 이벤트 → 격리(서명기는 payload 스키마를 안 본다)."""
+    bad = _r2_event("post", {"round": 1, "body": "가짜 발언"}, "b" * 32,
+                    extra={"sneaky": "계약에 없는 칸"})
+    out = _r2_collect(_r2_store(_r2_signed(_r2_genesis()), _r2_signed(bad)))
+    if len(out["valid"]) != 1 or _r2_reasons(out) != ["schema"]:
+        raise AssertionError(f"스키마 위반: valid={len(out['valid'])} "
+                             f"quarantined={out['quarantined']}")
+
+
+def _case_reducer_web_comment_quarantined() -> None:
+    """사람이 웹에서 그냥 쓴 댓글 → 격리(unparseable) · 상태 무반영."""
+    out = _r2_collect(_r2_store(
+        _r2_signed(_r2_genesis()),
+        "이건 그냥 사람이 웹에서 남긴 댓글입니다. 서식이 아닙니다.",
+    ))
+    if len(out["valid"]) != 1 or _r2_reasons(out) != ["unparseable"]:
+        raise AssertionError(f"웹 댓글: valid={len(out['valid'])} "
+                             f"quarantined={out['quarantined']}")
+
+
+def _case_reducer_quarantine_hidden_by_default() -> None:
+    """격리는 기본 출력에 **안 보이고** audit 에서만 보인다(AC ③ · §3-1)."""
+    from agora import reducer
+    from agora.event import render_post
+    out = _r2_collect(_r2_store(_r2_signed(_r2_genesis()),
+                                render_post(_r2_post("b" * 32), None)))
+    plain = reducer.read_view(out, state="open")
+    audited = reducer.read_view(out, state="open", audit=True)
+    if "quarantined" in plain:
+        raise AssertionError("기본 출력에 격리가 보인다")
+    if len(audited.get("quarantined") or []) != 1:
+        raise AssertionError(f"audit 에 격리가 없다: {audited}")
+    if len(plain["events"]) != 1:
+        raise AssertionError("기본 출력의 이벤트 수가 유효건과 다르다")
+
+
+def _case_reducer_quarantine_does_not_delete() -> None:
+    """격리는 **표시**다 — 운반층 원본도, 수집 결과도 그대로 남는다(삭제 0)."""
+    store = _r2_store(_r2_signed(_r2_genesis()),
+                      "웹에서 쓴 댓글", "또 다른 웹 댓글")
+    before = len(store.fetch(thread_id=_T1, limit=1000)["items"])
+    out = _r2_collect(store)
+    after = len(store.fetch(thread_id=_T1, limit=1000)["items"])
+    if before != 3 or after != 3:
+        raise AssertionError(f"운반층 건수가 변했다: {before} → {after}")
+    if out["fetched"] != 3 or len(out["quarantined"]) != 2:
+        raise AssertionError(f"수집 계수 불일치: {out['fetched']} / "
+                             f"{len(out['quarantined'])}")
+
+
+def _case_reducer_paginates_and_order_independent() -> None:
+    """페이지 경계를 넘어 전건을 모으고, 운반층이 순서를 흔들어도 같은 결과를 낸다.
+
+    ★한 페이지만 읽는 결손은 화면상 정상으로 보이고 상태만 틀린다 — 그래서 따로 잰다.
+    """
+    posts = [_r2_signed(_r2_genesis())] + [
+        _r2_signed(_r2_post(f"{i:032x}")) for i in range(1, 6)
+    ]
+    store = _r2_store(*posts)
+    store.shuffle(seed=20260825)
+    out = _r2_collect(store, limit=2)      # 6건을 2건씩 = 페이지 3장
+    if out["fetched"] != 6 or len(out["valid"]) != 6:
+        raise AssertionError(f"전건 수집 실패: fetched={out['fetched']} "
+                             f"valid={len(out['valid'])}")
+    ids = [v["message_id"] for v in out["valid"]]
+    if ids != sorted(ids, key=lambda m: [v["created_at"] for v in out["valid"]
+                                         if v["message_id"] == m][0]):
+        raise AssertionError("수집 순서가 createdAt 순이 아니다")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -972,6 +1167,16 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("스키마: 봉투 붙인 problem → 통과", _case_schema_problem_with_envelope_ok, None),
     ("스키마: genesis prev 계약값",   _case_schema_genesis_prev_contract, None),
     ("스키마: 표 ↔ 계약 kind 일치",   _case_schema_table_matches_contract, None),
+
+    ("reducer: 정상 3건 전건 유효",   _case_reducer_valid_pass_through, None),
+    ("reducer: 무서명 주입 → 격리",   _case_reducer_unsigned_injection, None),
+    ("reducer: 남의 스레드 → 격리",   _case_reducer_foreign_thread_event, None),
+    ("reducer: 재게시 → 뒤엣것 격리", _case_reducer_replay_rejected, None),
+    ("reducer: 스키마 위반 → 격리",   _case_reducer_schema_violation_quarantined, None),
+    ("reducer: 웹 댓글 → 격리",       _case_reducer_web_comment_quarantined, None),
+    ("reducer: 격리는 audit 에만",    _case_reducer_quarantine_hidden_by_default, None),
+    ("reducer: 격리는 삭제가 아니다", _case_reducer_quarantine_does_not_delete, None),
+    ("reducer: 페이지 전건·순서 무관", _case_reducer_paginates_and_order_independent, None),
 )
 
 
@@ -1114,6 +1319,34 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if "envelope" not in p:',
      "        if False:",
      "스키마: 봉투 없는 problem → 3"),
+    ("M35-reducer-signature-unchecked", "agora/reducer.py",
+     '        if verdict["verdict"] != sign.OK:',
+     "        if False:",
+     "reducer: 무서명 주입 → 격리"),
+    ("M36-reducer-thread-binding-off", "agora/reducer.py",
+     '        if event["thread_id"] != thread_id:',
+     "        if False:",
+     "reducer: 남의 스레드 → 격리"),
+    ("M37-reducer-replay-allowed", "agora/reducer.py",
+     "        if key in seen:",
+     "        if False:",
+     "reducer: 재게시 → 뒤엣것 격리"),
+    ("M38-reducer-schema-not-applied", "agora/reducer.py",
+     "            schema.validate(event)",
+     "            pass",
+     "reducer: 스키마 위반 → 격리"),
+    ("M39-reducer-quarantine-always-shown", "agora/reducer.py",
+     "    if audit:",
+     "    if True:",
+     "reducer: 격리는 audit 에만"),
+    ("M40-reducer-first-page-only", "agora/reducer.py",
+     "        cursor = page.get(\"next_cursor\")",
+     "        cursor = None",
+     "reducer: 페이지 전건·순서 무관"),
+    ("M41-reducer-order-unstable", "agora/reducer.py",
+     "    rows = sorted(fetch_all(store, thread_id, limit=limit), key=_order_key)",
+     "    rows = fetch_all(store, thread_id, limit=limit)",
+     "reducer: 재게시 → 뒤엣것 격리"),
 )
 
 
@@ -1285,7 +1518,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S2-1(kind 9종 스키마)"
+            "슬라이스": "S2-2(reducer 검증 파이프·격리)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
