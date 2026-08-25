@@ -5019,6 +5019,166 @@ def _case_docs_point_at_real_files() -> None:
             raise AssertionError(f"README 가 없는 문서를 가리킨다: {target}")
 
 
+# ── S6-5 관계 조회·렌더 ─────────────────────────────────────────────────────
+# ★관계는 **둘 사이에** 생긴다. 「가리키는 쪽」만 돌려주면 답한 사람은
+#   자기 글이 어디에 인용됐는지 영영 모른다.
+
+def _rel_env() -> tuple[Any, Any, dict[str, Any]]:
+    """(ctx, fixtures, 봉투) — 관계 픽스처의 공통 준비."""
+    from agora import core
+    ctx = _tools_ctx()
+    return ctx, _fixtures(), core.envelope_template()
+
+
+def _rel_pair(ctx: Any, f: Any, env: dict[str, Any]) -> tuple[str, str]:
+    """A(problem) 와 B(debate) 를 만들고 **B 가 A 를 인용**한다."""
+    from agora import tools
+    a = _with_key(f["key_a"], lambda: tools.propose(
+        ctx, type="problem", title="A 문제", body="본문", envelope=env))
+    b = _with_key(f["key_a"], lambda: tools.propose(
+        ctx, type="debate", title="B 토론", body="본문"))
+    _with_key(f["key_a"], lambda: tools.say(
+        ctx, thread_id=b["thread_id"], body="A 를 인용한다",
+        refs=[{"thread_id": a["thread_id"], "why": "같은 증상"}]))
+    return a["thread_id"], b["thread_id"]
+
+
+def _case_related_is_bidirectional() -> None:
+    """★**왕복**: A→B 를 걸면 **양쪽에서** 상대가 나온다(AC ① · 단방향이면 적색).
+
+    ★이 케이스**만**이 역방향을 잰다. 정방향(가리키는 쪽)은 구현이 자연스럽게 되는 쪽이라,
+      그것만 재면 「관계 조회가 된다」는 초록이 **절반의 사실** 위에 선다.
+    """
+    from agora import tools
+    ctx, f, env = _rel_env()
+    a, b = _rel_pair(ctx, f, env)
+    from_a = tools.threads(ctx, related=a)
+    from_b = tools.threads(ctx, related=b)
+    if [i["thread_id"] for i in from_a["items"]] != [b]:
+        raise AssertionError(f"A 기준 역방향이 안 나온다: {[i['title'] for i in from_a['items']]}")
+    if [i["thread_id"] for i in from_b["items"]] != [a]:
+        raise AssertionError(f"B 기준 정방향이 안 나온다: {[i['title'] for i in from_b['items']]}")
+
+
+def _case_related_excludes_self() -> None:
+    """자기 자신은 관계가 아니다 — 물어본 그 스레드가 답에 끼면 목록이 늘 하나씩 틀린다.
+
+    ★**자기를 가리키는 스레드를 일부러 만든다.** 안 그러면 이 가드는 **한 번도 작동하지 않는다** —
+      자기를 안 가리키는 스레드는 애초에 조건을 통과하지 못하므로, 가드를 지워도 결과가 같다
+      (M179 가 처음에 살아남은 자리다 · 오늘 열다섯 번째 같은 계보).
+    """
+    from agora import tools
+    ctx, f, env = _rel_env()
+    a, b = _rel_pair(ctx, f, env)
+    # A 가 **자기 자신**을 인용한다(실물에서도 난다 — 같은 스레드의 앞 발언을 되짚을 때).
+    _with_key(f["key_a"], lambda: tools.say(
+        ctx, thread_id=a, body="내 앞 글을 되짚는다",
+        refs=[{"thread_id": a, "why": "같은 스레드"}]))
+    got = [i["thread_id"] for i in tools.threads(ctx, related=a)["items"]]
+    if a in got:
+        raise AssertionError("자기 자신이 관계로 나왔다")
+    if got != [b]:
+        raise AssertionError(f"자기 참조를 지우다 남까지 지웠다: {got}")
+
+
+def _case_read_renders_refs_with_why() -> None:
+    """`read` 가 refs 를 **링크로** 싣고 `why` 를 함께 준다(AC ②).
+
+    ★`why` 가 빠지면 읽는 쪽은 링크를 따라가 보고서야 관계를 짐작해야 한다.
+    """
+    from agora import tools
+    ctx, f, env = _rel_env()
+    a, b = _rel_pair(ctx, f, env)
+    view = tools.read(ctx, thread_id=b)
+    refs = view.get("refs")
+    if not refs:
+        raise AssertionError("read 에 관계가 안 실렸다")
+    hit = [r for r in refs if r["thread_id"] == a]
+    if not hit:
+        raise AssertionError(f"인용한 스레드가 없다: {refs}")
+    if hit[0].get("why") != "같은 증상":
+        raise AssertionError(f"why 가 안 실렸다: {hit[0]}")
+    if hit[0].get("role") != "ref":
+        raise AssertionError(f"관계 종류가 틀렸다: {hit[0].get('role')}")
+
+
+def _case_promoted_knowhow_points_at_problem() -> None:
+    """승격된 knowhow 의 `parent` 가 **원 problem** 을 가리킨다(AC ③)."""
+    from agora import tools
+    ctx, f, env = _rel_env()
+    a = _with_key(f["key_a"], lambda: tools.propose(
+        ctx, type="problem", title="A 문제", body="본문", envelope=env))
+    k = _with_key(f["key_a"], lambda: tools.promote_knowhow(
+        ctx, parent_thread_id=a["thread_id"], title="배운 것", body="정리", envelope=env))
+    view = tools.read(ctx, thread_id=k["thread_id"])
+    parents = [r for r in view["refs"] if r["role"] == "parent"]
+    if len(parents) != 1 or parents[0]["thread_id"] != a["thread_id"]:
+        raise AssertionError(f"parent 가 원 문제를 안 가리킨다: {parents}")
+    if view["state"]["type"] != "knowhow":
+        raise AssertionError(f"승격 결과 유형: {view['state']['type']}")
+
+
+def _case_promotion_is_not_a_new_tool() -> None:
+    """승격은 **새 도구가 아니다** — 도구 11종은 §4 에서 동결이다.
+
+    ★새 코어 도구를 하나 만들면 계약이 12종이 되고, **문서·MCP·대리인 브리프가 전부 갈라진다.**
+      승격은 `propose` 로 할 수 있는 일(`parent` 를 단 genesis)이므로 편의 함수로만 둔다.
+    """
+    from agora import cli, tools
+    if "promote_knowhow" in tools.CORE_TOOLS or "promote-knowhow" in cli.COMMANDS:
+        raise AssertionError("승격이 도구 표에 들어갔다 — 계약이 12종이 됐다")
+    if len(tools.CORE_TOOLS) != 11:
+        raise AssertionError(f"도구 수가 바뀌었다: {len(tools.CORE_TOOLS)}")
+
+
+def _case_relations_do_not_change_state() -> None:
+    """★**관계는 상태를 바꾸지 않는다**(AC ④ · §2-1b 불변식).
+
+    ★같은 발언을 refs 있는 것과 없는 것으로 각각 올려 **절차 스냅샷**을 비교한다.
+      `state_hash` 로 비교하면 안 된다 — 그 안에는 사슬의 머리가 들어 있어서
+      **관계를 달면 당연히 달라진다.** 두 질문을 한 값으로 답하려 하면 하나는 거짓말이 된다.
+    """
+    from agora import reducer, tools
+    ctx, f, env = _rel_env()
+    plain_ctx = _tools_ctx()
+
+    def build(with_refs: bool, c: Any) -> dict[str, Any]:
+        a = _with_key(f["key_a"], lambda: tools.propose(
+            c, type="problem", title="A 문제", body="본문", envelope=env))
+        kw: dict[str, Any] = {"thread_id": a["thread_id"], "body": "발언"}
+        if with_refs:
+            kw["refs"] = [{"thread_id": "d" * 32, "why": "관련"}]
+        _with_key(f["key_a"], lambda: tools.say(c, **kw))
+        reduced = tools._reduce(c, a["thread_id"])
+        return reducer.procedure_snapshot(reduced)
+
+    bare = build(False, plain_ctx)
+    linked = build(True, ctx)
+    if bare != linked:
+        raise AssertionError(f"관계가 절차를 바꿨다: {bare} ↔ {linked}")
+
+
+def _case_link_to_unopened_thread_is_allowed() -> None:
+    """아직 **안 열린 스레드**도 가리킬 수 있다 — 거부하지 않고 미해소로 표시한다.
+
+    ★거부하면 「먼저 열고 나중에 잇는다」가 불가능해진다(§2-1b).
+    """
+    from agora import tools
+    ctx, f, env = _rel_env()
+    a = _with_key(f["key_a"], lambda: tools.propose(
+        ctx, type="problem", title="A 문제", body="본문", envelope=env))
+    ghost = "e" * 32
+    _with_key(f["key_a"], lambda: tools.say(
+        ctx, thread_id=a["thread_id"], body="아직 없는 것을 가리킨다",
+        refs=[{"thread_id": ghost, "why": "곧 열 것"}]))
+    view = tools.read(ctx, thread_id=a["thread_id"])
+    hit = [r for r in view["refs"] if r["thread_id"] == ghost]
+    if not hit:
+        raise AssertionError("미해소 링크가 사라졌다")
+    if hit[0].get("resolved") is not False:
+        raise AssertionError(f"미해소인데 해소로 표시됐다: {hit[0]}")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -5280,6 +5440,13 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("문서: 매트릭스에 K-1 미실행",   _case_matrix_keeps_k1_unrun, None),
     ("문서: 의존 0 이라 안 쓴다",     _case_readme_does_not_claim_zero_dependency, None),
     ("문서: 링크가 살아 있다",        _case_docs_point_at_real_files, None),
+    ("관계: 왕복이 양방향",           _case_related_is_bidirectional, None),
+    ("관계: 자기 자신은 제외",        _case_related_excludes_self, None),
+    ("관계: read 에 why 가 함께",     _case_read_renders_refs_with_why, None),
+    ("관계: 승격은 원 문제를 가리켜", _case_promoted_knowhow_points_at_problem, None),
+    ("관계: 승격은 새 도구 아니다",   _case_promotion_is_not_a_new_tool, None),
+    ("관계: 상태를 바꾸지 않는다",    _case_relations_do_not_change_state, None),
+    ("관계: 안 열린 것도 가리킨다",   _case_link_to_unopened_thread_is_allowed, None),
 )
 
 
@@ -6012,6 +6179,29 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "| 9 | 상태 불일치(CAS) |",
      "| 99 | 상태 불일치(CAS) |",
      "문서: 오류 코드 표가 코드와"),
+    # ── S6-5 관계 조회·렌더 ─────────────────────────────────────────────────
+    ("M178-related-is-one-way", "agora/tools.py",
+     "        if related in (links.get(tid) or []) or tid in forward:",
+     "        if related in (links.get(tid) or []):",
+     "관계: 왕복이 양방향"),
+    ("M179-related-includes-self", "agora/tools.py",
+     "        if tid == related:\n            continue",
+     "        if False:\n            continue",
+     "관계: 자기 자신은 제외"),
+    ("M180-read-drops-refs", "agora/tools.py",
+     '    view["refs"] = reducer.links_of(reduced)',
+     '    view["refs"] = []',
+     "관계: read 에 why 가 함께"),
+    ("M181-promotion-loses-parent", "agora/tools.py",
+     '                   parent={"thread_id": parent_thread_id})',
+     "                   parent=None)",
+     "관계: 승격은 원 문제를 가리켜"),
+    # ⚠처음엔 `[] or [...]` 로 인덱스를 비우려 했는데 **빈 리스트가 falsy 라 뒤가 평가됐다** —
+    #   내가 만든 등가 뮤턴트였다. 정방향·역방향을 **각각** 지우는 대칭 축으로 바꿨다.
+    ("M182-related-forward-only", "agora/tools.py",
+     "        if related in (links.get(tid) or []) or tid in forward:",
+     "        if tid in forward:",
+     "관계: 왕복이 양방향"),
 )
 
 
@@ -6183,7 +6373,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S6-4(문서 5종·지원 매트릭스)"
+            "슬라이스": "S6-5(관계 조회·렌더)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

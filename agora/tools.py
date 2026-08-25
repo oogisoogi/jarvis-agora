@@ -155,6 +155,7 @@ def threads(ctx: Context, *, type: str | None = None, status: str | None = None,
     """스레드 목록. **연 만큼만 안다** — 그 사실을 결과에 적는다."""
     listed = ctx.store.list_threads(limit=limit, cursor=cursor)
     items: list[dict[str, Any]] = []
+    links_by_thread: dict[str, list[str]] = {}
     opened = 0
     for row in listed["items"]:
         page = ctx.store.fetch(number=row["number"])
@@ -174,9 +175,13 @@ def threads(ctx: Context, *, type: str | None = None, status: str | None = None,
                 "deadline": (genesis.get("deadlines") or {}).get(
                     f"r{rnd}" if rnd is not None else "r0"),
                 "updated": row.get("updated_at")}
+        links_by_thread[thread_id] = [link["thread_id"]
+                                      for link in reducer.links_of(reduced)]
         if _matches(item, genesis, reduced, type=type, status=status, tag=tag,
-                    os=os, app=app, answered=answered, query=query, related=related):
+                    os=os, app=app, answered=answered, query=query):
             items.append(item)
+    if related:
+        items = _narrow_related(items, links_by_thread, related)
     return {"items": items, "next_cursor": listed.get("next_cursor"),
             # ★열어 본 수와 「필터가 이 범위 안에서만 돌았다」를 함께 준다.
             #   이 두 칸이 없으면 「결과 0건」이 「그런 스레드 없음」으로 읽힌다.
@@ -226,13 +231,28 @@ def _matches(item: dict[str, Any], genesis: dict[str, Any], reduced: dict[str, A
         return False
     if f.get("query") and f["query"] not in item["title"]:
         return False
-    if f.get("related"):
-        # 이 스레드가 그 스레드를 **가리키는가**(parent·refs). 해소 여부는 보지 않는다 —
-        # 아직 안 열린 스레드를 가리키는 것도 관계다(§2-1b).
-        links = reducer.links_of(reduced)
-        if not any(link["thread_id"] == f["related"] for link in links):
-            return False
     return True
+
+
+def _narrow_related(items: list[dict[str, Any]], links: dict[str, list[str]],
+                    related: str) -> list[dict[str, Any]]:
+    """관계는 **양방향**이다(§2-1b · AC ①).
+
+    ★A 가 B 를 refs 로 걸면 관계는 **둘 사이에** 생긴 것이지 A 에만 생긴 것이 아니다.
+      「가리키는 쪽」만 돌려주면 **B 쪽에서 물었을 때 아무것도 안 나온다** — 답한 사람은
+      자기 글이 어디에 인용됐는지 영영 모른다. 그래서 역방향도 함께 본다.
+    ★역방향은 **스캔한 범위 안에서만** 알 수 있다(남의 스레드가 나를 가리키는지는 그 스레드를
+      열어야 안다). 그 한계는 `threads` 가 이미 결과에 적는다(`scanned`·`filtered_within_scanned`).
+    """
+    forward = set(links.get(related) or [])          # related → 그가 가리키는 것들
+    out = []
+    for item in items:
+        tid = item["thread_id"]
+        if tid == related:
+            continue                                  # 자기 자신은 관계가 아니다
+        if related in (links.get(tid) or []) or tid in forward:
+            out.append(item)
+    return out
 
 
 def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
@@ -250,6 +270,9 @@ def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
                              {"since_event": since_event})
         view["events"] = view["events"][ids.index(since_event) + 1:]
     view["state_hash"] = reduced.get("state_hash")   # ★쓰기의 CAS 인자가 여기서 나온다
+    # ★관계를 **링크로** 싣는다 — `why` 와 함께(AC ②). 왜 인용했는지가 빠지면
+    #   읽는 쪽은 그 링크를 따라가 보고서야 관계를 짐작해야 한다.
+    view["refs"] = reducer.links_of(reduced)
     view["next_cursor"] = None
     return view
 
@@ -340,6 +363,20 @@ def vote(ctx: Context, *, thread_id: str, target: str, value: int) -> dict[str, 
                    payload={"target": target, "value": value},
                    prev=prev, expected_state=expected, category=state["type"])
     return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
+
+
+def promote_knowhow(ctx: Context, *, parent_thread_id: str, title: str, body: str,
+                    envelope: dict[str, Any]) -> dict[str, Any]:
+    """problem 에서 배운 것을 knowhow 로 **승격**한다(04-tasks S6-5 AC ③).
+
+    ★**새 도구를 만들지 않는다.** 도구 11종은 §4 에서 동결이고, 승격은 그중 `propose` 로
+      할 수 있는 일이다(`parent` 를 단 genesis). 편의 함수는 두되 **도구 표에는 넣지 않는다** —
+      넣는 순간 계약이 12종이 되고, 그것은 문서·MCP·대리인 브리프가 전부 갈라진다는 뜻이다.
+    """
+    # ⚠`parent` 링크에는 `why` 를 **넣지 않는다** — 계약이 그 칸을 `refs` 에만 허용한다
+    #   (`schema._check_link(need_why=...)`). 승격의 이유는 본문에 적는다.
+    return propose(ctx, type="knowhow", title=title, body=body, envelope=envelope,
+                   parent={"thread_id": parent_thread_id})
 
 
 def envelope_check(ctx: Context, *, envelope: Any) -> dict[str, Any]:
