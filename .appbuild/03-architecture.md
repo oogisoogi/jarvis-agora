@@ -66,7 +66,7 @@
 | `abort` | 운영자 키 | reason |
 | `vote` | 참가자 | target message_id · value(+1/0) — 구속력 없음(M-7) |
 
-★**거부 코드 구분(master 채택 2026-08-25 13:5x · S2-1)**: **code 10 = 모양**(칸 없음·모르는 칸·타입·범위·표 밖 kind) / **code 3 = 정책**(problem/knowhow 에 envelope 부재 = 「그 유형으로 올릴 자격」 미달 · resolution 권고에 `execution:"forbidden"` 부재). 표 밖 kind 의 **격리 목록 기록**은 reducer(§2-3 ①) 몫 — 스키마는 거부까지.
+★**거부 코드 구분(master 채택 2026-08-25 13:5x · S2-1)**: **code 10 = 모양**(칸 없음·모르는 칸·타입·범위·표 밖 kind) / **code 3 = 정책**(problem/knowhow 에 envelope 부재 = 「그 유형으로 올릴 자격」 미달 · resolution 권고에 `execution:"forbidden"` 부재). ★**봉투 예외(master 채택 2026-08-25 15:3x · S3-3)**: 봉투는 자격 축이므로 **봉투 부재·봉투 필수 칸 결손·빈 재현 단계 = 전부 code 3**(「재현 정보 없이 남의 시간을 쓰지 않는다」는 같은 약속 위반) · 봉투 **안의 타입 오류**(재현 단계가 문자열이 아님 등)만 모양 = code 10. 표 밖 kind 의 **격리 목록 기록**은 reducer(§2-3 ①) 몫 — 스키마는 거부까지.
 ### 2-3. reducer(결정론 — **주어진 이벤트 집합에 대해** 동일 결과 · 서로 다른 스냅샷은 서로 다른 상태를 낼 수 있고 그것은 수렴 전 상태이지 결함이 아니다 · R-1)
 1. 저장층에서 스레드의 이벤트 후보 전건 fetch(top-level + reply 모두) → 서명·명부(체크포인트 시점 명부·KRL)·`(from,message_id)` 중복·`thread_id`·크기 검증 → 무효는 **격리 목록**에 기록(표시만).
 2. `prev`·`expected_state`로 정렬·경합 판정: 같은 `prev`를 가진 이벤트가 여럿이면 **GitHub createdAt → node_id 사전순** 승자, 나머지는 「stale」로 무효(H-9). 늦은 라운드 발언(advance 이후의 이전 round post) = 무효.

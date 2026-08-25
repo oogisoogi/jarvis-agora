@@ -2525,6 +2525,181 @@ def _case_receiver_no_flag_when_matching() -> None:
     if out["valid"][0]["hash"] != event_hash(g):
         raise AssertionError("주장을 채운 뒤의 해시가 사슬 값과 다르다")
 
+# ── S4-1 GitHub 운반층 ──────────────────────────────────────────────────────
+# ★가짜 transport 로 **논리**를 잰다(페이지 순회·답글 순회·재조회 판정).
+#   가짜로 초록이 나도 그것은 「GitHub 이 그렇게 답한다」는 뜻이 아니다 — 실물 대조는 드라이런(S7).
+#   그 경계를 케이스 이름과 보고에 그대로 적는다.
+
+def _fake_transport(pages: list[dict[str, Any]], *, replies: dict[str, list] | None = None,
+                    log: list | None = None) -> Any:
+    """정해진 응답을 순서대로 돌려주는 가짜 운반층."""
+    state = {"i": 0}
+    replies = replies or {}
+
+    def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        if log is not None:
+            # ★질의 이름을 **본문에서** 알아낸다. 첫 줄만 보면 전부 "query" 로 뭉쳐져
+            #   「검색을 몇 번 했나」를 셀 수 없다(처음에 그렇게 짰다가 0 회로 셌다).
+            for label in ("search", "createDiscussion", "addDiscussionComment",
+                          "DiscussionComment", "discussion", "repository"):
+                if label + "(" in query or "... on " + label in query:
+                    log.append((label, dict(variables)))
+                    break
+            else:
+                log.append(("?", dict(variables)))
+        if "search(" in query:
+            return {"search": {"nodes": [{"id": "D_1", "number": 7, "title": "t"}]}}
+        if "... on DiscussionComment" in query:
+            rows = replies.get(variables.get("id"), [])
+            return {"node": {"replies": {"pageInfo": {"hasNextPage": False,
+                                                      "endCursor": None},
+                                         "nodes": rows}}}
+        page = pages[min(state["i"], len(pages) - 1)]
+        state["i"] += 1
+        return {"repository": {"discussion": page}}
+
+    return transport
+
+
+def _disc_page(*, comments: list[dict[str, Any]], has_next: bool,
+               cursor: str | None, first: bool = True) -> dict[str, Any]:
+    return {
+        "id": "D_1", "number": 7, "title": "[selftest] 가짜 스레드",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "body": "genesis 본문" if first else "genesis 본문",
+        "comments": {"pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                     "nodes": comments},
+    }
+
+
+def _comment(node_id: str, *, replies: list[dict[str, Any]] | None = None,
+             reply_next: bool = False) -> dict[str, Any]:
+    return {"id": node_id, "body": f"{node_id} 본문",
+            "createdAt": "2026-01-01T00:01:00Z",
+            "replies": {"pageInfo": {"hasNextPage": reply_next, "endCursor": "rc1"},
+                        "nodes": replies or []}}
+
+
+def _case_github_fetch_walks_all_pages() -> None:
+    """댓글이 2페이지를 넘어가면 **전건**을 모은다(AC ①)."""
+    from agora.store_github import GitHubStore
+    pages = [
+        _disc_page(comments=[_comment("C_1"), _comment("C_2")], has_next=True,
+                   cursor="c1"),
+        _disc_page(comments=[_comment("C_3")], has_next=False, cursor=None),
+    ]
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_fake_transport(pages))
+    items = store.fetch(thread_id="a" * 32)["items"]
+    ids = [i["node_id"] for i in items]
+    if ids != ["D_1", "C_1", "C_2", "C_3"]:
+        raise AssertionError(f"전건 회수 실패: {ids}")
+    if sum(1 for i in items if i["is_genesis"]) != 1:
+        raise AssertionError("genesis 표시가 1건이 아니다")
+
+
+def _case_github_fetch_walks_replies() -> None:
+    """댓글의 **답글**도 함께 모은다 — 한쪽만 돌면 대화 뒷부분이 조용히 사라진다(AC ②)."""
+    from agora.store_github import GitHubStore
+    pages = [_disc_page(comments=[_comment("C_1", replies=[
+        {"id": "R_1", "body": "답글", "createdAt": "2026-01-01T00:02:00Z"}])],
+        has_next=False, cursor=None)]
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_fake_transport(pages))
+    ids = [i["node_id"] for i in store.fetch(thread_id="a" * 32)["items"]]
+    if ids != ["D_1", "C_1", "R_1"]:
+        raise AssertionError(f"답글 누락: {ids}")
+
+
+def _case_github_fetch_paginates_replies() -> None:
+    """답글도 페이지가 있다 — 첫 페이지만 읽으면 뒷부분이 사라진다."""
+    from agora.store_github import GitHubStore
+    pages = [_disc_page(comments=[_comment("C_1", replies=[
+        {"id": "R_1", "body": "답글1", "createdAt": "2026-01-01T00:02:00Z"}],
+        reply_next=True)], has_next=False, cursor=None)]
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_fake_transport(pages, replies={"C_1": [
+                            {"id": "R_2", "body": "답글2",
+                             "createdAt": "2026-01-01T00:03:00Z"}]}))
+    ids = [i["node_id"] for i in store.fetch(thread_id="a" * 32)["items"]]
+    if ids != ["D_1", "C_1", "R_1", "R_2"]:
+        raise AssertionError(f"답글 2페이지 누락: {ids}")
+
+
+def _case_github_lookup_is_cached() -> None:
+    """스레드 번호는 한 번만 찾는다 — 매번 검색하면 한도를 검색으로 태운다."""
+    from agora.store_github import GitHubStore
+    log: list = []
+    pages = [_disc_page(comments=[], has_next=False, cursor=None)]
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_fake_transport(pages, log=log))
+    store.fetch(thread_id="a" * 32)
+    store.fetch(thread_id="a" * 32)
+    searches = [q for q, _v in log if q == "search"]
+    if len(searches) != 1:
+        raise AssertionError(f"검색을 {len(searches)}회 했다 — 캐시가 안 산다")
+
+
+def _case_github_empty_result_is_unknown_commit() -> None:
+    """생성 결과가 비면 성공도 실패도 단정하지 않는다 → code 8(재조회 후 판정)."""
+    from agora.store_github import GitHubStore
+
+    def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        if "repository(owner:" in query and "discussion" not in query:
+            return {"repository": {"id": "R_1"}}
+        if "createDiscussion" in query:
+            return {"createDiscussion": {"discussion": {}}}     # 응답이 비었다
+        return {}
+
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=transport)
+    store.append(thread_id="a" * 32, category="debate", title="[selftest] 가짜",
+                 body="본문", is_genesis=True)
+
+
+def _case_github_transport_error_is_retryable() -> None:
+    """저장층 오류는 **재시도 가능**(7)이다 — 계약 위반(10)과 섞지 않는다."""
+    from agora.store_github import GitHubStore
+
+    def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        raise AgoraError(errors.STORE, "가짜 저장층 오류", None)
+
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=transport)
+    try:
+        store.fetch(thread_id="a" * 32)
+    except AgoraError as e:
+        if not e.retryable:
+            raise AssertionError("저장층 오류가 재시도 불가로 나왔다") from None
+        raise
+
+
+def _case_github_projection_is_not_silently_ok() -> None:
+    """아직 안 만든 투영이 **조용히 성공**을 돌려주지 않는다.
+
+    ★「반영했다」는 거짓이 화면과 상태를 갈라놓는다 — 그 거짓은 아무도 못 본다.
+    """
+    from agora.store_github import GitHubStore
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_fake_transport([]))
+    try:
+        store.project(thread_id="a" * 32, state="open")
+    except AgoraError as e:
+        if (e.detail or {}).get("reason") != "slice_not_built":
+            raise AssertionError(f"사유가 다르다: {e.detail}") from None
+        return
+    raise AssertionError("미구현 투영이 성공을 돌려줬다")
+
+
+def _case_github_store_satisfies_contract() -> None:
+    """mock 과 같은 인터페이스를 만족한다 — 갈아 끼울 면이 좁아야 한다."""
+    from agora.store_base import Store
+    from agora.store_github import GitHubStore
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_fake_transport([]))
+    if not isinstance(store, Store):
+        raise AssertionError("Store 계약을 만족하지 않는다")
+
 # ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
 
 # S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
@@ -2757,6 +2932,14 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("수신: digest 불일치 → 플래그",  _case_receiver_flags_digest_mismatch, None),
     ("수신: 일치하면 플래그 없음",    _case_receiver_no_flag_when_matching, None),
     ("S3: 4축 그물 실재",             _case_s3_axes_have_nets, None),
+    ("운반층: 댓글 전 페이지 회수",   _case_github_fetch_walks_all_pages, None),
+    ("운반층: 답글도 회수",           _case_github_fetch_walks_replies, None),
+    ("운반층: 답글 2페이지 회수",     _case_github_fetch_paginates_replies, None),
+    ("운반층: 번호 조회 캐시",        _case_github_lookup_is_cached, None),
+    ("운반층: 빈 응답 → 8",           _case_github_empty_result_is_unknown_commit, errors.UNKNOWN_COMMIT),
+    ("운반층: 오류 → 7(retryable)",   _case_github_transport_error_is_retryable, errors.STORE),
+    ("운반층: 투영은 조용하지 않다",  _case_github_projection_is_not_silently_ok, None),
+    ("운반층: Store 계약 충족",       _case_github_store_satisfies_contract, None),
 )
 
 
@@ -2975,6 +3158,30 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M93-github-first-page-only", "agora/store_github.py",
+     '            if not page.get("hasNextPage"):\n                break',
+     "            if True:\n                break",
+     "운반층: 댓글 전 페이지 회수"),
+    ("M94-github-replies-skipped", "agora/store_github.py",
+     "                for reply in self._all_replies(comment):",
+     "                for reply in []:",
+     "운반층: 답글도 회수"),
+    ("M95-github-reply-first-page-only", "agora/store_github.py",
+     '        while page.get("hasNextPage"):',
+     "        while False:",
+     "운반층: 답글 2페이지 회수"),
+    ("M96-github-lookup-not-cached", "agora/store_github.py",
+     "        if thread_id in self._numbers:",
+     "        if False:",
+     "운반층: 번호 조회 캐시"),
+    ("M97-github-empty-create-is-ok", "agora/store_github.py",
+     '            if not node.get("id"):\n                # 성공도 실패도 단정하지 않는다 — 재조회 후에만 판정한다(S4-3).',
+     '            if False:\n                # 성공도 실패도 단정하지 않는다 — 재조회 후에만 판정한다(S4-3).',
+     "운반층: 빈 응답 → 8"),
+    ("M98-github-projection-silently-ok", "agora/store_github.py",
+     '        raise AgoraError(errors.PRECONDITION, "투영은 아직 구현되지 않았다",\n                         {"reason": "slice_not_built", "slice": "S4-4"})',
+     '        return {"ok": True}',
+     "운반층: 투영은 조용하지 않다"),
     ("M89-signer-records-claim-not-measure", "agora/signer.py",
      '        "scrub": report,\n        "scrub_claim": _claim_of(event),',
      '        "scrub": _claim_of(event),\n        "scrub_claim": _claim_of(event),',
@@ -3306,7 +3513,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S3-6(S3 완주)"
+            "슬라이스": "S4-1(store_github)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
