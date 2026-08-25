@@ -1945,6 +1945,117 @@ def _case_spawn_is_proposal_only() -> None:
 
 
 
+# ── S3-1 allowlist ──────────────────────────────────────────────────────────
+# ★두 겹의 뜻이 다르다: allowlist 는 「모양이 우리 것인가」, denylist 는 「아는 위험이 있나」.
+#   그래서 위반 픽스처도 **구조**로 만든다(개인정보가 아니라 첨부·이미지·HTML·멘션·URL).
+
+_ALLOW_VIOLATIONS = (
+    ("이미지", "image", "본문입니다 ![그림](x.png) 끝"),
+    ("HTML", "html", "본문입니다 <div>가짜</div> 끝"),
+    ("멘션", "mention", "본문입니다 @someone 보세요"),
+    ("첨부", "attachment", "본문입니다 file:///어딘가/가짜.txt"),
+    ("비허용 도메인", "url-domain", "본문입니다 https://not-allowed.example/a 참고"),
+)
+
+
+def _case_allowlist_blocks_five_kinds() -> None:
+    """allowlist 위반 5종이 전건 차단된다(§8 · AC) — 그리고 **어느 규칙이** 잡았는지까지 본다.
+
+    ★사유를 안 보면 「무엇이든 걸리기만 하면 초록」이 된다. 실제로 denylist 가 대신 잡아도
+      계수는 같아지므로, 규칙 이름을 단언해야 그 그물을 쟀다고 말할 수 있다.
+    """
+    from agora import scrub
+    for name, rule, body in _ALLOW_VIOLATIONS:
+        report = scrub.check({"payload": {"body": body}})
+        rules = [f["rule"] for f in report["findings"]]
+        if rule not in rules:
+            raise AssertionError(f"{name}: {rule} 이 안 잡혔다 — 잡힌 것={rules}")
+
+
+def _case_allowlist_enforce_is_code3() -> None:
+    """집행 경로에서는 code 3 으로 멈춘다(§8 첨부/@멘션/비허용 URL code 3)."""
+    from agora import scrub
+    scrub.enforce({"payload": {"body": "본문 @someone https://not-allowed.example/a"}})
+
+
+def _case_allowlist_allows_listed_domain() -> None:
+    """허용 목록에 있는 도메인은 통과한다 — 그리고 평범한 본문에 오탐이 없다(대조군).
+
+    ★차단만 재면 「전부 차단」도 초록이다. 통과 축이 없으면 게이트가 죽었는지 알 수 없다.
+    """
+    from agora import scrub
+    clean = [
+        "평범한 한글 발언입니다. 숫자 12 와 기호 · 도 있습니다.",
+        "ascii sentence with punctuation, and a dash - here.",
+        "허용된 문서 링크입니다 https://docs.python.org/3/library/json.html 참고하세요.",
+        "코드 이야기: 함수 이름은 canonical_bytes 이고 인자는 event 입니다.",
+    ]
+    for body in clean:
+        report = scrub.check({"payload": {"body": body}})
+        if report["blocked"]:
+            raise AssertionError(f"정상문 오탐: {body[:20]}… → {report['findings']}")
+
+
+def _case_allowlist_empty_domains_blocks_all_urls() -> None:
+    """허용 도메인 목록을 비우면 **모든 URL 이 차단**된다(AC ① · fail-closed)."""
+    import tempfile
+    from agora import scrub
+    with tempfile.TemporaryDirectory() as d:
+        empty = os.path.join(d, "none.txt")
+        with open(empty, "w", encoding="utf-8") as fh:
+            fh.write("# 비어 있다\n")
+        allow = scrub.load_allow(domains_path=empty)
+        if allow.domains:
+            raise AssertionError(f"목록이 비지 않았다: {allow.domains}")
+        found = scrub.check_allow({"payload": {"body": "https://github.com/a 문서"}},
+                                  allow)
+        if [f["rule"] for f in found] != ["url-domain"]:
+            raise AssertionError(f"빈 목록인데 URL 이 통과했다: {found}")
+
+
+def _case_allowlist_missing_file_is_fail_closed() -> None:
+    """allowlist 규칙 파일이 없으면 전량 차단(3) — denylist 와 같은 방향이다."""
+    from agora import scrub
+    scrub.load_allow(path=os.path.join(_ROOT, "config", "no-such-allowlist.json"))
+
+
+def _case_allowlist_field_limits() -> None:
+    """필드별 상한 — 제목은 글자 수, 로그 발췌는 **바이트**로 잰다.
+
+    ★로그 발췌를 글자 수로 재면 한글이 3배로 들어가 4KB 약속이 깨진다.
+    """
+    from agora import scrub
+    long_title = scrub.check({"payload": {"title": "가" * 201}})
+    if [f["rule"] for f in long_title["findings"]] != ["max_chars"]:
+        raise AssertionError(f"제목 상한: {long_title['findings']}")
+    ok_title = scrub.check({"payload": {"title": "가" * 200}})
+    if ok_title["blocked"]:
+        raise AssertionError(f"상한 안 제목이 막혔다: {ok_title['findings']}")
+
+    # 한글 1자 = UTF-8 3바이트 → 1400자면 4200바이트로 4KB 를 넘는다.
+    big_log = scrub.check({"payload": {"envelope": {"log_excerpt": "가" * 1400}}})
+    if [f["rule"] for f in big_log["findings"]] != ["max_bytes"]:
+        raise AssertionError(f"로그 발췌 상한: {big_log['findings']}")
+
+
+def _case_scrub_report_carries_both_digests() -> None:
+    """보고서가 **두 겹의 digest** 를 함께 싣는다(M-11 · 수신 측 대조용)."""
+    from agora import scrub
+    report = scrub.check({"payload": {"body": "평범한 본문"}})
+    for key in ("rules", "allow_rules", "bundle"):
+        if not report.get(key) or len(report[key]) != 64:
+            raise AssertionError(f"digest 칸 {key}: {report.get(key)!r}")
+    if report["bundle"] in (report["rules"], report["allow_rules"]):
+        raise AssertionError("묶음 digest 가 한쪽과 같다 — 두 겹을 안 묶었다")
+
+
+def _case_signer_refuses_allowlist_violation() -> None:
+    """서명기가 allowlist 위반을 거부한다 → 서명 없음 = 전송 없음(3)."""
+    from agora.sign import sign_event
+    f = _fixtures()
+    ev = _r2_post("1" * 32, "본문 @someone 멘션이 들어 있다")
+    _with_key(f["key_a"], lambda: sign_event(ev))
+
 # ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
 
 # S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
@@ -2119,6 +2230,14 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("관계: spawn 은 제안뿐",         _case_spawn_is_proposal_only, None),
     ("S2: 4축 그물 실재",             _case_s2_axes_have_nets, None),
     ("S2: 격리 사유는 이름을 받는다", _case_quarantine_reasons_are_named, None),
+    ("allowlist: 위반 5종 차단",      _case_allowlist_blocks_five_kinds, None),
+    ("allowlist: 집행 → 3",           _case_allowlist_enforce_is_code3, errors.GATE_REJECT),
+    ("allowlist: 허용 통과·오탐 0",   _case_allowlist_allows_listed_domain, None),
+    ("allowlist: 빈 목록 → 전 URL 차단", _case_allowlist_empty_domains_blocks_all_urls, None),
+    ("allowlist: 파일 부재 → 3",      _case_allowlist_missing_file_is_fail_closed, errors.GATE_REJECT),
+    ("allowlist: 필드 상한(자·바이트)", _case_allowlist_field_limits, None),
+    ("scrub: 두 겹 digest 동봉",      _case_scrub_report_carries_both_digests, None),
+    ("서명기: allowlist 위반 → 3",    _case_signer_refuses_allowlist_violation, errors.GATE_REJECT),
 )
 
 
@@ -2337,6 +2456,26 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M69-allow-length-unchecked", "agora/scrub.py",
+     '        if "max_chars" in spec and len(text) > spec["max_chars"]:',
+     "        if False:",
+     "allowlist: 필드 상한(자·바이트)"),
+    ("M70-allow-forbidden-off", "agora/scrub.py",
+     "        for rid, kind, pattern in allow.forbidden:\n            m = pattern.search(text)",
+     "        for rid, kind, pattern in []:\n            m = pattern.search(text)",
+     "allowlist: 위반 5종 차단"),
+    ("M71-allow-url-host-unchecked", "agora/scrub.py",
+     "            if not _host_allowed(m.group(1), allow.domains):",
+     "            if False:",
+     "allowlist: 빈 목록 → 전 URL 차단"),
+    ("M72-allow-empty-domains-fail-open", "agora/scrub.py",
+     '    host = host.lower().rsplit("@", 1)[-1].split(":", 1)[0]',
+     '    if not domains:\n        return True\n    host = host.lower().rsplit("@", 1)[-1].split(":", 1)[0]',
+     "allowlist: 빈 목록 → 전 URL 차단"),
+    ("M73-allow-missing-file-passes", "agora/scrub.py",
+     '        raise AgoraError(errors.GATE_REJECT,\n                         "allowlist 파일을 읽을 수 없다 — 전량 차단(fail-closed)",\n                         {"path": os.path.basename(path), "error": e.strerror}) from None',
+     '        return AllowRules("empty", {}, {}, [("x", "x", re.compile("(?!x)x"))], frozenset(), "none")',
+     "allowlist: 파일 부재 → 3"),
     ("M66-link-schema-open", "agora/schema.py",
      "    _closed(link, allowed, where)",
      "    pass",
@@ -2570,7 +2709,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S2-8(S2 완주)"
+            "슬라이스": "S3-1(allowlist)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

@@ -1,0 +1,19 @@
+{
+  "version": "v1",
+  "note": "필드별 허용 길이·구조와 금칙 구조(첨부·이미지·HTML·멘션). URL 은 allow-domains.txt 로 따로 본다.",
+  "default": {"max_chars": 20000},
+  "fields": {
+    "payload.title": {"max_chars": 200},
+    "payload.body": {"max_chars": 20000},
+    "payload.envelope.symptom": {"max_chars": 2000},
+    "payload.envelope.log_excerpt": {"max_bytes": 4096},
+    "payload.summary": {"max_chars": 8000}
+  },
+  "forbidden": [
+    {"id": "image",      "kind": "이미지 삽입",   "pattern": "!\\[[^\\]]*\\]\\("},
+    {"id": "html",       "kind": "HTML 태그",     "pattern": "<[A-Za-z/!][^>\\n]{0,200}>"},
+    {"id": "mention",    "kind": "멘션",          "pattern": "(?<![A-Za-z0-9_/])@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?![A-Za-z0-9-]*\\.)"},
+    {"id": "attachment", "kind": "첨부·비웹 스킴", "pattern": "(?i)\\b(file|data|attachment|blob):"},
+    {"id": "control",    "kind": "제어 문자",     "pattern": "[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f]"}
+  ]
+}
