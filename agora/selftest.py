@@ -42,9 +42,15 @@ def _case_unbuilt_subcommand() -> None:
       실제로 M3 뮤테이션(가드 삭제)이 그 틈으로 살아남았다.
       그래서 이 분기에만 있는 `detail.reason` 까지 단언한다.
     """
-    from agora.cli import dispatch
+    from agora.cli import COMMANDS, dispatch
+    # ★대상을 **박아 두지 않고 표에서 고른다.** 슬라이스가 진행되면 미구현 목록이 줄어드는데,
+    #   이름을 박아 두면 그 명령이 구현되는 날 이 케이스가 「거부하지 않는다」고 거짓 신고를 한다
+    #   (S6-1 에서 실제로 났다 — `threads` 가 구현되자 적색이 됐다).
+    unbuilt = [n for n, m in COMMANDS.items() if not m["built"]]
+    if not unbuilt:
+        return          # 전부 구현되면 이 케이스는 잴 것이 없다(그때는 표가 그렇게 말한다)
     try:
-        dispatch("threads", None)
+        dispatch(unbuilt[0], None)
     except AgoraError as e:
         reason = (e.detail or {}).get("reason")
         if reason != "slice_not_built":
@@ -3823,8 +3829,14 @@ def _case_ack_is_registered_and_built() -> None:
         emitted = _json.loads(buf.getvalue())
     except ValueError:
         raise AssertionError(f"stderr 가 JSON 이 아니다: {buf.getvalue()[:80]!r}") from None
-    if emitted.get("code") != errors.PRECONDITION or emitted.get("detail", {}).get("reason") != "not_received":
-        raise AssertionError(f"계약과 다른 오류를 냈다: {emitted}")
+    # ★S6-1 부터 CLI 는 코어 도구를 **컨텍스트 조립을 거쳐** 부른다. 그래서 설정이 없는 폴더에서는
+    #   「참가자 설정이 없다」가 먼저 난다 — 그것도 code 2 다. 코드만 재면 두 분기가 구별되지 않으므로,
+    #   **어느 문에서 막혔는지**를 detail 로 확인한다(둘 다 정당한 거부다).
+    detail = emitted.get("detail") or {}
+    if emitted.get("code") != errors.PRECONDITION:
+        raise AssertionError(f"계약과 다른 코드: {emitted}")
+    if not (detail.get("reason") == "not_received" or detail.get("dir") or detail.get("file")):
+        raise AssertionError(f"어느 문에서 막혔는지 알 수 없다: {emitted}")
 
 
 # ── S5-4 tombstone · reconciliation ─────────────────────────────────────────
@@ -4086,6 +4098,363 @@ def _case_local_count_comes_from_stored_events() -> None:
         raise AssertionError("없는 스레드에 보관본이 있다고 한다")
 
 
+# ── S6-1 도구 11종 · 계약 자동 대조 ─────────────────────────────────────────
+# ★이 블록의 절반은 **동작이 아니라 대조**다. 도구 층은 새 규칙을 만들지 않으므로,
+#   여기서 깨지는 것은 대개 「계약과 코드가 갈라진 것」이다 — 갈라짐은 조용해서 시험이 아니면 안 보인다.
+
+# 설계 §4 표의 코어 도구 이름 — **동결된 계약**이므로 여기 적어 두고 대조한다.
+# ★코드에서 파생시키지 않는다. 파생시키면 「코드가 곧 계약」이 되어, 도구를 하나 지워도
+#   대조가 초록으로 남는다(양쪽이 같이 움직이니까).
+FROZEN_CORE_TOOLS = ("threads", "read", "propose", "say", "advance", "resolve",
+                     "mark-solved", "close", "vote", "envelope-check", "ack")
+
+
+def _tools_ctx(**kw: Any) -> Any:
+    """도구 한 벌. 승인은 **기본으로 꺼 둔다** — 켠 상태는 그것을 재는 케이스가 따로 켠다."""
+    import tempfile
+    from agora import tools
+    from agora.ledger import Ledger
+    from agora.spool import Spool
+    from agora.store_mock import MockStore
+    f = _fixtures()
+    d = tempfile.mkdtemp(prefix="agora-tools-")
+    opts: dict[str, Any] = {"store": MockStore(), "ledger": Ledger(d), "spool": Spool(d),
+                            "allowed_signers_path": f["roster_ab"],
+                            "participant_id": "operator-a",
+                            "config": {"human_approval": False}}
+    opts.update(kw)
+    return tools.Context(**opts)
+
+
+def _tools_thread(ctx: Any, *, gtype: str = "debate", key: str = "key_a") -> str:
+    from agora import tools
+    f = _fixtures()
+    body = {"debate": "가짜 발제"}.get(gtype, "가짜 질문")
+    payload: dict[str, Any] = {"type": gtype, "title": "가짜 제목", "body": body}
+    if gtype != "debate":
+        payload["envelope"] = _envelope_ok()
+    out = _with_key(f[key], lambda: tools.propose(ctx, **payload))
+    return out["thread_id"]
+
+
+def _envelope_ok() -> dict[str, Any]:
+    from agora import core
+    return core.envelope_template()
+
+
+def _case_tool_table_matches_contract() -> None:
+    """도구 표 **3자 일치** — 설계 §4(동결) · CLI 등록표 · 도구 모듈.
+
+    ★한 곳만 고치는 실수가 이 저장소에서 제일 흔한 사고다. 세 목록을 서로 대조해 두면
+      **고치다 만 상태**가 초록으로 남지 않는다.
+    """
+    from agora import cli, tools
+    frozen = set(FROZEN_CORE_TOOLS)
+    if set(tools.CORE_TOOLS) != frozen:
+        raise AssertionError(f"도구 모듈이 계약과 다르다: {sorted(set(tools.CORE_TOOLS) ^ frozen)}")
+    registered = set(cli.core_command_names())
+    if registered != frozen:
+        raise AssertionError(f"CLI 등록표가 계약과 다르다: {sorted(registered ^ frozen)}")
+    if len(frozen) != 11:
+        raise AssertionError(f"코어 도구는 11종이다: {len(frozen)}")
+    for name in frozen:
+        if cli.mcp_tool_name(name) != "agora." + name.replace("-", "_"):
+            raise AssertionError(f"MCP 이름 규칙이 깨졌다: {name}")
+        if name in cli.MCP_EXEMPT:
+            raise AssertionError(f"코어 도구가 MCP 예외에 들어 있다: {name}")
+
+
+def _case_every_tool_takes_context_first() -> None:
+    """모든 도구가 **컨텍스트를 첫 인자로** 받고 나머지는 키워드다.
+
+    ★위치 인자를 허용하면 호출부마다 인자 순서를 외워야 하고, 순서가 어긋나도 조용히 돈다.
+    ★그리고 `expected_state`·`prev` 를 **호출자가 못 넘긴다**는 것도 여기서 잰다 —
+      넘길 수 있으면 「아까 본 상태」로 쓸 수 있고, 그것이 CAS 가 막으려는 상황 자체다.
+    """
+    import inspect
+    from agora import tools
+    for name, fn in tools.CORE_TOOLS.items():
+        params = list(inspect.signature(fn).parameters.values())
+        if not params or params[0].name != "ctx":
+            raise AssertionError(f"{name}: 첫 인자가 ctx 가 아니다")
+        for p in params[1:]:
+            if p.kind is not inspect.Parameter.KEYWORD_ONLY:
+                raise AssertionError(f"{name}: 위치 인자가 있다 — {p.name}")
+            if p.name in ("prev", "expected_state", "message_id_override"):
+                raise AssertionError(f"{name}: 호출자가 {p.name} 을 넘길 수 있다")
+
+
+def _case_tools_do_not_touch_store_directly() -> None:
+    """쓰기 도구가 저장층을 **직접** 부르지 않는다 — 소스로 잰다.
+
+    ★`core.publish_event` 를 건너뛰면 계약·스크럽·승인·서명·원장 중 몇 개가 조용히 빠진다.
+      「빠졌다」는 것은 결과를 봐서는 모른다(글은 잘 올라간다). 그래서 **경로 자체**를 잰다.
+    """
+    path = os.path.join(_ROOT, "agora", "tools.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    if "store.append(" in src:
+        raise AssertionError("도구가 저장층에 직접 쓴다")
+    if "sign_event(" in src:
+        raise AssertionError("도구가 서명기를 직접 부른다 — 순서가 갈라진다")
+    if src.count("core.publish_event(") != 1:
+        raise AssertionError("쓰기 입구가 하나가 아니다")
+
+
+def _case_tool_propose_read_say_round_trip() -> None:
+    """발제 → 읽기 → 발언 → 다시 읽기. 엔진 전체를 도구 이름으로 한 바퀴 돈다."""
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx)
+    view = tools.read(ctx, thread_id=tid)
+    if view["state"]["state"] != "r0" or len(view["events"]) != 1:
+        raise AssertionError(f"발제 직후 상태: {view['state']} · {len(view['events'])}건")
+    _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="가짜 발언"))
+    view2 = tools.read(ctx, thread_id=tid)
+    if len(view2["events"]) != 2:
+        raise AssertionError(f"발언 후 이벤트 수: {len(view2['events'])}")
+    if view2["state_hash"] == view["state_hash"]:
+        raise AssertionError("상태가 움직였는데 해시가 그대로다 — CAS 가 안 먹는다")
+
+
+def _case_tool_say_uses_current_round() -> None:
+    """라운드를 **안 주면 지금 라운드**다 — 손으로 적게 두면 어긋난 라운드가 나간다.
+
+    ★이 축**만**을 고립시키려고 라운드를 1로 올려 두고, 인자 없이 발언한다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx)
+    _with_key(f["key_a"], lambda: tools.advance(ctx, thread_id=tid, to_round=1))
+    said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="라운드 1 발언"))
+    view = tools.read(ctx, thread_id=tid)
+    if view["state"]["round"] != 1:
+        raise AssertionError(f"라운드: {view['state']['round']}")
+    if len(view["events"]) != 3:
+        raise AssertionError(f"라운드 밖으로 밀려 격리됐다: {len(view['events'])}건")
+    # ★재조준(M143 이 처음에 살아남은 자리): 「격리됐는가」로는 이 축이 안 보인다 —
+    #   라운드 0 으로 나간 글도 reducer 가 **유효로 받아 준다**(라운드 밖 판정은 debate 의
+    #   다른 규칙에 걸려야 하고, r0 post 는 그 규칙에 안 걸린다). 그래서 **실제로 나간 글의
+    #   라운드 값**을 운반층에서 직접 읽어 잰다. 이것만이 이 가드를 고립시킨다.
+    from agora.event import parse_post
+    rounds = []
+    for row in ctx.store.fetch(thread_id=tid)["items"]:
+        try:
+            ev = parse_post(row.get("body") or "")["event"]
+        except Exception:      # noqa: BLE001
+            continue
+        if ev["message_id"] == said["message_id"]:
+            rounds.append(ev["payload"].get("round"))
+    if rounds != [1]:
+        raise AssertionError(f"발언이 지금 라운드로 안 나갔다: {rounds}")
+
+
+def _case_tool_advance_requires_chair() -> None:
+    """전진은 **의장만**(code 5) — 그리고 막혔으면 **쓰기 호출이 0**이어야 한다."""
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx)
+    before = ctx.store.append_calls
+    other = tools.Context(store=ctx.store, ledger=ctx.ledger, spool=ctx.spool,
+                          allowed_signers_path=ctx.allowed_signers_path,
+                          participant_id="operator-b", config=ctx.config)
+    try:
+        _with_key(f["key_b"], lambda: tools.advance(other, thread_id=tid, to_round=1))
+    except AgoraError as e:
+        if e.code != errors.PERMISSION:
+            raise AssertionError(f"다른 코드로 막았다: {e.code}") from None
+    else:
+        raise AssertionError("비의장이 라운드를 올렸다")
+    if ctx.store.append_calls != before:
+        raise AssertionError("막고도 운반층에 썼다")
+
+
+def _case_tool_mark_solved_requires_requester() -> None:
+    """해결 표시는 **요청자만**(§8 FR-5 · code 5)."""
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")
+    said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="가짜 답"))
+    other = tools.Context(store=ctx.store, ledger=ctx.ledger, spool=ctx.spool,
+                          allowed_signers_path=ctx.allowed_signers_path,
+                          participant_id="operator-b", config=ctx.config)
+    try:
+        _with_key(f["key_b"], lambda: tools.mark_solved(
+            other, thread_id=tid, post_message_id=said["message_id"]))
+    except AgoraError as e:
+        if e.code != errors.PERMISSION:
+            raise AssertionError(f"다른 코드로 막았다: {e.code}") from None
+    else:
+        raise AssertionError("요청자가 아닌 사람이 해결을 표시했다")
+    ok = _with_key(f["key_a"], lambda: tools.mark_solved(
+        ctx, thread_id=tid, post_message_id=said["message_id"]))
+    if not ok["ok"]:
+        raise AssertionError("요청자 본인도 못 했다 — 그물이 너무 넓다")
+
+
+def _case_tool_resolution_needs_forbidden_mark() -> None:
+    """권고에 **집행 금지 표식**이 없으면 게이트 거부(NFR-8 · code 3)."""
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx)
+    try:
+        _with_key(f["key_a"], lambda: tools.resolve(
+            ctx, thread_id=tid, summary="가짜 요약", dissent=[],
+            recommended_actions=[{"text": "무언가 하라"}]))
+    except AgoraError as e:
+        if e.code != errors.GATE_REJECT:
+            raise AssertionError(f"다른 코드로 막았다: {e.code}") from None
+    else:
+        raise AssertionError("집행 금지 표식 없이 권고가 나갔다")
+    ok = _with_key(f["key_a"], lambda: tools.resolve(
+        ctx, thread_id=tid, summary="가짜 요약", dissent=[],
+        recommended_actions=[{"text": "무언가 하라", "execution": "forbidden"}]))
+    if not ok["ok"]:
+        raise AssertionError("표식을 달았는데도 막혔다")
+
+
+def _case_tool_write_passes_approval_gate() -> None:
+    """도구도 **승인 게이트를 지난다** — 띄울 수 없으면 보내지 않는다(code 3 · 쓰기 0).
+
+    ★도구가 게이트를 우회하면 「사람이 볼 때만 작동하는 게이트」가 된다(무인 실행에서 무력).
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx(config={}, isatty=lambda: False)      # 기본 on · TTY 없음
+    before = ctx.store.append_calls
+    try:
+        _with_key(f["key_a"], lambda: tools.propose(
+            ctx, type="debate", title="가짜 제목", body="가짜 발제"))
+    except AgoraError as e:
+        if e.code != errors.GATE_REJECT:
+            raise AssertionError(f"다른 코드로 막았다: {e.code}") from None
+        if (e.detail or {}).get("reason") != "human_approval_required":
+            raise AssertionError(f"사유가 다르다: {e.detail}")
+    else:
+        raise AssertionError("승인 없이 나갔다")
+    if ctx.store.append_calls != before:
+        raise AssertionError("막고도 운반층에 썼다")
+
+
+def _case_tool_usage_does_not_count_tokens() -> None:
+    """`usage` 는 **토큰을 세지 않는다** — null 과 사유를 남긴다(NFR-7 · M-4).
+
+    ★추정치를 넣으면 그 숫자가 비용표로 인용되고, 아무도 그것이 추정인 줄 모른다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    out = _with_key(f["key_a"], lambda: tools.propose(
+        ctx, type="debate", title="가짜 제목", body="열두 글자입니다"))
+    usage = out["usage"]
+    if usage["tokens"] is not None:
+        raise AssertionError(f"토큰을 셌다고 한다: {usage['tokens']}")
+    if not usage.get("tokens_why"):
+        raise AssertionError("미측정인데 사유가 없다")
+    if usage["body_chars"] != len("열두 글자입니다"):
+        raise AssertionError(f"글자 수: {usage['body_chars']}")
+    if not usage["event_bytes"] > usage["body_chars"]:
+        raise AssertionError("이벤트 바이트가 본문보다 작다")
+
+
+def _case_tool_threads_admits_what_it_scanned() -> None:
+    """목록은 **연 만큼만 안다** — 몇 건을 열었는지와 필터 범위를 결과에 적는다.
+
+    ★이 칸이 없으면 「필터 결과 0건」이 「그런 스레드가 없다」로 읽힌다.
+      ⇒ 스레드 2건을 만들고 **한 건만 열도록** 상한을 걸어, 안 열린 쪽이 결과에서
+        빠지면서도 `scanned` 가 그 사실을 말하는지 본다.
+    """
+    from agora import tools
+    ctx = _tools_ctx()
+    _tools_thread(ctx)
+    _tools_thread(ctx)
+    out = tools.threads(ctx, limit=1)
+    if out["scanned"] != 1:
+        raise AssertionError(f"연 스레드 수: {out['scanned']}")
+    if len(out["items"]) != 1:
+        raise AssertionError(f"목록: {len(out['items'])}건")
+    if out.get("filtered_within_scanned") is not True:
+        raise AssertionError("필터 범위를 안 밝혔다")
+    if not out.get("next_cursor"):
+        raise AssertionError("더 있는데 커서를 안 줬다 — 못 본 것이 없다고 읽힌다")
+    full = tools.threads(ctx, limit=10)
+    if len(full["items"]) != 2 or full["scanned"] != 2:
+        raise AssertionError(f"전체: {len(full['items'])}건 · scanned {full['scanned']}")
+
+
+def _case_tool_filters_narrow_within_scan() -> None:
+    """필터는 **연 범위 안에서** 좁힌다 — 유형이 다른 스레드는 빠진다."""
+    from agora import tools
+    ctx = _tools_ctx()
+    _tools_thread(ctx, gtype="debate")
+    _tools_thread(ctx, gtype="problem")
+    only = tools.threads(ctx, type="problem")
+    if len(only["items"]) != 1 or only["items"][0]["type"] != "problem":
+        raise AssertionError(f"유형 필터: {[i['type'] for i in only['items']]}")
+    if only["scanned"] != 2:
+        raise AssertionError(f"필터가 읽기를 줄인 것처럼 셌다: {only['scanned']}")
+
+
+def _case_tool_unknown_name_is_rejected() -> None:
+    """계약에 없는 도구 이름은 **한 곳에서** 죽는다(code 10)."""
+    from agora import tools
+    ctx = _tools_ctx()
+    try:
+        tools.call("삭제하라", ctx, {})
+    except AgoraError as e:
+        if e.code != errors.ARGUMENT:
+            raise AssertionError(f"다른 코드로 막았다: {e.code}") from None
+    else:
+        raise AssertionError("계약 밖 이름이 통과했다")
+
+
+def _case_tool_ack_needs_spool() -> None:
+    """영수증은 spool 없이는 못 쓴다(code 2) — 없는 채로 쓰면 수신 증거가 반쪽이 된다."""
+    from agora import tools
+    ctx = _tools_ctx(spool=None)
+    try:
+        tools.ack(ctx, message_id="a" * 32)
+    except AgoraError as e:
+        if (e.detail or {}).get("reason") != "no_spool":
+            raise AssertionError(f"다른 사유로 막았다: {e.detail}") from None
+    else:
+        raise AssertionError("spool 없이 영수증을 썼다")
+
+
+def _case_cli_does_not_guess_types() -> None:
+    """CLI 인자는 **계약이 정한 칸만** 정수·불리언으로 읽는다.
+
+    ★「숫자처럼 보이면 정수」로 하면 제목 「2026」이 정수가 되고, 스키마가 title 을 탓한다 —
+      **틀린 곳과 탓하는 곳이 어긋난다.** 처음 쓴 파서가 실제로 그랬다.
+    """
+    from agora import cli
+    got = cli._kv(["title=2026", "round=1", "audit=true", "body=null 이라는 글"])
+    if got["title"] != "2026":
+        raise AssertionError(f"제목이 문자열이 아니다: {got['title']!r}")
+    if got["round"] != 1 or got["audit"] is not True:
+        raise AssertionError(f"계약 칸을 안 읽었다: {got}")
+    if got["body"] != "null 이라는 글":
+        raise AssertionError(f"본문을 건드렸다: {got['body']!r}")
+    try:
+        cli._kv(["round=하나"])
+    except AgoraError as e:
+        if e.code != errors.ARGUMENT:
+            raise AssertionError(f"다른 코드: {e.code}") from None
+    else:
+        raise AssertionError("정수 칸에 글자를 넣었는데 통과했다")
+    try:
+        cli._kv(["짝없는인자"])
+    except AgoraError:
+        pass
+    else:
+        raise AssertionError("key=value 가 아닌 인자가 통과했다")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -4301,6 +4670,21 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("묘비: 기준은 보관 원문이다",    _case_local_count_comes_from_stored_events, None),
     ("S5: 5축 그물 실재",             _case_s5_axes_have_nets, None),
     ("표: 번호가 둘을 안 가리킨다",   _case_mutation_ids_are_unique, None),
+    ("계약: 도구 표 3자 일치",        _case_tool_table_matches_contract, None),
+    ("계약: ctx 가 첫 인자",          _case_every_tool_takes_context_first, None),
+    ("계약: 쓰기 입구는 하나",        _case_tools_do_not_touch_store_directly, None),
+    ("도구: 발제→읽기→발언",         _case_tool_propose_read_say_round_trip, None),
+    ("도구: 라운드 기본값",           _case_tool_say_uses_current_round, None),
+    ("도구: 전진은 의장만",           _case_tool_advance_requires_chair, None),
+    ("도구: 해결은 요청자만",         _case_tool_mark_solved_requires_requester, None),
+    ("도구: 권고엔 집행 금지",        _case_tool_resolution_needs_forbidden_mark, None),
+    ("도구: 승인 게이트를 지난다",    _case_tool_write_passes_approval_gate, None),
+    ("도구: usage 는 토큰 안 센다",   _case_tool_usage_does_not_count_tokens, None),
+    ("도구: 연 만큼만 안다",          _case_tool_threads_admits_what_it_scanned, None),
+    ("도구: 필터는 연 범위 안",       _case_tool_filters_narrow_within_scan, None),
+    ("도구: 계약 밖 이름 거부",       _case_tool_unknown_name_is_rejected, None),
+    ("도구: 영수증엔 spool 필요",     _case_tool_ack_needs_spool, None),
+    ("CLI: 타입을 추측 안 한다",      _case_cli_does_not_guess_types, None),
 )
 
 
@@ -4877,6 +5261,55 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "        page = store.fetch(thread_id=thread_id, cursor=cursor)",
      '        try:\n            page = store.fetch(thread_id=thread_id, cursor=cursor)\n        except AgoraError:\n            return {"ids": found, "complete": True, "pages": pages, "items": items}',
      "묘비: 조회 실패는 삭제가 아냐"),
+    # ── S6-1 도구 11종 · 계약 대조 ──────────────────────────────────────────
+    ("M141-tool-table-shrunk", "agora/tools.py",
+     '    "close": close, "vote": vote, "envelope-check": envelope_check, "ack": ack,',
+     '    "vote": vote, "envelope-check": envelope_check, "ack": ack,',
+     "계약: 도구 표 3자 일치"),
+    ("M142-publish-forces-approval-off", "agora/tools.py",
+     "                             config=ctx.config, prompt=ctx.prompt,",
+     '                             config={"human_approval": False}, prompt=ctx.prompt,',
+     "도구: 승인 게이트를 지난다"),
+    ("M143-say-round-not-defaulted", "agora/tools.py",
+     '    payload: dict[str, Any] = {"round": state["round"] or 0 if round is None else round,',
+     '    payload: dict[str, Any] = {"round": round or 0,',
+     "도구: 라운드 기본값"),
+    ("M144-advance-chair-check-off", "agora/tools.py",
+     '    reducer.require_chair(state, ctx.participant_id)\n    out = _publish(ctx, kind="advance"',
+     '    out = _publish(ctx, kind="advance"',
+     "도구: 전진은 의장만"),
+    ("M145-mark-solved-requester-check-off", "agora/tools.py",
+     "    reducer.require_requester(state, ctx.participant_id)",
+     "    pass",
+     "도구: 해결은 요청자만"),
+    ("M146-usage-guesses-tokens", "agora/tools.py",
+     '            "tokens": None, "tokens_why": "미측정 — 이 경계에서는 셀 수 없다"}',
+     '            "tokens": len(canonical_bytes(event)) // 4,\n            "tokens_why": "추정"}',
+     "도구: usage 는 토큰 안 센다"),
+    ("M147-scan-count-is-item-count", "agora/tools.py",
+     '            "scanned": opened,',
+     '            "scanned": len(items),',
+     "도구: 필터는 연 범위 안"),
+    ("M148-threads-drops-next-cursor", "agora/tools.py",
+     '    return {"items": items, "next_cursor": listed.get("next_cursor"),',
+     '    return {"items": items, "next_cursor": None,',
+     "도구: 연 만큼만 안다"),
+    ("M149-unknown-tool-passes", "agora/tools.py",
+     "    if fn is None:",
+     "    if False:",
+     "도구: 계약 밖 이름 거부"),
+    ("M150-ack-without-spool", "agora/tools.py",
+     "    if ctx.spool is None:",
+     "    if False:",
+     "도구: 영수증엔 spool 필요"),
+    ("M151-cli-guesses-int-anywhere", "agora/cli.py",
+     "    if key in INT_ARGS:",
+     '    if raw.lstrip("-").isdigit():',
+     "CLI: 타입을 추측 안 한다"),
+    ("M152-tool-takes-positional-arg", "agora/tools.py",
+     "def say(ctx: Context, *, thread_id: str, body: str, round: int | None = None,",
+     "def say(ctx: Context, thread_id: str, *, body: str, round: int | None = None,",
+     "계약: ctx 가 첫 인자"),
 )
 
 
@@ -5048,7 +5481,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S5-5(S5 완주)"
+            "슬라이스": "S6-1(도구 11종·계약 대조)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

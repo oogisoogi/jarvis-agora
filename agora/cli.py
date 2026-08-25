@@ -23,16 +23,16 @@ from agora.errors import AgoraError
 #              ★「등록됐다」와 「동작한다」를 한 칸으로 뭉치지 않으려고 나눠 둔다 —
 #                뭉치면 미구현이 --help 에서 구현으로 보인다.
 COMMANDS: dict[str, dict[str, Any]] = {
-    "threads":        {"core": True,  "built": False, "slice": "S1-6"},
-    "read":           {"core": True,  "built": False, "slice": "S1-6"},
-    "propose":        {"core": True,  "built": False, "slice": "S2-4"},
-    "say":            {"core": True,  "built": False, "slice": "S2-4"},
-    "advance":        {"core": True,  "built": False, "slice": "S2-5"},
-    "resolve":        {"core": True,  "built": False, "slice": "S3-2"},
-    "mark-solved":    {"core": True,  "built": False, "slice": "S2-4"},
-    "close":          {"core": True,  "built": False, "slice": "S2-4"},
-    "vote":           {"core": True,  "built": False, "slice": "S3-4"},
-    "envelope-check": {"core": True,  "built": False, "slice": "S3-3"},
+    "threads":        {"core": True,  "built": True,  "slice": "S1-6"},
+    "read":           {"core": True,  "built": True,  "slice": "S1-6"},
+    "propose":        {"core": True,  "built": True,  "slice": "S2-4"},
+    "say":            {"core": True,  "built": True,  "slice": "S2-4"},
+    "advance":        {"core": True,  "built": True,  "slice": "S2-5"},
+    "resolve":        {"core": True,  "built": True,  "slice": "S3-2"},
+    "mark-solved":    {"core": True,  "built": True,  "slice": "S2-4"},
+    "close":          {"core": True,  "built": True,  "slice": "S2-4"},
+    "vote":           {"core": True,  "built": True,  "slice": "S3-4"},
+    "envelope-check": {"core": True,  "built": True,  "slice": "S3-3"},
     "ack":            {"core": True,  "built": True,  "slice": "S5-3"},
     "watch":          {"core": False, "built": False, "slice": "S5-2"},
     "selftest":       {"core": False, "built": True,  "slice": "S1-8"},
@@ -89,6 +89,49 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# 정수로 읽는 칸 — **계약이 정한다**(§4 도구 인자 표). 여기 없으면 문자열이다.
+# ★왜 목록인가: 「숫자처럼 보이면 정수」로 하면 **제목 「2026」이 정수가 된다.**
+#   그러면 스키마가 「title 은 문자열이어야 한다」로 거절하고, 사용자는 자기가 문자열을 줬다고
+#   믿는다 — 틀린 곳과 탓하는 곳이 어긋난다. 처음 쓴 파서가 실제로 그랬다.
+INT_ARGS = frozenset({"round", "to_round", "value", "limit"})
+BOOL_ARGS = frozenset({"audit", "answered"})
+
+
+def _kv(rest: list[str]) -> dict[str, Any]:
+    """`key=value` 인자를 구조체로. **파일 인자(`--body-file`)는 S6-2 의 몫이다.**
+
+    ★값의 타입을 **추측하지 않는다.** 정수·불리언은 위 목록의 칸에서만 그렇게 읽고,
+      JSON 은 `{`·`[` 로 시작할 때만, 나머지는 **문자열 그대로** 둔다.
+    """
+    out: dict[str, Any] = {}
+    for token in rest:
+        if "=" not in token:
+            raise AgoraError(errors.ARGUMENT, "인자는 key=value 형식이다",
+                             {"token_len": len(token)})
+        key, _, raw = token.partition("=")
+        out[key.replace("-", "_")] = _value(key.replace("-", "_"), raw)
+    return out
+
+
+def _value(key: str, raw: str) -> Any:
+    if key in BOOL_ARGS and raw in ("true", "false"):
+        return raw == "true"
+    if key in INT_ARGS:
+        if not raw.lstrip("-").isdigit():
+            raise AgoraError(errors.ARGUMENT, "이 칸은 정수여야 한다",
+                             {"key": key, "len": len(raw)})
+        return int(raw)
+    if raw == "null":
+        return None
+    if raw[:1] in ("{", "["):
+        try:
+            return json.loads(raw)
+        except ValueError:
+            raise AgoraError(errors.ARGUMENT, "JSON 인자를 읽지 못했다",
+                             {"starts_with": raw[:1]}) from None
+    return raw
+
+
 def dispatch(name: str, args: argparse.Namespace) -> Any:
     meta = COMMANDS.get(name)
     if meta is None:
@@ -107,17 +150,12 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
     if name == "keygen":
         from agora import keygen as kg
         return kg.run(args.rest if hasattr(args, "rest") else [])
-    if name == "ack":
-        from agora import ack as ack_mod
-        from agora.ledger import Ledger
-        from agora.participant import config_dir
-        from agora.spool import Spool
+    if meta["core"]:
+        # ★코어 도구는 **한 줄로** 넘긴다. 도구마다 여기에 분기를 만들면 그 분기가
+        #   두 번째 계약이 되고, 언젠가 표와 갈라진다(그때 갈라진 쪽이 조용히 이긴다).
+        from agora import tools
         rest = list(args.rest) if hasattr(args, "rest") else []
-        if len(rest) != 1:
-            raise AgoraError(errors.ARGUMENT, "ack 는 message_id 하나를 받는다",
-                             {"given": len(rest)})
-        d = config_dir()
-        return ack_mod.ack(ledger=Ledger(d), spool=Spool(d), message_id=rest[0])
+        return tools.call(name, tools.context_from_config(), _kv(rest))
     raise AgoraError(errors.PRECONDITION, "실행기 배선 누락", {"command": name})
 
 

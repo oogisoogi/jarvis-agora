@@ -1,0 +1,399 @@
+"""도구 11종 — 코어 함수 = MCP 도구(설계 §4 · **동결된 계약**).
+
+★이 파일에는 **새 규칙이 없다.** 전이·권한·게이트·서명·운반·원장은 S1~S5 가 이미 만들었고,
+  여기가 하는 일은 그것들을 **계약이 정한 순서와 이름으로 묶는 것**뿐이다.
+  그래서 이 파일에서 조심할 것은 「무엇을 구현하는가」가 아니라 **「어디를 건너뛰지 않는가」**다.
+
+★쓰기는 전부 `core.publish_event` 를 지난다 — 계약 → 스크럽 → 승인 → 서명 → 쓰기 → 원장.
+  도구가 저장층을 **직접** 부르면 그 다섯 중 몇 개가 조용히 빠지고, 빠진 것은 아무도 못 본다.
+  ⇒ 이 파일이 저장층 쓰기 함수를 **직접 부르지 않는다**는 것 자체가 계약이고, 시험이 그것을
+    소스로 잰다. (⚠그 함수 이름을 여기 적지 않는다 — 적는 순간 이 문장이 위반이 된다.
+    같은 자리를 오늘만 세 번째 밟는다: 검사기·보고서에 이어 이번엔 **주석**이었다.)
+
+★쓰기 전 **세 가지를 같은 자리에서** 본다: 상태(CAS `expected_state`) · 권한 · 사슬 머리(`prev`).
+  하나라도 밖에서 받으면 「내가 본 상태」와 「지금 상태」가 갈라진 채 글이 나간다.
+  세 값은 전부 **방금 계산한 reduce 결과**에서 나온다 — 호출자가 넘기지 못하게 한다.
+
+★읽기(`threads`)는 **비용을 숨기지 않는다.** 목록에 없는 것(유형·상태·의장)은 스레드를 열어야
+  알 수 있고, 그것이 곧 API 호출이다(S4-2 실측). 그래서 몇 건을 열었는지 세어 결과에 싣고,
+  **필터가 그 범위 안에서만 적용됐다는 사실도 함께 싣는다** — 안 그러면 「필터 결과 0건」이
+  「그런 스레드가 없다」로 읽힌다.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from agora import ack as ack_mod
+from agora import core, errors, reducer
+from agora.contract_open import GENESIS_EXPECTED_STATE, GENESIS_PREV
+from agora.errors import AgoraError
+from agora.event import new_id
+from agora.ledger import now_iso
+
+DEFAULT_THREADS_LIMIT = 20
+
+
+class Context:
+    """도구 한 번을 돌리는 데 필요한 것 한 벌.
+
+    ★도구마다 이것들을 따로 찾아 오면 **어떤 도구는 원장을 안 쓰고, 어떤 도구는 명부를 안 본다**.
+      한 벌로 묶어 두면 빠뜨린 것이 시그니처에서 드러난다.
+    """
+
+    def __init__(self, *, store: Any, ledger: Any, spool: Any = None,
+                 allowed_signers_path: str, participant_id: str,
+                 config: dict[str, Any] | None = None,
+                 operators: frozenset[str] = frozenset(),
+                 prompt: Any = None, isatty: Any = None) -> None:
+        self.store = store
+        self.ledger = ledger
+        self.spool = spool
+        self.allowed_signers_path = allowed_signers_path
+        self.participant_id = participant_id
+        self.config = config or {}
+        self.operators = operators
+        self.prompt = prompt
+        self.isatty = isatty
+
+
+# ── 상태 읽기(모든 도구의 출발점) ───────────────────────────────────────────
+
+def _reduce(ctx: Context, thread_id: str) -> dict[str, Any]:
+    collected = reducer.collect(store=ctx.store, thread_id=thread_id,
+                                allowed_signers_path=ctx.allowed_signers_path)
+    reduced = reducer.apply(reducer.order(collected), operators=ctx.operators)
+    reduced["collected"] = collected
+    return reduced
+
+
+def _require_open(reduced: dict[str, Any]) -> dict[str, Any]:
+    """상태가 없으면(genesis 부재·전부 격리) 쓰기의 전제가 없다 — code 2.
+
+    ★`reducer.apply` 는 상태를 **평탄하게** 돌려준다(`reduced` 자신이 곧 상태이고,
+      `reduced["state"]` 는 상태 **이름** 문자열이다). 여기서 그것을 한 번 못박아 둔다 —
+      「상태 객체」를 따로 있는 것처럼 다루면 `state["state"]` 같은 코드가 생기고,
+      그때부터 두 뜻이 한 이름에 얹힌다.
+    """
+    if not reduced.get("state"):
+        raise AgoraError(errors.PRECONDITION, "상태를 세울 수 없다 — genesis 가 없다",
+                         {"thread_id": reduced.get("thread_id"),
+                          "reason": reduced.get("reason")})
+    return reduced
+
+
+# ── 쓰기 공통 경로 ──────────────────────────────────────────────────────────
+
+def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any],
+             prev: str, expected_state: str, category: str, title: str = "",
+             is_genesis: bool = False) -> dict[str, Any]:
+    """계약 → 스크럽 → 승인 → 서명 → 쓰기 → 원장. **건너뛰는 길을 두지 않는다.**"""
+    event = {
+        "v": 1, "kind": kind, "thread_id": thread_id, "message_id": new_id(),
+        "prev": prev, "expected_state": expected_state,
+        "from": ctx.participant_id, "roster": _roster_digest(ctx),
+        "ts": now_iso(), "payload": payload,
+    }
+    core.declare_scrub(event)          # ★서명 대상 안에 들어가므로 **만들 때** 채운다
+    out = core.publish_event(store=ctx.store, event=event, category=category,
+                             title=title, is_genesis=is_genesis,
+                             config=ctx.config, prompt=ctx.prompt,
+                             isatty=ctx.isatty, ledger=ctx.ledger)
+    out["usage"] = usage_of(event)
+    return out
+
+
+def usage_of(event: dict[str, Any]) -> dict[str, Any]:
+    """이 호출이 **쓴 양**(NFR-7 · M-4 — reducer 가 「도구 경계에서 붙는다」고 남긴 칸).
+
+    ★**토큰은 세지 않는다 — 셀 수 없기 때문이다.** 이 경계에는 모델도 토크나이저도 없다.
+      그래서 `tokens` 를 0 이나 추정치로 채우지 않고 **null 로 두고 사유를 적는다.**
+      추정치를 넣으면 그 숫자가 곧 비용표로 인용되고, 아무도 그것이 추정인 줄 모른다
+      (이 저장소가 이미 아는 형태다 — 「미측정 칸은 미측정으로 남긴다」).
+    ★대신 **확실히 아는 것**을 준다: 본문 글자 수와 canonical 바이트 수.
+    """
+    from agora.event import canonical_bytes
+    body = event["payload"].get("body")
+    return {"body_chars": len(body) if type(body) is str else None,
+            "event_bytes": len(canonical_bytes(event)),
+            "tokens": None, "tokens_why": "미측정 — 이 경계에서는 셀 수 없다"}
+
+
+def _roster_digest(ctx: Context) -> str:
+    """이 이벤트가 **어느 명부를 보고** 쓰였는지(§2-1 · H-13 체크포인트).
+
+    ★파일 내용의 해시다. 「그때 명부가 무엇이었나」를 나중에 못 대면,
+      폐기된 키로 서명된 옛 글을 어떻게 볼지 정할 근거가 사라진다.
+    """
+    import hashlib
+    try:
+        with open(ctx.allowed_signers_path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        raise AgoraError(errors.PRECONDITION, "명부를 읽을 수 없다",
+                         {"path_kind": "allowed_signers"}) from None
+
+
+def _head_and_state(ctx: Context, thread_id: str) -> tuple[dict[str, Any], str, str]:
+    """(상태, prev, expected_state) — **셋을 같은 reduce 에서** 뽑는다.
+
+    ★호출자가 이 값들을 넘기게 두지 않는다. 넘길 수 있으면 「아까 본 상태」로 쓸 수 있고,
+      그것이 CAS 가 막으려는 바로 그 상황이다.
+    """
+    reduced = _reduce(ctx, thread_id)
+    state = _require_open(reduced)
+    return state, state["head"], state["state_hash"]
+
+
+# ── 도구 11종(설계 §4 표 순서 그대로) ───────────────────────────────────────
+
+def threads(ctx: Context, *, type: str | None = None, status: str | None = None,
+            tag: str | None = None, os: str | None = None, app: str | None = None,
+            answered: bool | None = None, query: str | None = None,
+            related: str | None = None, cursor: str | None = None,
+            limit: int = DEFAULT_THREADS_LIMIT) -> dict[str, Any]:
+    """스레드 목록. **연 만큼만 안다** — 그 사실을 결과에 적는다."""
+    listed = ctx.store.list_threads(limit=limit, cursor=cursor)
+    items: list[dict[str, Any]] = []
+    opened = 0
+    for row in listed["items"]:
+        page = ctx.store.fetch(number=row["number"])
+        opened += 1
+        thread_id = _thread_id_of(page["items"])
+        if not thread_id:
+            continue
+        reduced = _reduce(ctx, thread_id)
+        if not reduced.get("state"):
+            continue                      # 상태를 못 세우는 스레드는 목록에 싣지 않는다
+        genesis = _genesis_payload(reduced)
+        rnd = reduced["round"]
+        item = {"thread_id": thread_id, "number": row["number"],
+                "type": reduced["type"], "title": genesis.get("title", ""),
+                "state": reduced["state"], "round": rnd,
+                "chair": reduced["chair"],
+                "deadline": (genesis.get("deadlines") or {}).get(
+                    f"r{rnd}" if rnd is not None else "r0"),
+                "updated": row.get("updated_at")}
+        if _matches(item, genesis, reduced, type=type, status=status, tag=tag,
+                    os=os, app=app, answered=answered, query=query, related=related):
+            items.append(item)
+    return {"items": items, "next_cursor": listed.get("next_cursor"),
+            # ★열어 본 수와 「필터가 이 범위 안에서만 돌았다」를 함께 준다.
+            #   이 두 칸이 없으면 「결과 0건」이 「그런 스레드 없음」으로 읽힌다.
+            "scanned": opened,
+            "filtered_within_scanned": True}
+
+
+def _thread_id_of(items: list[dict[str, Any]]) -> str | None:
+    """genesis 본문에서 thread_id 를 얻는다(목록에는 없다 — S5-2 주석 참조)."""
+    from agora.event import parse_post
+    for row in items:
+        try:
+            parsed = parse_post(row.get("body") or "")
+        except Exception:      # noqa: BLE001 — 우리 서식이 아니면 그냥 아니다
+            continue
+        tid = parsed["event"].get("thread_id")
+        if tid:
+            return tid
+    return None
+
+
+def _genesis_payload(reduced: dict[str, Any]) -> dict[str, Any]:
+    chain = reduced.get("collected", {}).get("valid") or []
+    for entry in chain:
+        if entry["kind"] == "genesis":
+            return entry["event"]["payload"]
+    return {}
+
+
+def _matches(item: dict[str, Any], genesis: dict[str, Any], reduced: dict[str, Any],
+             **f: Any) -> bool:
+    """필터. **본문을 해석하지 않는다** — 구조 필드와 제목만 본다(§5 「글은 데이터」)."""
+    if f.get("type") and item["type"] != f["type"]:
+        return False
+    if f.get("status") and item["state"] != f["status"]:
+        return False
+    if f.get("answered") is not None:
+        solved = reduced.get("solved_by") is not None
+        if solved != f["answered"]:
+            return False
+    env = genesis.get("envelope") or {}
+    if f.get("os") and (env.get("env") or {}).get("os") != f["os"]:
+        return False
+    if f.get("app") and (env.get("env") or {}).get("app") != f["app"]:
+        return False
+    if f.get("tag") and f["tag"] not in (genesis.get("tags") or []):
+        return False
+    if f.get("query") and f["query"] not in item["title"]:
+        return False
+    if f.get("related"):
+        # 이 스레드가 그 스레드를 **가리키는가**(parent·refs). 해소 여부는 보지 않는다 —
+        # 아직 안 열린 스레드를 가리키는 것도 관계다(§2-1b).
+        links = reducer.links_of(reduced)
+        if not any(link["thread_id"] == f["related"] for link in links):
+            return False
+    return True
+
+
+def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
+         audit: bool = False, cursor: str | None = None) -> dict[str, Any]:
+    """스레드 하나를 읽는다. 격리 목록은 `audit` 에서만 드러난다(§3-1)."""
+    reduced = _reduce(ctx, thread_id)
+    # ★`state` 칸에 reduce 결과를 통째로 싣지 않는다 — 그 안에는 이벤트 전문·격리 목록이
+    #   다시 들어 있어 같은 것을 두 번 주게 되고, 「상태」라는 이름이 무엇을 가리키는지 흐려진다.
+    view = reducer.read_view(reduced["collected"],
+                             state=reducer.procedure_snapshot(reduced), audit=audit)
+    if since_event:
+        ids = [e["message_id"] for e in view["events"]]
+        if since_event not in ids:
+            raise AgoraError(errors.ARGUMENT, "그 message_id 가 이 스레드에 없다",
+                             {"since_event": since_event})
+        view["events"] = view["events"][ids.index(since_event) + 1:]
+    view["state_hash"] = reduced.get("state_hash")   # ★쓰기의 CAS 인자가 여기서 나온다
+    view["next_cursor"] = None
+    return view
+
+
+def propose(ctx: Context, *, type: str, title: str, body: str,
+            envelope: dict[str, Any] | None = None,
+            deadlines: dict[str, Any] | None = None,
+            parent: dict[str, Any] | None = None) -> dict[str, Any]:
+    """새 스레드. thread_id 는 **미리 만든다**(H-6 · genesis 안에 들어가야 한다)."""
+    thread_id = new_id()
+    payload: dict[str, Any] = {"type": type, "title": title, "body": body}
+    if envelope is not None:
+        payload["envelope"] = envelope
+    if deadlines is not None:
+        payload["deadlines"] = deadlines
+    if parent is not None:
+        payload["parent"] = parent
+    out = _publish(ctx, kind="genesis", thread_id=thread_id, payload=payload,
+                   prev=GENESIS_PREV, expected_state=GENESIS_EXPECTED_STATE,
+                   category=type, title=title, is_genesis=True)
+    return {"thread_id": thread_id, "number": out.get("number"),
+            "url": out.get("url"), "message_id": out["message_id"],
+            "usage": out["usage"]}
+
+
+def say(ctx: Context, *, thread_id: str, body: str, round: int | None = None,
+        counter: list[dict[str, Any]] | None = None,
+        refs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """발언. 라운드를 **안 주면 지금 라운드**다 — 손으로 적게 두면 어긋난 라운드가 나간다."""
+    state, prev, expected = _head_and_state(ctx, thread_id)
+    payload: dict[str, Any] = {"round": state["round"] or 0 if round is None else round,
+                               "body": body}
+    if counter is not None:
+        payload["counter"] = counter
+    if refs is not None:
+        payload["refs"] = refs
+    out = _publish(ctx, kind="post", thread_id=thread_id, payload=payload,
+                   prev=prev, expected_state=expected, category=state["type"])
+    return {"message_id": out["message_id"], "url": out.get("url"),
+            "usage": out["usage"]}
+
+
+def advance(ctx: Context, *, thread_id: str, to_round: int) -> dict[str, Any]:
+    """라운드 전진 — **의장만**(code 5) · 상태가 어긋나면 code 9."""
+    state, prev, expected = _head_and_state(ctx, thread_id)
+    reducer.require_chair(state, ctx.participant_id)
+    out = _publish(ctx, kind="advance", thread_id=thread_id,
+                   payload={"from_round": state["round"], "to_round": to_round},
+                   prev=prev, expected_state=expected, category=state["type"])
+    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
+
+
+def resolve(ctx: Context, *, thread_id: str, summary: str,
+            dissent: list[dict[str, Any]],
+            recommended_actions: list[dict[str, Any]]) -> dict[str, Any]:
+    """수렴 — 의장만. 권고에 집행 금지 표식이 없으면 스키마가 막는다(NFR-8 · code 3)."""
+    state, prev, expected = _head_and_state(ctx, thread_id)
+    reducer.require_chair(state, ctx.participant_id)
+    out = _publish(ctx, kind="resolution", thread_id=thread_id,
+                   payload={"summary": summary, "dissent": dissent,
+                            "recommended_actions": recommended_actions},
+                   prev=prev, expected_state=expected, category=state["type"])
+    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
+
+
+def mark_solved(ctx: Context, *, thread_id: str, post_message_id: str) -> dict[str, Any]:
+    """해결 표시 — **요청자만**(§8 FR-5 · code 5)."""
+    state, prev, expected = _head_and_state(ctx, thread_id)
+    reducer.require_requester(state, ctx.participant_id)
+    out = _publish(ctx, kind="answer_selected", thread_id=thread_id,
+                   payload={"post_message_id": post_message_id},
+                   prev=prev, expected_state=expected, category=state["type"])
+    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
+
+
+def close(ctx: Context, *, thread_id: str, reason: str) -> dict[str, Any]:
+    """종결. 사유는 계약 목록 안에서만(스키마가 막는다)."""
+    state, prev, expected = _head_and_state(ctx, thread_id)
+    out = _publish(ctx, kind="close", thread_id=thread_id, payload={"reason": reason},
+                   prev=prev, expected_state=expected, category=state["type"])
+    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
+
+
+def vote(ctx: Context, *, thread_id: str, target: str, value: int) -> dict[str, Any]:
+    """투표(0/1). 값의 뜻은 reducer 가 정한다 — 여기서는 계약만 지킨다."""
+    state, prev, expected = _head_and_state(ctx, thread_id)
+    out = _publish(ctx, kind="vote", thread_id=thread_id,
+                   payload={"target": target, "value": value},
+                   prev=prev, expected_state=expected, category=state["type"])
+    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
+
+
+def envelope_check(ctx: Context, *, envelope: Any) -> dict[str, Any]:
+    """보내도 되는지 **묻는** 자리(§4). 던지지 않고 돌려준다 — 코어는 S3-3 것을 그대로 쓴다."""
+    return core.envelope_check(envelope)
+
+
+def ack(ctx: Context, *, message_id: str) -> dict[str, Any]:
+    """수신 영수증(S5-3). 주체는 **참가 master 세션**이다(K-2)."""
+    if ctx.spool is None:
+        raise AgoraError(errors.PRECONDITION, "spool 없이는 영수증을 쓸 수 없다",
+                         {"reason": "no_spool"})
+    return ack_mod.ack(ledger=ctx.ledger, spool=ctx.spool, message_id=message_id)
+
+
+def context_from_config(directory: str | None = None, *,
+                        store: Any = None) -> Context:
+    """설정 폴더에서 컨텍스트 한 벌을 세운다(CLI·MCP 서버의 공통 입구).
+
+    ★조립을 **한 곳**에 둔다. 도구마다 따로 세우면 어떤 경로는 원장을 안 달고 어떤 경로는
+      명부를 다른 데서 읽는다 — 그리고 그 차이는 사고가 나기 전까지 안 보인다.
+    """
+    import os as _os
+    from agora.ledger import Ledger
+    from agora.participant import config_dir, load
+    from agora.spool import Spool
+    d = directory or config_dir()
+    doc = load(d)
+    if store is None:
+        from agora.store_github import GitHubStore
+        store = GitHubStore()
+    return Context(store=store, ledger=Ledger(d), spool=Spool(d),
+                   allowed_signers_path=_os.path.join(d, "allowed_signers"),
+                   participant_id=doc["id"], config=doc.get("config") or {})
+
+
+def call(name: str, ctx: Context, kwargs: dict[str, Any]) -> Any:
+    """이름으로 도구를 부른다(CLI·MCP 서버가 쓰는 한 줄).
+
+    ★모르는 이름은 **여기서** 죽인다. 부르는 쪽마다 따로 검사하면 한 곳이 빠지고,
+      빠진 그 경로가 계약 밖 이름을 통과시킨다.
+    """
+    fn = CORE_TOOLS.get(name)
+    if fn is None:
+        raise AgoraError(errors.ARGUMENT, "계약에 없는 도구",
+                         {"tool": name, "allowed": sorted(CORE_TOOLS)})
+    return fn(ctx, **kwargs)
+
+
+# ── 계약 대조표(§4 = 이 표 = CLI 등록표) ────────────────────────────────────
+# ★도구 이름과 함수를 **한 곳에서** 잇는다. 세 곳(설계 표·CLI 등록표·이 모듈)이
+#   따로 놀면 「CLI 엔 있는데 MCP 엔 없는」 도구가 조용히 생긴다 — 시험이 셋을 대조한다.
+CORE_TOOLS: dict[str, Any] = {
+    "threads": threads, "read": read, "propose": propose, "say": say,
+    "advance": advance, "resolve": resolve, "mark-solved": mark_solved,
+    "close": close, "vote": vote, "envelope-check": envelope_check, "ack": ack,
+}
