@@ -3472,7 +3472,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     # ★거부 이벤트 하나로 스레드를 영구 동결시킬 수 있던 자리(실물 #4).
     "사슬교착": ("M211-head-advances-on-accepted-only",),
     # ★띄울 방법이 없던 도구 표면(S6-2 AC ② 미충족分).
-    "도구표면": ("M212-mcp-serve-prints-return-value", "M213-mcp-serve-exposed-as-tool"),
+    "도구표면": ("M212-mcp-serve-prints-return-value", "M213-mcp-serve-exposed-as-tool",
+                 "M220-vote-loses-its-emitter"),
     # ★실사용에 배달 영수증이 없던 자리(부인 방지가 실물에서 비어 있었다).
     "배달영수증": ("M214-watch-does-not-deliver", "M215-delivery-without-ledger",
                    "M216-receipt-taken-from-any-body"),
@@ -6179,6 +6180,42 @@ def _wiring_allowed() -> dict[str, str]:
     return out
 
 
+def _case_every_contracted_kind_has_an_emitter() -> None:
+    """계약에 있는 **모든 kind 를 내보낼 자리가 있다** — 없으면 허용목록에 사유와 함께.
+
+    ★함수 대조(「배선: 안 불리는 정의 0」)는 이 결손을 **못 잡는다.** reducer 는 그 kind 의
+      전이를 갖고 있고 스키마도 허용하며 시험도 초록인데, **아무 도구도 그것을 만들지 않는다** —
+      「받을 준비는 다 됐는데 보낼 손이 없다」. 같은 병의 **다른 층**이라 그물을 따로 둔다.
+      (2026-08-26 실측: `delegate_chair`·`abort` 가 그 상태였다 — S7-3 AC ② 가 제품 경로로
+      불가능하다는 사실이 이 그물이 없었으면 실물에 가서야 드러났다.)
+    ★두 방향으로 잰다: 계약 kind 가 다 덮이는가 · **덮는다고 적힌 것이 실제로 있는가**
+      (허용목록에 적어 두고 나중에 배선되면 그것도 적색이다 — 목록이 썩는 것을 막는다).
+    """
+    import ast
+    from agora.contract_open import KINDS
+    emitted: set[str] = set()
+    tree = ast.parse(_read_text(os.path.join(_ROOT, "agora", "tools.py")))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg == "kind" and isinstance(kw.value, ast.Constant):
+                emitted.add(kw.value.value)
+    if not emitted:
+        raise AssertionError("스캐너가 kind 를 하나도 못 찾았다 — 검사가 고장났다")
+    allowed = {name.split(":", 1)[1] for name in _wiring_allowed()
+               if name.startswith("kind:")}
+    missing = sorted(set(KINDS) - emitted - allowed)
+    if missing:
+        raise AssertionError(f"내보낼 자리가 없는 kind: {missing}")
+    stale = sorted(allowed & emitted)
+    if stale:
+        raise AssertionError(f"허용목록이 낡았다 — 이제 내보내는 kind: {stale}")
+    unknown = sorted(allowed - set(KINDS))
+    if unknown:
+        raise AssertionError(f"계약에 없는 kind 가 허용목록에 있다: {unknown}")
+
+
 def _case_no_unwired_production_definitions() -> None:
     """정의는 있는데 **부르는 곳이 없는** 것 = 허용목록에 적힌 것뿐이다.
 
@@ -6197,10 +6234,11 @@ def _case_no_unwired_production_definitions() -> None:
     allowed = _wiring_allowed()
     if not allowed:
         raise AssertionError(f"허용목록이 비었거나 사유 없는 줄뿐이다: {WIRING_ALLOWLIST}")
-    fresh = [n for n in unwired if n not in allowed]
+    names = {n for n in allowed if not n.startswith("kind:")}   # kind 축은 다른 케이스가 본다
+    fresh = [n for n in unwired if n not in names]
     if fresh:
         raise AssertionError(f"부르는 곳이 없는 새 정의: {fresh}")
-    stale = sorted(set(allowed) - set(unwired))
+    stale = sorted(names - set(unwired))
     if stale:
         raise AssertionError(f"허용목록이 낡았다 — 이제 배선된 이름: {stale}")
 
@@ -6504,6 +6542,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("영수증: 원장 없으면 안 적는다",  _case_delivery_receipt_needs_a_ledger, None),
     ("code 8: 도구가 판정한다",        _case_unknown_commit_is_settled_by_the_tool, None),
     ("배선: 안 불리는 정의 0",        _case_no_unwired_production_definitions, None),
+    ("배선: 모든 kind 에 발신자",     _case_every_contracted_kind_has_an_emitter, None),
 )
 
 
@@ -7415,6 +7454,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                             stale=reduced.get("stale"))',
      "                             stale=None)",
      "읽기: 진 글도 audit 에 나온다"),
+    ("M220-vote-loses-its-emitter", "agora/tools.py",
+     '    out = _publish(ctx, kind="vote", thread_id=thread_id,',
+     '    out = _publish(ctx, kind="post", thread_id=thread_id,',
+     "배선: 모든 kind 에 발신자"),
     ("M208-brief-drops-single-source", "agora/brief.py",
      "    tools = cli.role_tools(role)",
      "    tools = ()",
