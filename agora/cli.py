@@ -42,11 +42,18 @@ COMMANDS: dict[str, dict[str, Any]] = {
     "keygen":         {"core": False, "built": True,  "slice": "S1-4"},
     "export":         {"core": False, "built": True,  "slice": "S6-2"},
     "import":         {"core": False, "built": True,  "slice": "S6-2"},
+    # ★계약 확장 2(master 결정 2026-08-26) — **도구 표면을 띄우는 명령**.
+    #   S6-2 AC ② 는 「예시 설정 그대로 서버를 띄워 도구 목록 조회」를 요구하는데,
+    #   `mcp_server.serve` 를 **부를 방법이 아무 데도 없었다**(`__main__`·CLI·예시 파일 전무).
+    #   그래서 시험은 `handle()` 을 직접 부르며 초록이었고, 제품에는 표면이 없었다.
+    #   ⇒ 도구가 아니라 **운영 동작**이므로 core=False 이고 MCP 에 노출하지 않는다
+    #     (서버를 띄우는 명령을 서버가 노출하면 대리인이 서버를 또 띄운다).
+    "mcp-serve":      {"core": False, "built": True,  "slice": "S6-6"},
 }
 
 # MCP 에 노출하지 않는 것 — 설계 §4 가 예외로 명시한 4종.
 MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
-                        "reconcile"})
+                        "reconcile", "mcp-serve"})
 
 # ── 역할별 노출표(설계 §5 「수신 격리」 H-3 · NFR-2) ─────────────────────────
 # ★**여기가 「도구 목록」의 단일 출처다.** 대리인 브리프(S6-3 `brief-reader.md`)는 이 표를
@@ -204,6 +211,12 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
     if name == "keygen":
         from agora import keygen as kg
         return kg.run(args.rest if hasattr(args, "rest") else [])
+    if name == "mcp-serve":
+        # ★결과를 **안 돌려준다**(None). 이 명령의 출력은 stdout 의 **프로토콜 줄**이고,
+        #   여기서 반환값을 주면 main 이 그 위에 JSON 을 한 줄 더 찍어 프로토콜을 깬다.
+        from agora import mcp_server
+        mcp_server.serve()
+        return None
     if name in ("watch", "reconcile", "export", "import"):
         return _run_local(name, list(args.rest) if hasattr(args, "rest") else [])
     if meta["core"]:

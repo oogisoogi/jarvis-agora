@@ -3471,6 +3471,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "읽기정직2": ("M209-audit-hides-lost-races", "M210-read-does-not-pass-stale"),
     # ★거부 이벤트 하나로 스레드를 영구 동결시킬 수 있던 자리(실물 #4).
     "사슬교착": ("M211-head-advances-on-accepted-only",),
+    # ★띄울 방법이 없던 도구 표면(S6-2 AC ② 미충족分).
+    "도구표면": ("M212-mcp-serve-prints-return-value", "M213-mcp-serve-exposed-as-tool"),
 }
 
 S5_AXES: dict[str, tuple[str, ...]] = {
@@ -4826,7 +4828,8 @@ def _case_config_examples_match_contract() -> None:
 def _case_local_commands_are_not_tools() -> None:
     """CLI 전용 명령은 **도구 표에 없다** — 대리인 세션의 손에 운영 동작을 쥐어 주지 않는다."""
     from agora import cli, tools
-    local = {"watch", "reconcile", "selftest", "keygen", "export", "import"}
+    local = {"watch", "reconcile", "selftest", "keygen", "export", "import",
+             "mcp-serve"}
     if cli.MCP_EXEMPT != frozenset(local):
         raise AssertionError(f"예외 목록: {sorted(cli.MCP_EXEMPT)}")
     if local & set(tools.CORE_TOOLS):
@@ -5959,6 +5962,61 @@ def _case_rejected_event_does_not_wedge_the_chain() -> None:
         raise AssertionError("막으려던 것을 통과시켰다 — 권한 없는 해결 표시가 유효로 실렸다")
 
 
+def _case_example_mcp_config_actually_starts_the_server() -> None:
+    """`.mcp.json.example` **그대로** 서버를 띄워 도구 목록을 받는다(04-tasks S6-2 AC ②).
+
+    ★이 AC 가 **미충족인 채 초록이었다**(2026-08-26 전수조사에서 드러났다):
+      `mcp_server.serve` 를 부를 방법이 **아무 데도 없었다** — `__main__` 도, CLI 명령도,
+      예시 설정 파일도 없었다. 그런데 시험은 `handle()` 을 **직접 불러** 재고 있었으므로
+      전건 초록이었다. ★**도구 표면이 없는 제품은 제품이 아니다**(master 2026-08-26).
+    ★그래서 여기서는 **함수를 안 부른다.** 예시 파일이 적어 둔 그 명령을 **프로세스로 띄우고**,
+      줄 단위 프로토콜로 물어서, 나온 목록을 계약과 대조한다.
+    ★예시는 **손대지 않고** 쓴다 — 한 글자라도 고쳐서 돌리면 「예시대로 하면 된다」를 못 잰다.
+    """
+    import json as _json
+    import subprocess as _sp
+    from agora import cli, tools
+    path = os.path.join(_ROOT, ".mcp.json.example")
+    with open(path, encoding="utf-8") as fh:
+        cfg = _json.load(fh)
+    server = (cfg.get("mcpServers") or {}).get("agora") or {}
+    argv = [server.get("command")] + list(server.get("args") or [])
+    if not server.get("command"):
+        raise AssertionError(f"예시에 띄울 명령이 없다: {cfg}")
+    proc = _sp.run(argv, cwd=_ROOT, input='{"method":"tools/list"}\n',
+                   capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise AssertionError(f"예시대로 띄웠는데 죽었다(rc={proc.returncode}): "
+                             f"{proc.stderr.strip()[:200]}")
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    if len(lines) != 1:
+        # ★출력이 한 줄이 아니면 프로토콜이 깨진 것이다 — 반환값을 한 줄 더 찍는 구현이 그렇다.
+        raise AssertionError(f"응답이 한 줄이 아니다({len(lines)}줄): {lines[:2]}")
+    try:
+        listed = _json.loads(lines[0])
+    except ValueError as e:
+        raise AssertionError(f"응답이 JSON 이 아니다: {e} · {lines[0][:120]}") from None
+    names = sorted(t["name"] for t in listed.get("tools") or [])
+    want = sorted(cli.mcp_tool_name(n) for n in tools.CORE_TOOLS)
+    if names != want:
+        raise AssertionError(f"띄운 서버의 도구 목록이 계약과 다르다: {names}")
+
+
+def _case_mcp_serve_is_not_itself_a_tool() -> None:
+    """서버를 **띄우는 명령**은 서버가 노출하지 않는다.
+
+    ★노출하면 대리인 세션이 서버를 또 띄울 수 있다 — 도구 표면이 자기 자신을 낳는다.
+      그리고 그것은 「운영 동작은 도구가 아니다」라는 이 저장소의 경계를 무너뜨린다.
+    """
+    from agora import cli, tools
+    if "mcp-serve" in tools.CORE_TOOLS:
+        raise AssertionError("서버 기동이 도구 표에 있다")
+    if "mcp-serve" not in cli.MCP_EXEMPT:
+        raise AssertionError("서버 기동이 MCP 예외 목록에 없다")
+    if "mcp-serve" not in cli.COMMANDS:
+        raise AssertionError("서버 기동이 CLI 등록표에 없다 — 띄울 방법이 다시 사라졌다")
+
+
 # ── 배선 대조 자체를 상시 케이스로(master 승인 2026-08-26) ───────────────────
 
 WIRING_ALLOWLIST = "tests/wiring-allowlist.txt"
@@ -6336,6 +6394,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("배선: 본문은 데이터 표식",      _case_read_wraps_bodies_as_untrusted_data, None),
     ("읽기: 진 글도 audit 에 나온다",  _case_audit_shows_the_races_that_were_lost, None),
     ("사슬: 거부가 막지 않는다",       _case_rejected_event_does_not_wedge_the_chain, None),
+    ("MCP: 예시대로 서버가 뜬다",      _case_example_mcp_config_actually_starts_the_server, None),
+    ("MCP: 기동은 도구가 아니다",      _case_mcp_serve_is_not_itself_a_tool, None),
     ("배선: 안 불리는 정의 0",        _case_no_unwired_production_definitions, None),
 )
 
@@ -7008,7 +7068,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    path = _os.path.join(directory, "participant.json")',
      "설정: config.json 에서 온다"),
     ("M164-local-command-becomes-tool", "agora/cli.py",
-     'MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",\n                        "reconcile"})',
+     'MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",\n                        "reconcile", "mcp-serve"})',
      'MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import"})',
      "CLI: 전용 명령은 도구 아니다"),
     # ── S6-3 대리인 스킬 ────────────────────────────────────────────────────
@@ -7204,6 +7264,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     # ★배선 대조기 자신을 재는 그물: 배선 하나를 끊으면 정의 하나가 고아가 된다.
     #   (이 변이는 브리프 단일 출처 케이스도 함께 잡는다 — 귀속은 배선 쪽으로 둔다.)
     # ★master 동봉 조건 ⑴ — head 전진을 accepted-only 로 되돌리면 교착이 재현돼야 한다.
+    ("M212-mcp-serve-prints-return-value", "agora/cli.py",
+     "        mcp_server.serve()\n        return None",
+     "        return mcp_server.serve()",
+     "MCP: 예시대로 서버가 뜬다"),
+    ("M213-mcp-serve-exposed-as-tool", "agora/cli.py",
+     '                        "reconcile", "mcp-serve"})',
+     '                        "reconcile"})',
+     "MCP: 기동은 도구가 아니다"),
     ("M211-head-advances-on-accepted-only", "agora/reducer.py",
      '        state["head"] = entry["hash"]\n\n    for entry in chain[1:]:',
      "\n    for entry in chain[1:]:",
