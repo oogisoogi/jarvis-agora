@@ -17,7 +17,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agora import schema, scrub, sign
+from agora import errors, schema, scrub, sign
+from agora.errors import AgoraError
 from agora.event import render_post
 
 
@@ -33,3 +34,47 @@ def publish_event(*, store: Any, event: dict[str, Any], category: str,
                           body=body, is_genesis=is_genesis)   # ⑷ 쓰기
     return {"message_id": event["message_id"], "hash": signed["hash"],
             "scrub": report, **result}
+
+
+# ── 봉투(설계 §3-2 · FR-2) ──────────────────────────────────────────────────
+# ★봉투는 **예의**가 아니라 **자격**이다. 재현 정보 없이 올린 질문은 답하는 쪽의 시간을
+#   먼저 쓴다 — 그래서 결손은 「형식 미비」가 아니라 게이트 거부(3)다.
+
+def envelope_template() -> dict[str, Any]:
+    """빈 봉투 서식 — 사람이 채워 넣을 자리를 보여 준다.
+
+    ★이 값이 **그대로 검사를 통과**해야 한다(S3-3 AC ③). 서식이 자기 검사를 못 지나면
+      「서식대로 썼는데 거부당하는」 일이 생기고, 그러면 아무도 서식을 안 믿는다.
+      그래서 서식은 문서에 따로 적지 않고 **여기 한 곳**에 두고 문서가 이것을 인용한다.
+    """
+    return {
+        "env": {"os": "운영체제와 판본", "app": "프로그램과 판본", "version": "0.0.0"},
+        "symptom": "무엇이 어떻게 잘못되는지 한 줄",
+        "repro_steps": ["첫 단계", "둘째 단계", "그때 일어나는 일"],
+        "log_excerpt": "관련 로그 몇 줄(개인 정보와 경로는 빼고)",
+        "tried": ["이미 해 본 것"],
+        "questions": ["묻고 싶은 것"],
+    }
+
+
+def envelope_check(envelope: Any) -> dict[str, Any]:
+    """`agora.envelope_check` 코어(§4) — {ok, errors[], scrub_report}.
+
+    ★**던지지 않고 돌려준다.** 이 도구는 「보내도 되나」를 묻는 자리이지 보내는 자리가 아니다.
+      사람이 고칠 수 있게 사유마다 **빠진 칸 이름**을 함께 준다(AC ①).
+    """
+    errs: list[dict[str, Any]] = []
+    try:
+        schema._check_envelope(envelope if type(envelope) is dict else {})
+    except AgoraError as e:
+        errs.append({"code": e.code, "message": e.message, "detail": e.detail})
+    report: dict[str, Any] | None = None
+    try:
+        report = scrub.check({"payload": {"envelope": envelope}})
+        if report["blocked"]:
+            errs.append({"code": errors.GATE_REJECT, "message": "스크럽 게이트 차단",
+                         "detail": {"rules": [f["rule"] for f in report["findings"]],
+                                    "where": [f["where"] for f in report["findings"]]}})
+    except AgoraError as e:
+        errs.append({"code": e.code, "message": e.message, "detail": e.detail})
+    return {"ok": not errs, "errors": errs, "scrub_report": report}

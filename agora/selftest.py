@@ -2215,6 +2215,109 @@ def _case_clean_event_reaches_store() -> None:
     if len(collected["valid"]) != 1 or collected["quarantined"]:
         raise AssertionError(f"올라간 글이 다시 읽히지 않는다: {collected['quarantined']}")
 
+# ── S3-3 봉투 스키마 · envelope_check ───────────────────────────────────────
+# ★봉투는 예의가 아니라 **자격**이다. 재현 정보 없이 올린 질문은 답하는 쪽의 시간을 먼저 쓴다.
+
+def _case_envelope_missing_three_kinds() -> None:
+    """봉투 결손 3종 → code 3, 그리고 **빠진 칸 이름**이 사유에 나온다(§8 · AC ①)."""
+    from agora import core
+    template = core.envelope_template()
+    for key in ("env", "symptom", "repro_steps"):
+        broken = {k: v for k, v in template.items() if k != key}
+        out = core.envelope_check(broken)
+        if out["ok"]:
+            raise AssertionError(f"{key} 결손이 통과했다")
+        first = out["errors"][0]
+        if first["code"] != errors.GATE_REJECT:
+            raise AssertionError(f"{key} 결손: code {first['code']} != 3")
+        if (first.get("detail") or {}).get("key") != key:
+            raise AssertionError(f"{key} 결손인데 사유에 칸 이름이 없다: {first}")
+
+
+def _case_envelope_empty_steps_is_gate() -> None:
+    """재현 단계가 **빈 배열**인 것도 결손과 같은 자격 문제다(3)."""
+    from agora import core
+    env = core.envelope_template()
+    env["repro_steps"] = []
+    out = core.envelope_check(env)
+    if out["ok"] or out["errors"][0]["code"] != errors.GATE_REJECT:
+        raise AssertionError(f"빈 재현 단계: {out['errors']}")
+
+
+def _case_envelope_shape_error_is_ten() -> None:
+    """봉투 **안의 타입 오류**는 모양이므로 10 이다 — 자격(3)과 구별한다.
+
+    ★둘을 뭉치면 「고치면 되는 것」과 「올릴 자격이 없는 것」이 같은 코드로 나가고,
+      호출자는 어느 쪽인지 몰라 둘 다 못 고친다.
+    """
+    from agora import core
+    env = core.envelope_template()
+    env["repro_steps"] = ["첫 단계", 2, "셋째"]
+    out = core.envelope_check(env)
+    if out["ok"] or out["errors"][0]["code"] != errors.ARGUMENT:
+        raise AssertionError(f"타입 오류: {out['errors']}")
+
+
+def _case_envelope_log_excerpt_cap() -> None:
+    """`log_excerpt` 4KB 초과 → code 3(AC ②) · **바이트**로 잰다."""
+    from agora import core
+    from agora.contract_open import MAX_LOG_EXCERPT_BYTES
+    env = core.envelope_template()
+    env["log_excerpt"] = "가" * ((MAX_LOG_EXCERPT_BYTES // 3) + 10)   # 한글 1자 = 3바이트
+    out = core.envelope_check(env)
+    if out["ok"]:
+        raise AssertionError("상한을 넘겼는데 통과했다")
+    # ★두 겹이 각각 잡는지 **따로** 본다. 계수만 보면 한 겹을 지워도 다른 겹이 대신 잡아
+    #   초록이 유지된다(M80 이 처음에 그렇게 살아남았다 — 오늘 여섯 번째 같은 계보).
+    schema_hit = [e for e in out["errors"]
+                  if (e.get("detail") or {}).get("where") == "envelope.log_excerpt"]
+    if not schema_hit or schema_hit[0]["code"] != errors.GATE_REJECT:
+        raise AssertionError(f"계약 층이 상한을 안 잡는다: {out['errors']}")
+    scrub_hit = [f for f in (out["scrub_report"] or {}).get("findings", [])
+                 if f["rule"] == "max_bytes"]
+    if not scrub_hit:
+        raise AssertionError(f"게이트 층이 상한을 안 잡는다: {out['scrub_report']}")
+
+    ok_env = core.envelope_template()
+    ok_env["log_excerpt"] = "가" * ((MAX_LOG_EXCERPT_BYTES // 3) - 10)
+    if not core.envelope_check(ok_env)["ok"]:
+        raise AssertionError("상한 안인데 막혔다")
+
+
+def _case_envelope_template_round_trips() -> None:
+    """**서식이 그대로 검사를 통과한다**(AC ③).
+
+    ★서식이 자기 검사를 못 지나면 「서식대로 썼는데 거부당하는」 일이 생기고,
+      그러면 아무도 서식을 안 믿는다. 그래서 서식은 문서가 아니라 코드에 한 곳으로 둔다.
+    """
+    from agora import core, schema
+    template = core.envelope_template()
+    out = core.envelope_check(template)
+    if not out["ok"]:
+        raise AssertionError(f"서식이 자기 검사를 못 지난다: {out['errors']}")
+    if out["scrub_report"]["blocked"]:
+        raise AssertionError(f"서식이 스크럽에 걸린다: {out['scrub_report']['findings']}")
+    # 서식을 그대로 담은 genesis 도 통과해야 한다 — 왕복의 나머지 반쪽.
+    schema.validate(_fake_event("genesis", {
+        "type": "problem", "title": "가짜 제목", "body": "가짜 본문",
+        "envelope": template}))
+
+
+def _case_envelope_check_returns_not_raises() -> None:
+    """`envelope_check` 는 **던지지 않고 돌려준다** — 보내도 되나를 묻는 자리다.
+
+    ★던지면 호출자가 사유를 하나밖에 못 본다. 사람이 한 번에 다 고칠 수 있어야 한다.
+    """
+    from agora import core
+    env = core.envelope_template()
+    del env["symptom"]
+    env["log_excerpt"] = "연락처는 010-1234-5678 입니다"      # 스크럽도 함께 걸리게
+    out = core.envelope_check(env)          # 예외가 나면 이 줄에서 케이스가 실패한다
+    if out["ok"] or len(out["errors"]) < 2:
+        raise AssertionError(f"사유를 모아서 주지 않는다: {out['errors']}")
+    if out["scrub_report"] is None:
+        raise AssertionError("스크럽 보고서가 비었다")
+
 # ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
 
 # S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
@@ -2404,6 +2507,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("scrub: 이름 목록 부재는 보인다", _case_names_absence_is_visible, None),
     ("쓰기: 차단이면 저장 호출 0",    _case_blocked_means_zero_writes, None),
     ("쓰기: 깨끗하면 올라간다",       _case_clean_event_reaches_store, None),
+    ("봉투: 결손 3종 → 3(칸 이름)",   _case_envelope_missing_three_kinds, None),
+    ("봉투: 빈 재현 단계 → 3",        _case_envelope_empty_steps_is_gate, None),
+    ("봉투: 타입 오류 → 10",          _case_envelope_shape_error_is_ten, None),
+    ("봉투: 로그 발췌 4KB → 3",       _case_envelope_log_excerpt_cap, None),
+    ("봉투: 서식이 그대로 통과",      _case_envelope_template_round_trips, None),
+    ("봉투: 사유를 모아서 돌려준다",  _case_envelope_check_returns_not_raises, None),
 )
 
 
@@ -2622,6 +2731,30 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M83-allow-max-bytes-unchecked", "agora/scrub.py",
+     '        if "max_bytes" in spec:',
+     "        if False:",
+     "allowlist: 필드 상한(자·바이트)"),
+    ("M78-envelope-required-unchecked", "agora/schema.py",
+     "    for key in ENVELOPE_REQUIRED:\n        if key not in env:",
+     "    for key in ENVELOPE_REQUIRED:\n        if False:",
+     "봉투: 결손 3종 → 3(칸 이름)"),
+    ("M79-envelope-missing-is-shape-error", "agora/schema.py",
+     '    _fail("봉투 필수 칸 누락", {"where": where, "key": key}, errors.GATE_REJECT)',
+     '    _fail("봉투 필수 칸 누락", {"where": where, "key": key})',
+     "봉투: 결손 3종 → 3(칸 이름)"),
+    ("M80-log-excerpt-cap-off", "agora/schema.py",
+     "        if len(raw) > MAX_LOG_EXCERPT_BYTES:",
+     "        if False:",
+     "봉투: 로그 발췌 4KB → 3"),
+    ("M81-empty-steps-allowed", "agora/schema.py",
+     "    if not steps:",
+     "    if False:",
+     "봉투: 빈 재현 단계 → 3"),
+    ("M82-envelope-check-drops-scrub", "agora/core.py",
+     '        if report["blocked"]:',
+     "        if False:",
+     "봉투: 사유를 모아서 돌려준다"),
     ("M74-broken-rules-file-passes", "agora/scrub.py",
      '        raise AgoraError(errors.GATE_REJECT,\n                         "규칙 파일이 깨졌다 — 전량 차단(fail-closed)",\n                         {"error": str(e)}) from None',
      '        return Rules("empty", [("x", "x", re.compile("(?!x)x"))], "none")',
@@ -2893,7 +3026,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S3-2(denylist v1·rule digest)"
+            "슬라이스": "S3-3(봉투 스키마·envelope_check)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

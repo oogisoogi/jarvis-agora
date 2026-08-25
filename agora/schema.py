@@ -17,7 +17,7 @@ from typing import Any
 
 from agora import errors
 from agora.contract_open import (
-    GENESIS_EXPECTED_STATE, GENESIS_PREV, ID_HEX_LEN, KINDS,
+    GENESIS_EXPECTED_STATE, GENESIS_PREV, ID_HEX_LEN, KINDS, MAX_LOG_EXCERPT_BYTES,
 )
 from agora.errors import AgoraError
 from agora.event import is_id
@@ -54,20 +54,55 @@ def _closed(obj: dict[str, Any], allowed: tuple[str, ...], where: str) -> None:
         _fail("계약에 없는 칸", {"where": where, "extra": sorted(extra)})
 
 
+# 봉투의 필수 칸(설계 §3-2). 하나라도 없으면 **그 유형으로 올릴 자격**이 없다 → 정책 거부(3).
+ENVELOPE_REQUIRED = ("env", "symptom", "repro_steps")
+ENVELOPE_ENV_REQUIRED = ("os", "app")
+
+
+def _envelope_missing(env: dict[str, Any], key: str, where: str) -> None:
+    """봉투 **결손**은 정책 거부(3)다 — 모양 오류(10)와 구별한다.
+
+    ★K-10 은 「칸 결손 = 10」이라고 정했고 §8 은 「봉투 결손 3종 = code 3」이라고 적었다.
+      둘을 같이 세우는 선은 하나뿐이다: **봉투에 관한 것은 자격 문제**다.
+      봉투가 아예 없는 것(K-10 이 이미 3 으로 정했다)과 봉투가 필수 칸을 못 채운 것은
+      같은 사건 — 「재현 정보 없이 남에게 시간을 쓰게 하지 않는다」는 같은 약속을 어긴다.
+      반면 봉투 **안의 타입 오류**(재현 단계가 문자열이 아님 따위)는 모양이므로 10 그대로다.
+    """
+    _fail("봉투 필수 칸 누락", {"where": where, "key": key}, errors.GATE_REJECT)
+
+
 def _check_envelope(env: dict[str, Any]) -> None:
     _closed(env, ("env", "symptom", "repro_steps", "log_excerpt", "tried", "questions"),
             "envelope")
+    for key in ENVELOPE_REQUIRED:
+        if key not in env:
+            _envelope_missing(env, key, "envelope")
     e = _need(env, "env", dict, "envelope")
     _closed(e, ("os", "app", "version"), "envelope.env")
-    _need(e, "os", str, "envelope.env")
-    _need(e, "app", str, "envelope.env")
+    for key in ENVELOPE_ENV_REQUIRED:
+        if key not in e:
+            _envelope_missing(e, key, "envelope.env")
+        _need(e, key, str, "envelope.env")
     _need(env, "symptom", str, "envelope")
     steps = _need(env, "repro_steps", list, "envelope")
     if not steps:
-        _fail("재현 단계가 비었다", {"where": "envelope.repro_steps"})
+        # 빈 배열은 「칸은 있는데 내용이 없다」 — 결손과 같은 자격 문제다.
+        _fail("재현 단계가 비었다", {"where": "envelope.repro_steps"}, errors.GATE_REJECT)
     for i, st in enumerate(steps):
         if type(st) is not str:
             _fail("재현 단계는 문자열이어야 한다", {"where": f"envelope.repro_steps[{i}]"})
+    if "log_excerpt" in env:
+        raw = _need(env, "log_excerpt", str, "envelope").encode("utf-8")
+        if len(raw) > MAX_LOG_EXCERPT_BYTES:
+            # 상한 초과는 게이트가 막는다 — 스크럽이 훑어야 할 면적을 무한히 키우지 않는다.
+            _fail("로그 발췌 상한 초과",
+                  {"where": "envelope.log_excerpt", "bytes": len(raw),
+                   "max": MAX_LOG_EXCERPT_BYTES}, errors.GATE_REJECT)
+    for key in ("tried", "questions"):
+        if key in env:
+            for i, item in enumerate(_need(env, key, list, "envelope")):
+                if type(item) is not str:
+                    _fail("문자열 목록이어야 한다", {"where": f"envelope.{key}[{i}]"})
 
 
 def _check_link(link: dict[str, Any], where: str, *, need_why: bool) -> None:
