@@ -2700,6 +2700,130 @@ def _case_github_store_satisfies_contract() -> None:
     if not isinstance(store, Store):
         raise AssertionError("Store 계약을 만족하지 않는다")
 
+# ── S4-2 한도·backoff·비용 모델 ─────────────────────────────────────────────
+# ★한도는 **벽이 아니라 신호**다. 그래서 재는 축이 둘이다:
+#   ⑴ 기다렸다 다시 하는가(간격이 곱으로 느는가) ⑵ 기다려도 소용없는 것을 안 두드리는가.
+
+def _rate_limited_transport(fail_times: int, log: list | None = None) -> Any:
+    state = {"n": 0}
+
+    def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        state["n"] += 1
+        if log is not None:
+            log.append(state["n"])
+        if state["n"] <= fail_times:
+            raise AgoraError(errors.STORE, "가짜 한도",
+                             {"stderr": "You have exceeded a secondary rate limit (429)"})
+        if "search(" in query:
+            return {"search": {"nodes": [{"id": "D_1", "number": 7, "title": "t"}]}}
+        return {"repository": {"discussion": {
+            "id": "D_1", "number": 7, "title": "t", "createdAt": "2026-01-01T00:00:00Z",
+            "body": "genesis", "comments": {"pageInfo": {"hasNextPage": False,
+                                                          "endCursor": None},
+                                             "nodes": []}}}}
+
+    return transport
+
+
+def _case_backoff_waits_multiplying() -> None:
+    """429 를 만나면 **곱으로 늘어나는 간격**으로 기다렸다 다시 한다(AC ①).
+
+    ★같은 간격으로 재시도하면 한도가 풀리기 전에 시도를 다 써 버린다.
+      그래서 재는 것은 「재시도했다」가 아니라 **간격이 늘었다**이다.
+    """
+    from agora.store_github import GitHubStore
+    waits: list = []
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_rate_limited_transport(2),
+                        sleep=lambda d: waits.append(d))
+    store.fetch(thread_id="a" * 32)          # 2번 실패 후 성공해야 한다
+    if len(waits) != 2:
+        raise AssertionError(f"기다린 횟수: {waits}")
+    if not all(waits[i] < waits[i + 1] for i in range(len(waits) - 1)):
+        raise AssertionError(f"간격이 안 늘어난다: {waits}")
+
+
+def _case_backoff_eventually_succeeds() -> None:
+    """기다린 뒤 성공하면 **결과를 돌려준다** — 재시도가 결과를 삼키지 않는다."""
+    from agora.store_github import GitHubStore
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_rate_limited_transport(1), sleep=lambda d: None)
+    items = store.fetch(thread_id="a" * 32)["items"]
+    if [i["node_id"] for i in items] != ["D_1"]:
+        raise AssertionError(f"재시도 후 결과가 비었다: {items}")
+
+
+def _case_backoff_gives_up_with_evidence() -> None:
+    """끝내 안 풀리면 **기다린 기록과 함께** 저장층 오류(7)로 올린다."""
+    from agora.store_github import GitHubStore
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_rate_limited_transport(99), sleep=lambda d: None,
+                        attempts=3)
+    try:
+        store.fetch(thread_id="a" * 32)
+    except AgoraError as e:
+        if e.code != errors.STORE or not e.retryable:
+            raise AssertionError(f"code {e.code} retryable={e.retryable}") from None
+        if (e.detail or {}).get("attempts") != 3 or len(e.detail["waited"]) != 2:
+            raise AssertionError(f"기다린 기록이 없다: {e.detail}") from None
+        return
+    raise AssertionError("영영 안 풀리는데 성공했다")
+
+
+def _case_permanent_error_is_not_retried() -> None:
+    """기다려도 그대로인 실패는 **즉시** 올린다 — 한 번만 부른다.
+
+    ★안 가르면 영영 못 고칠 것을 계속 두드린다(그리고 남의 서비스를 두드리는 일이 된다).
+    """
+    from agora.store_github import GitHubStore
+    log: list = []
+
+    def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        log.append(1)
+        raise AgoraError(errors.STORE, "가짜 문법 오류",
+                         {"stderr": "Field 'nope' doesn't exist on type 'Discussion'"})
+
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=transport, sleep=lambda d: None)
+    try:
+        store.fetch(thread_id="a" * 32)
+    except AgoraError:
+        if len(log) != 1:
+            raise AssertionError(f"영구 실패를 {len(log)}회 두드렸다") from None
+        return
+    raise AssertionError("영구 실패가 성공으로 나왔다")
+
+
+def _case_calls_count_includes_retries() -> None:
+    """호출 계수는 **재시도까지 센다** — 비용 모델은 「실제로 쓴 횟수」를 알아야 한다."""
+    from agora.store_github import GitHubStore
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_rate_limited_transport(2), sleep=lambda d: None)
+    store.fetch(thread_id="a" * 32)
+    # 검색 1 + (스레드 읽기: 실패 2 + 성공 1) = 4 이상이어야 한다.
+    if store.calls < 4:
+        raise AssertionError(f"재시도가 계수에 안 잡힌다: {store.calls}")
+
+
+def _case_cost_model_marks_unmeasured() -> None:
+    """비용 표가 **미측정 칸을 그대로 남겼는지** 본다(AC ②).
+
+    ★빈칸을 그럴듯한 수로 채우면 그 수를 근거로 다음 결정이 쌓이고,
+      진짜 값이 나왔을 때 되돌릴 수 없다. 그래서 「미측정」이라는 글자가 실재해야 한다.
+    """
+    path = os.path.join(_ROOT, "docs", "COST-MODEL.md")
+    if not os.path.exists(path):
+        raise AssertionError("비용 모델 기록이 없다")
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    if text.count("미측정") < 5:
+        raise AssertionError(f"미측정 표기가 너무 적다: {text.count('미측정')}")
+    if "해소 판정" not in text:
+        raise AssertionError("미측정 칸에 해소 판정이 없다 — 영영 안 채워진다")
+    for measured in ("5000", "rateLimit"):
+        if measured not in text:
+            raise AssertionError(f"실측 근거 {measured} 이 없다")
+
 # ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
 
 # S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
@@ -2940,6 +3064,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("운반층: 오류 → 7(retryable)",   _case_github_transport_error_is_retryable, errors.STORE),
     ("운반층: 투영은 조용하지 않다",  _case_github_projection_is_not_silently_ok, None),
     ("운반층: Store 계약 충족",       _case_github_store_satisfies_contract, None),
+    ("한도: 곱으로 늘어나는 대기",    _case_backoff_waits_multiplying, None),
+    ("한도: 재시도 후 결과 반환",     _case_backoff_eventually_succeeds, None),
+    ("한도: 포기해도 기록을 남긴다",  _case_backoff_gives_up_with_evidence, None),
+    ("한도: 영구 실패는 안 두드린다", _case_permanent_error_is_not_retried, None),
+    ("한도: 계수는 재시도까지",       _case_calls_count_includes_retries, None),
+    ("비용: 미측정 칸이 남아 있다",   _case_cost_model_marks_unmeasured, None),
 )
 
 
@@ -3158,6 +3288,22 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M99-backoff-constant-interval", "agora/store_github.py",
+     "                delay *= BACKOFF_FACTOR",
+     "                pass",
+     "한도: 곱으로 늘어나는 대기"),
+    ("M100-everything-is-retried", "agora/store_github.py",
+     "                if not is_rate_limited(e):",
+     "                if False:",
+     "한도: 영구 실패는 안 두드린다"),
+    ("M101-retries-not-counted", "agora/store_github.py",
+     "        for attempt in range(self._attempts):\n            self.calls += 1",
+     "        self.calls += 1\n        for attempt in range(self._attempts):",
+     "한도: 계수는 재시도까지"),
+    ("M102-no-actual-waiting", "agora/store_github.py",
+     "                self.waits.append(delay)\n                self._sleep(delay)",
+     "                self.waits.append(delay)",
+     "한도: 곱으로 늘어나는 대기"),
     ("M93-github-first-page-only", "agora/store_github.py",
      '            if not page.get("hasNextPage"):\n                break',
      "            if True:\n                break",
@@ -3513,7 +3659,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S4-1(store_github)"
+            "슬라이스": "S4-2(한도·backoff·비용 모델)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

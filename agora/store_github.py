@@ -18,10 +18,29 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from typing import Any
 
 from agora import errors
 from agora.errors import AgoraError
+
+# ★한도에 걸린 것은 **벽이 아니라 신호**다(§10). 429·403(secondary rate limit)은 「하지 마라」가
+#   아니라 「지금은 말고」이므로 **기다렸다 다시** 한다. 반대로 문법 오류·권한 없음은 기다려도 그대로다.
+#   둘을 안 가르면 ⑴영영 못 고칠 것을 계속 두드리거나 ⑵고칠 필요 없는 것을 실패로 올린다.
+RATE_LIMIT_MARKERS = ("rate limit", "ratelimit", "rate_limited", "429",
+                      "secondary rate", "abuse detection")
+
+# 대기는 **곱으로** 늘린다. 같은 간격으로 재시도하면 한도가 풀리기 전에 시도를 다 써 버린다.
+BACKOFF_BASE_SECONDS = 1.0
+BACKOFF_FACTOR = 2.0
+BACKOFF_ATTEMPTS = 4
+
+
+def is_rate_limited(err: AgoraError) -> bool:
+    """이 실패가 「지금은 말고」인가 — 문자열로 판별한다(gh 는 상태 코드를 말로 준다)."""
+    blob = json.dumps(err.detail, ensure_ascii=False, default=str).lower()
+    return any(marker in blob for marker in RATE_LIMIT_MARKERS)
+
 
 _LOOKUP = """
 query($q: String!) {
@@ -115,19 +134,44 @@ def gh_transport(query: str, variables: dict[str, Any], *,
 
 class GitHubStore:
     def __init__(self, owner: str, name: str, categories: dict[str, str],
-                 transport: Any = None) -> None:
+                 transport: Any = None, sleep: Any = None,
+                 attempts: int = BACKOFF_ATTEMPTS) -> None:
         self.owner = owner
         self.name = name
         self._categories = dict(categories)      # 이름 → category id(S4-0 실측값)
         self._transport = transport or gh_transport
+        self._sleep = sleep or time.sleep
+        self._attempts = max(1, attempts)
+        self.waits: list[float] = []             # 실제로 기다린 간격 — 시험이 이것을 본다
         self._numbers: dict[str, int] = {}       # thread_id → discussion number
         self._ids: dict[str, str] = {}           # thread_id → discussion node id
         self.calls = 0                           # 호출 계수 — 한도 이야기의 시작점(S4-2)
 
     # ── 내부 ────────────────────────────────────────────────────────────────
     def _run(self, query: str, **variables: Any) -> dict[str, Any]:
-        self.calls += 1
-        return self._transport(query, variables)
+        """한 번 부른다. 한도에 걸리면 곱으로 늘어나는 간격을 두고 다시 부른다.
+
+        ★호출 계수(`calls`)는 **재시도까지 센다.** 비용 모델이 「성공한 횟수」가 아니라
+          「실제로 쓴 횟수」를 알아야 하기 때문이다.
+        """
+        delay = BACKOFF_BASE_SECONDS
+        last: AgoraError | None = None
+        for attempt in range(self._attempts):
+            self.calls += 1
+            try:
+                return self._transport(query, variables)
+            except AgoraError as e:
+                if not is_rate_limited(e):
+                    raise            # 기다려도 그대로인 실패는 그대로 올린다
+                last = e
+                if attempt == self._attempts - 1:
+                    break
+                self.waits.append(delay)
+                self._sleep(delay)
+                delay *= BACKOFF_FACTOR
+        raise AgoraError(errors.STORE, "한도에 걸렸고 재시도도 실패했다",
+                         {"attempts": self._attempts, "waited": list(self.waits),
+                          "last": (last.detail if last else None)})
 
     def _locate(self, thread_id: str) -> tuple[int, str]:
         """thread_id → (번호, node id). 한 번 찾으면 캐시한다."""
