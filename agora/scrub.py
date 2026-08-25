@@ -31,6 +31,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_RULES_PATH = os.path.join(_ROOT, "config", "scrub-rules-v1.json")
 DEFAULT_ALLOW_PATH = os.path.join(_ROOT, "config", "allowlist-v1.json")
 DEFAULT_DOMAINS_PATH = os.path.join(_ROOT, "config", "allow-domains.txt")
+# ★이름 목록은 **참가자 로컬**이다(설계 §5·§7). 저장소에는 예시만 둔다 —
+#   「무엇을 가리려 하는지」 자체가 정보이기 때문이다.
+DEFAULT_NAMES_PATH = os.path.join(_ROOT, "config", "scrub-names.txt")
 
 # URL 은 호스트만 본다. 경로·질의는 denylist 와 필드 길이가 따로 본다.
 _URL = re.compile(r"(?i)\bhttps?://([^\s/?#\\)\]>'\"]+)")
@@ -178,8 +181,40 @@ def _walk_strings(node: Any, path: str = "$"):
             yield from _walk_strings(v, f"{path}.{k}")
 
 
+def load_names(path: str | None = None) -> frozenset[str]:
+    """이름 목록. **없으면 공집합**이고 그것은 정상이다.
+
+    ★규칙 파일 부재(전량 차단)와 다르다. 규칙 파일은 「검사기가 고장났다」이고,
+      이름 목록 부재는 「이 참가자가 가릴 이름을 아직 안 적었다」다.
+      다만 **조용히 다르면 안 되므로** 보고서에 몇 개를 실었는지 적는다 —
+      0 이 보이면 「안 걸렀다」와 「걸릴 것이 없었다」를 사람이 구별할 수 있다.
+    """
+    path = path or DEFAULT_NAMES_PATH
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return frozenset()
+    return frozenset(
+        line.strip().lower() for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
+def check_names(payload: Any, names: frozenset[str]) -> list[dict[str, Any]]:
+    for where, text in _walk_strings(payload):
+        low = text.lower()
+        for name in names:
+            if name in low:
+                # ★이름 자체는 담지 않는다 — 보고서가 유출 경로가 되면 안 된다.
+                yield_ = {"rule": "name-list", "kind": "이름 목록", "where": where,
+                          "span": [low.index(name), low.index(name) + len(name)]}
+                yield yield_
+
+
 def check(payload: Any, rules: Rules | None = None,
-          allow: AllowRules | None = None) -> dict[str, Any]:
+          allow: AllowRules | None = None,
+          names: frozenset[str] | None = None) -> dict[str, Any]:
     """구조 전체의 문자열을 훑어 차단 사유를 모은다.
 
     반환은 **보고서**이지 판정 집행이 아니다 — 집행(전송 중단)은 호출자가 한다.
@@ -188,7 +223,9 @@ def check(payload: Any, rules: Rules | None = None,
     """
     rules = rules or load_rules()
     allow = allow or load_allow()
+    names = load_names() if names is None else names
     findings: list[dict[str, Any]] = list(check_allow(payload, allow))
+    findings.extend(check_names(payload, names))
     for where, text in _walk_strings(payload):
         for rid, kind, pattern in rules.compiled:
             m = pattern.search(text)
@@ -208,6 +245,8 @@ def check(payload: Any, rules: Rules | None = None,
         "allow_version": allow.version,
         "bundle": hashlib.sha256(
             (rules.digest + allow.digest).encode("utf-8")).hexdigest(),
+        # ★0 이 보이면 「안 걸렀다」와 「걸릴 것이 없었다」를 사람이 구별할 수 있다.
+        "names_loaded": len(names),
         "blocked": len(findings),
         "redacted": 0,
         "findings": findings,
@@ -215,9 +254,10 @@ def check(payload: Any, rules: Rules | None = None,
 
 
 def enforce(payload: Any, rules: Rules | None = None,
-            allow: AllowRules | None = None) -> dict[str, Any]:
+            allow: AllowRules | None = None,
+            names: frozenset[str] | None = None) -> dict[str, Any]:
     """차단이 1건이라도 있으면 code 3 으로 멈춘다. 통과하면 보고서를 돌려준다."""
-    report = check(payload, rules, allow)
+    report = check(payload, rules, allow, names)
     if report["blocked"]:
         raise AgoraError(errors.GATE_REJECT, "스크럽 게이트 차단",
                          {"blocked": report["blocked"],

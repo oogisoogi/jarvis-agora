@@ -2056,6 +2056,165 @@ def _case_signer_refuses_allowlist_violation() -> None:
     ev = _r2_post("1" * 32, "본문 @someone 멘션이 들어 있다")
     _with_key(f["key_a"], lambda: sign_event(ev))
 
+# ── S3-2 denylist v1 · rule digest ──────────────────────────────────────────
+# ★픽스처 값은 **그 자리에서 난수로 짓는다**(AC ①). 이유가 둘이다:
+#   ⑴ 유명 문서 예제(4111-1111-…)는 도구 기본 허용목록에 걸려 시험이 무효가 된다.
+#   ⑵ 진짜처럼 생긴 값이 **저장소에 글자로 남지 않는다** — 커밋 게이트의 누출 스캔과 다투지 않는다.
+
+def _rng():
+    import random
+    return random.Random(20260825)      # 씨앗 고정 — 실패가 재현돼야 고칠 수 있다
+
+
+def _denylist_fixtures() -> list[tuple[str, str, str]]:
+    """(범주, 기대 규칙 id, 본문) — 설계 §5 의 8범주를 덮는다."""
+    import string
+    rng = _rng()
+
+    def alnum(n: int) -> str:
+        return "".join(rng.choice(string.ascii_letters + string.digits) for _ in range(n))
+
+    def digits(n: int) -> str:
+        return "".join(rng.choice(string.digits) for _ in range(n))
+
+    return [
+        ("이메일", "email", f"연락은 {alnum(7).lower()}@{alnum(6).lower()}.example 로"),
+        ("국제 전화", "phone-intl", f"번호는 +{digits(2)} {digits(3)}-{digits(4)}-{digits(4)} 입니다"),
+        ("국내 전화", "phone-kr", f"번호는 01{digits(1)}-{digits(4)}-{digits(4)} 입니다"),
+        ("주민등록번호형", "national-id", f"식별자 {digits(6)}-{rng.choice('1234')}{digits(6)}"),
+        ("계좌형", "account", f"계좌 {digits(3)}-{digits(4)}-{digits(6)} 로 보내세요"),
+        ("카드형", "card", f"카드 {digits(4)}-{digits(4)}-{digits(4)}-{digits(4)}"),
+        ("비밀키형", "key-openai", f"키는 sk-{alnum(24)} 입니다"),
+        ("비밀키형(gh)", "key-github", f"토큰 ghp_{alnum(30)}"),
+        ("비밀키형(AWS)", "key-aws", f"자격 AKIA{''.join(rng.choice(string.ascii_uppercase + string.digits) for _ in range(16))}"),
+        ("개인키 블록", "key-private", "-----BEGIN OPENSSH PRIVATE KEY-----"),
+        ("절대 경로", "path-posix", f"로그는 /Users/{alnum(6).lower()}/log 에"),
+        ("홈 경로", "path-home", f"설정은 ~/{alnum(5).lower()}/conf 에"),
+        ("사설 IP", "ip-private", f"서버 192.168.{digits(1)}.{digits(2)} 에서"),
+        ("루프백 IP", "ip-loopback", f"로컬 127.0.0.{digits(1)} 에서"),
+    ]
+
+
+def _case_denylist_blocks_all_fixtures() -> None:
+    """denylist 픽스처 전건 차단 — 그리고 **어느 규칙이** 잡았는지까지 단언한다(§8)."""
+    from agora import scrub
+    for label, rule, body in _denylist_fixtures():
+        report = scrub.check({"payload": {"body": body}})
+        rules = [f["rule"] for f in report["findings"]]
+        if rule not in rules:
+            raise AssertionError(f"{label}: {rule} 이 안 잡혔다 — 잡힌 것={rules}")
+
+
+def _case_denylist_covers_eight_categories() -> None:
+    """설계 §5 의 8범주가 규칙 파일에 **전부** 있다 — 규칙을 지우면 여기서 걸린다."""
+    from agora import scrub
+    want = {"email", "phone-intl", "phone-kr", "national-id", "account", "card",
+            "key-openai", "key-github", "key-aws", "key-slack", "key-jwt",
+            "key-private", "path-posix", "path-windows", "path-home",
+            "ip-private", "ip-loopback"}
+    have = {rid for rid, _kind, _p in scrub.load_rules().compiled}
+    missing = want - have
+    if missing:
+        raise AssertionError(f"규칙이 사라졌다: {sorted(missing)}")
+
+
+def _case_denylist_no_false_positive() -> None:
+    """정상문 오탐 0(§8) — 우리가 실제로 쓸 법한 문장들로 잰다.
+
+    ★차단 축만 재면 「전부 차단」도 초록이다. 이 축이 없으면 게이트를 조여도 아무도 모른다.
+    """
+    from agora import scrub
+    clean = [
+        "재현 절차는 세 단계입니다. 먼저 설정을 열고, 값을 바꾸고, 다시 실행합니다.",
+        "판본 1.2.3 에서 같은 증상이 났고 1.2.4 에서는 안 났습니다.",
+        "오류 코드 10 은 인자 오류이고 3 은 게이트 거부입니다.",
+        "The build failed after 42 seconds with exit status 2.",
+        "포트 8080 과 3000 을 함께 열어 두었습니다.",
+        "2026-08-25 15:00 에 시작해 15:30 에 끝났습니다.",
+        "비율은 10.5 대 89.5 였고 표본은 1200 개였습니다.",
+        "문서는 https://docs.python.org/3/library/re.html 에 있습니다.",
+    ]
+    for body in clean:
+        report = scrub.check({"payload": {"body": body}})
+        if report["blocked"]:
+            raise AssertionError(f"오탐: {body[:24]}… → {report['findings']}")
+
+
+def _case_denylist_broken_rules_file_is_fail_closed() -> None:
+    """규칙 파일이 **깨졌으면** 전량 차단(AC ② · 부재와 같은 방향)."""
+    import tempfile
+    from agora import scrub
+    with tempfile.TemporaryDirectory() as d:
+        broken = os.path.join(d, "broken.json")
+        with open(broken, "w", encoding="utf-8") as fh:
+            fh.write('{"version": "v1", "rules": [{"id": "x", "kind": "y", '
+                     '"pattern": "[unclosed"}]}')
+        scrub.load_rules(broken)
+
+
+def _case_names_absence_is_visible() -> None:
+    """이름 목록 부재는 **정상**이되 조용하지 않다 — 보고서에 몇 개를 실었는지 남는다.
+
+    ★규칙 파일 부재(전량 차단)와 다르다. 「검사기가 고장났다」와
+      「가릴 이름을 아직 안 적었다」는 다른 사건이고, 0 이 보여야 사람이 그것을 구별한다.
+    """
+    from agora import scrub
+    report = scrub.check({"payload": {"body": "평범한 본문"}}, names=frozenset())
+    if report["names_loaded"] != 0:
+        raise AssertionError(f"이름 계수: {report['names_loaded']}")
+    hit = scrub.check({"payload": {"body": "가나다 님이 그렇게 말했습니다"}},
+                      names=frozenset({"가나다"}))
+    if [f["rule"] for f in hit["findings"]] != ["name-list"]:
+        raise AssertionError(f"이름 목록이 안 걸린다: {hit['findings']}")
+    if hit["names_loaded"] != 1:
+        raise AssertionError(f"이름 계수: {hit['names_loaded']}")
+
+
+def _case_blocked_means_zero_writes() -> None:
+    """차단 1건이면 **저장층 쓰기 호출이 0**이다(AC ③).
+
+    ★code 3 이 났다는 것만으로는 「안 썼다」가 증명되지 않는다 — 쓰고 나서 났을 수도 있다.
+      그래서 운반층의 호출 계수를 직접 본다.
+
+    ★그리고 code 3 **자체**로는 이 경로를 잴 수 없다는 것을 실측으로 배웠다:
+      publish 의 게이트를 지워도 **서명기가 다시 막아** 똑같이 code 3 이 난다(M-11 이중 방어).
+      그래서 재는 축은 코드가 아니라 **쓰기 계수와 순서**다.
+    """
+    from agora import core
+    from agora.store_mock import MockStore
+    store = MockStore()
+    ev = _r2_post("1" * 32, "본문에 sk-" + "A" * 24 + " 가 들어 있다")
+    try:
+        core.publish_event(store=store, event=ev, category="debate")
+    except AgoraError as e:
+        if e.code != errors.GATE_REJECT:
+            raise AssertionError(f"code {e.code} != 3") from None
+    else:
+        raise AssertionError("차단됐어야 할 이벤트가 올라갔다")
+    if store.append_calls != 0:
+        raise AssertionError(f"막혔는데 저장층을 {store.append_calls}회 호출했다")
+    if store.fetch(thread_id=_T1, limit=10)["items"]:
+        raise AssertionError("막혔는데 운반층에 글이 남았다")
+
+
+def _case_clean_event_reaches_store() -> None:
+    """대조군 — 깨끗한 이벤트는 같은 경로로 **실제로** 올라간다.
+
+    ★이 축이 없으면 「전부 차단」하는 고장이 초록으로 통과한다.
+    """
+    from agora import core, reducer
+    from agora.store_mock import MockStore
+    store = MockStore()
+    ev = _r2_genesis()
+    f = _fixtures()
+    out = _with_key(f["key_a"], lambda: core.publish_event(
+        store=store, event=ev, category="debate", is_genesis=True))
+    if store.append_calls != 1 or not out.get("node_id"):
+        raise AssertionError(f"쓰기 계수 {store.append_calls} · 결과 {out}")
+    collected = _r2_collect(store)
+    if len(collected["valid"]) != 1 or collected["quarantined"]:
+        raise AssertionError(f"올라간 글이 다시 읽히지 않는다: {collected['quarantined']}")
+
 # ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
 
 # S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
@@ -2238,6 +2397,13 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("allowlist: 필드 상한(자·바이트)", _case_allowlist_field_limits, None),
     ("scrub: 두 겹 digest 동봉",      _case_scrub_report_carries_both_digests, None),
     ("서명기: allowlist 위반 → 3",    _case_signer_refuses_allowlist_violation, errors.GATE_REJECT),
+    ("denylist: 픽스처 전건 차단",    _case_denylist_blocks_all_fixtures, None),
+    ("denylist: 8범주 규칙 실재",     _case_denylist_covers_eight_categories, None),
+    ("denylist: 정상문 오탐 0",       _case_denylist_no_false_positive, None),
+    ("denylist: 규칙 파손 → 3",       _case_denylist_broken_rules_file_is_fail_closed, errors.GATE_REJECT),
+    ("scrub: 이름 목록 부재는 보인다", _case_names_absence_is_visible, None),
+    ("쓰기: 차단이면 저장 호출 0",    _case_blocked_means_zero_writes, None),
+    ("쓰기: 깨끗하면 올라간다",       _case_clean_event_reaches_store, None),
 )
 
 
@@ -2456,6 +2622,24 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M74-broken-rules-file-passes", "agora/scrub.py",
+     '        raise AgoraError(errors.GATE_REJECT,\n                         "규칙 파일이 깨졌다 — 전량 차단(fail-closed)",\n                         {"error": str(e)}) from None',
+     '        return Rules("empty", [("x", "x", re.compile("(?!x)x"))], "none")',
+     "denylist: 규칙 파손 → 3"),
+    # ★첫 판(enforce → check)은 **살아남았다**: 게이트를 꺼도 서명기가 같은 code 3 을 낸다.
+    #   그래서 이 축의 변이는 「쓰기를 게이트보다 앞에 둔다」로 바꿨다 — 그것이 AC 가 재는 결함이다.
+    ("M75-publish-writes-before-gate", "agora/core.py",
+     "    report = scrub.enforce(event)              # ⑵ 게이트 — 여기서 막히면 아래로 못 간다",
+     '    store.append(thread_id=event["thread_id"], category=category, title="",\n                 body="", is_genesis=False)\n    report = scrub.enforce(event)',
+     "쓰기: 차단이면 저장 호출 0"),
+    ("M76-name-list-ignored", "agora/scrub.py",
+     "            if name in low:",
+     "            if False:",
+     "scrub: 이름 목록 부재는 보인다"),
+    ("M77-names-count-hidden", "agora/scrub.py",
+     '        "names_loaded": len(names),',
+     '        "names_loaded": 0,',
+     "scrub: 이름 목록 부재는 보인다"),
     ("M69-allow-length-unchecked", "agora/scrub.py",
      '        if "max_chars" in spec and len(text) > spec["max_chars"]:',
      "        if False:",
@@ -2709,7 +2893,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S3-1(allowlist)"
+            "슬라이스": "S3-2(denylist v1·rule digest)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
