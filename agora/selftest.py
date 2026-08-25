@@ -1325,6 +1325,19 @@ def _case_reducer_no_genesis_no_chain() -> None:
 # ★사슬 하나를 만들어 상태까지 계산하는 픽스처를 공용으로 둔다.
 #   각 케이스는 「그 사슬에 이 이벤트를 더하면 어떻게 되는가」 하나만 묻는다.
 
+def _after_genesis(g: dict[str, Any]) -> str:
+    """genesis 하나만 있는 자리의 상태 해시 — 그 다음 글이 볼 값이다(M-b 이후)."""
+    return _expected_state_of([(_r2_signed(g), "2026-01-01T00:00:00Z")])
+
+
+def _expected_state_of(items: list, *, operators: frozenset[str] = frozenset(),
+                       now: str | None = None) -> str:
+    """앞선 이벤트들만으로 상태를 세워 그 해시를 준다 — **쓴 사람이 본 값**이다."""
+    from agora import reducer
+    return reducer.apply(reducer.order(_r2_collect(_r3_store(list(items)))),
+                         operators=operators, now=now)["state_hash"]
+
+
 def _r4_chain(gtype: str, steps: list[tuple[str, dict[str, Any], str]], *,
               operators: frozenset[str] = frozenset()) -> dict[str, Any]:
     """(kind, payload, from) 목록을 앞 이벤트에 이어 붙여 사슬을 만들고 상태까지 계산한다.
@@ -1343,6 +1356,10 @@ def _r4_chain(gtype: str, steps: list[tuple[str, dict[str, Any], str]], *,
     for i, (kind, pl, who) in enumerate(steps):
         ev = _r2_event(kind, pl, f"{i + 1:032x}", prev=prev)
         ev["from"] = who
+        # ★CAS 칸을 **실제 값으로** 채운다(M-b 이후). 가짜로 채우면 reducer 가 전건 격리하고,
+        #   그러면 이 픽스처가 재려던 축(권한·라운드·전이)은 **아무것도 안 재게 된다.**
+        #   ⇒ 픽스처가 규약을 안 지키면 시험은 옛 세계를 계속 증명한다.
+        ev["expected_state"] = _expected_state_of(items, operators=operators)
         items.append((_r2_signed(ev), f"2026-01-01T00:01:{i:02d}Z"))
         prev = event_hash(ev)
     return reducer.apply(reducer.order(_r2_collect(_r3_store(items))),
@@ -1572,6 +1589,10 @@ def _r5_debate(steps: list[tuple[str, dict[str, Any], str]], *,
     for i, (kind, pl, who) in enumerate(steps):
         ev = _r2_event(kind, pl, f"{i + 1:032x}", prev=prev)
         ev["from"] = who
+        # ★CAS 칸을 **실제 값으로** 채운다(M-b 이후). 가짜로 채우면 reducer 가 전건 격리하고,
+        #   그러면 이 픽스처가 재려던 축(권한·라운드·전이)은 **아무것도 안 재게 된다.**
+        #   ⇒ 픽스처가 규약을 안 지키면 시험은 옛 세계를 계속 증명한다.
+        ev["expected_state"] = _expected_state_of(items, operators=operators, now=now)
         items.append((_r2_signed(ev), f"2026-01-01T00:01:{i:02d}Z"))
         prev = event_hash(ev)
     return reducer.apply(reducer.order(_r2_collect(_r3_store(items))),
@@ -1750,6 +1771,7 @@ def _case_budget_comes_from_settings() -> None:
     for i in range(2):
         ev = _r2_event("post", {"round": 0, "body": f"발언 {i}"}, f"{i + 1:032x}",
                        prev=prev)
+        ev["expected_state"] = _expected_state_of(items)
         items.append((_r2_signed(ev), f"2026-01-01T00:01:{i:02d}Z"))
         prev = event_hash(ev)
     collected = _r2_collect(_r3_store(items))
@@ -1766,6 +1788,39 @@ def _case_budget_comes_from_settings() -> None:
         raise AssertionError("상한 1 로 낮췄는데 결과가 그대로다 — 설정을 안 읽는다")
 
 
+def _case_forged_expected_state_is_quarantined() -> None:
+    """도구를 건너뛴 이벤트의 **CAS 칸을 받는 쪽이 판정한다**(M-b · codex 2026-08-26).
+
+    ★`expected_state` 는 지금까지 **쓰는 쪽**(도구의 `require_state`)에서만 검사됐다.
+      그런데 도구는 우리 것이고 운반층은 남의 것이다 — 서명 능력이 있는 사람이 직접 게시하면
+      그 칸에 무엇을 적든 **아무도 안 봤다.** 「내가 본 상태 위에 쓴다」는 약속이
+      **정직한 사람에게만** 걸려 있었다.
+    ★★**계약 칸은 받는 쪽이 판정할 때만 계약이다.** 아니면 그냥 주석이다.
+    ★양쪽으로 잰다: 거짓 칸은 격리되고, **바른 칸은 통과한다**(한쪽만 재면 전부 막는 구현도 초록이다).
+    """
+    from agora import reducer
+    from agora.event import event_hash
+    g = _r2_event("genesis", {"type": "debate", "title": "가짜", "body": "가짜",
+                              "chair": "operator-a"}, "a" * 32)
+    forged = _r2_event("post", {"round": 0, "body": "우회해서 쓴 글"}, "1" * 32,
+                       prev=event_hash(g))
+    forged["expected_state"] = "f" * 64          # 본 적 없는 상태를 봤다고 적는다
+    out = reducer.apply(reducer.order(_r2_collect(_r3_store([
+        (_r2_signed(g), "2026-01-01T00:00:00Z"),
+        (_r2_signed(forged), "2026-01-01T00:01:00Z")]))))
+    if _r4_reasons(out) != ["stale_expected_state"]:
+        raise AssertionError(f"거짓 CAS 칸이 통과했다: {_r4_reasons(out)}")
+
+    honest = _r2_event("post", {"round": 0, "body": "정직하게 쓴 글"}, "2" * 32,
+                       prev=event_hash(g))
+    honest["expected_state"] = _after_genesis(g)
+    ok = reducer.apply(reducer.order(_r2_collect(_r3_store([
+        (_r2_signed(g), "2026-01-01T00:00:00Z"),
+        (_r2_signed(honest), "2026-01-01T00:01:00Z")]))))
+    if _r4_reasons(ok):
+        raise AssertionError(f"바른 칸인데 막혔다: {_r4_reasons(ok)}")
+
+
 def _case_budget_counts_chars_too() -> None:
     """글자 수 상한도 같은 규칙으로 막힌다."""
     out = _r5_debate([("post", {"round": 0, "body": "가" * 50}, "operator-a")],
@@ -1778,6 +1833,7 @@ def _case_budget_counts_chars_too() -> None:
                               "chair": "operator-a"}, "a" * 32)
     ev = _r2_event("post", {"round": 0, "body": "가" * 50}, "1" * 32,
                    prev=event_hash(g))
+    ev["expected_state"] = _after_genesis(g)
     ordered = reducer.order(_r2_collect(_r3_store([
         (_r2_signed(g), "2026-01-01T00:00:00Z"),
         (_r2_signed(ev), "2026-01-01T00:01:00Z")])))
@@ -1801,8 +1857,14 @@ def _case_budget_not_spent_by_losers() -> None:
     ghash = event_hash(g)
     winner = _r2_event("post", {"round": 0, "body": "이긴 발언"}, "1" * 32, prev=ghash)
     loser = _r2_event("post", {"round": 0, "body": "진 발언"}, "2" * 32, prev=ghash)
+    # ★경합하는 둘은 **같은 자리를 보고** 쓴다 — 그래서 expected_state 도 같다.
+    #   진 쪽이 CAS 로 걸리는 것이 아니라 **경합으로** 지는 것임을 이 픽스처가 지킨다.
+    winner["expected_state"] = loser["expected_state"] = _after_genesis(g)
     second = _r2_event("post", {"round": 0, "body": "둘째 발언"}, "3" * 32,
                        prev=event_hash(winner))
+    second["expected_state"] = _expected_state_of([
+        (_r2_signed(g), "2026-01-01T00:00:00Z"),
+        (_r2_signed(winner), "2026-01-01T00:00:04Z")])
     out = reducer.apply(reducer.order(_r2_collect(_r3_store([
         (_r2_signed(g), "2026-01-01T00:00:00Z"),
         (_r2_signed(winner), "2026-01-01T00:00:05Z"),
@@ -1925,6 +1987,7 @@ def _case_relations_do_not_change_procedure() -> None:
             pp["refs"] = [{"thread_id": _OTHER_THREAD, "why": "가짜 인용 사유"}]
         g = _r2_event("genesis", gp, "a" * 32)
         post = _r2_event("post", pp, "1" * 32, prev=event_hash(g))
+        post["expected_state"] = _after_genesis(g)
         return reducer.apply(reducer.order(_r2_collect(_r3_store([
             (_r2_signed(g), "2026-01-01T00:00:00Z"),
             (_r2_signed(post), "2026-01-01T00:01:00Z")]))))
@@ -1954,6 +2017,7 @@ def _case_relations_may_point_nowhere() -> None:
                               "refs": [{"thread_id": _OTHER_THREAD,
                                         "why": "가짜 인용 사유"}]},
                      "1" * 32, prev=event_hash(g))
+    post["expected_state"] = _after_genesis(g)
     out = reducer.apply(reducer.order(_r2_collect(_r3_store([
         (_r2_signed(g), "2026-01-01T00:00:00Z"),
         (_r2_signed(post), "2026-01-01T00:01:00Z")]))))
@@ -3613,6 +3677,10 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                    "M239-audit-hides-candidates"),
     # ★파일 하나를 지우면 폐기가 통째로 꺼지던 자리(codex H2 · THREAT R-14).
     "폐기페일클로즈드": ("M240-missing-revocation-is-empty",),
+    # ★올린 것과 받아들여진 것을 안 가르던 마지막 자리.
+    "수락판정": ("M241-delegate-claims-success",),
+    # ★쓰는 쪽에만 있고 받는 쪽에 없던 계약 칸.
+    "CAS판정": ("M242-expected-state-unchecked",),
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
                  "M227-operator-may-delegate-anytime"),
@@ -6460,6 +6528,28 @@ def _case_reader_has_no_hands_and_writer_does() -> None:
 
 # ── S7-3 후반: 운영 동작 2종(§4 아래 절 · master 결정 2026-08-26 (b)안) ──────
 
+def _case_delegate_reports_procedure_rejection() -> None:
+    """거부된 승계를 **성공이라고 답하지 않는다**(M-a · codex 2026-08-26).
+
+    ★`delegate_chair` 만 `_accepted` 를 안 타고 있었다 — `close`·`mark_solved`·`abort` 는 전부 탄다.
+      이 명령은 **만료된 동안에만** 유효한데, 만료 아닌 스레드에서 부르면 reducer 가 격리한다.
+      그런데 도구는 `ok: True` 를 돌려줬다. ⇒ 부른 사람은 의장이 바뀐 줄 알고,
+      새 의장은 `advance` 에서 code 5 를 맞는다. **무엇이 잘못인지 아무 데도 안 적힌다.**
+    ★★이 병을 오늘 네 번째로 고친다(reconcile · 투영 · 예산 · 여기).
+      같은 모양이 네 번이면 실수가 아니라 **경로가 하나 빠진 것**이다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx(operators=frozenset({"operator-a"}))
+    tid = _tools_thread(ctx, gtype="problem")     # 만료가 아니다 = 승계 조건 미달
+    out = _with_key(f["key_a"], lambda: tools.delegate_chair(
+        ctx, thread_id=tid, new_chair="operator-b"))
+    if out["ok"]:
+        raise AssertionError("절차가 거부한 승계를 성공이라고 답했다")
+    if not out.get("why"):
+        raise AssertionError(f"거부 사유가 없다: {out}")
+
+
 def _case_operator_actions_are_gated_by_the_roster() -> None:
     """`abort` 는 **운영자 명부에 있는 사람만**(K-3) — 그리고 **보내기 전에** 막는다.
 
@@ -7026,6 +7116,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("예산: 로컬 사전 검사 → 3",      _case_budget_local_precheck_is_code3, errors.GATE_REJECT),
     ("예산: 사전 검사 없이도 무효",   _case_budget_reducer_rejects_without_precheck, None),
     ("예산: 설정에서 읽는다",         _case_budget_comes_from_settings, None),
+    ("CAS: 거짓 상태 칸 → 격리",      _case_forged_expected_state_is_quarantined, None),
     ("예산: 글자 수 상한",            _case_budget_counts_chars_too, None),
     ("예산: 진 글은 안 쓴다",         _case_budget_not_spent_by_losers, None),
     ("예산: 참가자·라운드별",         _case_budget_is_per_participant_and_round, None),
@@ -7227,6 +7318,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("감사: 명부 낡음 표시",          _case_audit_shows_roster_and_rule_drift, None),
     ("주입: 우리 경로는 실행 안 한다", _case_injection_does_not_run_through_our_path, None),
     ("주입: 읽는 쪽에 손이 없다",      _case_reader_has_no_hands_and_writer_does, None),
+    ("운영: 거부된 승계는 실패다",     _case_delegate_reports_procedure_rejection, None),
     ("운영: 중단은 명부 안에서만",     _case_operator_actions_are_gated_by_the_roster, None),
     ("운영: 만료를 운영자가 되살린다", _case_expired_debate_is_resumed_by_an_operator, None),
     ("게이트: 증거로 든 그물이 실재한다", _case_gate_evidence_names_are_real, None),
@@ -8239,6 +8331,16 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        raise AgoraError(errors.PRECONDITION, "폐기 목록 파일이 없다 — 비었음은 빈 파일로 말한다",\n                         {"file": os.path.basename(path),\n                          "how": "빈 파일이나 주석만 있는 파일을 두면 「폐기된 키 0건」으로 읽는다"})',
      '        return frozenset()',
      "명부: 폐기 목록 부재 → 2"),
+    # ★M-a — 승계만 「받아들여졌는가」를 안 묻던 자리(같은 병 네 번째).
+    ("M241-delegate-claims-success", "agora/tools.py",
+     '    verdict = _accepted(ctx, thread_id, out["message_id"])\n    if not verdict["accepted"]:\n        return {"ok": False, "message_id": out["message_id"], "usage": out["usage"],\n                "why": verdict["why"], "state": verdict["state"]}\n    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"],\n            "state": verdict["state"]}',
+     '    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}',
+     "운영: 거부된 승계는 실패다"),
+    # ★M-b — CAS 칸을 판정하는 쪽이 없던 자리(계약 칸이 주석이 되던 자리).
+    ("M242-expected-state-unchecked", "agora/reducer.py",
+     '        if not ok:\n            reject(entry, STALE_EXPECTED,\n                   {"expected_state": seen, "at_that_point": _state_hash(state)})\n            continue',
+     '        if False:\n            pass',
+     "CAS: 거짓 상태 칸 → 격리"),
 )
 
 

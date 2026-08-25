@@ -620,7 +620,19 @@ def delegate_chair(ctx: Context, *, thread_id: str, new_chair: str) -> dict[str,
     out = _publish(ctx, kind="delegate_chair", thread_id=thread_id,
                    payload={"new_chair": new_chair},
                    prev=prev, expected_state=expected, category=state["type"])
-    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"]}
+    # ★★M-a(codex 2026-08-26) — **올린 것과 받아들여진 것은 다르다.**
+    #   여기만 `_accepted` 를 안 타고 있었다(close·mark_solved·abort 는 전부 탄다).
+    #   그래서 reducer 가 거부한 승계도 **`ok: True` 로 보고**됐다 — 부른 사람은 의장이
+    #   바뀐 줄 알고, 새 의장은 `advance` 에서 code 5 를 맞는다. 무엇이 잘못인지 아무 데도 없다.
+    #   ⚠조건이 까다로운 동작일수록 이 자리가 중요하다: 이 명령은 **만료 중에만** 유효하다.
+    # ★오늘 이 병을 네 번째로 고친다(reconcile · 투영 · 예산 · 여기).
+    #   같은 모양이 네 번 나왔으면 그건 실수가 아니라 **경로가 하나 빠진 것**이다.
+    verdict = _accepted(ctx, thread_id, out["message_id"])
+    if not verdict["accepted"]:
+        return {"ok": False, "message_id": out["message_id"], "usage": out["usage"],
+                "why": verdict["why"], "state": verdict["state"]}
+    return {"ok": True, "message_id": out["message_id"], "usage": out["usage"],
+            "state": verdict["state"]}
 
 
 def abort(ctx: Context, *, thread_id: str, reason: str) -> dict[str, Any]:

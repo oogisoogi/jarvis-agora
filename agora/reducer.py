@@ -38,10 +38,12 @@ BAD_TRANSITION = "bad_transition"      # 지금 상태에서 갈 수 없는 자�
 UNKNOWN_TARGET = "unknown_target"      # 가리키는 이벤트가 사슬에 없다
 BUDGET_EXCEEDED = "budget_exceeded"    # 라운드당 발언 예산을 넘겼다
 AFTER_CLOSE = "after_close"            # 닫힌 뒤에 온 이벤트
+STALE_EXPECTED = "stale_expected_state"  # 쓴 사람이 본 상태가 그 자리의 상태가 아니다(CAS)
 
 REASONS = (UNPARSEABLE, OVERSIZE, SCHEMA, THREAD_MISMATCH, SIGNATURE, REPLAY,
            OUT_OF_ROUND, COUNTER_REQUIRED, PERMISSION, KIND_NOT_ALLOWED,
-           BAD_TRANSITION, UNKNOWN_TARGET, AFTER_CLOSE, BUDGET_EXCEEDED)
+           BAD_TRANSITION, UNKNOWN_TARGET, AFTER_CLOSE, BUDGET_EXCEEDED,
+           STALE_EXPECTED)
 
 
 def _order_key(item: dict[str, Any]) -> tuple[str, str]:
@@ -482,6 +484,26 @@ def apply(ordered: dict[str, Any], *,
     for entry in chain[1:]:
         kind, ev, who = entry["kind"], entry["event"], entry["from"]
         payload = ev["payload"]
+
+        # ★★M-b(codex 2026-08-26) — CAS 칸을 **판정하는 쪽이 없었다.**
+        #   `expected_state` 는 도구의 쓰기 경로(`require_state`)에서만 검사됐다. 그런데
+        #   도구는 **우리 것**이고 운반층은 남의 것이다 — 서명 능력이 있는 사람이 도구를
+        #   건너뛰고 직접 게시하면, 그 칸에 무엇을 적든 아무도 안 봤다.
+        #   ⇒ 「내가 본 상태 위에 쓴다」는 약속이 **정직한 사람에게만** 걸려 있었다.
+        # ★계약 칸은 **받는 쪽이 판정할 때만** 계약이다. 안 그러면 그저 주석이다.
+        # ⚠견줄 상태가 **둘**일 수 있다: 만료는 이 루프 뒤에 발동하므로(「이벤트가 시간을
+        #   이긴다」), 만료된 스레드를 되살리러 쓰는 사람은 **만료가 반영된 상태**를 보고 쓴다.
+        #   한쪽만 인정하면 그 정당한 글이 통째로 격리된다(운영자 승계가 정확히 그 경로다).
+        seen = ev.get("expected_state")
+        ok = seen == _state_hash(state)
+        if not ok and is_expired_now(gtype, state["state"], deadlines, now):
+            probe = dict(state)
+            probe["state"] = EXPIRED
+            ok = seen == _state_hash(probe)
+        if not ok:
+            reject(entry, STALE_EXPECTED,
+                   {"expected_state": seen, "at_that_point": _state_hash(state)})
+            continue
 
         if state["state"] == "closed":
             reject(entry, AFTER_CLOSE, {"kind": kind})
