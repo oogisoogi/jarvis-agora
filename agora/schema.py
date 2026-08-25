@@ -25,6 +25,7 @@ from agora.event import is_id
 THREAD_TYPES = ("problem", "knowhow", "debate")
 CLOSE_REASONS = ("solved", "unresolved", "superseded", "archived", "aborted", "expired")
 ROUNDS = (0, 1, 2, 3)
+DEADLINE_ROUNDS = ("r0", "r1", "r2", "r3")
 
 # 모든 이벤트가 갖는 칸(설계 §2-1). `delegate` 만 선택이다.
 COMMON_REQUIRED = ("v", "kind", "thread_id", "message_id", "prev", "expected_state",
@@ -82,6 +83,13 @@ def _check_genesis(p: dict[str, Any]) -> None:
             # 봉투 없는 problem/knowhow 는 **게이트 거부**다(모양이 아니라 정책).
             _fail("봉투 없는 problem/knowhow", {"type": t}, errors.GATE_REJECT)
         _check_envelope(_need(p, "envelope", dict, "genesis"))
+    if "deadlines" in p:
+        # 라운드별 마감(§2-2). 키는 라운드 이름, 값은 ISO-8601 시각 문자열이다.
+        # ★닫아 둔다 — 「r4」 같은 없는 라운드에 마감을 걸면 아무도 안 보는 약속이 된다.
+        dl = _need(p, "deadlines", dict, "genesis")
+        _closed(dl, DEADLINE_ROUNDS, "genesis.deadlines")
+        for k in dl:
+            _need(dl, k, str, "genesis.deadlines")
     if "parent" in p:   # §2-1b 관계 — 상세 검증은 S2-7
         _need(p, "parent", dict, "genesis")
 

@@ -1468,17 +1468,20 @@ def _case_events_after_close_rejected() -> None:
                              f"거부={_r4_reasons(out)}")
 
 
-def _case_deferred_kinds_are_named() -> None:
-    """delegate_chair·abort 는 받되 **아직 계산하지 않는다** — 그 사실이 목록에 남는다.
+def _case_no_silent_deferrals() -> None:
+    """받는 kind 는 전부 **실제 전이**를 갖는다 — 보류 목록은 비어 있어야 한다.
 
-    ★조용히 무시하면 「받아서 아무 일도 없었다」와 「아직 안 만들었다」가 구별되지 않는다.
+    ★S2-4 에서 이 케이스는 정반대를 쟀다(delegate_chair 가 보류 목록에 이름을 남기는지).
+      S2-5 가 그 둘에 전이를 줬으므로 이제 비어 있는 것이 정상이다.
+      **케이스를 지우지 않고 방향을 뒤집어 둔다** — 다음에 또 「받되 계산 안 하는」 kind 가
+      생기면 여기서 걸린다. 지워 버리면 그 자리를 지키던 눈이 함께 사라진다.
     """
     out = _r4_chain("debate", [("delegate_chair", {"new_chair": "operator-b"},
                                 "operator-a")])
-    if [d["kind"] for d in out["deferred"]] != ["delegate_chair"]:
-        raise AssertionError(f"보류 목록: {out['deferred']}")
-    if out["chair"] != "operator-a":
-        raise AssertionError("아직 계산하지 않기로 한 승계가 상태를 바꿨다")
+    if out["deferred"]:
+        raise AssertionError(f"조용히 보류된 kind 가 있다: {out['deferred']}")
+    if out["chair"] != "operator-b":
+        raise AssertionError(f"승계가 상태에 반영되지 않았다: chair={out['chair']}")
 
 
 def _case_state_hash_is_deterministic_and_sensitive() -> None:
@@ -1492,6 +1495,143 @@ def _case_state_hash_is_deterministic_and_sensitive() -> None:
                                       "operator-a")])
     if c["state_hash"] == a["state_hash"]:
         raise AssertionError("사슬이 자랐는데 상태 해시가 그대로다")
+
+
+# ── S2-5 마감·만료·의장 승계 ────────────────────────────────────────────────
+# ★시각은 픽스처가 **주입**한다. 프로세스 현재 시각을 읽는 판정은 재현할 수 없고,
+#   재현할 수 없는 판정은 노드마다 다른 사실을 만든다.
+
+_DUE = "2026-02-01T00:00:00Z"
+_BEFORE = "2026-02-01T00:04:59Z"    # 마감 + 299초 — 유예 안
+_AFTER = "2026-02-01T00:05:01Z"     # 마감 + 301초 — 유예 밖
+
+
+def _r5_debate(steps: list[tuple[str, dict[str, Any], str]], *,
+               now: str | None = None, deadlines: dict[str, str] | None = None,
+               operators: frozenset[str] = frozenset()) -> dict[str, Any]:
+    from agora import reducer
+    from agora.event import event_hash
+    payload: dict[str, Any] = {"type": "debate", "title": "가짜 제목",
+                               "body": "가짜 발제", "chair": "operator-a",
+                               "deadlines": deadlines or {"r0": _DUE, "r1": _DUE}}
+    g = _r2_event("genesis", payload, "a" * 32)
+    items = [(_r2_signed(g), "2026-01-01T00:00:00Z")]
+    prev = event_hash(g)
+    for i, (kind, pl, who) in enumerate(steps):
+        ev = _r2_event(kind, pl, f"{i + 1:032x}", prev=prev)
+        ev["from"] = who
+        items.append((_r2_signed(ev), f"2026-01-01T00:01:{i:02d}Z"))
+        prev = event_hash(ev)
+    return reducer.apply(reducer.order(_r2_collect(_r3_store(items))),
+                         operators=operators, now=now)
+
+
+def _case_deadline_expires_without_advance() -> None:
+    """마감 경과 + advance 부재 → expired(자동 · 이벤트 없이 시간으로)."""
+    out = _r5_debate([], now=_AFTER)
+    if out["state"] != "expired":
+        raise AssertionError(f"만료되지 않았다: {out['state']}")
+
+
+def _case_deadline_grace_window() -> None:
+    """유예(300초) 안에서는 만료가 아니다 — 시계가 몇 초 빠른 노드가 혼자 앞서 선언하지 못하게."""
+    out = _r5_debate([], now=_BEFORE)
+    if out["state"] != "r0":
+        raise AssertionError(f"유예 안인데 만료됐다: {out['state']}")
+
+
+def _case_event_beats_time() -> None:
+    """유효 advance 가 있으면 그 라운드의 만료 판정보다 **언제나** 우선한다(R-3).
+
+    ★advance 가 마감보다 늦게 왔어도 그렇다. 시간 전이는 이벤트가 **없을 때만** 발동하는 보조 규칙이다.
+    """
+    out = _r5_debate([("advance", {"from_round": 0, "to_round": 1}, "operator-a")],
+                     now=_AFTER, deadlines={"r0": _DUE, "r1": "2026-03-01T00:00:00Z"})
+    if out["state"] != "r1" or out["round"] != 1:
+        raise AssertionError(f"이벤트가 시간에 졌다: {out['state']}")
+
+
+def _case_expired_verdict_is_deterministic() -> None:
+    """같은 이벤트 묶음 + 같은 시각 → 언제 몇 번을 돌려도 같은 판정(AC ①)."""
+    seen = {_r5_debate([], now=_AFTER)["state"] for _ in range(5)}
+    if seen != {"expired"}:
+        raise AssertionError(f"판정이 흔들린다: {seen}")
+    seen2 = {_r5_debate([], now=_BEFORE)["state"] for _ in range(5)}
+    if seen2 != {"r0"}:
+        raise AssertionError(f"판정이 흔들린다: {seen2}")
+
+
+def _case_chair_is_latest_delegate() -> None:
+    """의장 = genesis.chair 또는 **최신 유효** delegate_chair(AC ③).
+
+    ★두 번 넘기면 마지막 사람이 의장이다. 첫 위임을 붙잡으면 승계가 한 번밖에 못 일어난다.
+    """
+    out = _r5_debate([
+        ("delegate_chair", {"new_chair": "operator-b"}, "operator-a"),
+        ("delegate_chair", {"new_chair": "operator-a"}, "operator-b"),
+    ])
+    if out["chair"] != "operator-a":
+        raise AssertionError(f"최신 위임이 반영되지 않았다: chair={out['chair']}")
+
+
+def _case_non_chair_cannot_delegate() -> None:
+    """의장이 아닌 사람의 위임 → 무효(사유 permission) · 의장 불변."""
+    out = _r5_debate([("delegate_chair", {"new_chair": "operator-b"}, "operator-b")])
+    if out["chair"] != "operator-a" or _r4_reasons(out) != ["permission"]:
+        raise AssertionError(f"비의장 위임: chair={out['chair']} 거부={_r4_reasons(out)}")
+
+
+def _case_expired_resumes_by_advance_not_by_delegate() -> None:
+    """만료 재개는 **advance** 가 한다 — 위임만으로는 풀리지 않는다(§8 마감 경과 → 재개).
+
+    ★둘을 뭉치면 「새 의장이 왔으니 됐다」로 끝나고, 라운드는 그대로 멈춰 있는다.
+    """
+    only_delegate = _r5_debate(
+        [("delegate_chair", {"new_chair": "operator-b"}, "operator-a")], now=_AFTER)
+    if only_delegate["state"] != "expired" or only_delegate["chair"] != "operator-b":
+        raise AssertionError(f"위임만: state={only_delegate['state']} "
+                             f"chair={only_delegate['chair']}")
+
+    resumed = _r5_debate([
+        ("delegate_chair", {"new_chair": "operator-b"}, "operator-a"),
+        ("advance", {"from_round": 0, "to_round": 1}, "operator-b"),   # 새 의장이 재개
+    ], now=_AFTER, deadlines={"r0": _DUE, "r1": "2026-03-01T00:00:00Z"})
+    if resumed["state"] != "r1" or resumed["chair"] != "operator-b":
+        raise AssertionError(f"재개 실패: state={resumed['state']} "
+                             f"chair={resumed['chair']}")
+
+
+def _case_abort_requires_operator() -> None:
+    """운영자 명부에 없는 키의 abort → 무효(AC ②) · 명부에 있으면 aborted 로 닫힌다.
+
+    ★명부에서 그 이름을 지우면 같은 키의 abort 가 죽는지도 함께 본다 —
+      「운영자가 누구인가」가 코드가 아니라 **명부**에서 온다는 뜻이다.
+    """
+    out = _r5_debate([("abort", {"reason": "가짜 중단 사유"}, "operator-b")],
+                     operators=frozenset({"operator-a"}))      # b 는 운영자가 아니다
+    if out["state"] == "closed" or _r4_reasons(out) != ["permission"]:
+        raise AssertionError(f"비운영자 abort: state={out['state']} "
+                             f"거부={_r4_reasons(out)}")
+
+    ok = _r5_debate([("abort", {"reason": "가짜 중단 사유"}, "operator-b")],
+                    operators=frozenset({"operator-a", "operator-b"}))
+    if ok["state"] != "closed" or ok["close_reason"] != "aborted":
+        raise AssertionError(f"운영자 abort: state={ok['state']} "
+                             f"reason={ok.get('close_reason')}")
+
+
+def _case_deadlines_schema_closed() -> None:
+    """마감 표의 키는 라운드 이름뿐이다 — 없는 라운드에 건 마감은 아무도 안 보는 약속이다."""
+    from agora import schema
+    bad = _fake_event("genesis", {"type": "debate", "title": "가짜", "body": "가짜",
+                                  "deadlines": {"r4": _DUE}})
+    try:
+        schema.validate(bad)
+    except AgoraError as e:
+        if e.code != errors.ARGUMENT:
+            raise AssertionError(f"code {e.code} != 10") from None
+    else:
+        raise AssertionError("없는 라운드의 마감이 통과했다")
 
 
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
@@ -1587,8 +1727,17 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("전이: 없는 답 고르기 → 무효",   _case_answer_target_must_exist, None),
     ("전이: knowhow 종결 사유 제한",  _case_knowhow_close_reason_limited, None),
     ("전이: 종결 후 이벤트 → 무효",   _case_events_after_close_rejected, None),
-    ("전이: 보류 kind 는 이름을 남긴다", _case_deferred_kinds_are_named, None),
+    ("전이: 조용한 보류 0건",         _case_no_silent_deferrals, None),
     ("상태 해시: 결정론·민감",        _case_state_hash_is_deterministic_and_sensitive, None),
+    ("마감: advance 부재 → expired",  _case_deadline_expires_without_advance, None),
+    ("마감: 유예 안에서는 진행",      _case_deadline_grace_window, None),
+    ("마감: 이벤트가 시간을 이긴다",  _case_event_beats_time, None),
+    ("마감: 만료 판정 결정론",        _case_expired_verdict_is_deterministic, None),
+    ("승계: 최신 위임이 의장",        _case_chair_is_latest_delegate, None),
+    ("승계: 비의장 위임 → 무효",      _case_non_chair_cannot_delegate, None),
+    ("승계: 재개는 advance 가 한다",  _case_expired_resumes_by_advance_not_by_delegate, None),
+    ("중단: 운영자 명부만 abort",     _case_abort_requires_operator, None),
+    ("마감: deadlines 표는 닫혀 있다", _case_deadlines_schema_closed, None),
 )
 
 
@@ -1807,6 +1956,30 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M55-grace-ignored", "agora/reducer.py",
+     "    return _parse_ts(now, \"now\") > _parse_ts(deadline, \"deadline\") + timedelta(seconds=grace)",
+     "    return _parse_ts(now, \"now\") > _parse_ts(deadline, \"deadline\")",
+     "마감: 유예 안에서는 진행"),
+    ("M56-time-beats-event", "agora/reducer.py",
+     '        due = deadlines.get(state["state"])',
+     '        due = deadlines.get("r0")',
+     "마감: 이벤트가 시간을 이긴다"),
+    ("M57-delegate-chair-check-off", "agora/reducer.py",
+     '            if who != state["chair"]:\n                reject(entry, PERMISSION, {"chair": state["chair"], "from": who})\n                continue\n            state["chair"] = payload["new_chair"]',
+     '            if False:\n                pass\n            state["chair"] = payload["new_chair"]',
+     "승계: 비의장 위임 → 무효"),
+    ("M58-abort-operator-check-off", "agora/reducer.py",
+     "            if who not in operators:",
+     "            if False:",
+     "중단: 운영자 명부만 abort"),
+    ("M59-expired-never-fires", "agora/reducer.py",
+     "            state[\"state\"] = EXPIRED",
+     "            pass",
+     "마감: advance 부재 → expired"),
+    ("M60-deadline-rounds-open", "agora/schema.py",
+     '        _closed(dl, DEADLINE_ROUNDS, "genesis.deadlines")',
+     "        pass",
+     "마감: deadlines 표는 닫혀 있다"),
     ("M54-state-hash-ignores-head", "agora/reducer.py",
      '                ("type", "state", "round", "chair", "requester", "solved_by",\n                 "close_reason", "head")}',
      '                ("type", "state", "round", "chair", "requester", "solved_by",\n                 "close_reason")}',
@@ -1982,7 +2155,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S2-4(전이표 3종·라운드·권한)"
+            "슬라이스": "S2-5(마감·만료·의장 승계)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

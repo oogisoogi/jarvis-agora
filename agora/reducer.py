@@ -233,6 +233,38 @@ def order(collected: dict[str, Any]) -> dict[str, Any]:
             "quarantined": collected["quarantined"]}
 
 
+# ── S2-5: 마감·만료·의장 승계(설계 §6 · §2-3 ④) ─────────────────────────────
+# ★**이벤트가 시간을 이긴다(R-3).** 시간 전이는 이벤트가 **없을 때만** 발동하는 보조 규칙이다.
+#   반대로 두면 노드 시계가 조금만 어긋나도 「어떤 노드에서는 만료, 어떤 노드에서는 진행」이 되고,
+#   그 순간 두 노드는 서로 다른 사실을 갖는다.
+#
+# ★시각은 **주입받는다.** 프로세스의 현재 시각을 몰래 읽으면 같은 이벤트 묶음이
+#   실행할 때마다 다른 상태를 내고, 그것은 재현할 수 없는 판정이 된다.
+
+EXPIRED = "expired"
+
+
+def _parse_ts(value: str, where: str) -> Any:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        raise AgoraError(errors.ARGUMENT, "시각 형식이 아니다",
+                         {"where": where, "value": str(value)[:40]}) from None
+
+
+def deadline_passed(deadline: str, now: str, *, grace_seconds: int | None = None) -> bool:
+    """마감이 지났는가 — 유예를 더한 뒤에 본다(§2-3 ④).
+
+    ★유예(기본 300초)는 노드 시계 오차를 흡수한다. 유예가 없으면 시계가 몇 초 빠른 노드가
+      혼자 먼저 만료를 선언하고, 그 노드만 다른 상태를 갖게 된다.
+    """
+    from datetime import timedelta
+    from agora.contract_open import EXPIRED_GRACE_SECONDS
+    grace = EXPIRED_GRACE_SECONDS if grace_seconds is None else grace_seconds
+    return _parse_ts(now, "now") > _parse_ts(deadline, "deadline") + timedelta(seconds=grace)
+
+
 # ── 3단: 유형별 전이(설계 §6 · §2-3 ③) ──────────────────────────────────────
 # 유형은 「내용의 벽」이 아니라 **절차**다(§2-1b). 그래서 유형마다 받는 kind 가 다르고,
 # 같은 kind 라도 낼 수 있는 사람이 다르다.
@@ -247,10 +279,10 @@ ALLOWED_KINDS: dict[str, frozenset[str]] = {
                          "vote", "abort"}),
 }
 
-# ★`delegate_chair`·`abort` 는 **받되 상태를 계산하지 않는다** — 마감·만료·승계는 S2-5 의 몫이다.
-#   조용히 무시하면 「받아서 아무 일도 안 일어난 것」과 「아직 안 만든 것」이 구별되지 않으므로,
-#   결과의 `deferred` 목록에 이름을 남긴다.
-DEFERRED_KINDS = frozenset({"delegate_chair", "abort"})
+# S2-5 에서 실제 전이를 갖게 됐다(승계·중단). 그래서 이 집합은 이제 **비어 있는 것이 정상**이다 —
+# 칸은 남겨 둔다: 다음에 또 「받되 계산 안 하는」 kind 가 생기면 같은 자리에 이름을 남긴다.
+# 조용히 무시하면 「받아서 아무 일도 안 일어난 것」과 「아직 안 만든 것」이 구별되지 않는다.
+DEFERRED_KINDS: frozenset[str] = frozenset()
 
 DEBATE_ROUNDS = ("r0", "r1", "r2", "r3")
 KNOWHOW_CLOSE_REASONS = frozenset({"superseded", "archived"})
@@ -301,7 +333,8 @@ def _state_hash(state: dict[str, Any]) -> str:
 
 
 def apply(ordered: dict[str, Any], *,
-          operators: frozenset[str] = frozenset()) -> dict[str, Any]:
+          operators: frozenset[str] = frozenset(),
+          now: str | None = None) -> dict[str, Any]:
     """사슬 → 상태(§6). 절차에서 걸린 것은 사유와 함께 격리 목록에 더한다.
 
     ⛔여기서도 `expected_state` 는 아직 대조하지 않는다 — 쓰기 경로(CAS)가 생기는 S2-5·S4 의 몫이다.
@@ -420,7 +453,35 @@ def apply(ordered: dict[str, Any], *,
             state["close_reason"] = payload["reason"]
             accepted.append(entry)
 
+        elif kind == "delegate_chair":
+            # ★현 의장만 넘길 수 있다(§2-2 「delegate_chair | 의장」).
+            #   만료된 스레드를 운영자가 대신 넘길 수 있는지는 설계가 말하지 않는다 —
+            #   권한 경계를 내가 넓히지 않는다(【결정필요】로 올렸다).
+            if who != state["chair"]:
+                reject(entry, PERMISSION, {"chair": state["chair"], "from": who})
+                continue
+            state["chair"] = payload["new_chair"]
+            accepted.append(entry)
+
+        elif kind == "abort":
+            # 운영자 명부(K-3)에 있는 사람만. 목록에서 이름이 빠지면 그 키의 abort 는 죽는다.
+            if who not in operators:
+                reject(entry, PERMISSION, {"from": who, "need": "operator"})
+                continue
+            state["state"] = "closed"
+            state["close_reason"] = "aborted"
+            state["abort_reason"] = payload["reason"]
+            accepted.append(entry)
+
         state["head"] = entry["hash"]
+
+    # ★만료는 **이벤트가 없을 때만** 발동한다. 지금 라운드의 마감만 본다 —
+    #   앞 라운드의 마감은 advance 가 이미 지나갔으므로 따질 일이 없다(이벤트가 시간을 이긴다).
+    deadlines = genesis["payload"].get("deadlines") or {}
+    if gtype == "debate" and now and state["state"] in DEBATE_ROUNDS:
+        due = deadlines.get(state["state"])
+        if due and deadline_passed(due, now):
+            state["state"] = EXPIRED
 
     result = dict(state)
     result.update({"thread_id": ordered["thread_id"],
