@@ -40,6 +40,16 @@ STAGES = (FETCHED, DELIVERED, ACKED)
 _RANK = {stage: i for i, stage in enumerate(STAGES)}
 
 
+_CARRIED = ("thread_id", "message_id")
+
+
+def _carry(into: dict[str, Any], src: dict[str, Any]) -> None:
+    """빈 칸만 채운다. **이미 있는 값은 건드리지 않는다** — 덮어쓰면 앞뒤가 갈린다."""
+    for key in _CARRIED:
+        if not into.get(key) and src.get(key):
+            into[key] = src[key]
+
+
 class Spool:
     def __init__(self, directory: str, fsync: Any = None) -> None:
         self.dir = directory
@@ -75,7 +85,13 @@ class Spool:
                     yield row
 
     def state(self) -> dict[str, dict[str, Any]]:
-        """node_id → 마지막 단계. 같은 node_id 가 여러 줄이면 **가장 앞선 단계**가 이긴다."""
+        """node_id → 마지막 단계. 같은 node_id 가 여러 줄이면 **가장 앞선 단계**가 이긴다.
+
+        ★단계는 덮어쓰되 **딸린 것(thread_id·message_id)은 이어받는다.**
+          뒷 줄이 그 값을 안 실었다고 앞 줄이 알던 것을 지우면, 「어느 스레드의 무엇인가」가
+          단계가 진행될수록 사라진다. S5-1 에서는 이것이 안 보였다 — **소비처가 없었기 때문**이다.
+          S5-3(ack)이 `message_id` 로 spool 을 찾으면서 드러났다.
+        """
         out: dict[str, dict[str, Any]] = {}
         for row in self.rows():
             nid = row.get("node_id")
@@ -83,10 +99,27 @@ class Spool:
                 continue
             prev = out.get(nid)
             if prev and _RANK.get(row.get("stage"), -1) <= _RANK.get(prev["stage"], -1):
+                # 단계는 안 밀렸지만, 이 줄이 새로 들고 온 딸린 값은 채워 둔다.
+                _carry(prev, row)
                 continue
-            out[nid] = {"stage": row.get("stage"), "thread_id": row.get("thread_id"),
-                        "ts": row.get("ts")}
+            cur = {"stage": row.get("stage"), "thread_id": row.get("thread_id"),
+                   "message_id": row.get("message_id"), "ts": row.get("ts")}
+            if prev:
+                _carry(cur, prev)          # 앞 줄이 알던 것을 잃지 않는다
+            out[nid] = cur
         return out
+
+    def by_message(self, message_id: str) -> dict[str, Any] | None:
+        """message_id → 그 상태 행(node_id 포함). 없으면 None.
+
+        ★도구 계약은 **message_id 로** 말하는데(§4 `agora.ack`) spool 은 운반층 식별자인
+          `node_id` 로 기억한다. 그 둘을 잇는 표를 **밖에 또 만들면 두 곳이 갈라진다** —
+          그래서 spool 이 자기 줄에 싣고 자기가 찾는다.
+        """
+        for nid, row in self.state().items():
+            if row.get("message_id") == message_id:
+                return {"node_id": nid, **row}
+        return None
 
     def seen(self, node_id: str) -> bool:
         """dedupe 의 판정 — 이 node_id 를 이미 받았는가(at-least-once 의 짝)."""
@@ -98,7 +131,8 @@ class Spool:
 
     # ── 쓰기(append 전용) ───────────────────────────────────────────────────
     def record(self, *, node_id: str, stage: str,
-               thread_id: str | None = None) -> dict[str, Any]:
+               thread_id: str | None = None,
+               message_id: str | None = None) -> dict[str, Any]:
         if stage not in STAGES:
             raise AgoraError(errors.ARGUMENT, "계약에 없는 단계",
                              {"stage": stage, "allowed": list(STAGES)})
@@ -109,7 +143,7 @@ class Spool:
                               "to": stage})
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
         row = {"node_id": node_id, "thread_id": thread_id, "stage": stage,
-               "ts": now_iso()}
+               "message_id": message_id, "ts": now_iso()}
         with open(self.lock_path, "a+") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:

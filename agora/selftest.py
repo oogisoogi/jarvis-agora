@@ -3500,6 +3500,285 @@ def _case_quarantine_reasons_are_named() -> None:
 
 
 
+# ── S5-3 ack 영수증 ─────────────────────────────────────────────────────────
+# ★이 블록이 재는 축은 「영수증을 쓰는가」가 아니라 **「못 쓰게 막는가」**다.
+#   받은 적 없는 것에 영수증이 써지면 원장은 증거가 아니라 자기주장이 된다(§8 고스트).
+
+def _ack_env() -> tuple[Any, Any, str]:
+    """(ledger, spool, dir) 한 벌. **fetched 까지만** 되어 있다 — 그 다음이 시험 대상이다."""
+    import tempfile
+    from agora.ledger import Ledger
+    from agora.spool import Spool
+    d = tempfile.mkdtemp(prefix="agora-ack-")
+    return Ledger(d), Spool(d), d
+
+
+def _ack_fetched(spool: Any, *, node_id: str = "N1", message_id: str = "m1",
+                 thread_id: str = "t1") -> None:
+    from agora.spool import FETCHED
+    spool.record(node_id=node_id, stage=FETCHED, thread_id=thread_id,
+                 message_id=message_id)
+
+
+def _case_ack_refuses_unreceived() -> None:
+    """받은 적 없는 message_id 는 ack 되지 않는다(§8 「자기생성 고스트」).
+
+    ★이 케이스**만**이 재는 축: spool 에 그 줄 자체가 없는 경우. 아래 「건네지 않은 것」과
+      다른 문이다 — 그쪽은 줄이 있고 단계가 모자란 경우다.
+    """
+    from agora import ack as ack_mod
+    ledger, spool, _d = _ack_env()
+    try:
+        ack_mod.ack(ledger=ledger, spool=spool, message_id="유령")
+    except AgoraError as e:
+        if e.code != errors.PRECONDITION or (e.detail or {}).get("reason") != "not_received":
+            raise AssertionError(f"다른 사유로 막았다: {e.code} {e.detail}") from None
+    else:
+        raise AssertionError("받은 적 없는 것에 영수증을 썼다")
+    if list(ledger.rows()):
+        raise AssertionError("막고도 원장에 줄이 남았다")
+
+
+def _case_ack_refuses_undelivered() -> None:
+    """건네지 않은 것(`fetched`)은 소비할 수 없다 — **그리고 그 문은 이 층에 있다.**
+
+    ★어느 층이 잡았는지까지 단언한다: `spool.record` 는 이것을 **안 막는다**
+      (`fetched → acked` 는 앞으로 가는 전이다). 그 사실을 먼저 확인하지 않으면
+      이 케이스는 spool 의 가드에 얹혀 초록이 되고, ack 의 문은 한 번도 안 재진다.
+    """
+    from agora import ack as ack_mod
+    from agora.spool import ACKED, FETCHED
+    ledger, spool, _d = _ack_env()
+    _ack_fetched(spool)
+    try:
+        ack_mod.ack(ledger=ledger, spool=spool, message_id="m1")
+    except AgoraError as e:
+        if (e.detail or {}).get("reason") != "not_delivered":
+            raise AssertionError(f"다른 사유로 막았다: {e.detail}") from None
+    else:
+        raise AssertionError("건네지 않은 것을 소비했다고 적었다")
+
+    # ★앞 단이 대신 막아 주지 않는다는 것의 실측 — spool 은 이 전이를 통과시킨다.
+    _l2, s2, _d2 = _ack_env()
+    _ack_fetched(s2, node_id="N9", message_id="m9")
+    s2.record(node_id="N9", stage=ACKED)          # 예외가 나지 않는 것이 정상이다
+    if s2.state()["N9"]["stage"] != ACKED:
+        raise AssertionError("spool 이 이 전이를 막았다면 위 단언은 ack 층을 안 잰 것이다")
+    if FETCHED == ACKED:                           # 축이 무너지면 알려라
+        raise AssertionError("단계 상수가 같다")
+
+
+def _case_ack_writes_recv_acked_row() -> None:
+    """정상 경로 — 원장에 **recv·acked** 1행. 방향과 단계를 둘 다 잰다.
+
+    ★방향을 안 재면 `sent` 로 적혀도 통과한다. 그러면 발신 계수가 수신 영수증으로 오염된다.
+    """
+    from agora import ack as ack_mod
+    from agora.spool import ACKED
+    ledger, spool, _d = _ack_env()
+    _ack_fetched(spool)
+    ack_mod.deliver(ledger=ledger, spool=spool, node_id="N1", thread_id="t1",
+                    message_id="m1", raw=b'{"message_id": "m1"}')
+    out = ack_mod.ack(ledger=ledger, spool=spool, message_id="m1")
+    rows = [r for r in ledger.rows() if r.get("stage") == ACKED]
+    if len(rows) != 1:
+        raise AssertionError(f"영수증 행 수: {len(rows)}")
+    if rows[0].get("dir") != "recv":
+        raise AssertionError(f"방향이 recv 가 아니다: {rows[0].get('dir')}")
+    if rows[0].get("node_id") != "N1":
+        raise AssertionError(f"운반층 식별자가 안 실렸다: {rows[0]}")
+    if out["already_acked"]:
+        raise AssertionError("첫 ack 인데 이미 했다고 답했다")
+    if spool.state()["N1"]["stage"] != ACKED:
+        raise AssertionError("spool 단계가 안 밀렸다")
+
+
+def _case_ack_twice_leaves_one_receipt() -> None:
+    """두 번 불러도 영수증은 한 장이다(운반은 at-least-once · 사람도 다시 부른다).
+
+    ★원장은 append-only 라 **쓰고 나서 지우는 길이 없다.** 그래서 쓰기 전에 막는다.
+    """
+    from agora import ack as ack_mod
+    from agora.spool import ACKED
+    ledger, spool, _d = _ack_env()
+    _ack_fetched(spool)
+    ack_mod.deliver(ledger=ledger, spool=spool, node_id="N1", thread_id="t1",
+                    message_id="m1", raw=b'{"message_id": "m1"}')
+    ack_mod.ack(ledger=ledger, spool=spool, message_id="m1")
+    again = ack_mod.ack(ledger=ledger, spool=spool, message_id="m1")
+    rows = [r for r in ledger.rows() if r.get("stage") == ACKED]
+    if len(rows) != 1:
+        raise AssertionError(f"두 번째 ack 이 영수증을 더 썼다: {len(rows)}")
+    if not again["already_acked"] or again["receipt"] is not None:
+        raise AssertionError(f"두 번째 답이 첫 번째와 구별되지 않는다: {again}")
+
+
+def _case_ack_receipt_carries_event_hash() -> None:
+    """영수증은 **원문의 해시**를 싣는다 — 「무엇을 받았다고 하는가」가 특정돼야 한다.
+
+    ★해시를 안 싣거나 아무 값이나 실으면, 나중에 다른 내용으로 바꿔 놓고 「그걸 받았다」고
+      해도 원장이 반박하지 못한다. 그래서 **보관된 원문으로 다시 계산해** 맞는지 본다.
+    """
+    import hashlib
+    from agora import ack as ack_mod
+    from agora.spool import ACKED
+    ledger, spool, _d = _ack_env()
+    raw = b'{"message_id": "m1", "payload": {"text": "\xea\xb0\x99\xec\x9d\x80 \xea\xb8\x80"}}'
+    _ack_fetched(spool)
+    ack_mod.deliver(ledger=ledger, spool=spool, node_id="N1", thread_id="t1",
+                    message_id="m1", raw=raw)
+    ack_mod.ack(ledger=ledger, spool=spool, message_id="m1")
+    row = [r for r in ledger.rows() if r.get("stage") == ACKED][0]
+    if row.get("hash") != hashlib.sha256(raw).hexdigest():
+        raise AssertionError(f"영수증 해시가 원문과 다르다: {row.get('hash')}")
+    with open(os.path.join(ledger.events_dir, "t1", "m1.json"), "rb") as fh:
+        if fh.read() != raw:
+            raise AssertionError("보관된 원문이 받은 것과 다르다")
+
+
+def _case_ack_refuses_when_event_not_stored() -> None:
+    """단계는 맞는데 **원문이 없으면** 거부한다(code 2 · `event_not_stored`).
+
+    ★이 축**만**을 재려고 원문 파일을 지운다 — spool 은 그대로 `delivered` 다.
+      원문 없이 영수증을 쓰면 「무엇을 받았는지 못 대는 영수증」이 남는다.
+    """
+    from agora import ack as ack_mod
+    from agora.spool import ACKED
+    ledger, spool, _d = _ack_env()
+    _ack_fetched(spool)
+    ack_mod.deliver(ledger=ledger, spool=spool, node_id="N1", thread_id="t1",
+                    message_id="m1", raw=b"{}")
+    os.remove(os.path.join(ledger.events_dir, "t1", "m1.json"))
+    try:
+        ack_mod.ack(ledger=ledger, spool=spool, message_id="m1")
+    except AgoraError as e:
+        if (e.detail or {}).get("reason") != "event_not_stored":
+            raise AssertionError(f"다른 사유로 막았다: {e.detail}") from None
+    else:
+        raise AssertionError("원문 없이 영수증을 썼다")
+    if [r for r in ledger.rows() if r.get("stage") == ACKED]:
+        raise AssertionError("막고도 영수증이 남았다")
+
+
+def _case_ack_counts_delivered_apart_from_acked() -> None:
+    """**전달됨 ≠ 소비됨을 계수로 가른다**(§8 FR-15 · 이 슬라이스의 AC).
+
+    ★한 숫자로 뭉치면 「받아 놓고 아무도 안 읽은 것」이 수신 증거로 계상된다.
+    """
+    from agora import ack as ack_mod
+    from agora.spool import ACKED, DELIVERED, FETCHED
+    ledger, spool, _d = _ack_env()
+    for i in (1, 2, 3):
+        _ack_fetched(spool, node_id=f"N{i}", message_id=f"m{i}")
+    for i in (1, 2):
+        ack_mod.deliver(ledger=ledger, spool=spool, node_id=f"N{i}", thread_id="t1",
+                        message_id=f"m{i}", raw=b"{}")
+    ack_mod.ack(ledger=ledger, spool=spool, message_id="m1")
+    counts = ack_mod.receipts(spool=spool)
+    if counts != {FETCHED: 1, DELIVERED: 1, ACKED: 1}:
+        raise AssertionError(f"계수가 세 단계를 안 가른다: {counts}")
+    if spool.pending(DELIVERED) != ["N2"]:
+        raise AssertionError(f"미소비 지목이 틀렸다: {spool.pending(DELIVERED)}")
+
+
+def _case_ack_receipts_keep_chain_intact() -> None:
+    """영수증이 줄줄이 들어와도 원장 사슬은 성립한다(링크·본문 둘 다).
+
+    ★수신 행이 발신 행과 **같은 사슬**에 들어간다 — 두 원장을 두면 어느 쪽이 정본인지가 갈린다.
+    """
+    from agora import ack as ack_mod
+    ledger, spool, _d = _ack_env()
+    for i in (1, 2, 3):
+        _ack_fetched(spool, node_id=f"N{i}", message_id=f"m{i}")
+        ack_mod.deliver(ledger=ledger, spool=spool, node_id=f"N{i}", thread_id="t1",
+                        message_id=f"m{i}", raw=b"{}")
+        ack_mod.ack(ledger=ledger, spool=spool, message_id=f"m{i}")
+    verdict = ledger.verify()
+    if not verdict["ok"] or verdict["rows"] != 6:
+        raise AssertionError(f"사슬 검증: {verdict}")
+
+
+def _case_spool_carries_thread_id_forward() -> None:
+    """단계가 앞으로 갈 때 **앞 줄이 알던 것을 잃지 않는다**(thread_id·message_id).
+
+    ★이 축**만**을 재려고 `delivered` 를 딸린 값 **없이** 기록한다. 이월이 없으면
+      단계가 진행될수록 「어느 스레드의 무엇인가」가 사라지고, ack 은 원문을 못 찾는다.
+      S5-1 에서는 안 보였다 — 그때는 이 값을 쓰는 곳이 없었기 때문이다.
+    """
+    from agora.spool import DELIVERED, FETCHED, Spool
+    _l, spool, _d = _ack_env()
+    spool.record(node_id="N1", stage=FETCHED, thread_id="t7", message_id="m7")
+    spool.record(node_id="N1", stage=DELIVERED)            # 딸린 값 없이
+    state = spool.state()["N1"]
+    if state["thread_id"] != "t7" or state["message_id"] != "m7":
+        raise AssertionError(f"이월이 안 됐다: {state}")
+    found = spool.by_message("m7")
+    if not found or found["node_id"] != "N1" or found["stage"] != DELIVERED:
+        raise AssertionError(f"message_id 로 못 찾는다: {found}")
+    if spool.by_message("없는것") is not None:
+        raise AssertionError("없는 message_id 를 찾았다고 한다")
+
+
+def _case_reader_role_has_no_tools() -> None:
+    """수신 워커(reader) 도구 목록 = **공집합** — `agora.ack` 도 그 안에 없다(H-3 · K-2).
+
+    ★영수증을 쓰는 것은 **참가 master 세션**이다. 수신 워커에 이 도구가 닿으면
+      「읽은 것을 스스로 소비했다고 적는」 길이 생긴다 — 수신 증거가 자기 증언이 된다.
+    ★공집합을 **양쪽으로** 잰다: reader 에 없다 · 같은 표의 master 에는 있다.
+      한쪽만 재면 표 전체가 비어 있어도 초록이다.
+    """
+    from agora import cli
+    reader = cli.role_tools(cli.ROLE_READER)
+    if reader != ():
+        raise AssertionError(f"수신 워커에 도구가 있다: {reader}")
+    master = cli.role_tools(cli.ROLE_PARTICIPANT_MASTER)
+    if "agora.ack" not in master:
+        raise AssertionError("참가 master 에 ack 이 없다 — 표가 통째로 비었을 수 있다")
+    if set(reader) & set(master):
+        raise AssertionError("공집합이 아니다")
+    if len(master) != len(cli.core_command_names()):
+        raise AssertionError(f"노출표가 등록표에서 파생되지 않았다: {len(master)}")
+
+
+def _case_ack_is_registered_and_built() -> None:
+    """`ack` 은 계약에 **등록**돼 있고 이 슬라이스에서 **구현**됐다(등록≠동작).
+
+    ★CLI 를 실제로 태워 본다 — 등록표만 보면 배선 누락(`실행기 배선 누락`)을 못 잡는다.
+    """
+    import tempfile
+    from agora import cli
+    if not (cli.COMMANDS["ack"]["core"] and cli.COMMANDS["ack"]["built"]):
+        raise AssertionError("ack 등록 상태가 틀렸다")
+    if "ack" in cli.MCP_EXEMPT:
+        raise AssertionError("ack 은 MCP 예외가 아니다")
+    d = tempfile.mkdtemp(prefix="agora-ackcli-")
+    old = os.environ.get("AGORA_CONFIG_DIR")
+    os.environ["AGORA_CONFIG_DIR"] = d
+    # ★CLI 는 계약대로 **stderr 로** 오류 JSON 을 낸다. 그것을 여기서 받아 두지 않으면
+    #   이 케이스가 검사 프로세스의 출력을 더럽힌다 — 실제로 그랬고, 게이트가 그 오염된
+    #   출력을 읽지 못한 채 PASS 를 냈다. 받아 두고, **계약대로 나왔는지까지** 잰다.
+    import contextlib
+    import io as _io
+    buf = _io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            code = cli.main(["ack", "유령"])
+    finally:
+        if old is None:
+            os.environ.pop("AGORA_CONFIG_DIR", None)
+        else:
+            os.environ["AGORA_CONFIG_DIR"] = old
+    if code != errors.PRECONDITION:
+        raise AssertionError(f"CLI 가 ack 을 태우지 못했다: rc={code}")
+    import json as _json
+    try:
+        emitted = _json.loads(buf.getvalue())
+    except ValueError:
+        raise AssertionError(f"stderr 가 JSON 이 아니다: {buf.getvalue()[:80]!r}") from None
+    if emitted.get("code") != errors.PRECONDITION or emitted.get("detail", {}).get("reason") != "not_received":
+        raise AssertionError(f"계약과 다른 오류를 냈다: {emitted}")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -3691,6 +3970,17 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("watch: 재시작 누락 0·중복 0",   _case_watch_restart_no_loss_no_duplicate, None),
     ("watch: at-least-once 명시",     _case_watch_says_at_least_once_everywhere, None),
     ("S4: 4축 그물 실재",             _case_s4_axes_have_nets, None),
+    ("ack: 받지 않은 것은 거부",      _case_ack_refuses_unreceived, None),
+    ("ack: 건네지 않은 것은 거부",    _case_ack_refuses_undelivered, None),
+    ("ack: 원장 recv·acked 1행",      _case_ack_writes_recv_acked_row, None),
+    ("ack: 두 번 해도 영수증 1장",    _case_ack_twice_leaves_one_receipt, None),
+    ("ack: 영수증은 원문 해시",       _case_ack_receipt_carries_event_hash, None),
+    ("ack: 원문 없으면 거부",         _case_ack_refuses_when_event_not_stored, None),
+    ("ack: 전달됨 ≠ 소비됨 계수",     _case_ack_counts_delivered_apart_from_acked, None),
+    ("ack: 사슬이 안 깨진다",         _case_ack_receipts_keep_chain_intact, None),
+    ("spool: 딸린 값 이월",           _case_spool_carries_thread_id_forward, None),
+    ("노출: reader 는 무도구",        _case_reader_role_has_no_tools, None),
+    ("ack: 등록·구현·배선",           _case_ack_is_registered_and_built, None),
 )
 
 
@@ -4181,6 +4471,51 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                ("type", "state", "round", "chair", "requester", "solved_by",\n                 "close_reason", "head")}',
      '                ("type", "state", "round", "chair", "requester", "solved_by",\n                 "close_reason")}',
      "상태 해시: 결정론·민감"),
+    # ── S5-3 ack 영수증 ─────────────────────────────────────────────────────
+    ("M118-ack-accepts-unreceived", "agora/ack.py",
+     "    if row is None:",
+     "    if False:",
+     "ack: 받지 않은 것은 거부"),
+    ("M119-ack-skips-delivered-check", "agora/ack.py",
+     '    if row.get("stage") not in (spool_mod.DELIVERED, spool_mod.ACKED):',
+     "    if False:",
+     "ack: 건네지 않은 것은 거부"),
+    ("M120-receipt-direction-is-sent", "agora/ack.py",
+     'DIRECTION = "recv"',
+     'DIRECTION = "sent"',
+     "ack: 원장 recv·acked 1행"),
+    ("M121-ack-writes-duplicate-receipt", "agora/ack.py",
+     "    if not ledger.has(message_id, direction=DIRECTION, stage=spool_mod.ACKED):",
+     "    if True:",
+     "ack: 두 번 해도 영수증 1장"),
+    ("M122-receipt-hash-blank", "agora/ack.py",
+     "                                event_hash=hashlib.sha256(raw).hexdigest(),",
+     '                                event_hash="",',
+     "ack: 영수증은 원문 해시"),
+    ("M123-ack-does-not-advance-spool", "agora/ack.py",
+     '        spool.record(node_id=row["node_id"], stage=spool_mod.ACKED,\n                     thread_id=thread_id, message_id=message_id)',
+     "        pass",
+     "ack: 전달됨 ≠ 소비됨 계수"),
+    ("M124-ack-skips-stored-event-check", "agora/ack.py",
+     "    if raw is None:",
+     "    if False:",
+     "ack: 원문 없으면 거부"),
+    ("M125-reader-gets-tools", "agora/cli.py",
+     "        return ()                      # ★무도구 — 이 공집합이 격리 그 자체다",
+     "        return tuple(mcp_tool_name(n) for n in core_command_names())",
+     "노출: reader 는 무도구"),
+    ("M126-ack-registered-not-built", "agora/cli.py",
+     '    "ack":            {"core": True,  "built": True,  "slice": "S5-3"},',
+     '    "ack":            {"core": True,  "built": False, "slice": "S5-3"},',
+     "ack: 등록·구현·배선"),
+    ("M127-spool-drops-carried-values", "agora/spool.py",
+     "            if prev:\n                _carry(cur, prev)          # 앞 줄이 알던 것을 잃지 않는다",
+     "            if False:\n                _carry(cur, prev)          # 앞 줄이 알던 것을 잃지 않는다",
+     "spool: 딸린 값 이월"),
+    ("M128-ledger-has-ignores-stage", "agora/ledger.py",
+     '            if stage is not None and r.get("stage") != stage:',
+     "            if False:",
+     "ack: 원장 recv·acked 1행"),
 )
 
 
@@ -4352,7 +4687,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S5-2(watch·overlap·dedupe)"
+            "슬라이스": "S5-3(ack 영수증·수신 격리)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

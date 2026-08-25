@@ -33,7 +33,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
     "close":          {"core": True,  "built": False, "slice": "S2-4"},
     "vote":           {"core": True,  "built": False, "slice": "S3-4"},
     "envelope-check": {"core": True,  "built": False, "slice": "S3-3"},
-    "ack":            {"core": True,  "built": False, "slice": "S5-3"},
+    "ack":            {"core": True,  "built": True,  "slice": "S5-3"},
     "watch":          {"core": False, "built": False, "slice": "S5-2"},
     "selftest":       {"core": False, "built": True,  "slice": "S1-8"},
     "keygen":         {"core": False, "built": True,  "slice": "S1-4"},
@@ -42,6 +42,27 @@ COMMANDS: dict[str, dict[str, Any]] = {
 
 # MCP 에 노출하지 않는 것 — 설계 §4 가 예외로 명시한 4종.
 MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export"})
+
+# ── 역할별 노출표(설계 §5 「수신 격리」 H-3 · NFR-2) ─────────────────────────
+# ★**여기가 「도구 목록」의 단일 출처다.** 대리인 브리프(S6-3 `brief-reader.md`)는 이 표를
+#   인용해 렌더한다 — 브리프에 손으로 목록을 적으면 두 곳이 갈라지고, 갈라진 날
+#   무도구여야 할 세션에 도구가 하나 들어가 있어도 아무도 모른다.
+#
+# ★`reader` 가 **공집합**인 것이 이 표의 전부다. 수신 워커는 남이 보낸 글을 읽을 뿐이고,
+#   그 글에는 「이것을 실행하라」가 들어 있을 수 있다(§8 주입 픽스처). 도구가 0 이면
+#   그 문장은 **읽을 수는 있어도 실행할 손이 없다.**
+#   ⇒ `agora.ack` 도 여기에 없다. 영수증을 쓰는 것은 **참가 master 세션**이다(K-2).
+ROLE_PARTICIPANT_MASTER = "participant_master"
+ROLE_READER = "reader"
+
+
+def role_tools(role: str) -> tuple[str, ...]:
+    """그 역할의 손에 닿는 MCP 도구 이름들."""
+    if role == ROLE_READER:
+        return ()                      # ★무도구 — 이 공집합이 격리 그 자체다
+    if role == ROLE_PARTICIPANT_MASTER:
+        return tuple(mcp_tool_name(n) for n in core_command_names())
+    raise AgoraError(errors.ARGUMENT, "모르는 역할", {"role": role})
 
 
 def mcp_tool_name(cli_name: str) -> str:
@@ -86,6 +107,17 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
     if name == "keygen":
         from agora import keygen as kg
         return kg.run(args.rest if hasattr(args, "rest") else [])
+    if name == "ack":
+        from agora import ack as ack_mod
+        from agora.ledger import Ledger
+        from agora.participant import config_dir
+        from agora.spool import Spool
+        rest = list(args.rest) if hasattr(args, "rest") else []
+        if len(rest) != 1:
+            raise AgoraError(errors.ARGUMENT, "ack 는 message_id 하나를 받는다",
+                             {"given": len(rest)})
+        d = config_dir()
+        return ack_mod.ack(ledger=Ledger(d), spool=Spool(d), message_id=rest[0])
     raise AgoraError(errors.PRECONDITION, "실행기 배선 누락", {"command": name})
 
 

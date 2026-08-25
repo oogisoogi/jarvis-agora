@@ -76,8 +76,24 @@ class Ledger:
             last = row
         return last
 
-    def has(self, message_id: str) -> bool:
-        return any(r.get("message_id") == message_id for r in self.rows())
+    def has(self, message_id: str, *, direction: str | None = None,
+            stage: str | None = None) -> bool:
+        """그 message_id 의 행이 있는가. 방향·단계를 주면 **그 조합으로** 좁힌다.
+
+        ★좁힐 수 있어야 하는 이유: 같은 message_id 에 **뜻이 다른 행**이 여럿 있을 수 있다
+          (보낸 것 `sent` · 받아 건넨 것 `delivered` · 소비한 것 `acked`).
+          방향·단계를 안 보고 「있다/없다」로만 물으면 발신 기록 하나가 **수신 영수증이 이미
+          있는 것처럼** 보이고, 그러면 진짜 영수증이 안 써진다(수신 증거가 조용히 빈다).
+        """
+        for r in self.rows():
+            if r.get("message_id") != message_id:
+                continue
+            if direction is not None and r.get("dir") != direction:
+                continue
+            if stage is not None and r.get("stage") != stage:
+                continue
+            return True
+        return False
 
     # ── 쓰기(append 전용) ───────────────────────────────────────────────────
     def append(self, *, direction: str, message_id: str, event_hash: str,

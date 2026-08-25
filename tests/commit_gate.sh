@@ -53,13 +53,21 @@ fi
 
 echo "== selftest =="
 if ./bin/agora selftest >/tmp/agora-selftest.$$ 2>&1; then
-  python3 -c "
+  # ★파싱 실패를 **삼키지 않는다.** rc 0 만 보고 통과시키면, 출력이 오염돼 한 글자도
+  #   못 읽은 상태가 「PASS」로 나온다 — 검사기가 고장난 것과 통과한 것이 구별되지 않는다.
+  #   (2026-08-25 S5-3 에서 실제로 났다: 케이스 하나가 stderr 로 JSON 을 흘려 `2>&1` 로
+  #    합쳐진 출력이 「Extra data」가 됐는데 게이트는 PASS·rc 0 을 냈다.)
+  if ! python3 -c "
 import json,sys
 r=json.load(open('/tmp/agora-selftest.$$'))
 s=r['요약']; m=r['미측정']
 print('  ', s['케이스'], '·', s['뮤테이션'], '· 슬라이스', s['슬라이스'])
 print('   미측정: NOT-APPLIED', m['뮤테이션_NOT_APPLIED'], '· 미발생 오류코드', m['발생하지_않은_오류코드'])
-"
+"; then
+    echo "  FAIL — selftest 출력을 읽지 못했다(오염 또는 형식 변경). 아래 앞 5줄:"
+    head -5 /tmp/agora-selftest.$$
+    rc=1
+  fi
 else
   echo "  FAIL — selftest rc != 0"; tail -20 /tmp/agora-selftest.$$; rc=1
 fi
