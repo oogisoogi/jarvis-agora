@@ -3455,6 +3455,8 @@ S6_AXES: dict[str, tuple[str, ...]] = {
 S7_AXES: dict[str, tuple[str, ...]] = {
     "온보딩공백": ("M188-repo-config-not-checked", "M189-json-guessed-by-shape",
                    "M190-unexpected-error-leaks-message"),
+    "읽기정직": ("M191-read-shows-rejected-as-valid",
+                 "M192-audit-hides-procedure-rejects"),
 }
 
 S5_AXES: dict[str, tuple[str, ...]] = {
@@ -5482,6 +5484,53 @@ def _case_onboarding_matches_real_procedure() -> None:
             raise AssertionError(f"설정 예시에 {key} 가 없다 — 예시를 따라가면 또 막힌다")
 
 
+def _case_read_hides_procedure_rejects_from_valid() -> None:
+    """★절차에서 **거부된 글은 「유효」가 아니다** — 그리고 `audit` 에 사유가 보인다.
+
+    ★S7-2 실물에서 드러났다: `read` 가 **1단(서명·계약)** 결과만 보고 있어서,
+      권한으로 거부된 `answer_selected` 가 유효 목록에 **그대로 실렸다.**
+      ⑴사용자는 자기 글이 반영됐다고 오해하고 ⑵`audit` 을 켜도 거부 사유가 안 보였다.
+    ★이 축**만**을 고립시키려면 **도구를 우회해** 넣어야 한다 — 도구로 부르면 code 5 로 막혀
+      reducer 까지 가지도 못한다(그러면 재려던 층이 무측정이다).
+    """
+    from agora import core, tools
+    from agora.event import new_id, render_post
+    from agora.ledger import now_iso
+    from agora.sign import sign_event
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")
+    said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="답변 후보"))
+
+    # ★남(operator-b)이 **요청자가 아닌데** 답을 고른다 — 서명은 유효하다.
+    other = tools.Context(store=ctx.store, ledger=ctx.ledger, spool=ctx.spool,
+                          allowed_signers_path=ctx.allowed_signers_path,
+                          participant_id="operator-b", config=ctx.config)
+    _state, prev, expected = tools._head_and_state(other, tid)
+    event = {"v": 1, "kind": "answer_selected", "thread_id": tid,
+             "message_id": new_id(), "prev": prev, "expected_state": expected,
+             "from": "operator-b", "roster": tools._roster_digest(other),
+             "ts": now_iso(), "payload": {"post_message_id": said["message_id"]}}
+    core.declare_scrub(event)
+    signed = _with_key(f["key_b"], lambda: sign_event(event))
+    ctx.store.inject_raw(thread_id=tid, category="problem",
+                         body=render_post(event, signed["signature"]))
+
+    view = tools.read(ctx, thread_id=tid, audit=True)
+    kinds = [e["kind"] for e in view["events"]]
+    if "answer_selected" in kinds:
+        raise AssertionError(f"절차에서 거부된 글이 유효로 실렸다: {kinds}")
+    if view["state"]["solved_by"] is not None:
+        raise AssertionError("남이 고른 답이 상태에 반영됐다")
+    reasons = [q.get("reason") for q in (view.get("quarantined") or [])]
+    if "permission" not in reasons:
+        raise AssertionError(f"감사에 절차 거부 사유가 안 보인다: {reasons}")
+
+    plain = tools.read(ctx, thread_id=tid)
+    if "quarantined" in plain:
+        raise AssertionError("audit 없이도 격리가 보인다 — 기본 화면 규약 위반")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -5761,6 +5810,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("CLI: 대괄호 제목도 제목이다",   _case_cli_title_may_start_with_bracket, None),
     ("CLI: 뜻밖의 예외도 JSON",       _case_cli_wraps_unexpected_errors_as_json, None),
     ("문서: 온보딩이 절차와 맞다",    _case_onboarding_matches_real_procedure, None),
+    ("읽기: 거부된 글은 유효 아님",   _case_read_hides_procedure_rejects_from_valid, None),
     ("S7: 축 그물 실재",              _case_s7_axes_have_nets, None),
 )
 
@@ -6551,6 +6601,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                         {"exception": type(e).__name__, "reason": "unexpected"})',
      '                         {"exception": str(e), "reason": "unexpected"})',
      "CLI: 뜻밖의 예외도 JSON"),
+    ("M191-read-shows-rejected-as-valid", "agora/tools.py",
+     '                             accepted=reduced.get("events"),',
+     "                             accepted=None,",
+     "읽기: 거부된 글은 유효 아님"),
+    ("M192-audit-hides-procedure-rejects", "agora/tools.py",
+     '                             quarantined=reduced.get("quarantined"))',
+     "                             quarantined=None)",
+     "읽기: 거부된 글은 유효 아님"),
 )
 
 
@@ -6722,7 +6780,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S7-1(실물 온보딩)"
+            "슬라이스": "S7-2(problem 완주)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

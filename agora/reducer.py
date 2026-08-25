@@ -187,21 +187,32 @@ def links_of(reduced: dict[str, Any], *,
     return out
 
 
-def read_view(collected: dict[str, Any], *, state: Any, audit: bool = False) -> dict[str, Any]:
+def read_view(collected: dict[str, Any], *, state: Any, audit: bool = False,
+              accepted: list[dict[str, Any]] | None = None,
+              quarantined: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """`agora.read` 가 돌려줄 모양(§4) — 격리는 `audit` 에서만 드러난다(§3-1).
 
     ★숨기는 것과 지우는 것은 다르다. 여기서 하는 일은 **기본 화면에서 빼는 것**뿐이고,
       원본은 운반층에도 `collected` 에도 그대로 있다.
+
+    ★★**`accepted`·`quarantined` 를 받는 이유**(S7-2 실물에서 드러난 결함):
+      `collected` 는 **1단**(서명·계약)만 통과한 것이다. 절차 단계(권한·라운드·상태)에서
+      거부된 이벤트는 그 목록에 **여전히 「유효」로 들어 있다.** 그대로 보여 주면
+      ⑴사용자는 자기 글이 **반영됐다고 오해**하고 ⑵`audit` 을 켜도 **거부 사유가 안 보인다**
+      (수집 격리만 실리므로). 그래서 2단 결과를 함께 받아 **실제로 받아들여진 것**을 싣는다.
+      ⚠안 넘기면 옛 동작(1단 기준)이다 — 호출자는 넘기는 쪽이 맞다.
     """
+    source = accepted if accepted is not None else collected["valid"]
     view: dict[str, Any] = {
         "state": state,
         "events": [{"message_id": v["message_id"], "kind": v["kind"], "from": v["from"],
                     "ts": v["event"]["ts"], "sig": "ok",
                     "body": v["event"]["payload"].get("body")}
-                   for v in collected["valid"]],
+                   for v in source],
     }
     if audit:
-        view["quarantined"] = list(collected["quarantined"])
+        view["quarantined"] = list(collected["quarantined"] if quarantined is None
+                                   else quarantined)
     return view
 
 

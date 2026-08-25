@@ -261,8 +261,11 @@ def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
     reduced = _reduce(ctx, thread_id)
     # ★`state` 칸에 reduce 결과를 통째로 싣지 않는다 — 그 안에는 이벤트 전문·격리 목록이
     #   다시 들어 있어 같은 것을 두 번 주게 되고, 「상태」라는 이름이 무엇을 가리키는지 흐려진다.
+    # ★2단(절차)까지 지난 결과를 넘긴다 — 1단만 보면 **거부된 글이 「유효」로 보인다**(S7-2 실측).
     view = reducer.read_view(reduced["collected"],
-                             state=reducer.procedure_snapshot(reduced), audit=audit)
+                             state=reducer.procedure_snapshot(reduced), audit=audit,
+                             accepted=reduced.get("events"),
+                             quarantined=reduced.get("quarantined"))
     if since_event:
         ids = [e["message_id"] for e in view["events"]]
         if since_event not in ids:
