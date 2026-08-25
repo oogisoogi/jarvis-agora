@@ -237,11 +237,18 @@ def _fixtures() -> dict[str, Any]:
         pub = fh.read().strip()
     with open(roster, "w", encoding="utf-8") as fh:
         fh.write(f"operator-a {pub}\n")
+    # ★2인 명부 — reducer 픽스처용. 기존 1인 명부(`roster`)는 그대로 둔다:
+    #   「명부 밖 = unsigned」를 재는 S1 케이스가 그 파일에 기대고 있다.
+    roster_ab = os.path.join(d, "allowed_signers_ab")
+    with open(os.path.join(d, "b.pub"), encoding="utf-8") as fh:
+        pub_b = fh.read().strip()
+    with open(roster_ab, "w", encoding="utf-8") as fh:
+        fh.write(f"operator-a {pub}\noperator-b {pub_b}\n")
     notkey = os.path.join(d, "not-a-key")
     with open(notkey, "w", encoding="utf-8") as fh:
         fh.write("이건 키가 아니다\n")
     _FIX.update({"dir": d, "key_a": os.path.join(d, "a"), "key_b": os.path.join(d, "b"),
-                 "roster": roster, "notkey": notkey, "empty_roster": os.path.join(d, "none")})
+                 "roster": roster, "roster_ab": roster_ab, "notkey": notkey, "empty_roster": os.path.join(d, "none")})
     return _FIX
 
 
@@ -946,11 +953,16 @@ def _r2_post(mid: str, body: str = "가짜 발언", thread_id: str = _T1) -> dic
 
 
 def _r2_signed(event: dict[str, Any]) -> str:
-    """서명기를 거쳐 운반층 게시물 본문을 만든다(정상 경로 전체를 탄다)."""
+    """서명기를 거쳐 운반층 게시물 본문을 만든다(정상 경로 전체를 탄다).
+
+    ★키는 `from` 에 맞춰 고른다. 남의 이름으로 서명하면 명부 검증에서 걸려
+      **전이 단계까지 오지도 못한다** — 권한을 재려던 케이스가 서명에서 죽는다(실제로 그랬다).
+    """
     from agora.event import render_post
     from agora.sign import sign_event
     f = _fixtures()
-    res = _with_key(f["key_a"], lambda: sign_event(event))
+    key = f["key_b"] if event["from"] == "operator-b" else f["key_a"]
+    res = _with_key(key, lambda: sign_event(event))
     return render_post(event, res["signature"])
 
 
@@ -967,7 +979,7 @@ def _r2_collect(store: Any, thread_id: str = _T1, **kw: Any) -> dict[str, Any]:
     from agora import reducer
     f = _fixtures()
     return reducer.collect(store=store, thread_id=thread_id,
-                           allowed_signers_path=f["roster"], **kw)
+                           allowed_signers_path=f["roster_ab"], **kw)
 
 
 def _r2_reasons(out: dict[str, Any]) -> list[str]:
@@ -1257,6 +1269,231 @@ def _case_reducer_no_genesis_no_chain() -> None:
         raise AssertionError(f"사유가 다르다: {out['stale']}")
 
 
+# ── S2-4 유형별 전이표 ──────────────────────────────────────────────────────
+# ★사슬 하나를 만들어 상태까지 계산하는 픽스처를 공용으로 둔다.
+#   각 케이스는 「그 사슬에 이 이벤트를 더하면 어떻게 되는가」 하나만 묻는다.
+
+def _r4_chain(gtype: str, steps: list[tuple[str, dict[str, Any], str]], *,
+              operators: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """(kind, payload, from) 목록을 앞 이벤트에 이어 붙여 사슬을 만들고 상태까지 계산한다.
+
+    ★`prev` 를 실제 해시로 잇는다 — 잇는 시늉만 하면 S2-3 의 사슬 규칙이 이 픽스처를 걸러 버린다.
+    """
+    from agora import reducer
+    from agora.event import event_hash
+    payload: dict[str, Any] = {"type": gtype, "title": "가짜 제목", "body": "가짜 발제",
+                               "chair": "operator-a"}
+    if gtype in ("problem", "knowhow"):
+        payload["envelope"] = _fake_envelope()
+    g = _r2_event("genesis", payload, "a" * 32)
+    items = [(_r2_signed(g), "2026-01-01T00:00:00Z")]
+    prev = event_hash(g)
+    for i, (kind, pl, who) in enumerate(steps):
+        ev = _r2_event(kind, pl, f"{i + 1:032x}", prev=prev)
+        ev["from"] = who
+        items.append((_r2_signed(ev), f"2026-01-01T00:01:{i:02d}Z"))
+        prev = event_hash(ev)
+    return reducer.apply(reducer.order(_r2_collect(_r3_store(items))),
+                         operators=operators)
+
+
+def _r4_reasons(out: dict[str, Any]) -> list[str]:
+    return [q["reason"] for q in out["quarantined"] if q.get("stage") == "transition"]
+
+
+def _case_debate_full_course() -> None:
+    """debate 정상 완주: r0 → r1 → r2(반론) → r3 → resolved → closed."""
+    out = _r4_chain("debate", [
+        ("advance", {"from_round": 0, "to_round": 1}, "operator-a"),
+        ("post", {"round": 1, "body": "1라운드 발언"}, "operator-a"),
+        ("advance", {"from_round": 1, "to_round": 2}, "operator-a"),
+        ("post", {"round": 2, "body": "2라운드 반론",
+                  "counter": [{"target_message_id": "b" * 32, "point": "가짜 반론"}]},
+         "operator-a"),
+        ("advance", {"from_round": 2, "to_round": 3}, "operator-a"),
+        ("resolution", {"summary": "가짜 요약", "dissent": [],
+                        "recommended_actions": [{"text": "가짜 권고",
+                                                 "execution": "forbidden"}]},
+         "operator-a"),
+        ("close", {"reason": "solved"}, "operator-a"),
+    ])
+    if out["state"] != "closed" or _r4_reasons(out):
+        raise AssertionError(f"정상 완주: state={out['state']} 거부={_r4_reasons(out)}")
+
+
+def _case_debate_non_chair_advance() -> None:
+    """비의장의 advance → 무효(사유 permission) · 라운드 불변."""
+    out = _r4_chain("debate", [
+        ("advance", {"from_round": 0, "to_round": 1}, "operator-b"),   # 의장이 아니다
+    ])
+    if out["round"] != 0 or _r4_reasons(out) != ["permission"]:
+        raise AssertionError(f"비의장 advance: round={out['round']} "
+                             f"거부={_r4_reasons(out)}")
+
+
+def _case_write_path_non_chair_is_code5() -> None:
+    """쓰기 경로에서는 같은 규칙이 **code 5** 로 나간다(§4 · §8 FR-4)."""
+    from agora import reducer
+    reducer.require_chair({"chair": "operator-a"}, "operator-b")
+
+
+def _case_write_path_non_requester_is_code5() -> None:
+    """해결 표시는 요청자만 — 쓰기 경로 code 5(§8 FR-5)."""
+    from agora import reducer
+    reducer.require_requester({"requester": "operator-a"}, "operator-b")
+
+
+def _case_write_path_stale_state_is_code9() -> None:
+    """내가 본 상태가 지금 상태와 다르면 **code 9**(CAS) — 재시도 전에 read.
+
+    ★코드 9 가 처음으로 실제 발생하는 자리다(그전까지는 「그 코드를 내는 경로가 없다」였다).
+    """
+    from agora import reducer
+    out = _r4_chain("debate", [("advance", {"from_round": 0, "to_round": 1},
+                                "operator-a")])
+    reducer.require_state(out, "0" * 64)      # 낡은 상태 해시를 들고 왔다
+
+
+def _case_debate_out_of_round_post() -> None:
+    """라운드 밖 발언 → 격리(§6) · 지금 라운드의 발언만 사슬에 남는다."""
+    out = _r4_chain("debate", [
+        ("advance", {"from_round": 0, "to_round": 1}, "operator-a"),
+        ("post", {"round": 0, "body": "지난 라운드 발언"}, "operator-a"),
+    ])
+    if _r4_reasons(out) != ["out_of_round"]:
+        raise AssertionError(f"라운드 밖 발언: {out['quarantined']}")
+
+
+def _case_debate_r2_requires_counter() -> None:
+    """R2 발언에 counter[] 가 없으면 무효 — R2 는 반론 라운드다."""
+    out = _r4_chain("debate", [
+        ("advance", {"from_round": 0, "to_round": 1}, "operator-a"),
+        ("advance", {"from_round": 1, "to_round": 2}, "operator-a"),
+        ("post", {"round": 2, "body": "반론 대상 없는 발언"}, "operator-a"),
+    ])
+    if _r4_reasons(out) != ["counter_required"]:
+        raise AssertionError(f"R2 counter: {out['quarantined']}")
+
+
+def _case_advance_monotonic_only() -> None:
+    """advance 는 한 칸씩만 — r1→r1 · r2→r1 · r1→r3 전건 무효(AC ①).
+
+    ★셋 다 **모양**에서 걸린다(스키마 code 10). 「어디서 걸리든 무효면 됐다」가 아니라
+      어디서 걸리는지를 적어 둔다 — 나중에 그 검사를 옮기면 이 케이스가 알려 준다.
+    """
+    from agora import schema
+    for a, b in ((1, 1), (2, 1), (1, 3)):
+        try:
+            schema.validate(_fake_event("advance", {"from_round": a, "to_round": b}))
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"advance {a}→{b}: code {e.code} != 10") from None
+        else:
+            raise AssertionError(f"advance {a}→{b} 가 통과했다")
+
+
+def _case_advance_from_round_must_match_now() -> None:
+    """모양이 맞아도 **지금 라운드**에서 출발하지 않으면 무효(bad_transition)."""
+    out = _r4_chain("debate", [
+        ("advance", {"from_round": 1, "to_round": 2}, "operator-a"),   # 지금은 r0
+    ])
+    if out["round"] != 0 or _r4_reasons(out) != ["bad_transition"]:
+        raise AssertionError(f"출발 라운드 불일치: round={out['round']} "
+                             f"거부={_r4_reasons(out)}")
+
+
+def _case_debate_rejects_answer_selected() -> None:
+    """debate 에 answer_selected → 유형 경계 위반(AC ③)."""
+    out = _r4_chain("debate", [("answer_selected", {"post_message_id": "b" * 32},
+                                "operator-a")])
+    if _r4_reasons(out) != ["kind_not_allowed"]:
+        raise AssertionError(f"debate answer_selected: {out['quarantined']}")
+
+
+def _case_knowhow_rejects_advance() -> None:
+    """knowhow 에 advance → 유형 경계 위반(AC ④)."""
+    out = _r4_chain("knowhow", [("advance", {"from_round": 0, "to_round": 1},
+                                 "operator-a")])
+    if _r4_reasons(out) != ["kind_not_allowed"]:
+        raise AssertionError(f"knowhow advance: {out['quarantined']}")
+
+
+def _case_problem_only_requester_solves() -> None:
+    """타인의 해결 표시 → 상태 무반영 · 요청자의 것만 solved(§8 FR-5)."""
+    post_id = f"{1:032x}"
+    out = _r4_chain("problem", [
+        ("post", {"round": 0, "body": "가짜 답변"}, "operator-b"),
+        ("answer_selected", {"post_message_id": post_id}, "operator-b"),   # 타인
+    ])
+    if out["state"] != "open" or _r4_reasons(out) != ["permission"]:
+        raise AssertionError(f"타인 해결 표시: state={out['state']} "
+                             f"거부={_r4_reasons(out)}")
+
+    out2 = _r4_chain("problem", [
+        ("post", {"round": 0, "body": "가짜 답변"}, "operator-b"),
+        ("answer_selected", {"post_message_id": post_id}, "operator-a"),   # 요청자
+    ])
+    if out2["state"] != "solved" or out2["solved_by"] != post_id:
+        raise AssertionError(f"요청자 해결 표시: state={out2['state']} "
+                             f"solved_by={out2['solved_by']}")
+
+
+def _case_answer_target_must_exist() -> None:
+    """사슬에 없는 글을 답으로 고르면 무효 — 「없는 답으로 해결됨」을 막는다."""
+    out = _r4_chain("problem", [
+        ("answer_selected", {"post_message_id": "f" * 32}, "operator-a"),
+    ])
+    if out["state"] != "open" or _r4_reasons(out) != ["unknown_target"]:
+        raise AssertionError(f"없는 대상: state={out['state']} 거부={_r4_reasons(out)}")
+
+
+def _case_knowhow_close_reason_limited() -> None:
+    """knowhow 의 종결 사유는 superseded/archived 뿐(§6)."""
+    bad = _r4_chain("knowhow", [("close", {"reason": "solved"}, "operator-a")])
+    if bad["state"] != "open" or _r4_reasons(bad) != ["bad_transition"]:
+        raise AssertionError(f"knowhow close(solved): {bad['quarantined']}")
+    ok = _r4_chain("knowhow", [("close", {"reason": "superseded"}, "operator-a")])
+    if ok["state"] != "closed":
+        raise AssertionError(f"knowhow close(superseded): {ok['state']}")
+
+
+def _case_events_after_close_rejected() -> None:
+    """닫힌 뒤에 온 이벤트는 상태를 못 바꾼다."""
+    out = _r4_chain("problem", [
+        ("close", {"reason": "unresolved"}, "operator-a"),
+        ("post", {"round": 0, "body": "닫힌 뒤 발언"}, "operator-a"),
+    ])
+    if out["state"] != "closed" or _r4_reasons(out) != ["after_close"]:
+        raise AssertionError(f"종결 후 이벤트: state={out['state']} "
+                             f"거부={_r4_reasons(out)}")
+
+
+def _case_deferred_kinds_are_named() -> None:
+    """delegate_chair·abort 는 받되 **아직 계산하지 않는다** — 그 사실이 목록에 남는다.
+
+    ★조용히 무시하면 「받아서 아무 일도 없었다」와 「아직 안 만들었다」가 구별되지 않는다.
+    """
+    out = _r4_chain("debate", [("delegate_chair", {"new_chair": "operator-b"},
+                                "operator-a")])
+    if [d["kind"] for d in out["deferred"]] != ["delegate_chair"]:
+        raise AssertionError(f"보류 목록: {out['deferred']}")
+    if out["chair"] != "operator-a":
+        raise AssertionError("아직 계산하지 않기로 한 승계가 상태를 바꿨다")
+
+
+def _case_state_hash_is_deterministic_and_sensitive() -> None:
+    """같은 사슬 → 같은 상태 해시 · 한 걸음 더 가면 달라진다(CAS 의 전제)."""
+    steps = [("advance", {"from_round": 0, "to_round": 1}, "operator-a")]
+    a = _r4_chain("debate", steps)
+    b = _r4_chain("debate", steps)
+    if a["state_hash"] != b["state_hash"]:
+        raise AssertionError("같은 사슬이 다른 상태 해시를 냈다")
+    c = _r4_chain("debate", steps + [("post", {"round": 1, "body": "한 걸음 더"},
+                                      "operator-a")])
+    if c["state_hash"] == a["state_hash"]:
+        raise AssertionError("사슬이 자랐는데 상태 해시가 그대로다")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -1335,6 +1572,23 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("경합: 진 쪽 후손 → unreachable", _case_reducer_loser_descendant_unreachable, None),
     ("경합: stale ≠ 격리",            _case_reducer_stale_is_not_quarantine, None),
     ("경합: genesis 없으면 사슬 없음", _case_reducer_no_genesis_no_chain, None),
+    ("전이: debate 정상 완주",        _case_debate_full_course, None),
+    ("전이: 비의장 advance → 무효",   _case_debate_non_chair_advance, None),
+    ("권한: 비의장 쓰기 → 5",         _case_write_path_non_chair_is_code5, errors.PERMISSION),
+    ("권한: 비요청자 쓰기 → 5",       _case_write_path_non_requester_is_code5, errors.PERMISSION),
+    ("CAS: 낡은 상태로 쓰기 → 9",     _case_write_path_stale_state_is_code9, errors.STATE_CONFLICT),
+    ("전이: 라운드 밖 post → 격리",   _case_debate_out_of_round_post, None),
+    ("전이: R2 counter 필수",         _case_debate_r2_requires_counter, None),
+    ("전이: advance 단조 증가만",     _case_advance_monotonic_only, None),
+    ("전이: 출발 라운드 불일치",      _case_advance_from_round_must_match_now, None),
+    ("경계: debate 에 answer → 무효", _case_debate_rejects_answer_selected, None),
+    ("경계: knowhow 에 advance → 무효", _case_knowhow_rejects_advance, None),
+    ("전이: 요청자만 solved",         _case_problem_only_requester_solves, None),
+    ("전이: 없는 답 고르기 → 무효",   _case_answer_target_must_exist, None),
+    ("전이: knowhow 종결 사유 제한",  _case_knowhow_close_reason_limited, None),
+    ("전이: 종결 후 이벤트 → 무효",   _case_events_after_close_rejected, None),
+    ("전이: 보류 kind 는 이름을 남긴다", _case_deferred_kinds_are_named, None),
+    ("상태 해시: 결정론·민감",        _case_state_hash_is_deterministic_and_sensitive, None),
 )
 
 
@@ -1521,6 +1775,42 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            "quarantined": collected["quarantined"]}',
      '            "quarantined": collected["quarantined"] + stale}',
      "경합: stale ≠ 격리"),
+    ("M46-chair-check-off", "agora/reducer.py",
+     '            if who != state["chair"]:\n                reject(entry, PERMISSION, {"chair": state["chair"], "from": who})\n                continue\n            if payload["from_round"] != state["round"]:',
+     '            if False:\n                pass\n            if payload["from_round"] != state["round"]:',
+     "전이: 비의장 advance → 무효"),
+    ("M47-out-of-round-allowed", "agora/reducer.py",
+     '                if payload.get("round") != state["round"]:',
+     "                if False:",
+     "전이: 라운드 밖 post → 격리"),
+    ("M48-counter-not-required", "agora/reducer.py",
+     '                if state["round"] == 2 and not payload.get("counter"):',
+     "                if False:",
+     "전이: R2 counter 필수"),
+    ("M49-kind-boundary-open", "agora/reducer.py",
+     "        if kind not in ALLOWED_KINDS[gtype]:",
+     "        if False:",
+     "경계: knowhow 에 advance → 무효"),
+    ("M50-requester-check-off", "agora/reducer.py",
+     '            if who != state["requester"]:',
+     "            if False:",
+     "전이: 요청자만 solved"),
+    ("M51-answer-target-unchecked", "agora/reducer.py",
+     '            if payload["post_message_id"] not in post_ids:',
+     "            if False:",
+     "전이: 없는 답 고르기 → 무효"),
+    ("M52-after-close-allowed", "agora/reducer.py",
+     '        if state["state"] == "closed":',
+     "        if False:",
+     "전이: 종결 후 이벤트 → 무효"),
+    ("M53-cas-gate-off", "agora/reducer.py",
+     "    if expected_state != now:",
+     "    if False:",
+     "CAS: 낡은 상태로 쓰기 → 9"),
+    ("M54-state-hash-ignores-head", "agora/reducer.py",
+     '                ("type", "state", "round", "chair", "requester", "solved_by",\n                 "close_reason", "head")}',
+     '                ("type", "state", "round", "chair", "requester", "solved_by",\n                 "close_reason")}',
+     "상태 해시: 결정론·민감"),
 )
 
 
@@ -1692,7 +1982,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S2-3(정렬·경합 판정)"
+            "슬라이스": "S2-4(전이표 3종·라운드·권한)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

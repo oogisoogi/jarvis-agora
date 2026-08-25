@@ -29,7 +29,18 @@ THREAD_MISMATCH = "thread_mismatch"  # 다른 스레드의 이벤트를 여기 �
 SIGNATURE = "signature"            # 서명 없음·BAD·명부 밖·폐기 키
 REPLAY = "replay"                  # (from, message_id) 재게시
 
-REASONS = (UNPARSEABLE, OVERSIZE, SCHEMA, THREAD_MISMATCH, SIGNATURE, REPLAY)
+# 3단(전이) 에서 붙는 사유 — 「자격」이 아니라 「절차」에서 걸린 것들이다.
+OUT_OF_ROUND = "out_of_round"          # 지금 라운드의 발언이 아니다
+COUNTER_REQUIRED = "counter_required"  # R2 발언인데 반론 대상이 없다
+PERMISSION = "permission"              # 의장·요청자·운영자가 아닌데 그 권한의 이벤트를 냈다
+KIND_NOT_ALLOWED = "kind_not_allowed"  # 이 유형의 스레드가 받지 않는 kind
+BAD_TRANSITION = "bad_transition"      # 지금 상태에서 갈 수 없는 자리
+UNKNOWN_TARGET = "unknown_target"      # 가리키는 이벤트가 사슬에 없다
+AFTER_CLOSE = "after_close"            # 닫힌 뒤에 온 이벤트
+
+REASONS = (UNPARSEABLE, OVERSIZE, SCHEMA, THREAD_MISMATCH, SIGNATURE, REPLAY,
+           OUT_OF_ROUND, COUNTER_REQUIRED, PERMISSION, KIND_NOT_ALLOWED,
+           BAD_TRANSITION, UNKNOWN_TARGET, AFTER_CLOSE)
 
 
 def _order_key(item: dict[str, Any]) -> tuple[str, str]:
@@ -220,3 +231,200 @@ def order(collected: dict[str, Any]) -> dict[str, Any]:
             "stale": stale + unreachable,
             # 격리는 건드리지 않는다 — 다른 사건이므로 다른 목록으로 그대로 통과시킨다.
             "quarantined": collected["quarantined"]}
+
+
+# ── 3단: 유형별 전이(설계 §6 · §2-3 ③) ──────────────────────────────────────
+# 유형은 「내용의 벽」이 아니라 **절차**다(§2-1b). 그래서 유형마다 받는 kind 가 다르고,
+# 같은 kind 라도 낼 수 있는 사람이 다르다.
+#
+# ★표를 **닫아** 둔다. 「모르는 kind 는 그냥 지나가게」 두면 유형 경계가 서서히 녹는다.
+
+# 유형 → 그 유형이 받는 kind(§6). vote 는 구속력이 없지만(M-7) 어디서나 낼 수 있다.
+ALLOWED_KINDS: dict[str, frozenset[str]] = {
+    "problem": frozenset({"post", "answer_selected", "close", "vote", "abort"}),
+    "knowhow": frozenset({"post", "close", "vote", "abort"}),
+    "debate": frozenset({"post", "advance", "resolution", "close", "delegate_chair",
+                         "vote", "abort"}),
+}
+
+# ★`delegate_chair`·`abort` 는 **받되 상태를 계산하지 않는다** — 마감·만료·승계는 S2-5 의 몫이다.
+#   조용히 무시하면 「받아서 아무 일도 안 일어난 것」과 「아직 안 만든 것」이 구별되지 않으므로,
+#   결과의 `deferred` 목록에 이름을 남긴다.
+DEFERRED_KINDS = frozenset({"delegate_chair", "abort"})
+
+DEBATE_ROUNDS = ("r0", "r1", "r2", "r3")
+KNOWHOW_CLOSE_REASONS = frozenset({"superseded", "archived"})
+
+
+def require_chair(state: dict[str, Any], participant_id: str) -> None:
+    """쓰기 경로의 권한 게이트 — 의장이 아니면 code 5.
+
+    ★읽기 경로(reducer)와 **같은 규칙**을 쓴다. 두 곳에 따로 적으면 언젠가 갈라지고,
+      갈라지는 순간 「도구는 막았는데 reducer 는 통과시키는」 무단 결의가 성립한다.
+    """
+    if participant_id != state.get("chair"):
+        raise AgoraError(errors.PERMISSION, "의장만 할 수 있다",
+                         {"chair": state.get("chair"), "from": participant_id})
+
+
+def require_requester(state: dict[str, Any], participant_id: str) -> None:
+    """해결 표시는 요청자만(§8 FR-5) — 아니면 code 5."""
+    if participant_id != state.get("requester"):
+        raise AgoraError(errors.PERMISSION, "요청자만 할 수 있다",
+                         {"requester": state.get("requester"), "from": participant_id})
+
+
+def require_state(reduced: dict[str, Any], expected_state: str) -> None:
+    """쓰기 경로의 CAS 게이트(§4 code 9) — 내가 본 상태가 지금 상태와 다르면 거부.
+
+    ★재시도 전에 `read` 를 다시 하라는 뜻이다. 이 칸이 없으면 두 사람이 같은 자리에서
+      서로 다른 역사를 쓰고, 경합 판정이 그 뒤치다꺼리를 하게 된다 —
+      경합은 **막을 수 없는 동시성**을 위한 장치이지, 눈감고 쓴 글을 위한 장치가 아니다.
+    """
+    now = reduced.get("state_hash")
+    if expected_state != now:
+        raise AgoraError(errors.STATE_CONFLICT, "상태가 그 사이에 바뀌었다 — read 후 재시도",
+                         {"expected_state": expected_state, "now": now})
+
+
+def _state_hash(state: dict[str, Any]) -> str:
+    """상태 해시 — 다음 이벤트의 `expected_state` 가 가리키는 값(§2-1).
+
+    ★사슬의 머리(head)를 넣는다. 안 넣으면 「같은 결론에 이른 서로 다른 역사」가 같은 해시가 되고,
+      그러면 CAS 가 놓치는 창이 생긴다.
+    """
+    from agora.event import canonical_bytes
+    snapshot = {k: state.get(k) for k in
+                ("type", "state", "round", "chair", "requester", "solved_by",
+                 "close_reason", "head")}
+    return hashlib.sha256(canonical_bytes(snapshot)).hexdigest()
+
+
+def apply(ordered: dict[str, Any], *,
+          operators: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """사슬 → 상태(§6). 절차에서 걸린 것은 사유와 함께 격리 목록에 더한다.
+
+    ⛔여기서도 `expected_state` 는 아직 대조하지 않는다 — 쓰기 경로(CAS)가 생기는 S2-5·S4 의 몫이다.
+      상태 해시는 여기서 계산해 두므로, 그때 비교할 값은 이제 존재한다.
+    """
+    quarantined = list(ordered["quarantined"])
+    chain = ordered["chain"]
+    if not chain or chain[0]["kind"] != "genesis":
+        # genesis 가 없으면 상태가 없다. 「빈 스레드」와 구별되게 이유를 남긴다.
+        return {"thread_id": ordered["thread_id"], "state": None,
+                "reason": "no_genesis", "events": [], "deferred": [],
+                "stale": ordered["stale"], "quarantined": quarantined}
+
+    genesis = chain[0]["event"]
+    gtype = genesis["payload"]["type"]
+    state: dict[str, Any] = {
+        "type": gtype,
+        "state": "r0" if gtype == "debate" else "open",
+        "round": 0 if gtype == "debate" else None,
+        "chair": genesis["payload"].get("chair") or genesis["from"],
+        "requester": genesis["from"],
+        "solved_by": None,
+        "close_reason": None,
+        "head": chain[0]["hash"],
+    }
+    accepted = [chain[0]]
+    deferred: list[dict[str, Any]] = []
+    post_ids = {chain[0]["message_id"]}
+
+    def reject(entry: dict[str, Any], reason: str, detail: Any = None) -> None:
+        quarantined.append({"node_id": entry["node_id"],
+                            "created_at": entry["created_at"],
+                            "reason": reason, "stage": "transition", "detail": detail})
+
+    for entry in chain[1:]:
+        kind, ev, who = entry["kind"], entry["event"], entry["from"]
+        payload = ev["payload"]
+
+        if state["state"] == "closed":
+            reject(entry, AFTER_CLOSE, {"kind": kind})
+            continue
+        if kind not in ALLOWED_KINDS[gtype]:
+            reject(entry, KIND_NOT_ALLOWED, {"type": gtype, "kind": kind})
+            continue
+        if kind in DEFERRED_KINDS:
+            deferred.append({"node_id": entry["node_id"], "kind": kind,
+                             "why": "마감·만료·승계는 S2-5"})
+            accepted.append(entry)
+            continue
+
+        if kind == "vote":
+            # 구속력 없음(M-7) — 받아 두되 상태를 바꾸지 않는다.
+            accepted.append(entry)
+            continue
+
+        if kind == "post":
+            if gtype == "debate":
+                if payload.get("round") != state["round"]:
+                    reject(entry, OUT_OF_ROUND,
+                           {"post_round": payload.get("round"), "now": state["round"]})
+                    continue
+                if state["round"] == 2 and not payload.get("counter"):
+                    # R2 는 반론 라운드다 — 대상 없는 발언은 라운드의 뜻을 비운다.
+                    reject(entry, COUNTER_REQUIRED, {"round": 2})
+                    continue
+            post_ids.add(entry["message_id"])
+            accepted.append(entry)
+
+        elif kind == "advance":
+            if who != state["chair"]:
+                reject(entry, PERMISSION, {"chair": state["chair"], "from": who})
+                continue
+            if payload["from_round"] != state["round"]:
+                reject(entry, BAD_TRANSITION,
+                       {"from_round": payload["from_round"], "now": state["round"]})
+                continue
+            state["round"] = payload["to_round"]
+            state["state"] = DEBATE_ROUNDS[payload["to_round"]]
+            accepted.append(entry)
+
+        elif kind == "resolution":
+            if who != state["chair"]:
+                reject(entry, PERMISSION, {"chair": state["chair"], "from": who})
+                continue
+            if state["state"] != "r3":
+                reject(entry, BAD_TRANSITION, {"now": state["state"], "want": "r3"})
+                continue
+            state["state"] = "resolved"
+            accepted.append(entry)
+
+        elif kind == "answer_selected":
+            if who != state["requester"]:
+                # 남이 고른 답은 상태를 바꾸지 않는다(§8 FR-5).
+                reject(entry, PERMISSION, {"requester": state["requester"], "from": who})
+                continue
+            if payload["post_message_id"] not in post_ids:
+                reject(entry, UNKNOWN_TARGET,
+                       {"post_message_id": payload["post_message_id"]})
+                continue
+            state["state"] = "solved"
+            state["solved_by"] = payload["post_message_id"]
+            accepted.append(entry)
+
+        elif kind == "close":
+            if who not in (state["chair"], state["requester"]) and who not in operators:
+                reject(entry, PERMISSION,
+                       {"allowed": [state["chair"], state["requester"], "operator"],
+                        "from": who})
+                continue
+            if gtype == "knowhow" and payload["reason"] not in KNOWHOW_CLOSE_REASONS:
+                reject(entry, BAD_TRANSITION,
+                       {"reason": payload["reason"],
+                        "allowed": sorted(KNOWHOW_CLOSE_REASONS)})
+                continue
+            state["state"] = "closed"
+            state["close_reason"] = payload["reason"]
+            accepted.append(entry)
+
+        state["head"] = entry["hash"]
+
+    result = dict(state)
+    result.update({"thread_id": ordered["thread_id"],
+                   "events": accepted, "deferred": deferred,
+                   "stale": ordered["stale"], "quarantined": quarantined})
+    result["state_hash"] = _state_hash(state)
+    return result
