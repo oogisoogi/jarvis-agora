@@ -3450,6 +3450,13 @@ S6_AXES: dict[str, tuple[str, ...]] = {
                 "M187-mcp-accepts-unknown-tool"),
 }
 
+# ★S7 은 **실물에서 드러난 것**을 재는 축이다. 실물 절차를 밟기 전에는 전부 초록이었다 —
+#   「시험이 통과한다」와 「사람이 문서를 보고 쓸 수 있다」는 다른 질문이라는 증거다.
+S7_AXES: dict[str, tuple[str, ...]] = {
+    "온보딩공백": ("M188-repo-config-not-checked", "M189-json-guessed-by-shape",
+                   "M190-unexpected-error-leaks-message"),
+}
+
 S5_AXES: dict[str, tuple[str, ...]] = {
     "내구": ("M109-fsync-before-flush", "M110-spool-no-fsync",
              "M111-spool-stage-goes-backwards", "M112-spool-torn-tail-silent",
@@ -3552,13 +3559,18 @@ def _case_every_mutation_belongs_to_an_axis() -> None:
       그래서 반대 방향으로도 잰다: 표가 뮤테이션을 덮는가가 아니라, **뮤테이션이 표에 있는가.**
     """
     covered: set[str] = set()
-    for table in (S2_AXES, S3_AXES, S4_AXES, S5_AXES, S6_AXES):
+    for table in (S2_AXES, S3_AXES, S4_AXES, S5_AXES, S6_AXES, S7_AXES):
         for want in table.values():
             covered |= set(want)
     late = {m[0] for m in MUTATIONS if int(m[0].split("-")[0][1:]) >= 109}
     orphan = sorted(late - covered)
     if orphan:
         raise AssertionError(f"어느 축에도 안 실린 뮤테이션: {orphan}")
+
+
+def _case_s7_axes_have_nets() -> None:
+    """S7 의 축(온보딩공백)도 같은 방식으로 덮인다."""
+    _axes_have_nets(S7_AXES, "S7")
 
 
 def _case_mutation_ids_are_unique() -> None:
@@ -5355,6 +5367,121 @@ def _case_mcp_call_reaches_the_tool() -> None:
         raise AssertionError("목록과 호출이 같은 표를 안 본다")
 
 
+# ── S7-1 실물 온보딩에서 드러난 것들 ────────────────────────────────────────
+# ★이 블록의 케이스는 전부 **실제로 막혔던 자리**다. 문서만 보고 따라가다 멈춘 지점이
+#   곧 결함이고, 멈춘 자리마다 그물을 남긴다(04-tasks S7-1 AC ②).
+
+def _case_config_names_missing_repo_fields() -> None:
+    """저장소 설정이 없으면 **빠진 칸 이름을 대고** 멈춘다(code 2).
+
+    ★S7-1 에서 여기가 **날 예외(TypeError)** 로 터졌다 — 설정 계약에 저장소 칸이 아예 없었다.
+      「설정이 잘못됐다」로만 말하면 사용자는 무엇을 고쳐야 하는지 모른다.
+    """
+    from agora import tools
+    try:
+        tools._store_from_config({})
+    except AgoraError as e:
+        missing = (e.detail or {}).get("missing") or []
+        if e.code != errors.PRECONDITION:
+            raise AssertionError(f"다른 코드: {e.code}") from None
+        for want in ("repo.owner", "repo.name", "categories.problem"):
+            if want not in missing:
+                raise AssertionError(f"빠진 칸을 안 댄다: {missing}")
+    else:
+        raise AssertionError("저장소 설정 없이 운반층을 세웠다")
+    # 반쪽만 있어도 그 반쪽을 지목해야 한다.
+    try:
+        tools._store_from_config({"repo": {"owner": "누군가"},
+                                  "categories": {"problem": "x", "knowhow": "y",
+                                                 "debate": "z"}})
+    except AgoraError as e:
+        if (e.detail or {}).get("missing") != ["repo.name"]:
+            raise AssertionError(f"반쪽 설정의 지목이 틀렸다: {e.detail}")
+    else:
+        raise AssertionError("이름 없는 저장소를 통과시켰다")
+
+
+def _case_cli_title_may_start_with_bracket() -> None:
+    """★제목이 `[` 로 시작해도 **제목이다** — 우리 규약이 그 접두를 요구한다.
+
+    ★S7-1 실물 절차에서 실제로 막혔다: 시험 글 제목은 `[selftest] …` 여야 하는데(04-tasks S7-2)
+      파서가 그 값을 JSON 으로 읽으려다 `code 10` 을 냈다. **값의 모양으로 추측하면
+      우리 자신의 규약과 충돌한다** — 칸 이름은 계약이 정하고, 계약은 충돌하지 않는다.
+    """
+    from agora import cli
+    got = cli._kv(["title=[selftest] 첫 글", "body={중괄호로 시작하는 본문}",
+                   'envelope={"symptom":"x"}'])
+    if got["title"] != "[selftest] 첫 글":
+        raise AssertionError(f"제목이 깨졌다: {got['title']!r}")
+    if got["body"] != "{중괄호로 시작하는 본문}":
+        raise AssertionError(f"본문이 깨졌다: {got['body']!r}")
+    if got["envelope"] != {"symptom": "x"}:
+        raise AssertionError(f"봉투가 구조체로 안 왔다: {got['envelope']!r}")
+    try:
+        cli._kv(["envelope=이건 JSON 이 아니다"])
+    except AgoraError as e:
+        if (e.detail or {}).get("key") != "envelope":
+            raise AssertionError(f"어느 칸이 문제인지 안 댄다: {e.detail}") from None
+    else:
+        raise AssertionError("JSON 칸에 아무 문자열이나 통과했다")
+
+
+def _case_cli_wraps_unexpected_errors_as_json() -> None:
+    """★예상 못 한 예외도 **JSON 으로** 나간다 — 오류 계약에 구멍을 두지 않는다.
+
+    ★S7-1 에서 사용자가 **Traceback 을 받았다.** 그 순간 「무엇이 잘못됐나」를 기계가
+      읽을 방법이 사라진다. 메시지 원문은 싣지 않는다(경로·값이 섞여 나갈 수 있다) —
+      **타입만** 싣는다.
+    """
+    import contextlib
+    import io as _io
+    import json as _json
+    from agora import cli
+
+    def boom(name: str, args: Any) -> Any:
+        raise RuntimeError("경로 /어딘가/비밀 이 섞인 메시지")
+
+    original = cli.dispatch
+    cli.dispatch = boom
+    buf = _io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            code = cli.main(["threads"])
+    finally:
+        cli.dispatch = original
+    if code != errors.PRECONDITION:
+        raise AssertionError(f"계약 밖 코드로 끝났다: {code}")
+    emitted = _json.loads(buf.getvalue())
+    if emitted.get("detail", {}).get("exception") != "RuntimeError":
+        raise AssertionError(f"예외 종류가 안 실렸다: {emitted}")
+    if "비밀" in buf.getvalue():
+        raise AssertionError("메시지 원문이 새어 나갔다")
+
+
+def _case_onboarding_matches_real_procedure() -> None:
+    """온보딩 문서가 **실제 절차와 맞는다** — 막혔던 세 자리가 전부 적혀 있다.
+
+    ★문서만 보고 따라가다 멈춘 지점이 곧 문서 결함이다(S7-1 AC ②).
+      세 자리: ⑴keygen 인자 ⑵`AGORA_SIGNING_KEY` ⑶`config.json` 의 저장소 칸.
+    """
+    with open(os.path.join(_ROOT, "docs", "ONBOARDING.md"), encoding="utf-8") as fh:
+        text = fh.read()
+    if "agora keygen <참가자-id>" not in text:
+        raise AssertionError("keygen 이 인자를 받는다는 것이 안 적혀 있다")
+    if "AGORA_SIGNING_KEY" not in text:
+        raise AssertionError("서명 키 환경변수가 안 적혀 있다")
+    if '"repo"' not in text or '"categories"' not in text:
+        raise AssertionError("저장소·카테고리 설정이 안 적혀 있다")
+    if "participant.json` 까지 **만들어 준다**" not in text:
+        raise AssertionError("participant.json 이 자동 생성된다는 사실이 안 적혀 있다")
+    import json as _json
+    with open(os.path.join(_ROOT, "config", "config.json.example"), encoding="utf-8") as fh:
+        example = _json.load(fh)
+    for key in ("repo", "categories"):
+        if key not in example:
+            raise AssertionError(f"설정 예시에 {key} 가 없다 — 예시를 따라가면 또 막힌다")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -5630,6 +5757,11 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("MCP: 경로형 인자 0건",          _case_mcp_has_no_path_arguments, None),
     ("MCP: 모르는 것은 거부",         _case_mcp_rejects_unknown_method_and_tool, None),
     ("MCP: 호출이 도구까지 닿는다",   _case_mcp_call_reaches_the_tool, None),
+    ("설정: 빠진 저장소 칸을 댄다",   _case_config_names_missing_repo_fields, None),
+    ("CLI: 대괄호 제목도 제목이다",   _case_cli_title_may_start_with_bracket, None),
+    ("CLI: 뜻밖의 예외도 JSON",       _case_cli_wraps_unexpected_errors_as_json, None),
+    ("문서: 온보딩이 절차와 맞다",    _case_onboarding_matches_real_procedure, None),
+    ("S7: 축 그물 실재",              _case_s7_axes_have_nets, None),
 )
 
 
@@ -6406,6 +6538,19 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if inner is None:",
      "    if False:",
      "MCP: 모르는 것은 거부"),
+    # ── S7-1 실물 온보딩에서 드러난 것들 ────────────────────────────────────
+    ("M188-repo-config-not-checked", "agora/tools.py",
+     '    missing = [k for k in ("owner", "name") if not repo.get(k)]',
+     "    missing = []",
+     "설정: 빠진 저장소 칸을 댄다"),
+    ("M189-json-guessed-by-shape", "agora/cli.py",
+     "    if key in JSON_ARGS:",
+     '    if raw[:1] in ("{", "["):',
+     "CLI: 대괄호 제목도 제목이다"),
+    ("M190-unexpected-error-leaks-message", "agora/cli.py",
+     '                         {"exception": type(e).__name__, "reason": "unexpected"})',
+     '                         {"exception": str(e), "reason": "unexpected"})',
+     "CLI: 뜻밖의 예외도 JSON"),
 )
 
 
@@ -6577,7 +6722,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S6-6(S6 완주)"
+            "슬라이스": "S7-1(실물 온보딩)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —

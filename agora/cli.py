@@ -100,6 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
 #   믿는다 — 틀린 곳과 탓하는 곳이 어긋난다. 처음 쓴 파서가 실제로 그랬다.
 INT_ARGS = frozenset({"round", "to_round", "value", "limit", "interval"})
 BOOL_ARGS = frozenset({"audit", "answered", "once"})
+# JSON 으로 읽는 칸 — **여기 없으면 문자열이다.**
+# ★「`{`·`[` 로 시작하면 JSON」으로 하면 **우리 규약이 요구하는 제목이 깨진다**:
+#   시험 글 제목은 `[selftest] …` 로 시작해야 하는데(04-tasks S7-2), 그 값이 JSON 으로 해석되어
+#   `code 10` 이 난다. S7-1 실물 절차에서 실제로 막혔다 — **값의 모양으로 추측하면
+#   언제나 이런 충돌이 생긴다.** 칸 이름은 계약이 정하고, 계약은 충돌하지 않는다.
+JSON_ARGS = frozenset({"envelope", "deadlines", "counter", "refs", "parent",
+                       "dissent", "recommended_actions", "arguments"})
 
 
 def _run_local(name: str, rest: list[str]) -> Any:
@@ -168,14 +175,14 @@ def _value(key: str, raw: str) -> Any:
             raise AgoraError(errors.ARGUMENT, "이 칸은 정수여야 한다",
                              {"key": key, "len": len(raw)})
         return int(raw)
-    if raw == "null":
-        return None
-    if raw[:1] in ("{", "["):
+    if key in JSON_ARGS:
         try:
             return json.loads(raw)
         except ValueError:
             raise AgoraError(errors.ARGUMENT, "JSON 인자를 읽지 못했다",
-                             {"starts_with": raw[:1]}) from None
+                             {"key": key}) from None
+    if raw == "null":
+        return None
     return raw
 
 
@@ -237,5 +244,16 @@ def main(argv: list[str] | None = None) -> int:
         if code == 0:
             return errors.OK
         err = AgoraError(errors.ARGUMENT, "인자 오류", {"argparse_exit": code})
+        print(err.to_json(), file=sys.stderr)
+        return err.code
+    except Exception as e:      # noqa: BLE001 — 최후 방어. 아래 이유로 **넓게** 잡는다.
+        # ★**어떤 실패든 JSON 으로 나간다**(이 파일의 계약 ⑶). 예상 못 한 예외가 날것으로 새면
+        #   사용자는 오류 계약을 믿고 있다가 **Traceback 을 받는다** — 그 순간
+        #   「무엇이 잘못됐나」를 기계가 읽을 방법이 사라진다(S7-1 에서 실제로 났다:
+        #   저장소 설정 칸이 계약에 없어 저장층 생성이 TypeError 로 터졌다).
+        # ★메시지 원문은 싣지 않는다 — 그 안에 경로·값이 섞여 나갈 수 있다. **타입만** 싣는다.
+        # ★`KeyboardInterrupt`·`SystemExit` 는 `Exception` 밖이라 여기 안 걸린다(의도한 것이다).
+        err = AgoraError(errors.PRECONDITION, "예상하지 못한 내부 오류",
+                         {"exception": type(e).__name__, "reason": "unexpected"})
         print(err.to_json(), file=sys.stderr)
         return err.code

@@ -405,12 +405,35 @@ def context_from_config(directory: str | None = None, *,
     from agora.spool import Spool
     d = directory or config_dir()
     doc = load(d)
+    cfg = load_config(d)
     if store is None:
-        from agora.store_github import GitHubStore
-        store = GitHubStore()
+        store = _store_from_config(cfg)
     return Context(store=store, ledger=Ledger(d), spool=Spool(d),
                    allowed_signers_path=_os.path.join(d, "allowed_signers"),
                    participant_id=doc["id"], config=load_config(d))
+
+
+def _store_from_config(cfg: dict[str, Any]) -> Any:
+    """설정에서 운반층을 세운다 — **어느 저장소인지는 설정에서만 온다.**
+
+    ★S7-1 에서 드러난 공백이다: 도구·CLI·문서는 다 있었는데 **「어느 저장소에 올리는가」를
+      적는 칸이 계약에 없었다.** 그래서 CLI 로 실제 도구를 부르면 저장층 생성에서
+      **날 예외**가 났다(오류 계약 밖). 문서만 보고 따라간 사람은 여기서 막힌다.
+    ★없으면 **무엇이 없는지 이름을 대고** code 2 로 멈춘다. 「설정이 잘못됐다」로만 말하면
+      사용자는 무엇을 고쳐야 하는지 모른다.
+    """
+    from agora.store_github import GitHubStore
+    repo = cfg.get("repo") or {}
+    missing = [k for k in ("owner", "name") if not repo.get(k)]
+    categories = cfg.get("categories") or {}
+    missing += [f"categories.{k}" for k in ("problem", "knowhow", "debate")
+                if not categories.get(k)]
+    if missing:
+        raise AgoraError(errors.PRECONDITION, "config.json 에 저장소 설정이 없다",
+                         {"missing": [f"repo.{m}" if m in ("owner", "name") else m
+                                      for m in missing],
+                          "file": "config.json"})
+    return GitHubStore(repo["owner"], repo["name"], categories)
 
 
 def load_config(directory: str) -> dict[str, Any]:

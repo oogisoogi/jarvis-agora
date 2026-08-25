@@ -12,9 +12,11 @@
 ## 1. 키 만들기
 
 ```
-agora keygen
+agora keygen <참가자-id>          # 예: agora keygen operator-a
 ```
 
+- **참가자 id 는 인자로 준다.** 없으면 `code 10` 으로 멈춘다.
+- 이 명령이 `participant.json` 까지 **만들어 준다** — 손으로 만들지 않아도 된다(§3 표 참조).
 - 출력에는 **지문만** 나온다. 개인키는 화면에 찍지 않는다.
 - 이미 키가 있으면 **덮어쓰지 않는다** — 덮어쓰면 그 키로 서명된 **과거 이벤트를 아무도
   검증할 수 없게 된다.**
@@ -30,7 +32,28 @@ agora keygen
 | 파일 | 무엇 | 권한 |
 |---|---|---|
 | `~/.config/agora/participant.json` | 신원(**비밀 없음** — 지문뿐) | `600`(폴더 `700`) |
-| `~/.config/agora/config.json` | 운영 설정(승인·예산·watch 주기) | `600` |
+| `~/.config/agora/config.json` | 운영 설정(승인·예산·watch 주기) + **저장소·카테고리** | `600` |
+| `~/.config/agora/allowed_signers` | 명부 사본(검증에 쓴다) | — |
+
+`config.json` 의 **저장소 칸은 필수**다 — 없으면 도구가 `code 2` 로 멈추고 **빠진 칸 이름을 댄다**:
+
+```json
+{
+  "repo": {"owner": "<계정>", "name": "<저장소>"},
+  "categories": {"problem": "<카테고리 id>", "knowhow": "…", "debate": "…"}
+}
+```
+
+카테고리 id 는 `gh api graphql` 로 한 번 조회해 적어 둔다(바뀌지 않는 값이다).
+
+## 3-1. 서명 키를 알려 준다
+
+```
+export AGORA_SIGNING_KEY=~/.config/agora/id_ed25519     # 또는 ssh-agent 에 올린 공개키 경로
+```
+
+⚠**이 환경변수가 없으면 글이 나가지 않는다**(`code 2` · `detail.env`).
+키 **경로**를 환경변수로 두는 이유는, 키 자체를 설정 파일에 적지 않기 위해서다.
 
 예시는 `config/*.example` 에 있다. ★**두 파일이 갈린 이유**: 참가자 파일은 계약된 칸만 허용해서
 (모르는 칸이 하나만 있어도 파일 전체가 거부된다) 설정을 거기 넣을 수 없다.
