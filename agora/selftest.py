@@ -3412,6 +3412,25 @@ def _case_watch_says_at_least_once_everywhere() -> None:
 #   이 케이스가 적색이 된다 — 그물을 걷어 낸 것이 조용히 지나가지 않는다.
 # S3(스크럽·게이트)의 4축(04-tasks S3-6) — 같은 규율을 그대로 적용한다.
 # S4(운반층)의 4축 — 페이지·한도·불명·투영.
+S5_AXES: dict[str, tuple[str, ...]] = {
+    "내구": ("M109-fsync-before-flush", "M110-spool-no-fsync",
+             "M111-spool-stage-goes-backwards", "M112-spool-torn-tail-silent",
+             "M113-spool-latest-row-wins", "M129-spool-drops-carried-values"),
+    "전달": ("M114-watch-reads-every-thread", "M115-watch-no-overlap",
+             "M116-watch-no-dedupe", "M117-watch-cursor-in-memory",
+             "M118-watch-claims-exactly-once", "M119-list-pagination-stops-early"),
+    "영수증": ("M120-ack-accepts-unreceived", "M121-ack-skips-delivered-check",
+                "M122-receipt-direction-is-sent", "M123-ack-writes-duplicate-receipt",
+                "M124-receipt-hash-blank", "M125-ack-does-not-advance-spool",
+                "M126-ack-skips-stored-event-check", "M130-ledger-has-ignores-stage"),
+    "삭제": ("M131-empty-response-tombstoned", "M132-truncated-pages-tombstoned",
+             "M133-tombstone-first-page-only", "M134-tombstone-written-twice",
+             "M135-event-removed-with-tombstone", "M136-tombstone-hash-blank",
+             "M137-looping-cursor-allowed", "M138-acked-not-separated",
+             "M139-local-scans-whole-events-dir", "M140-fetch-error-swallowed"),
+    "격리": ("M127-reader-gets-tools", "M128-ack-registered-not-built"),
+}
+
 S4_AXES: dict[str, tuple[str, ...]] = {
     "페이지": ("M93-github-first-page-only", "M94-github-replies-skipped",
                "M95-github-reply-first-page-only", "M96-github-lookup-not-cached"),
@@ -3475,6 +3494,35 @@ def _case_s3_axes_have_nets() -> None:
 def _case_s4_axes_have_nets() -> None:
     """S4 의 4축(페이지·한도·불명·투영)도 같은 방식으로 덮인다."""
     _axes_have_nets(S4_AXES, "S4")
+
+
+def _case_s5_axes_have_nets() -> None:
+    """S5 의 5축(내구·전달·영수증·삭제·격리)도 같은 방식으로 덮인다."""
+    _axes_have_nets(S5_AXES, "S5")
+
+
+def _case_mutation_ids_are_unique() -> None:
+    """뮤테이션 **번호**가 두 사건을 가리키지 않는다.
+
+    ★id 전체는 유일한데 **번호만 겹치는** 일이 실제로 났다(S5-3 이 M118·M119 를 다시 썼다).
+      하네스는 (파일·문자열)로 조준하니 **돌기는 잘 돌았다** — 그래서 아무도 안 알려 줬다.
+      깨지는 것은 사람 쪽이다: 보고서에서 「M118」이 두 항목을 가리키면 어느 그물이 살았는지
+      말로 지목할 수 없다. 이 저장소가 이미 아는 형태다 — **구분해야 하는 것은 이름을 가른다.**
+    ★규율로 두지 않는다. 번호를 다시 쓰면 **여기서 적색이 난다.**
+    """
+    from collections import Counter
+    ids = [m[0] for m in MUTATIONS]
+    dup_id = sorted(k for k, v in Counter(ids).items() if v > 1)
+    if dup_id:
+        raise AssertionError(f"같은 id 가 둘: {dup_id}")
+    nums = [m[0].split("-", 1)[0] for m in MUTATIONS]
+    dup_num = sorted(k for k, v in Counter(nums).items() if v > 1)
+    if dup_num:
+        raise AssertionError(f"같은 번호가 두 사건을 가리킨다: {dup_num}")
+    names = [c[0] for c in CASES]
+    dup_case = sorted(k for k, v in Counter(names).items() if v > 1)
+    if dup_case:
+        raise AssertionError(f"같은 케이스 이름이 둘: {dup_case}")
 
 
 def _case_quarantine_reasons_are_named() -> None:
@@ -4251,6 +4299,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("묘비: 소비한 것은 따로 센다",   _case_acked_but_gone_is_counted_apart, None),
     ("묘비: 사슬이 안 깨진다",        _case_tombstone_keeps_chain_intact, None),
     ("묘비: 기준은 보관 원문이다",    _case_local_count_comes_from_stored_events, None),
+    ("S5: 5축 그물 실재",             _case_s5_axes_have_nets, None),
+    ("표: 번호가 둘을 안 가리킨다",   _case_mutation_ids_are_unique, None),
 )
 
 
@@ -4742,88 +4792,88 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                ("type", "state", "round", "chair", "requester", "solved_by",\n                 "close_reason")}',
      "상태 해시: 결정론·민감"),
     # ── S5-3 ack 영수증 ─────────────────────────────────────────────────────
-    ("M118-ack-accepts-unreceived", "agora/ack.py",
+    ("M120-ack-accepts-unreceived", "agora/ack.py",
      "    if row is None:",
      "    if False:",
      "ack: 받지 않은 것은 거부"),
-    ("M119-ack-skips-delivered-check", "agora/ack.py",
+    ("M121-ack-skips-delivered-check", "agora/ack.py",
      '    if row.get("stage") not in (spool_mod.DELIVERED, spool_mod.ACKED):',
      "    if False:",
      "ack: 건네지 않은 것은 거부"),
-    ("M120-receipt-direction-is-sent", "agora/ack.py",
+    ("M122-receipt-direction-is-sent", "agora/ack.py",
      'DIRECTION = "recv"',
      'DIRECTION = "sent"',
      "ack: 원장 recv·acked 1행"),
-    ("M121-ack-writes-duplicate-receipt", "agora/ack.py",
+    ("M123-ack-writes-duplicate-receipt", "agora/ack.py",
      "    if not ledger.has(message_id, direction=DIRECTION, stage=spool_mod.ACKED):",
      "    if True:",
      "ack: 두 번 해도 영수증 1장"),
-    ("M122-receipt-hash-blank", "agora/ack.py",
+    ("M124-receipt-hash-blank", "agora/ack.py",
      "                                event_hash=hashlib.sha256(raw).hexdigest(),",
      '                                event_hash="",',
      "ack: 영수증은 원문 해시"),
-    ("M123-ack-does-not-advance-spool", "agora/ack.py",
+    ("M125-ack-does-not-advance-spool", "agora/ack.py",
      '        spool.record(node_id=row["node_id"], stage=spool_mod.ACKED,\n                     thread_id=thread_id, message_id=message_id)',
      "        pass",
      "ack: 전달됨 ≠ 소비됨 계수"),
-    ("M124-ack-skips-stored-event-check", "agora/ack.py",
+    ("M126-ack-skips-stored-event-check", "agora/ack.py",
      "    if raw is None:",
      "    if False:",
      "ack: 원문 없으면 거부"),
-    ("M125-reader-gets-tools", "agora/cli.py",
+    ("M127-reader-gets-tools", "agora/cli.py",
      "        return ()                      # ★무도구 — 이 공집합이 격리 그 자체다",
      "        return tuple(mcp_tool_name(n) for n in core_command_names())",
      "노출: reader 는 무도구"),
-    ("M126-ack-registered-not-built", "agora/cli.py",
+    ("M128-ack-registered-not-built", "agora/cli.py",
      '    "ack":            {"core": True,  "built": True,  "slice": "S5-3"},',
      '    "ack":            {"core": True,  "built": False, "slice": "S5-3"},',
      "ack: 등록·구현·배선"),
-    ("M127-spool-drops-carried-values", "agora/spool.py",
+    ("M129-spool-drops-carried-values", "agora/spool.py",
      "            if prev:\n                _carry(cur, prev)          # 앞 줄이 알던 것을 잃지 않는다",
      "            if False:\n                _carry(cur, prev)          # 앞 줄이 알던 것을 잃지 않는다",
      "spool: 딸린 값 이월"),
-    ("M128-ledger-has-ignores-stage", "agora/ledger.py",
+    ("M130-ledger-has-ignores-stage", "agora/ledger.py",
      '            if stage is not None and r.get("stage") != stage:',
      "            if False:",
      "ack: 원장 recv·acked 1행"),
     # ── S5-4 tombstone · reconciliation ─────────────────────────────────────
-    ("M129-empty-response-tombstoned", "agora/reconcile.py",
+    ("M131-empty-response-tombstoned", "agora/reconcile.py",
      '    if remote["items"] == 0:',
      "    if False:",
      "묘비: 빈 응답은 삭제가 아니다"),
-    ("M130-truncated-pages-tombstoned", "agora/reconcile.py",
+    ("M132-truncated-pages-tombstoned", "agora/reconcile.py",
      '    if not remote["complete"]:',
      "    if False:",
      "묘비: 절단이면 판정 보류"),
-    ("M131-first-page-only", "agora/reconcile.py",
+    ("M133-tombstone-first-page-only", "agora/reconcile.py",
      "        if not cursor:",
      "        if True:",
      "묘비: 페이지를 끝까지 돈다"),
-    ("M132-tombstone-written-twice", "agora/reconcile.py",
+    ("M134-tombstone-written-twice", "agora/reconcile.py",
      "        if ledger.has(mid, direction=DIRECTION, stage=TOMBSTONE):",
      "        if False:",
      "묘비: 한 번만 적는다"),
-    ("M133-event-removed-with-tombstone", "agora/reconcile.py",
+    ("M135-event-removed-with-tombstone", "agora/reconcile.py",
      "        raw = _read_raw(ledger, thread_id, mid)",
      '        raw = _read_raw(ledger, thread_id, mid)\n        os.remove(os.path.join(ledger.events_dir, thread_id, mid + ".json"))',
      "묘비: 원문은 남는다"),
-    ("M134-tombstone-hash-blank", "agora/reconcile.py",
+    ("M136-tombstone-hash-blank", "agora/reconcile.py",
      "                                     event_hash=hashlib.sha256(raw).hexdigest(),",
      '                                     event_hash="",',
      "묘비: 원문은 남는다"),
-    ("M135-looping-cursor-allowed", "agora/reconcile.py",
+    ("M137-looping-cursor-allowed", "agora/reconcile.py",
      "        if cursor in seen_cursors:",
      "        if False:",
      "묘비: 제자리 커서는 멈춘다"),
-    ("M136-acked-not-separated", "agora/reconcile.py",
+    ("M138-acked-not-separated", "agora/reconcile.py",
      '        if row and row.get("stage") == spool_mod.ACKED:',
      "        if row:",
      "묘비: 소비한 것은 따로 센다"),
-    ("M137-local-scans-whole-events-dir", "agora/reconcile.py",
+    ("M139-local-scans-whole-events-dir", "agora/reconcile.py",
      "    d = os.path.join(ledger.events_dir, thread_id)",
      "    d = ledger.events_dir",
      "묘비: 기준은 보관 원문이다"),
-    ("M138-fetch-error-swallowed", "agora/reconcile.py",
+    ("M140-fetch-error-swallowed", "agora/reconcile.py",
      "        page = store.fetch(thread_id=thread_id, cursor=cursor)",
      '        try:\n            page = store.fetch(thread_id=thread_id, cursor=cursor)\n        except AgoraError:\n            return {"ids": found, "complete": True, "pages": pages, "items": items}',
      "묘비: 조회 실패는 삭제가 아냐"),
@@ -4998,7 +5048,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S5-4(tombstone·reconciliation)"
+            "슬라이스": "S5-5(S5 완주)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
