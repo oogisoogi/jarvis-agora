@@ -138,17 +138,29 @@ def _rpc_error(code: int, message: str, data: Any = None) -> dict[str, Any]:
 
 
 def negotiate(protocol: Any) -> str:
-    """규약 판본 협상 — 아는 것이면 **그대로 되돌려 주고**, 모르면 거부한다.
+    """규약 판본 협상(MCP Lifecycle §Version Negotiation).
 
-    ★조용히 우리 판본으로 바꿔 답하면 클라이언트는 자기가 요청한 판본으로 말하고
-      우리는 다른 판본으로 답하는 상태가 된다 — 그 어긋남은 한참 뒤 엉뚱한 자리에서 터진다.
+    ★규약이 정한 것은 이렇다: 요청 판본을 **지원하면 같은 판본으로 응답** ·
+      **지원하지 않으면 서버가 지원하는 판본으로 응답** · 그 판본을 못 쓰겠으면
+      **클라이언트가** 연결을 끊는다. ⇒ **거절은 서버의 몫이 아니다.**
+
+    ★★**초판은 이것을 반대로 했다**(2026-08-26 master 의 C-7 실측이 잡았다):
+      모르는 판본을 **거부**했다. 그래서 Claude Code 2.1.245 가 보내는 `2025-11-25` 에
+      `-32601` 을 냈고, 클라이언트는 **조용히 서버를 버렸다**(도구 0종). 화면에는 오류도 안 뜬다.
+      ⇒ 「조용한 강제 변환은 나쁘다」는 내 규율이 옳았지만 **적용할 자리를 틀렸다**:
+        규약이 요구하는 것은 「지원 판본으로 **답하기**」이지 「거부」가 아니다.
+        그리고 그 답 자체가 협상 결과의 **명시**라서 조용한 변환이 아니다.
+    ⚠거부는 **`protocolVersion` 이 아예 없거나 문자열이 아닐 때만** — 그건 협상이 아니라
+      깨진 요청이다.
     """
-    if protocol is None:
-        return SUPPORTED_PROTOCOLS[0]
+    if type(protocol) is not str or not protocol:
+        raise AgoraError(errors.ARGUMENT, "protocolVersion 이 문자열이 아니다",
+                         {"got": type(protocol).__name__,
+                          "supported": list(SUPPORTED_PROTOCOLS)})
     if protocol in SUPPORTED_PROTOCOLS:
         return protocol
-    raise AgoraError(errors.ARGUMENT, "모르는 규약 판본",
-                     {"got": str(protocol)[:40], "supported": list(SUPPORTED_PROTOCOLS)})
+    # 모르는 판본 — **우리가 지원하는 최신 판본으로 답한다.** 이어 갈지는 클라이언트가 정한다.
+    return SUPPORTED_PROTOCOLS[0]
 
 
 def rpc_dispatch(request: dict[str, Any], *, ctx: Any = None) -> dict[str, Any]:

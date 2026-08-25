@@ -3483,7 +3483,7 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "투영정합": ("M229-close-projects-unconditionally", "M230-acceptance-always-true"),
     # ★우리 방언으로만 참이던 도구 표면(성찰 I-8).
     "전송규약": ("M231-rpc-envelope-stripped", "M232-rpc-answers-notifications",
-                 "M233-rpc-error-sent-as-result", "M234-rpc-protocol-silently-coerced"),
+                 "M233-rpc-error-sent-as-result", "M234-rpc-claims-unsupported-protocol"),
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
                  "M227-operator-may-delegate-anytime"),
@@ -6615,24 +6615,35 @@ def _case_mcp_speaks_jsonrpc_not_our_dialect() -> None:
         raise AssertionError(f"우리 code 가 사라졌다: {err}")
 
 
-def _case_mcp_rejects_unknown_protocol_version() -> None:
-    """모르는 규약 판본은 **거부한다** — 조용히 우리 판본으로 바꿔 답하지 않는다.
+def _case_mcp_negotiates_protocol_the_way_the_spec_says() -> None:
+    """판본 협상은 **규약이 정한 대로**(MCP Lifecycle §Version Negotiation).
 
-    ★바꿔 답하면 클라이언트는 자기가 요청한 판본으로 말하고 우리는 다른 판본으로 답한다.
-      그 어긋남은 한참 뒤 엉뚱한 자리에서 터지고, 그때는 원인을 여기까지 못 따라온다.
-    ★양쪽으로 잰다: 아는 판본 2종은 **그대로 되돌려 주고**, 모르는 판본은 오류다.
+    ★규약: 지원하면 **같은 판본으로 응답** · 지원하지 않으면 **서버가 지원하는 판본으로 응답** ·
+      못 쓰겠으면 **클라이언트가** 끊는다. ⇒ **거절은 서버의 몫이 아니다.**
+    ★★초판은 이것을 **반대로** 했고, 그 대가를 실물에서 치렀다(2026-08-26 C-7 실측):
+      Claude Code 2.1.245 가 보내는 `2025-11-25` 에 `-32601` 을 냈고 **클라이언트는 조용히
+      서버를 버렸다**(세션 도구 0종 · 오류도 안 뜬다). 「조용한 강제 변환은 나쁘다」는 규율은
+      옳았지만 **적용할 자리가 아니었다** — 규약이 요구한 것은 「지원 판본으로 답하기」다.
+    ★세 갈래를 **각각** 연다: 아는 판본 · 모르는 판본 · **깨진 요청**(판본이 없거나 문자열이 아님).
+      앞의 둘만 재면 「무엇이든 최신 판본으로 답하는」 구현도 초록이다.
     """
     from agora import mcp_server
     for version in mcp_server.SUPPORTED_PROTOCOLS:
         if mcp_server.negotiate(version) != version:
             raise AssertionError(f"아는 판본을 안 돌려준다: {version}")
-    try:
-        mcp_server.negotiate("1999-01-01")
-    except AgoraError as e:
-        if e.code != errors.ARGUMENT:
-            raise AssertionError(f"다른 코드: {e.code}") from None
-    else:
-        raise AssertionError("모르는 판본을 조용히 받아들였다")
+    got = mcp_server.negotiate("2025-11-25")      # 실물 Claude Code 2.1.245 가 보내는 값
+    if got != mcp_server.SUPPORTED_PROTOCOLS[0]:
+        raise AssertionError(f"모르는 판본에 지원 판본으로 안 답한다: {got}")
+    if got == "2025-11-25":
+        raise AssertionError("지원하지 않는 판본을 지원한다고 답했다")
+    for broken in (None, 20251125, ""):
+        try:
+            mcp_server.negotiate(broken)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"다른 코드: {e.code}") from None
+        else:
+            raise AssertionError(f"깨진 요청을 받아들였다: {broken!r}")
 
 
 # ── 배선 대조 자체를 상시 케이스로(master 승인 2026-08-26) ───────────────────
@@ -7068,7 +7079,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("목록: 못 세운 것을 말한다",      _case_threads_shows_what_it_could_not_verify, None),
     ("투영: 거부된 종결은 안 닫는다",  _case_rejected_close_does_not_touch_the_screen, None),
     ("MCP: 규약으로 말한다",           _case_mcp_speaks_jsonrpc_not_our_dialect, None),
-    ("MCP: 모르는 판본은 거부",        _case_mcp_rejects_unknown_protocol_version, None),
+    ("MCP: 판본 협상은 규약대로",     _case_mcp_negotiates_protocol_the_way_the_spec_says, None),
 )
 
 
@@ -7993,10 +8004,13 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            _write(dst, {"jsonrpc": JSONRPC, "id": request.get("id"),\n                         "error": _rpc_error(',
      '            _write(dst, {"jsonrpc": JSONRPC, "id": request.get("id"),\n                         "result": _rpc_error(',
      "MCP: 규약으로 말한다"),
-    ("M234-rpc-protocol-silently-coerced", "agora/mcp_server.py",
-     '    raise AgoraError(errors.ARGUMENT, "모르는 규약 판본",',
-     "    return SUPPORTED_PROTOCOLS[0]\n    raise AgoraError(errors.ARGUMENT, \"모르는 규약 판본\",",
-     "MCP: 모르는 판본은 거부"),
+    # ★변이의 뜻이 바뀌었다(2026-08-26 · 규약 실측 후): 이제 위험한 것은 「거부 안 함」이 아니라
+    #   **「지원하지 않는 판본을 지원한다고 답하는 것」**이다 — 그러면 클라이언트는 우리가 못 쓰는
+    #   판본으로 말하기 시작하고, 그 어긋남은 한참 뒤에 터진다.
+    ("M234-rpc-claims-unsupported-protocol", "agora/mcp_server.py",
+     "    # 모르는 판본 — **우리가 지원하는 최신 판본으로 답한다.** 이어 갈지는 클라이언트가 정한다.\n    return SUPPORTED_PROTOCOLS[0]",
+     "    return protocol",
+     "MCP: 판본 협상은 규약대로"),
     ("M229-close-projects-unconditionally", "agora/tools.py",
      '    verdict = _accepted(ctx, thread_id, out["message_id"])\n    if not verdict["accepted"]:\n        return {"ok": False, "message_id": out["message_id"], "usage": out["usage"],\n                "why": verdict["why"], "state": verdict["state"],\n                "projection": {"sent": False, "verified": False, "why": "not_accepted"}}\n    projection = _project(ctx, thread_id=thread_id, state="closed", close_reason=reason)',
      '    projection = _project(ctx, thread_id=thread_id, state="closed", close_reason=reason)',
