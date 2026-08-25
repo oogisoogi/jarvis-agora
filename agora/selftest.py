@@ -3021,6 +3021,176 @@ def _case_verdict_comes_from_store_not_ledger() -> None:
         raise AssertionError(f"운반층에 없는데 {verdict} 로 판정했다 "
                              "(원장을 봤거나, 아무 글이나 맞다고 했다)")
 
+# ── S5-1 durable spool ──────────────────────────────────────────────────────
+# ★이 절의 케이스는 **두 가지 다른 것**을 잰다. 뭉치지 않는다:
+#   ⑴ SIGKILL 픽스처 = 「메모리에만 갖고 있지 않은가」(write 가 커널까지 갔는가)
+#   ⑵ fsync 관측     = 「디스크까지 밀라고 시켰는가」
+#   전원 손실에서 살아남는지는 이 기계에서 재현하지 않는다 — **미측정**이고 그렇게 적는다.
+
+def _spool_dir() -> str:
+    import tempfile
+    return tempfile.mkdtemp(prefix="agora-spool-")
+
+
+def _crash_after(stage_script: str, directory: str) -> int:
+    """자식 프로세스에서 전이를 기록한 **직후 SIGKILL** 로 죽인다.
+
+    ★`finally`·atexit·버퍼 flush 가 전혀 안 도는 죽음이다. 그래도 남아 있어야 한다.
+    """
+    import subprocess
+    code = (
+        "import os, signal, sys;"
+        "sys.path.insert(0, %r);"
+        "from agora.spool import Spool, FETCHED, DELIVERED, ACKED;"
+        "s = Spool(%r);"
+        "%s;"
+        "os.kill(os.getpid(), signal.SIGKILL)"
+    ) % (_ROOT, directory, stage_script)
+    proc = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True,
+                          text=True, timeout=60)
+    return proc.returncode
+
+
+def _case_spool_survives_kill_at_three_points() -> None:
+    """세 지점 전부에서 강제 종료해도 상태가 남는다(AC ① · 3지점 crash 픽스처)."""
+    from agora.spool import Spool
+    d = _spool_dir()
+    steps = [
+        ("s.record(node_id='N1', stage=FETCHED, thread_id='t1')", "fetched"),
+        ("s.record(node_id='N1', stage=DELIVERED)", "delivered"),
+        ("s.record(node_id='N1', stage=ACKED)", "acked"),
+    ]
+    for script, want in steps:
+        rc = _crash_after(script, d)
+        if rc == 0:
+            raise AssertionError("자식이 강제 종료로 죽지 않았다 — 픽스처가 무효다")
+        state = Spool(d).state().get("N1")
+        if not state or state["stage"] != want:
+            raise AssertionError(f"강제 종료 뒤 상태가 사라졌다: {state} (기대 {want})")
+
+
+def _case_spool_fsync_is_called() -> None:
+    """디스크까지 밀라고 **실제로 시키는지** 관측한다(AC ②).
+
+    ★SIGKILL 픽스처로는 이 축을 못 잰다 — 커널 페이지 캐시는 프로세스가 죽어도 살아 있다.
+      fsync 가 막는 것은 전원 손실이고, 그것은 여기서 재현하지 않는다.
+      그러니 「불렀는가」라도 봐야 한다. 안 보면 지워져도 아무도 모른다.
+    """
+    from agora.spool import Spool, FETCHED
+    calls: list = []
+    s = Spool(_spool_dir())
+
+    def watching_fsync(fd: int) -> None:
+        # ★fsync 를 부르는 **그 순간** 파일에 무엇이 있는지 본다.
+        #   flush 없이 fsync 하면 바이트는 아직 파이썬 버퍼에 있고, 디스크로 민 것은 **빈 파일**이다.
+        #   그 결함은 SIGKILL 픽스처로는 안 보인다 — with 블록이 닫히며 어차피 flush 되기 때문이다
+        #   (M109 가 처음에 그렇게 살아남았다). 그러니 「불렀는가」만으로도 모자라다.
+        with open(s.path, encoding="utf-8") as fh:
+            calls.append(fh.read())
+        os.fsync(fd)
+
+    s._fsync = watching_fsync
+    s.record(node_id="N1", stage=FETCHED, thread_id="t1")
+    s.record(node_id="N2", stage=FETCHED, thread_id="t1")
+    if len(calls) != 2:
+        raise AssertionError(f"fsync 호출 {len(calls)}회 — 기록마다 한 번이어야 한다")
+    if "N1" not in calls[0]:
+        raise AssertionError("fsync 를 부를 때 파일이 비어 있었다 — 버퍼를 안 비우고 밀었다")
+    if "N2" not in calls[1]:
+        raise AssertionError("두 번째 기록이 fsync 시점에 파일에 없다")
+
+
+def _case_spool_stages_go_forward_only() -> None:
+    """단계는 뒤로 가지 않는다 — 「소비했다」가 「건넸다」로 되돌아가면 수신 증거가 사라진다."""
+    from agora.spool import Spool, ACKED, DELIVERED, FETCHED
+    s = Spool(_spool_dir())
+    s.record(node_id="N1", stage=FETCHED)
+    s.record(node_id="N1", stage=ACKED)
+    for backwards in (FETCHED, DELIVERED):
+        try:
+            s.record(node_id="N1", stage=backwards)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"code {e.code} != 10") from None
+            continue
+        raise AssertionError(f"{backwards} 로 되돌아갔다")
+
+
+def _case_spool_state_keeps_furthest_stage() -> None:
+    """파일에 단계가 **뒤섞여** 들어 있어도 상태는 가장 앞선 단계다.
+
+    ★`record` 의 가드는 우리 프로세스만 막는다. 파일에는 다른 경로로 줄이 들어올 수 있다 —
+      두 프로세스가 동시에 붙이거나, 옛 도구가 쓴 줄이 남아 있거나.
+      그때 「마지막 줄이 이긴다」로 접으면 **acked 가 delivered 로 되돌아간다**
+      (수신 증거가 조용히 사라진다). M113 이 처음에 살아남은 자리다 —
+      `record` 가 막아 주는 바람에 그 줄이 파일에 **한 번도 없었기** 때문이다.
+    """
+    import json as _json
+    from agora.spool import Spool, ACKED, DELIVERED, FETCHED
+    d = _spool_dir()
+    s = Spool(d)
+    s.record(node_id="N1", stage=FETCHED, thread_id="t1")
+    with open(s.path, "a", encoding="utf-8") as fh:      # 손으로 뒤섞어 넣는다
+        fh.write(_json.dumps({"node_id": "N1", "stage": ACKED,
+                              "ts": "2026-01-01T00:00:01Z"}) + "\n")
+        fh.write(_json.dumps({"node_id": "N1", "stage": DELIVERED,
+                              "ts": "2026-01-01T00:00:02Z"}) + "\n")
+    state = Spool(d).state()["N1"]
+    if state["stage"] != ACKED:
+        raise AssertionError(f"뒤 줄이 앞선 단계를 덮었다: {state}")
+
+
+def _case_spool_dedupe_by_node_id() -> None:
+    """같은 node_id 를 두 번 받아도 한 건이다(at-least-once 의 짝)."""
+    from agora.spool import Spool, FETCHED
+    s = Spool(_spool_dir())
+    s.record(node_id="N1", stage=FETCHED, thread_id="t1")
+    if not s.seen("N1") or s.seen("N2"):
+        raise AssertionError("dedupe 판정이 틀렸다")
+    s.record(node_id="N1", stage=FETCHED, thread_id="t1")     # 다시 받아도
+    if len(s.state()) != 1:
+        raise AssertionError(f"같은 node_id 가 둘로 셌다: {s.state()}")
+
+
+def _case_spool_delivered_is_not_consumed() -> None:
+    """「전달됨」과 「소비됨」을 계수로 가른다(§8 FR-15 · S5-3 의 전제).
+
+    ★뭉치면 받아 놓고 아무도 안 읽은 것이 수신 증거로 계상된다.
+    """
+    from agora.spool import Spool, ACKED, DELIVERED, FETCHED
+    s = Spool(_spool_dir())
+    for nid in ("N1", "N2", "N3"):
+        s.record(node_id=nid, stage=FETCHED, thread_id="t1")
+    s.record(node_id="N1", stage=DELIVERED)
+    s.record(node_id="N2", stage=DELIVERED)
+    s.record(node_id="N2", stage=ACKED)
+    if s.pending(DELIVERED) != ["N1"]:
+        raise AssertionError(f"미소비 목록: {s.pending(DELIVERED)}")
+    if s.pending(ACKED) != ["N2"]:
+        raise AssertionError(f"소비 목록: {s.pending(ACKED)}")
+    if s.pending(FETCHED) != ["N3"]:
+        raise AssertionError(f"미전달 목록: {s.pending(FETCHED)}")
+
+
+def _case_spool_torn_tail_is_counted_not_swallowed() -> None:
+    """쓰다 만 마지막 줄은 **버리되 센다**.
+
+    ★파싱 실패로 전체를 막으면 spool 하나가 채널을 멈춘다.
+      조용히 버리면 무슨 일이 있었는지 아무도 모른다. 그래서 버리고 계수한다.
+    """
+    from agora.spool import Spool, FETCHED
+    d = _spool_dir()
+    s = Spool(d)
+    s.record(node_id="N1", stage=FETCHED, thread_id="t1")
+    with open(s.path, "a", encoding="utf-8") as fh:
+        fh.write('{"node_id": "N2", "stage": "fetc')      # 쓰다 죽은 모양
+    s2 = Spool(d)
+    state = s2.state()
+    if list(state) != ["N1"]:
+        raise AssertionError(f"반쪽 줄을 상태로 읽었다: {state}")
+    if s2.malformed != 1:
+        raise AssertionError(f"반쪽 줄을 조용히 버렸다: malformed={s2.malformed}")
+
 # ── S2-8 슬라이스 마감 — 그물 대장 ─────────────────────────────────────────
 
 # S2 가 지켜야 할 4축(04-tasks S2-8) → 그 축을 재는 뮤테이션.
@@ -3292,6 +3462,13 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("불명: 두 번 정산해도 1행",      _case_settle_twice_leaves_one_row, None),
     ("원장: 정상 발신은 1행",         _case_success_path_writes_ledger_row, None),
     ("불명: 판정은 운반층이 한다",    _case_verdict_comes_from_store_not_ledger, None),
+    ("spool: 3지점 강제 종료 생존",   _case_spool_survives_kill_at_three_points, None),
+    ("spool: fsync 를 부른다",        _case_spool_fsync_is_called, None),
+    ("spool: 단계는 앞으로만",        _case_spool_stages_go_forward_only, None),
+    ("spool: 앞선 단계가 이긴다",     _case_spool_state_keeps_furthest_stage, None),
+    ("spool: node_id dedupe",         _case_spool_dedupe_by_node_id, None),
+    ("spool: 전달됨 ≠ 소비됨",        _case_spool_delivered_is_not_consumed, None),
+    ("spool: 잘린 꼬리는 계수",       _case_spool_torn_tail_is_counted_not_swallowed, None),
     ("S4: 4축 그물 실재",             _case_s4_axes_have_nets, None),
 )
 
@@ -3511,6 +3688,28 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if expected_state != now:",
      "    if False:",
      "CAS: 낡은 상태로 쓰기 → 9"),
+    # ★재조준: SIGKILL 은 flush 를 못 잰다(with 블록이 닫히며 어차피 flush 된다).
+    #   flush 를 지우면 **fsync 가 빈 파일을 민다** — 그것을 보는 케이스로 옮겼다.
+    ("M109-fsync-before-flush", "agora/spool.py",
+     '                    fh.flush()              # ★커널까지 — SIGKILL 을 이긴다',
+     "                    pass",
+     "spool: fsync 를 부른다"),
+    ("M110-spool-no-fsync", "agora/spool.py",
+     "                    self._fsync(fh.fileno())  # ★디스크까지 — 전원 손실을 겨냥한다",
+     "                    pass",
+     "spool: fsync 를 부른다"),
+    ("M111-spool-stage-goes-backwards", "agora/spool.py",
+     '        if current and _RANK[stage] < _RANK[current["stage"]]:',
+     "        if False:",
+     "spool: 단계는 앞으로만"),
+    ("M112-spool-torn-tail-silent", "agora/spool.py",
+     "                    self.malformed += 1",
+     "                    pass",
+     "spool: 잘린 꼬리는 계수"),
+    ("M113-spool-latest-row-wins", "agora/spool.py",
+     '            if prev and _RANK.get(row.get("stage"), -1) <= _RANK.get(prev["stage"], -1):',
+     "            if False:",
+     "spool: 앞선 단계가 이긴다"),
     ("M103-ledger-duplicate-allowed", "agora/core.py",
      '    if ledger.has(event["message_id"]):\n        return None',
      "    if False:\n        return None",
@@ -3908,7 +4107,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S4-4(투영 · S4 완주)"
+            "슬라이스": "S5-1(durable spool)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
