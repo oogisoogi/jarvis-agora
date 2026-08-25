@@ -3421,6 +3421,35 @@ def _case_watch_says_at_least_once_everywhere() -> None:
 #   이 케이스가 적색이 된다 — 그물을 걷어 낸 것이 조용히 지나가지 않는다.
 # S3(스크럽·게이트)의 4축(04-tasks S3-6) — 같은 규율을 그대로 적용한다.
 # S4(운반층)의 4축 — 페이지·한도·불명·투영.
+S6_AXES: dict[str, tuple[str, ...]] = {
+    "계약": ("M141-tool-table-shrunk", "M149-unknown-tool-passes",
+             "M152-tool-takes-positional-arg", "M164-local-command-becomes-tool",
+             "M151-cli-guesses-int-anywhere"),
+    "도구경로": ("M142-publish-forces-approval-off", "M143-say-round-not-defaulted",
+                 "M144-advance-chair-check-off", "M145-mark-solved-requester-check-off",
+                 "M146-usage-guesses-tokens", "M150-ack-without-spool"),
+    "비용정직": ("M147-scan-count-is-item-count", "M148-threads-drops-next-cursor"),
+    "반출입": ("M153-export-scan-skips-events", "M154-import-skips-chain-check",
+               "M155-import-skips-event-hash", "M156-import-appends-to-ledger",
+               "M157-unknown-counted-as-checked", "M158-ledger-drops-hash-kind",
+               "M159-sent-labeled-as-raw"),
+    "감시설정": ("M160-watch-batches-output", "M161-watch-reconciles-every-round",
+                 "M162-reconcile-period-changed", "M163-config-read-from-participant"),
+    "격리": ("M165-brief-tools-hardcoded", "M166-brief-empty-is-silent",
+             "M167-brief-marker-is-fixed", "M168-reader-gets-writer-brief",
+             "M170-reader-brief-loses-no-hands", "M171-writer-brief-drops-approval"),
+    "문서": ("M169-unmeasured-claims-measured", "M172-protocol-drops-private-key-rule",
+             "M173-threat-drops-hash-row", "M174-threat-softens-marker-row",
+             "M175-readme-drops-k1", "M176-readme-claims-zero-dependency",
+             "M177-protocol-code-table-stale"),
+    "관계": ("M178-related-is-one-way", "M179-related-includes-self",
+             "M180-read-drops-refs", "M181-promotion-loses-parent",
+             "M182-related-forward-only"),
+    "MCP표면": ("M183-mcp-schema-hardcoded", "M184-mcp-required-not-marked",
+                "M185-mcp-path-check-off", "M186-mcp-accepts-any-method",
+                "M187-mcp-accepts-unknown-tool"),
+}
+
 S5_AXES: dict[str, tuple[str, ...]] = {
     "내구": ("M109-fsync-before-flush", "M110-spool-no-fsync",
              "M111-spool-stage-goes-backwards", "M112-spool-torn-tail-silent",
@@ -3508,6 +3537,28 @@ def _case_s4_axes_have_nets() -> None:
 def _case_s5_axes_have_nets() -> None:
     """S5 의 5축(내구·전달·영수증·삭제·격리)도 같은 방식으로 덮인다."""
     _axes_have_nets(S5_AXES, "S5")
+
+
+def _case_s6_axes_have_nets() -> None:
+    """S6 의 9축(계약·도구경로·비용정직·반출입·감시설정·격리·문서·관계·MCP표면)도 같은 방식으로 덮인다."""
+    _axes_have_nets(S6_AXES, "S6")
+
+
+def _case_every_mutation_belongs_to_an_axis() -> None:
+    """★S5·S6 의 뮤테이션은 **하나도 빠짐없이** 어느 축에 속한다.
+
+    ★축 대장을 「만들어 두는 것」과 「덮는 것」은 다르다. 대장에 안 실린 뮤테이션은
+      **그 축이 비어도 아무도 모른다** — 표가 있으니 덮였다고 착각한다.
+      그래서 반대 방향으로도 잰다: 표가 뮤테이션을 덮는가가 아니라, **뮤테이션이 표에 있는가.**
+    """
+    covered: set[str] = set()
+    for table in (S2_AXES, S3_AXES, S4_AXES, S5_AXES, S6_AXES):
+        for want in table.values():
+            covered |= set(want)
+    late = {m[0] for m in MUTATIONS if int(m[0].split("-")[0][1:]) >= 109}
+    orphan = sorted(late - covered)
+    if orphan:
+        raise AssertionError(f"어느 축에도 안 실린 뮤테이션: {orphan}")
 
 
 def _case_mutation_ids_are_unique() -> None:
@@ -5179,6 +5230,131 @@ def _case_link_to_unopened_thread_is_allowed() -> None:
         raise AssertionError(f"미해소인데 해소로 표시됐다: {hit[0]}")
 
 
+# ── S6-6 MCP 서버 · S6 완주 ─────────────────────────────────────────────────
+# ★S6-1 의 AC 에 「MCP 서버 11종」과 「스키마 = 시그니처 **자동 대조**」가 있었는데
+#   그때는 코어 함수까지만 했다. 완주 슬라이스에서 그것을 메운다 —
+#   **덜 한 것을 완주로 적지 않는다.**
+
+def _case_mcp_exposes_eleven_tools() -> None:
+    """MCP 표면이 **도구 11종 전건**이고, 이름 규칙이 등록표와 같다."""
+    from agora import cli, mcp_server, tools
+    schemas = mcp_server.tool_schemas()
+    if len(schemas) != 11:
+        raise AssertionError(f"MCP 도구 수: {len(schemas)}")
+    names = {s["name"] for s in schemas}
+    want = {cli.mcp_tool_name(n) for n in tools.CORE_TOOLS}
+    if names != want:
+        raise AssertionError(f"MCP 이름이 등록표와 다르다: {sorted(names ^ want)}")
+    for name in cli.MCP_EXEMPT:
+        if cli.mcp_tool_name(name) in names:
+            raise AssertionError(f"예외인데 노출됐다: {name}")
+
+
+def _case_mcp_schema_follows_signature() -> None:
+    """★스키마는 **코어 함수 시그니처에서 파생**된다 — 손으로 적은 목록이 아니다(AC ①).
+
+    ★한쪽에 인자를 더하면 다른 쪽이 따라와야 한다. 이 케이스는 **실제로 인자를 하나 더해 보고**
+      스키마가 그것을 싣는지 본다 — 「파생한다고 적혀 있다」가 아니라 **파생하는지**를 잰다.
+    """
+    import inspect
+    from agora import mcp_server, tools
+    for name, fn in tools.CORE_TOOLS.items():
+        schema = mcp_server.tool_schema(name)["inputSchema"]
+        params = list(inspect.signature(fn).parameters.values())[1:]
+        if set(schema["properties"]) != {p.name for p in params}:
+            raise AssertionError(f"{name}: 스키마와 시그니처가 다르다")
+        want_required = {p.name for p in params
+                         if p.default is inspect.Parameter.empty}
+        if set(schema["required"]) != want_required:
+            raise AssertionError(f"{name}: 필수 칸이 다르다")
+
+    def probe(ctx: Any, *, 새인자: str, 두번째: int = 0) -> None:
+        """탐침."""
+
+    tools.CORE_TOOLS["__탐침__"] = probe
+    try:
+        got = mcp_server.tool_schema("__탐침__")["inputSchema"]
+    finally:
+        tools.CORE_TOOLS.pop("__탐침__", None)
+    if set(got["properties"]) != {"새인자", "두번째"}:
+        raise AssertionError(f"새 인자가 스키마에 안 실렸다: {got}")
+    if got["required"] != ["새인자"]:
+        raise AssertionError(f"필수/선택 구분이 안 된다: {got['required']}")
+    if got["properties"]["두번째"]["type"] != "integer":
+        raise AssertionError(f"타입이 시그니처를 안 따른다: {got['properties']}")
+
+
+def _case_mcp_has_no_path_arguments() -> None:
+    """★MCP 인자에 **파일 경로가 없다**(AC ② · 경로형 인자 0건).
+
+    ★원격 클라이언트는 우리 파일 시스템을 갖고 있지 않다 — 경로를 받는 도구는
+      그 클라이언트에서 **반드시 실패한다.** 파일 인자는 CLI 의 몫이다.
+    """
+    from agora import mcp_server, tools
+    found = mcp_server.path_like_arguments()
+    if found:
+        raise AssertionError(f"MCP 표면에 경로형 인자가 있다: {found}")
+
+    # ★검사기가 **실제로 잡는지**를 확인한다. 지금 경로형 인자가 0 이므로, 이 케이스는
+    #   검사기를 통째로 지워도 초록이다 — 「0 건이다」와 「검사를 안 한다」가 구별되지 않는다.
+    #   ⇒ 경로 인자를 가진 탐침 도구를 잠시 얹어 **잡히는지** 보고 되돌린다.
+    def probe(ctx: Any, *, out_path: str) -> None:
+        """탐침."""
+
+    tools.CORE_TOOLS["__경로탐침__"] = probe
+    try:
+        caught = mcp_server.path_like_arguments()
+    finally:
+        tools.CORE_TOOLS.pop("__경로탐침__", None)
+    if not any("out_path" in name for name in caught):
+        raise AssertionError("경로형 인자를 얹었는데 검사기가 못 잡는다")
+
+
+def _case_mcp_rejects_unknown_method_and_tool() -> None:
+    """모르는 메서드·도구는 **거부한다** — 조용한 빈 응답은 두 상황을 뭉갠다."""
+    from agora import mcp_server
+    # ★**어느 문에서 막혔는지까지** 단언한다. 코드만 재면 두 문이 서로를 가려 준다 —
+    #   메서드 가드를 지워도 뒤의 도구 가드가 같은 code 10 을 내고, 그 반대도 마찬가지다
+    #   (M186·M187 이 처음에 둘 다 살아남은 자리 · 오늘 열여섯 번째 같은 계보).
+    for request in ({"method": "resources/list"}, {"method": None}):
+        try:
+            mcp_server.handle(request)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"다른 코드: {e.code}") from None
+            if "supported" not in (e.detail or {}):
+                raise AssertionError(f"메서드 가드가 아니라 다른 문이 막았다: {e.detail}")
+        else:
+            raise AssertionError(f"모르는 메서드를 통과시켰다: {request}")
+    try:
+        mcp_server.handle({"method": "tools/call",
+                           "params": {"name": "agora.삭제", "arguments": {}}},
+                          ctx=object())
+    except AgoraError as e:
+        if e.code != errors.ARGUMENT or (e.detail or {}).get("surface") != "mcp":
+            # ★`tools.call` 도 같은 것을 막는다(방어 두 겹). 그래서 **이 층의 표식**을 본다 —
+            #   안 그러면 MCP 쪽 문을 지워도 아래 문이 대신 답해 초록이 유지된다.
+            raise AssertionError(f"MCP 층이 아니라 다른 문이 막았다: {e.code} {e.detail}") from None
+    else:
+        raise AssertionError("계약 밖 도구를 통과시켰다")
+
+
+def _case_mcp_call_reaches_the_tool() -> None:
+    """`tools/call` 이 **실제 도구까지 닿는다** — 목록만 있고 호출이 안 되면 절반이다."""
+    from agora import mcp_server, tools
+    ctx = _tools_ctx()
+    f = _fixtures()
+    tid = _tools_thread(ctx)
+    out = mcp_server.handle({"method": "tools/call",
+                             "params": {"name": "agora.read",
+                                        "arguments": {"thread_id": tid}}}, ctx=ctx)
+    if out["result"]["state"]["state"] != "r0":
+        raise AssertionError(f"호출 결과가 이상하다: {out}")
+    listed = mcp_server.handle({"method": "tools/list"})
+    if len(listed["tools"]) != len(tools.CORE_TOOLS):
+        raise AssertionError("목록과 호출이 같은 표를 안 본다")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -5447,6 +5623,13 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("관계: 승격은 새 도구 아니다",   _case_promotion_is_not_a_new_tool, None),
     ("관계: 상태를 바꾸지 않는다",    _case_relations_do_not_change_state, None),
     ("관계: 안 열린 것도 가리킨다",   _case_link_to_unopened_thread_is_allowed, None),
+    ("S6: 9축 그물 실재",             _case_s6_axes_have_nets, None),
+    ("표: 모든 변이가 축에 속한다",   _case_every_mutation_belongs_to_an_axis, None),
+    ("MCP: 도구 11종 노출",           _case_mcp_exposes_eleven_tools, None),
+    ("MCP: 스키마는 시그니처 파생",   _case_mcp_schema_follows_signature, None),
+    ("MCP: 경로형 인자 0건",          _case_mcp_has_no_path_arguments, None),
+    ("MCP: 모르는 것은 거부",         _case_mcp_rejects_unknown_method_and_tool, None),
+    ("MCP: 호출이 도구까지 닿는다",   _case_mcp_call_reaches_the_tool, None),
 )
 
 
@@ -6202,6 +6385,27 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "        if related in (links.get(tid) or []) or tid in forward:",
      "        if tid in forward:",
      "관계: 왕복이 양방향"),
+    # ── S6-6 MCP 서버 ──────────────────────────────────────────────────────
+    ("M183-mcp-schema-hardcoded", "agora/mcp_server.py",
+     "    for param in list(inspect.signature(fn).parameters.values())[1:]:",
+     '    for param in [p for p in list(inspect.signature(fn).parameters.values())[1:]\n                  if p.name in ("thread_id", "body")]:',
+     "MCP: 스키마는 시그니처 파생"),
+    ("M184-mcp-required-not-marked", "agora/mcp_server.py",
+     "        if param.default is inspect.Parameter.empty:",
+     "        if False:",
+     "MCP: 스키마는 시그니처 파생"),
+    ("M185-mcp-path-check-off", "agora/mcp_server.py",
+     '            if any(low == p or low.endswith("_" + p) for p in PATH_LIKE):',
+     "            if False:",
+     "MCP: 경로형 인자 0건"),
+    ("M186-mcp-accepts-any-method", "agora/mcp_server.py",
+     '    if method != "tools/call":',
+     "    if False:",
+     "MCP: 모르는 것은 거부"),
+    ("M187-mcp-accepts-unknown-tool", "agora/mcp_server.py",
+     "    if inner is None:",
+     "    if False:",
+     "MCP: 모르는 것은 거부"),
 )
 
 
@@ -6373,7 +6577,7 @@ def run() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S6-5(관계 조회·렌더)"
+            "슬라이스": "S6-6(S6 완주)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
