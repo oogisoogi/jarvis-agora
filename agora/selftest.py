@@ -2996,6 +2996,51 @@ def _case_bind_merges_under_lock_and_refuses_conflict() -> None:
             raise AssertionError("거부했다면서 파일은 바뀌었다")
     # 같은 값으로 다시 묶는 것은 충돌이 아니다(멱등).
     third._bind("a" * 32, {"id": "D_A", "number": 1})
+    # ★그 층만의 표식(R3-③ 뒤): `_locate` 가 판단 직전에 원장을 다시 읽게 되자 이 케이스의 병합 검사가
+    #   그 재읽기에 가려졌다(M259 생존). 그래서 `_locate` 를 **거치지 않고** `_bind` 를 직접 부른다 —
+    #   메모리가 낡은 인스턴스가 동료의 결박(C) 위에 자기 결박(D)을 더해도 C 가 남아야 한다.
+    stale = GitHubStore("o", "r", {"debate": "C"}, bindings_path=path,
+                        transport=_fake_transport(pages))          # 원장 로드 시점: A·B
+    peer = GitHubStore("o", "r", {"debate": "C"}, bindings_path=path,
+                       transport=_fake_transport(pages))
+    peer._bind("c" * 32, {"id": "D_C", "number": 3})
+    stale._bind("d" * 32, {"id": "D_D", "number": 4})
+    with open(path, encoding="utf-8") as fh:
+        threads = json.load(fh)["threads"]
+    if "c" * 32 not in threads or "d" * 32 not in threads:
+        raise AssertionError(f"직접 결박이 동료의 결박을 지웠다: {sorted(threads)}")
+
+
+def _case_locate_sees_bindings_made_by_a_peer() -> None:
+    """먼저 뜬 인스턴스도 동료가 **뒤늦게** 묶은 결박을 본다(H1⑵ R3-③ · codex 라운드 2).
+
+    ★라운드 2 는 시작 때 읽은 메모리 사본으로 결박을 판단했다. 동료가 그 뒤에 묶고 검색이 절단되면
+      먼저 뜬 쪽만 code 7 로 실패했다(무결성은 멀쩡 · 가용성이 샜다). 이제 판단 직전에 원장을 다시 읽는다.
+    ★재현 그대로: 원장이 빈 상태에서 old 를 만들고 → peer 가 결박 → old 가 **절단 검색**으로 조회 →
+      결박된 후보를 찾아 성공해야 한다(절단이어도 결박된 번호가 보이면 그것만 쓴다).
+    """
+    import tempfile
+    from agora.store_github import GitHubStore
+    d = tempfile.mkdtemp(prefix="agora-peer-bind-")
+    path = os.path.join(d, "thread-bindings.json")
+    pages = [_disc_page(comments=[], has_next=False, cursor=None)]
+    nodes = [{"id": "D1", "number": 1, "title": "o", "createdAt": "2026-01-01T00:00:00Z"}]
+
+    def endless(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        if "search(" not in query:
+            return {}
+        return {"search": {"pageInfo": {"hasNextPage": True, "endCursor": "c"}, "nodes": nodes}}
+
+    old = GitHubStore("o", "r", {"debate": "C"}, transport=endless, bindings_path=path)
+    peer = GitHubStore("o", "r", {"debate": "C"}, bindings_path=path,
+                       transport=_fake_transport(pages, search_nodes=nodes))
+    peer._locate("t" * 32)
+    try:
+        got = old._locate("t" * 32)
+    except AgoraError as e:
+        raise AssertionError(f"동료의 결박을 못 보고 절단으로 실패했다: code {e.code}") from None
+    if got != (1, "D1"):
+        raise AssertionError(f"결박된 번호가 아니다: {got}")
 
 
 def _case_locate_pages_the_search_and_refuses_truncation() -> None:
@@ -3960,7 +4005,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                  "M257-filter-query-ignored"),
     # ★봉합 라운드 2(codex 재검증 2026-08-26 PARTIAL 4) — 봉합이 닿지 않던 **진입점**들.
     "결박생성경로": ("M258-genesis-does-not-bind",),
-    "결박병합": ("M259-bind-skips-reread", "M260-bind-overwrites-conflict"),
+    "결박병합": ("M259-bind-skips-reread", "M260-bind-overwrites-conflict",
+                 "M278-locate-uses-stale-bindings"),
     "검색전수": ("M261-search-reads-one-page", "M262-truncated-search-still-binds",
                  "M263-audit-hides-search-truncation"),
     "응답상한": ("M264-audit-lists-not-paged", "M265-pending-sections-hidden",
@@ -8152,6 +8198,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("결박: 후보가 화면까지 온다",     _case_audit_shows_transport_candidates, None),
     ("결박: 만든 자리에서 묶는다",     _case_genesis_binds_at_creation, None),
     ("결박: 잠금 안 병합·충돌 → 2",    _case_bind_merges_under_lock_and_refuses_conflict, None),
+    ("결박: 동료의 결박을 본다",     _case_locate_sees_bindings_made_by_a_peer, None),
     ("결박: 검색은 끝까지·절단이면 거부", _case_locate_pages_the_search_and_refuses_truncation, None),
     ("결박: 절단이 화면까지 온다",     _case_audit_shows_search_truncation, None),
     ("사슬: 거부가 막지 않는다",       _case_rejected_event_does_not_wedge_the_chain, None),
@@ -9185,6 +9232,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            if existing and existing != entry:',
      '            if False:',
      "결박: 잠금 안 병합·충돌 → 2"),
+    ("M278-locate-uses-stale-bindings", "agora/store_github.py",
+     '        self._refresh_bindings()',
+     '        pass',
+     "결박: 동료의 결박을 본다"),
     ("M261-search-reads-one-page", "agora/store_github.py",
      '            if not page.get("hasNextPage") or pages >= LOCATE_SEARCH_PAGES:',
      '            if True:',

@@ -304,6 +304,10 @@ class GitHubStore:
                              {"thread_id": thread_id, "truncated": truncated})
         if len(nodes) > 1:
             self.locate_candidates[thread_id] = sorted(n["number"] for n in nodes)
+        # ★R3-③(codex 라운드 2 · master#238398) — 결박을 판단하기 **직전에** 원장을 다시 읽는다. 시작 때
+        #   읽은 메모리 사본만 보면, 동료 프로세스가 뒤늦게 묶은 결박을 이 인스턴스는 못 보고
+        #   (절단 검색이면) code 7 로 헛되이 실패한다 — 무결성은 _bind 의 재읽기가 지키지만 가용성이 샜다.
+        self._refresh_bindings()
         bound = self._bindings.get(thread_id)
         if bound:
             chosen = next((n for n in nodes if n["number"] == bound["number"]), None)
@@ -360,6 +364,13 @@ class GitHubStore:
         self.locate_search[thread_id] = {"candidates": len(nodes), "pages": pages,
                                          "truncated": truncated}
         return nodes, truncated
+
+    def _refresh_bindings(self) -> None:
+        """디스크 원장이 정본이다 — 잠금 아래 다시 읽어 메모리 사본을 갈아 끼운다(경로 없으면 그대로)."""
+        if not self._bindings_path:
+            return
+        with _bindings_lock(self._bindings_path):
+            self._bindings = _load_bindings(self._bindings_path)
 
     def _bind(self, thread_id: str, node: dict[str, Any]) -> None:
         """결박을 디스크에 남긴다. 경로가 없으면 이 프로세스 안에서만 산다.
