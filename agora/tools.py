@@ -394,16 +394,58 @@ def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
     #   전건 복사라 **최종 응답의 바이트 상한이 안 잠겼다**(무효 글 700건 재현: events 1 · quarantined 700 ·
     #   119KB). 상한은 「이벤트 수」가 아니라 **응답 전체**에 있어야 한다.
     #   ⇒ 커서 하나가 네 목록을 차례로 가리킨다(`<목록>:<키>` · 맨몸 message_id = events 호환).
+    # ★★R3-①(codex 라운드 2 재검증 · master#238398) — 라운드 2 는 예산을 **목록 행의 합**으로만 쟀다.
+    #   첫 페이지 목록 합 65,434B ≤ 65,536 인데 실제 JSON 은 66,575B · CLI(indent 2)는 89,303B 였다.
+    #   상한은 「내가 센 것」이 아니라 **전송되는 것**에 걸려야 한다 ⇒ 후보 페이지를 실제 포장(CLI·MCP)으로
+    #   직렬화해 재고, 넘치면 채움 예산을 비율로 줄여 다시 채운다(수렴 · 한 건은 반드시 싣는다).
     section, key = _parse_cursor(cursor)
+    base = {k: v for k, v in view.items() if k not in READ_SECTIONS}   # 고정 메타(state·refs 밖)
+    lists = {k: list(view[k]) for k in READ_SECTIONS if k in view}
+    budget = READ_PAGE_BYTES
+    candidate: dict[str, Any] = {}
+    for _ in range(READ_FIT_ROUNDS):
+        page = _fill_page(lists, section, key, budget)
+        candidate = {**base, **page}
+        wire = _wire_size(candidate)
+        if wire <= READ_PAGE_BYTES or _page_items(page) <= 1:
+            break
+        budget = max(1, int(budget * READ_PAGE_BYTES / wire * 0.98))
+    return candidate
+
+
+READ_FIT_ROUNDS = 8          # 비율 축소 재채움 상한 — 매 회 2% 여유를 두므로 보통 1~2회에 끝난다
+
+
+def _wire_size(view: dict[str, Any]) -> int:
+    """이 응답이 **실제로 나가는 크기** — 우리 포장 두 가지(CLI 들여쓰기 · MCP 텍스트 포장) 중 큰 쪽.
+
+    ★목록 행의 바이트 합은 응답 크기가 아니다. 키·구분자·들여쓰기·JSON-RPC 안의 문자열 이스케이프가
+      전부 전송에 실린다. 재려면 **포장한 채로** 재야 한다.
+    """
+    compact = json.dumps(view, ensure_ascii=False, sort_keys=True)
+    pretty = json.dumps(view, ensure_ascii=False, sort_keys=True, indent=2)
+    rpc = json.dumps({"jsonrpc": "2.0", "id": 0, "result": {
+        "content": [{"type": "text", "text": compact}]}}, ensure_ascii=False, sort_keys=True)
+    return max(len(pretty.encode("utf-8")), len(rpc.encode("utf-8")))
+
+
+def _page_items(page: dict[str, Any]) -> int:
+    return sum(len(page[k]) for k in READ_SECTIONS if k in page)
+
+
+def _fill_page(lists: dict[str, list[dict[str, Any]]], section: str,
+               key: str | None, budget: int) -> dict[str, Any]:
+    """커서 위치부터 예산(목록 행 바이트) 안에서 네 목록을 차례로 채운 한 페이지."""
+    page: dict[str, Any] = {}
     if section == "events":
-        view["events"], tail = _page(view["events"], key)
-        view["next_cursor"] = f"events:{tail}" if tail else None
+        page["events"], tail = _page(lists.get("events") or [], key, budget)
+        page["next_cursor"] = f"events:{tail}" if tail else None
+        budget -= _bytes_of(page["events"])
     else:
-        view["events"] = []            # 앞 페이지에서 이미 건넸다
-        view["next_cursor"] = None
-    _page_sections(view, section, key,
-                   READ_PAGE_BYTES - _bytes_of(view["events"]))
-    return view
+        page["events"] = []            # 앞 페이지에서 이미 건넸다
+        page["next_cursor"] = None
+    _page_sections(page, lists, section, key, budget)
+    return page
 
 
 # 응답 안의 목록 네 개 — 커서가 이 **차례로** 가리킨다. 이름이 커서에 그대로 실린다.
@@ -431,8 +473,8 @@ def _section_key(section: str, entry: dict[str, Any], index: int) -> str:
     return str(entry.get("node_id") or entry.get("message_id") or index)
 
 
-def _page_sections(view: dict[str, Any], section: str, key: str | None,
-                   budget: int) -> None:
+def _page_sections(view: dict[str, Any], lists: dict[str, list[dict[str, Any]]],
+                   section: str, key: str | None, budget: int) -> None:
     """events 뒤의 목록들을 **같은 바이트 예산** 안에서 이어 준다.
 
     ★못 실은 목록은 **빈 목록으로 두지 않고 이름을 댄다**(`pending`). 빈 목록은 「없다」와
@@ -440,7 +482,7 @@ def _page_sections(view: dict[str, Any], section: str, key: str | None,
     ★한 페이지에 적어도 한 건은 싣는다 — 한 건이 예산보다 커도 진행은 해야 한다(무한 같은 페이지 금지).
     """
     order = list(READ_SECTIONS[1:])
-    present = [s for s in order if s in view]
+    present = [s for s in order if s in lists]
     # 앞 목록(events)이 더 남았으면 뒤 목록은 이 페이지에 안 실린다 — 차례가 있어야 커서가 뜻을 갖는다.
     if view.get("next_cursor"):
         for s in present:
@@ -450,7 +492,7 @@ def _page_sections(view: dict[str, Any], section: str, key: str | None,
     pending: list[str] = []
     cut = False
     for s in present:
-        rows = list(view[s])
+        rows = list(lists[s])
         if cut or (section != "events" and order.index(s) < order.index(section)):
             view[s] = []               # 뒤(예산 소진) 또는 앞(이미 건넸다) — 둘 다 이 페이지엔 없다
             if cut:
@@ -477,8 +519,8 @@ def _page_sections(view: dict[str, Any], section: str, key: str | None,
         view["pending"] = pending
 
 
-def _page(events: list[dict[str, Any]],
-          cursor: str | None) -> tuple[list[dict[str, Any]], str | None]:
+def _page(events: list[dict[str, Any]], cursor: str | None,
+          budget: int = READ_PAGE_BYTES) -> tuple[list[dict[str, Any]], str | None]:
     """이어 읽기 — `cursor` 다음부터, 건수·바이트 상한까지.
 
     ★커서는 **마지막으로 건넨 `message_id`** 다. 불투명한 토큰을 쓰지 않는 이유는
@@ -497,7 +539,7 @@ def _page(events: list[dict[str, Any]],
     used = 0
     for entry in events[start:]:
         size = len(json.dumps(entry, ensure_ascii=False).encode("utf-8"))
-        if out and (len(out) >= READ_PAGE_EVENTS or used + size > READ_PAGE_BYTES):  # noqa: E501
+        if out and (len(out) >= READ_PAGE_EVENTS or used + size > budget):
             return out, out[-1].get("message_id")
         out.append(entry)
         used += size

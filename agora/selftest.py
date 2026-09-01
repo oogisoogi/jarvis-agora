@@ -3964,7 +3964,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "검색전수": ("M261-search-reads-one-page", "M262-truncated-search-still-binds",
                  "M263-audit-hides-search-truncation"),
     "응답상한": ("M264-audit-lists-not-paged", "M265-pending-sections-hidden",
-                 "M266-cursor-section-ignored"),
+                 "M266-cursor-section-ignored", "M273-fit-loop-never-shrinks",
+                 "M274-wire-size-ignores-envelopes"),
     "재검증": ("M267-unverified-treated-as-received",),
     "설정폴더": ("M268-context-does-not-pin-config-dir",),
     # ★NFR-8 — 2026-08-26 까지 「행 없음·미측정」이던 칸(성찰 J-1). 검사기 자신도 조준한다.
@@ -6553,9 +6554,13 @@ def _case_read_caps_the_whole_response() -> None:
     for _ in range(50):
         page = tools.read(ctx, thread_id=tid, audit=True, cursor=cursor)
         pages.append(page)
-        used = sum(tools._bytes_of(page[k]) for k in lists)
-        if used > READ_PAGE_BYTES and sum(len(page[k]) for k in lists) > 1:
-            raise AssertionError(f"한 페이지가 상한을 넘었다: {used} > {READ_PAGE_BYTES}")
+        # ★R3-①(codex 라운드 2) — 상한은 **전송되는 것**에 건다. 라운드 2 는 목록 합(65,434B)만 재서
+        #   실제 JSON 66,575B · CLI 들여쓰기 89,303B 를 통과시켰다(그 두 수가 이 검사의 회귀 값이다).
+        items = sum(len(page[k]) for k in lists)
+        cli = len(json.dumps(page, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8"))
+        wire = tools._wire_size(page)
+        if items > 1 and (cli > READ_PAGE_BYTES or wire > READ_PAGE_BYTES):
+            raise AssertionError(f"한 페이지가 전송 상한을 넘었다: CLI {cli} · wire {wire} > {READ_PAGE_BYTES}")
         if page["state"] != whole["state"]:
             raise AssertionError("자른 페이지가 상태를 바꿨다")
         cursor = page["next_cursor"]
@@ -9155,9 +9160,18 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "MCP: 나쁜 인자에도 산다"),
     # ★M-d — 인자만 있고 동작이 없던 자리(응답 상한 부재).
     ("M244-read-never-pages", "agora/tools.py",
-     '        view["events"], tail = _page(view["events"], key)',
-     '        view["events"], tail = view["events"], None',
+     '        page["events"], tail = _page(lists.get("events") or [], key, budget)',
+     '        page["events"], tail = list(lists.get("events") or []), None',
      "읽기: 커서로 나눠 준다"),
+    # ★R3-① — 「센 것」과 「나가는 것」이 달랐던 자리(목록 합 65,434 ≤ 상한 · 실제 66,575/89,303B).
+    ("M273-fit-loop-never-shrinks", "agora/tools.py",
+     '        if wire <= READ_PAGE_BYTES or _page_items(page) <= 1:',
+     '        if True:',
+     "읽기: 응답 전체에 상한"),
+    ("M274-wire-size-ignores-envelopes", "agora/tools.py",
+     '    return max(len(pretty.encode("utf-8")), len(rpc.encode("utf-8")))',
+     '    return len(compact.encode("utf-8"))',
+     "읽기: 응답 전체에 상한"),
     # ★M-d 라운드 2 — events 만 자르고 나머지 목록은 전건 복사하던 자리(응답 상한이 안 잠겼다).
     ("M264-audit-lists-not-paged", "agora/tools.py",
      '            if out and budget - size < 0:',
