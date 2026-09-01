@@ -3967,6 +3967,9 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                  "M266-cursor-section-ignored"),
     "재검증": ("M267-unverified-treated-as-received",),
     "설정폴더": ("M268-context-does-not-pin-config-dir",),
+    # ★NFR-8 — 2026-08-26 까지 「행 없음·미측정」이던 칸(성찰 J-1). 검사기 자신도 조준한다.
+    "정본적재": ("M269-body-written-to-docs", "M270-allowed-sink-writes-body",
+                 "M271-scanner-forgets-docs-marker", "M272-scanner-blind-to-os-replace"),
 
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
@@ -7662,6 +7665,85 @@ def _case_every_contracted_kind_has_an_emitter() -> None:
         raise AssertionError(f"계약에 없는 kind 가 허용목록에 있다: {unknown}")
 
 
+NFR8_ALLOWLIST = "tests/nfr8-allowlist.txt"
+
+# ★양성 대조군 — 검사기가 **잡는다**는 것을 먼저 보인다(「0건」은 잡을 수 있는 검사기의 0건만 증거다).
+#   ⑴경로 축: 지역변수 → 같은 모듈 함수 반환 → 모듈 상수까지 따라가야 잡히는 형태(brief.write_all 과 같다).
+#   ⑵본문 축: 허용된 sink 를 품은 함수가 남의 본문(payload["body"])을 쓰는 형태.
+_NFR8_PROBE_PATH = '''
+import os
+TARGET_DIR = "docs/auto"
+def where(root):
+    return os.path.join(root, TARGET_DIR, "note.md")
+def ingest(root, text):
+    path = where(root)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+def relocate(tmp, root):
+    os.replace(tmp, os.path.join(root, ".mcp.json"))
+def harmless(root, text):
+    with open(os.path.join(root, "events", "x.jsonl"), "a") as fh:
+        fh.write(text)
+'''
+_NFR8_PROBE_BODY = '''
+import os
+def write_all(root, event):
+    text = event["payload"]["body"]
+    with open(os.path.join(root, "skills", "brief.md"), "w") as fh:
+        fh.write(text)
+'''
+
+
+def _nfr8_scanner() -> Any:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "nfr8_scan", os.path.join(_ROOT, "tests", "nfr8_scan.py"))
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _case_nfr8_no_body_reaches_canonical_paths() -> None:
+    """정본 경로에 남의 본문을 쓰는 코드 경로 **0** — 정적 검사(NFR-8 · 03 §8 · R-11 A안 · 성찰 J-1).
+
+    ★2026-08-26 까지 이 칸은 **미측정**이었다(05 게이트에 「행 없음」으로 정직 표기). 코드의 `NFR-8`
+      2곳은 FR-4 축(권고 집행 금지 표식)이지 이 검사가 아니다.
+    ★네 방향으로 잰다: ⑴양성 대조군 — 간접 경로(지역변수→함수 반환→모듈 상수)의 `docs/` 쓰기와
+      `.mcp.json` 으로의 `os.replace` 를 **잡고**, `events/` 쓰기는 **안 잡는다** ⑵양성 대조군 2 —
+      허용된 이름의 함수라도 본문(`payload["body"]`)을 쓰면 오염으로 잡는다 ⑶실제 저장소 = 마커 sink 는
+      허용목록에 있는 것뿐 · 오염 0 · 썩은 허용목록 0 ⑷검사가 **닿았다** — 파일 수·sink 수가 0 이 아니다.
+    ★못 재는 것(숨기지 않는다): 본문이 다른 이름으로 옮겨 담긴 뒤 허용 sink 에 닿는 경로(이름 휴리스틱).
+    """
+    mod = _nfr8_scanner()
+    probe = mod.scan_source(_NFR8_PROBE_PATH, "probe/path.py")
+    marked = {(r["func"], tuple(r["markers"])) for r in probe if r["markers"]}
+    if ("ingest", ("docs",)) not in marked:
+        raise AssertionError(f"간접 경로의 docs/ 쓰기를 못 잡는다: {marked}")
+    if ("relocate", (".mcp.json",)) not in marked:
+        raise AssertionError(f".mcp.json 으로의 os.replace 를 못 잡는다: {marked}")
+    if any(r["func"] == "harmless" and r["markers"] for r in probe):
+        raise AssertionError("데이터 보관 경로(events/)를 정본으로 오탐한다")
+    body = mod.scan_source(_NFR8_PROBE_BODY, "probe/body.py")
+    if not any(r["func"] == "write_all" and r["markers"] and r["taint"] for r in body):
+        raise AssertionError(f"허용 sink 의 본문 오염을 못 잡는다: {body}")
+
+    allow = mod.load_allowlist(os.path.join(_ROOT, NFR8_ALLOWLIST))
+    if not allow:
+        raise AssertionError("허용목록이 비었다 — 사유 없는 줄은 목록이 아니다")
+    result = mod.scan(_ROOT, allow)
+    if result["files"] < 20 or result["sinks"] < 10:
+        raise AssertionError(f"검사가 저장소에 닿지 않았다: {result['files']}파일 · {result['sinks']}sink")
+    if result["violations"]:
+        raise AssertionError("허용목록 밖 정본 경로 쓰기: " + ", ".join(
+            f"{r['file']}:{r['line']} {r['sink']} {r['markers']}" for r in result["violations"]))
+    if result["tainted"]:
+        raise AssertionError("허용된 sink 가 본문을 건드린다: " + ", ".join(
+            f"{r['file']}:{r['func']} {r['taint']}" for r in result["tainted"]))
+    if result["stale_allowlist"]:
+        raise AssertionError(f"허용목록이 낡았다(코드에 없는 sink): {result['stale_allowlist']}")
+
+
 def _case_no_unwired_production_definitions() -> None:
     """정의는 있는데 **부르는 곳이 없는** 것 = 허용목록에 적힌 것뿐이다.
 
@@ -8010,6 +8092,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("영수증: 원장 없으면 안 적는다",  _case_delivery_receipt_needs_a_ledger, None),
     ("code 8: 도구가 판정한다",        _case_unknown_commit_is_settled_by_the_tool, None),
     ("배선: 안 불리는 정의 0",        _case_no_unwired_production_definitions, None),
+    ("NFR-8: 정본 경로에 본문 쓰기 0",   _case_nfr8_no_body_reaches_canonical_paths, None),
     ("배선: 모든 kind 에 발신자",     _case_every_contracted_kind_has_an_emitter, None),
     ("배선: 계약 인자 전건 전달",     _case_reduce_passes_every_contracted_knob, None),
     ("만료: 도구 경로에서 발동",      _case_expiry_fires_through_the_tool, None),
@@ -9120,6 +9203,23 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    _os.environ["AGORA_CONFIG_DIR"] = d',
      '    pass',
      "scrub: 설정 폴더는 한 번 정한다"),
+    # ★NFR-8 정적 검사 — 제품 코드에 적재 경로를 심는 변이 2 + 검사기 자신을 무디게 하는 변이 2.
+    ("M269-body-written-to-docs", "agora/tools.py",
+     '        wrapped = brief.wrap_untrusted(body)',
+     '        wrapped = brief.wrap_untrusted(body)\n        if False:\n            with open(os.path.join("docs", "auto.md"), "w") as _fh:\n                _fh.write(body)',
+     "NFR-8: 정본 경로에 본문 쓰기 0"),
+    ("M270-allowed-sink-writes-body", "agora/brief.py",
+     '        text = render(role)',
+     '        body = None\n        text = render(role) or body',
+     "NFR-8: 정본 경로에 본문 쓰기 0"),
+    ("M271-scanner-forgets-docs-marker", "tests/nfr8_scan.py",
+     'DIR_MARKERS = frozenset({"docs", "skills", "config", "participants"})',
+     'DIR_MARKERS = frozenset({"skills", "config", "participants"})',
+     "NFR-8: 정본 경로에 본문 쓰기 0"),
+    ("M272-scanner-blind-to-os-replace", "tests/nfr8_scan.py",
+     '        if owner == "os" and f.attr in ("replace", "rename") and len(call.args) >= 2:',
+     '        if False:',
+     "NFR-8: 정본 경로에 본문 쓰기 0"),
     # ★M-g(LOW) — 암호가 없으니 권한이 유일한 장벽이다.
     ("M250-key-file-world-readable", "agora/keygen.py",
      '    os.chmod(key_path, 0o600)',
