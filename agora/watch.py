@@ -114,7 +114,9 @@ def poll_once(*, store: Any, spool: Any, cursor: Cursor,
             node_id = item.get("node_id")
             if not node_id:
                 continue
-            if spool.seen(node_id):
+            # ★★M-e 라운드 2 — 「받았는가」로 묻는다(`fetched` 이상). 「봤는가」로 물으면
+            #   `unverified_seen` 이 영구 무시 표식이 돼, 명부를 고쳐도 그 글은 영영 안 온다.
+            if spool.received(node_id):
                 # ★겹쳐 물었으니 나오는 것이 정상이다. 조용히 지나가되 **센다** —
                 #   0 이 아닌 값이 보여야 겹치기가 실제로 돌고 있다는 것을 안다.
                 duplicates += 1
@@ -124,8 +126,10 @@ def poll_once(*, store: Any, spool: Any, cursor: Cursor,
                 # ★버리지 않는다 — **다른 단계 이름으로** 남긴다. 버리면 매 주기 다시 읽고,
                 #   「본 적 없다」와 「보고 물리쳤다」가 같아진다.
                 #   ⚠이 단계는 알림도 배달 영수증도 만들지 않는다. 본 것은 본 것일 뿐이다.
-                spool.record(node_id=node_id, stage=spool_mod.UNVERIFIED_SEEN,
-                             thread_id=item.get("thread_id"))
+                #   두 번째부터는 다시 적지 않는다 — 주기마다 한 줄씩 원장을 불리는 것은 기록이 아니다.
+                if spool.stage_of(node_id) is None:
+                    spool.record(node_id=node_id, stage=spool_mod.UNVERIFIED_SEEN,
+                                 thread_id=item.get("thread_id"))
                 unverified += 1
                 continue
             spool.record(node_id=node_id, stage=spool_mod.FETCHED,

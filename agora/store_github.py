@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
 import time
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from agora import errors
 from agora.errors import AgoraError
@@ -38,6 +40,25 @@ BACKOFF_ATTEMPTS = 4
 
 
 BINDINGS_FILENAME = "thread-bindings.json"
+
+# ★H1 라운드 2(codex 2026-08-26 재검증) — 검색은 **끝까지** 본다. 첫 10건만 보면 원본이 결과 밖으로
+#   밀린 가짜 응답에서 복제본을 결박한다(재현: `(100, D100)` 결박). 페이지 수에 상한을 두는 이유는
+#   운반층이 무엇이든 실어 오기 때문이다 — 상한에 닿았는데도 다음 페이지가 있으면 **절단**이고,
+#   절단된 결과로는 결박하지 않는다(「전부 봤다」가 아니면 「가장 이른 것」이 성립하지 않는다).
+LOCATE_SEARCH_PAGE = 50
+LOCATE_SEARCH_PAGES = 5
+
+
+@contextmanager
+def _bindings_lock(path: str) -> Iterator[None]:
+    """결박 원장의 **옆 파일**에 잠근다 — 데이터 파일 자체에 걸면 `os.replace` 가 inode 를
+    갈아치워 서로 다른 파일을 잠근 두 프로세스가 동시에 쓴다."""
+    with open(path + ".lock", "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _load_bindings(path: str | None) -> dict[str, dict[str, Any]]:
@@ -79,8 +100,9 @@ def is_rate_limited(err: AgoraError) -> bool:
 
 
 _LOOKUP = """
-query($q: String!) {
-  search(query: $q, type: DISCUSSION, first: 10) {
+query($q: String!, $first: Int!, $cursor: String) {
+  search(query: $q, type: DISCUSSION, first: $first, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
     nodes { ... on Discussion { id number title createdAt } }
   }
 }
@@ -226,6 +248,9 @@ class GitHubStore:
         self._bindings: dict[str, dict[str, Any]] = _load_bindings(bindings_path)
         # 후보가 둘 이상이었다는 **사실**을 감추지 않는다 — audit 이 이것을 싣는다.
         self.locate_candidates: dict[str, list[int]] = {}
+        # ★검색이 **몇 건을 봤고 끝까지 봤는가** — 후보 목록과 다른 사실이다(라운드 2).
+        #   후보 10건이 보여도 그 뒤가 잘렸으면 「원본이 없었다」와 「원본을 못 봤다」가 같아진다.
+        self.locate_search: dict[str, dict[str, Any]] = {}
 
     # ── 내부 ────────────────────────────────────────────────────────────────
     def _run(self, query: str, **variables: Any) -> dict[str, Any]:
@@ -268,15 +293,15 @@ class GitHubStore:
              **genesis 게시 시각이 가장 이른 것**. 복제본은 원본보다 먼저 존재할 수 없다.
         ⚠**이것은 탈취를 「불가능」하게 만들지 않는다** — 결박 전 첫 조회를 이기면 여전히 진다.
           그때도 후보가 여럿이었다는 사실은 `locate_candidates` 로 audit 에 남는다.
+        ★라운드 2 로 그 창은 **남이 만든 스레드에 처음 합류하는 조회**로 좁혀졌다: 우리가 만든 스레드는
+          생성 자리에서 묶이고(`append`), 검색은 끝까지 보거나 절단이면 결박을 거부한다(`_search`).
         """
         if thread_id in self._numbers:
             return self._numbers[thread_id], self._ids[thread_id]
-        q = f'repo:{self.owner}/{self.name} in:body "{thread_id}"'
-        data = self._run(_LOOKUP, q=q)
-        nodes = [n for n in ((data.get("search") or {}).get("nodes") or []) if n]
+        nodes, truncated = self._search(thread_id)
         if not nodes:
             raise AgoraError(errors.STORE, "스레드를 찾지 못했다",
-                             {"thread_id": thread_id})
+                             {"thread_id": thread_id, "truncated": truncated})
         if len(nodes) > 1:
             self.locate_candidates[thread_id] = sorted(n["number"] for n in nodes)
         bound = self._bindings.get(thread_id)
@@ -284,15 +309,24 @@ class GitHubStore:
             chosen = next((n for n in nodes if n["number"] == bound["number"]), None)
             if chosen is None:
                 # ★경보다. 결박된 번호가 후보에 없다 = 원본이 사라졌거나 남이 갈아치웠다.
+                #   ⚠절단됐으면 「없다」가 아니라 「못 봤다」다 — 같은 경보에 다른 사유를 단다.
                 raise AgoraError(
                     errors.STORE, "결박된 게시물이 후보에 없다 — 운반층을 믿지 않는다",
                     {"thread_id": thread_id, "bound": bound["number"],
-                     "found": sorted(n["number"] for n in nodes)})
+                     "found": sorted(n["number"] for n in nodes),
+                     "truncated": truncated})
             if chosen["id"] != bound["node_id"]:
                 raise AgoraError(
                     errors.STORE, "결박된 게시물의 node id 가 다르다",
                     {"thread_id": thread_id, "bound": bound["node_id"]})
         else:
+            # ★절단된 결과로는 **결박하지 않는다.** 「가장 이른 것」은 전부 봤을 때만 뜻이 있다 —
+            #   못 본 페이지에 원본이 있으면 지금 고르는 것이 곧 복제본이다.
+            if truncated:
+                raise AgoraError(
+                    errors.STORE, "검색 결과가 절단됐다 — 전부 보지 못했으므로 결박하지 않는다",
+                    {"thread_id": thread_id, "seen": len(nodes),
+                     "pages": LOCATE_SEARCH_PAGES})
             # ★가장 이른 것. 시각이 같거나 없으면 **번호가 작은 것**으로 갈라 준다
             #   (결정론 — 같은 입력에 늘 같은 답이 나와야 결박이 의미를 갖는다).
             chosen = min(nodes, key=lambda n: (n.get("createdAt") or "", n["number"]))
@@ -301,12 +335,57 @@ class GitHubStore:
         self._ids[thread_id] = chosen["id"]
         return chosen["number"], chosen["id"]
 
+    def _search(self, thread_id: str) -> tuple[list[dict[str, Any]], bool]:
+        """thread_id 를 본문에 담은 Discussion 을 **페이지를 넘겨 가며** 모은다.
+
+        돌려주는 것 = (후보 전건, 절단 여부). 절단 = 페이지 상한에 닿았는데 다음 페이지가 남았다.
+        ★pageInfo 가 없는 응답(옛 가짜 운반층)은 「다음 없음」으로 읽는다 — 없는 칸을 있다고
+          추측하지 않는다.
+        """
+        q = f'repo:{self.owner}/{self.name} in:body "{thread_id}"'
+        nodes: list[dict[str, Any]] = []
+        cursor: str | None = None
+        pages = 0
+        page: dict[str, Any] = {}
+        while True:
+            data = self._run(_LOOKUP, q=q, first=LOCATE_SEARCH_PAGE, cursor=cursor)
+            block = data.get("search") or {}
+            nodes.extend(n for n in (block.get("nodes") or []) if n)
+            page = block.get("pageInfo") or {}
+            pages += 1
+            if not page.get("hasNextPage") or pages >= LOCATE_SEARCH_PAGES:
+                break
+            cursor = page.get("endCursor")
+        truncated = bool(page.get("hasNextPage"))
+        self.locate_search[thread_id] = {"candidates": len(nodes), "pages": pages,
+                                         "truncated": truncated}
+        return nodes, truncated
+
     def _bind(self, thread_id: str, node: dict[str, Any]) -> None:
-        """첫 결박을 디스크에 남긴다. 경로가 없으면 이 프로세스 안에서만 산다."""
-        self._bindings[thread_id] = {"number": node["number"], "node_id": node["id"]}
+        """결박을 디스크에 남긴다. 경로가 없으면 이 프로세스 안에서만 산다.
+
+        ★★라운드 2(codex 재검증 신규 HIGH) — 그전에는 **자기 메모리 사본을 통째로** 갈아치웠다.
+          두 프로세스가 각자 시작 때 읽은 사본에 하나씩 더해 쓰면 **뒤에 쓴 쪽이 앞의 결박을 지운다**
+          (lost update · 재현: A 결박 뒤 B 결박 → 파일엔 B 만). 제자리 갈아치우기는 반쪽 파일만 막지
+          이것은 못 막는다. ⇒ **잠금 안에서 최신 원장을 다시 읽고, 거기에 더해서, 그것을 쓴다.**
+        ★같은 thread_id 가 **이미 다른 게시물에** 묶여 있으면 덮어쓰지 않고 멈춘다(code 2).
+          덮어쓰는 순간 결박은 「먼저 쓴 사람 것」이 되고, 그것은 검색 순서를 믿는 것과 같다.
+        """
+        entry = {"number": node["number"], "node_id": node["id"]}
         if not self._bindings_path:
+            self._bindings[thread_id] = entry
             return
-        _save_bindings(self._bindings_path, self._bindings)
+        with _bindings_lock(self._bindings_path):
+            current = _load_bindings(self._bindings_path)
+            existing = current.get(thread_id)
+            if existing and existing != entry:
+                raise AgoraError(
+                    errors.PRECONDITION, "같은 thread_id 가 이미 다른 게시물에 결박돼 있다",
+                    {"thread_id": thread_id, "bound": existing["number"],
+                     "attempted": entry["number"], "file": BINDINGS_FILENAME})
+            current[thread_id] = entry
+            self._bindings = current          # 병합본이 이제 이 프로세스의 기억이다
+            _save_bindings(self._bindings_path, self._bindings)
 
     def _all_replies(self, comment: dict[str, Any]) -> list[dict[str, Any]]:
         """한 댓글의 답글을 **끝까지** 따라간다.
@@ -344,6 +423,11 @@ class GitHubStore:
                 raise AgoraError(errors.UNKNOWN_COMMIT,
                                  "생성 결과가 비었다 — 재조회 후 판정하라",
                                  {"thread_id": thread_id})
+            # ★★라운드 2 — 만든 **그 자리에서** 묶는다. 그전에는 번호를 메모리에만 두고
+            #   첫 `_locate` 까지 기다렸다 ⇒ 「결박 전 첫 조회」 창이 짧은 것이 아니라
+            #   **다음 조회까지 시간 상한 없이** 열려 있었다(codex 재현 `H1_CREATE_BINDING_EXISTS False`).
+            #   우리가 방금 만든 게시물보다 더 확실한 원본은 없다 — 검색을 기다릴 이유가 없다.
+            self._bind(thread_id, node)
             self._numbers[thread_id] = node["number"]
             self._ids[thread_id] = node["id"]
             return {"node_id": node["id"], "url": node.get("url"),

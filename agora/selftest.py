@@ -2894,6 +2894,175 @@ def _case_binding_survives_and_refuses_substitutes() -> None:
     raise AssertionError("결박이 깨졌는데 복제본으로 갈아탔다")
 
 
+def _genesis_transport(*, search_nodes: list | None = None,
+                       log: list | None = None) -> Any:
+    """생성 경로용 가짜 운반층 — 저장소 id · createDiscussion · (있으면) 검색까지 답한다."""
+    def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        if log is not None:
+            log.append(query.split("(")[0].strip().split()[-1] if "(" in query else "?")
+        if "repository(owner:" in query and "discussion" not in query:
+            return {"repository": {"id": "R_1"}}
+        if "createDiscussion" in query:
+            return {"createDiscussion": {"discussion": {
+                "id": "D_NEW", "number": 42, "url": "https://x/42",
+                "createdAt": "2026-03-01T00:00:00Z"}}}
+        if "search(" in query:
+            return {"search": {"nodes": list(search_nodes or [])}}
+        return {}
+    return transport
+
+
+def _case_genesis_binds_at_creation() -> None:
+    """만든 자리에서 **즉시** 묶는다 — 첫 조회까지 기다리지 않는다(H1 라운드 2 · codex 재검증).
+
+    ★그전에는 생성 경로가 번호를 메모리에만 두고 `_bind()` 를 안 불렀다. 결박 전 창이
+      「아주 짧은 첫 조회」가 아니라 **다음 조회까지 시간 상한 없이** 열려 있었다는 뜻이다.
+      봉합은 맞았는데 그 봉합이 닿지 않는 진입점(생성)이 따로 있었다 — 라운드 1 의 열네 번째 얼굴.
+    ★두 방향으로 잰다: ⑴생성 직후 **디스크에** 결박이 있다 ⑵**새 세션**이 검색에서 복제본만 봐도
+      갈아타지 않는다(디스크의 결박이 검색을 이긴다).
+    """
+    import tempfile
+    from agora.store_github import GitHubStore
+    d = tempfile.mkdtemp(prefix="agora-genesis-bind-")
+    path = os.path.join(d, "thread-bindings.json")
+    tid = "c" * 32
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_genesis_transport(), bindings_path=path)
+    store.append(thread_id=tid, category="debate", title="[selftest] 가짜",
+                 body="본문", is_genesis=True)
+    if not os.path.exists(path):
+        raise AssertionError("생성 직후 결박 파일이 없다 — 첫 조회까지 창이 열려 있다")
+    with open(path, encoding="utf-8") as fh:
+        bound = json.load(fh)["threads"].get(tid)
+    if bound != {"number": 42, "node_id": "D_NEW"}:
+        raise AssertionError(f"결박 값이 생성 결과와 다르다: {bound}")
+    # 새 세션 — 검색에는 복제본(더 이른 시각을 주장)만 보인다.
+    fake = [{"id": "D_FAKE", "number": 99, "title": "복제본",
+             "createdAt": "2026-01-01T00:00:00Z"}]
+    later = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_genesis_transport(search_nodes=fake),
+                        bindings_path=path)
+    try:
+        later._locate(tid)
+    except AgoraError as e:
+        if e.code != errors.STORE:
+            raise AssertionError(f"코드가 {e.code}")
+        return
+    raise AssertionError("생성 때 묶은 결박을 새 세션이 무시하고 복제본을 골랐다")
+
+
+def _case_bind_merges_under_lock_and_refuses_conflict() -> None:
+    """결박 원장은 **잠금 안에서 다시 읽고 더해서** 쓴다 — 병렬 결박이 서로를 지우지 않는다.
+
+    ★★codex 재검증 신규 HIGH(2026-08-26): 두 인스턴스가 각자 시작 때 읽은 사본에 하나씩 더해
+      통째로 갈아치우면 **뒤에 쓴 쪽이 앞의 결박을 지웠다**(`A_BINDING_LOST True`). 제자리
+      갈아치우기(`os.replace`)는 반쪽 파일을 막지 lost update 는 못 막는다.
+    ★세 가지를 함께 잰다: ⑴먼저 묶은 A 가 뒤의 B 결박 뒤에도 파일에 있다 ⑵B 인스턴스의 메모리도
+      병합본이다(파일만 맞고 기억이 옛것이면 그 프로세스는 계속 옛 세계를 본다)
+      ⑶같은 thread_id 를 **다른 게시물에** 묶으려 하면 덮어쓰지 않고 code 2 다.
+    """
+    import tempfile
+    from agora.store_github import GitHubStore
+    d = tempfile.mkdtemp(prefix="agora-bind-merge-")
+    path = os.path.join(d, "thread-bindings.json")
+    pages = [_disc_page(comments=[], has_next=False, cursor=None)]
+    a_nodes = [{"id": "D_A", "number": 1, "title": "A", "createdAt": "2026-01-01T00:00:00Z"}]
+    b_nodes = [{"id": "D_B", "number": 2, "title": "B", "createdAt": "2026-01-01T00:00:00Z"}]
+    # 둘 다 **원장이 빈 상태에서** 만들어진다 — 서로의 사본은 비어 있다.
+    first = GitHubStore("o", "r", {"debate": "C"}, bindings_path=path,
+                        transport=_fake_transport(pages, search_nodes=a_nodes))
+    second = GitHubStore("o", "r", {"debate": "C"}, bindings_path=path,
+                         transport=_fake_transport(pages, search_nodes=b_nodes))
+    first._locate("a" * 32)
+    second._locate("b" * 32)
+    with open(path, encoding="utf-8") as fh:
+        threads = json.load(fh)["threads"]
+    if sorted(threads) != ["a" * 32, "b" * 32]:
+        raise AssertionError(f"뒤의 결박이 앞의 결박을 지웠다: {sorted(threads)}")
+    if "a" * 32 not in second._bindings:
+        raise AssertionError("파일은 병합됐는데 두 번째 인스턴스의 기억은 옛것이다")
+    # 충돌 — A 를 다른 게시물에 묶으려는 세 번째.
+    third = GitHubStore("o", "r", {"debate": "C"}, bindings_path=path,
+                        transport=_fake_transport(pages))
+    try:
+        third._bind("a" * 32, {"id": "D_OTHER", "number": 77})
+    except AgoraError as e:
+        if e.code != errors.PRECONDITION:
+            raise AssertionError(f"코드가 {e.code}")
+    else:
+        raise AssertionError("이미 묶인 thread_id 를 다른 게시물로 덮어썼다")
+    with open(path, encoding="utf-8") as fh:
+        if json.load(fh)["threads"]["a" * 32]["number"] != 1:
+            raise AssertionError("거부했다면서 파일은 바뀌었다")
+    # 같은 값으로 다시 묶는 것은 충돌이 아니다(멱등).
+    third._bind("a" * 32, {"id": "D_A", "number": 1})
+
+
+def _case_locate_pages_the_search_and_refuses_truncation() -> None:
+    """검색은 **끝까지** 넘겨 보고, 끝까지 못 봤으면 결박하지 않는다(H1 라운드 2).
+
+    ★그전에는 `first:10` 한 페이지뿐이었다. 원본이 결과 밖으로 밀린 가짜 응답에서
+      복제본 `(100, D100)` 을 결박했다(codex 재현). 「가장 이른 것」은 **전부 봤을 때만** 뜻이 있다.
+    ★두 방향으로 잰다: ⑴원본이 **둘째 페이지**에 있어도 원본을 고른다(= 페이지를 넘겼다)
+      ⑵페이지 상한까지 갔는데도 다음이 남으면 **결박을 거부**하고 그 사실이 audit 재료에 남는다.
+    """
+    from agora.store_github import LOCATE_SEARCH_PAGES, GitHubStore
+    tid = "d" * 32
+    fake = {"id": "D_FAKE", "number": 100, "title": "복제본", "createdAt": "2026-02-01T00:00:00Z"}
+    orig = {"id": "D_1", "number": 7, "title": "원본", "createdAt": "2026-01-01T00:00:00Z"}
+
+    def paged(pages_of_nodes: list[list[dict[str, Any]]], endless: bool) -> Any:
+        calls = {"i": 0}
+
+        def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+            if "search(" not in query:
+                return {}
+            i = calls["i"]
+            calls["i"] += 1
+            nodes = pages_of_nodes[min(i, len(pages_of_nodes) - 1)]
+            more = endless or i < len(pages_of_nodes) - 1
+            return {"search": {"pageInfo": {"hasNextPage": more, "endCursor": f"c{i}"},
+                               "nodes": nodes}}
+        return transport
+
+    store = GitHubStore("o", "r", {"debate": "C"}, transport=paged([[fake], [orig]], False))
+    if store._locate(tid) != (7, "D_1"):
+        raise AssertionError("둘째 페이지의 원본을 못 봤다 — 검색을 한 페이지만 읽는다")
+    if store.locate_search.get(tid) != {"candidates": 2, "pages": 2, "truncated": False}:
+        raise AssertionError(f"검색 사실 기록이 틀리다: {store.locate_search.get(tid)}")
+
+    endless = GitHubStore("o", "r", {"debate": "C"}, transport=paged([[fake]], True))
+    try:
+        endless._locate(tid)
+    except AgoraError as e:
+        if e.code != errors.STORE:
+            raise AssertionError(f"코드가 {e.code}")
+    else:
+        raise AssertionError("절단된 검색 결과로 결박했다")
+    rec = endless.locate_search.get(tid) or {}
+    if rec.get("truncated") is not True or rec.get("pages") != LOCATE_SEARCH_PAGES:
+        raise AssertionError(f"절단 사실이 안 남았다: {rec}")
+    if tid in endless._bindings:
+        raise AssertionError("거부했다면서 결박은 남겼다")
+
+
+def _case_audit_shows_search_truncation() -> None:
+    """검색이 끝까지 봤는지가 **화면까지** 온다 — 후보 목록과 별개의 칸이다(H1 라운드 2).
+
+    ★잘린 후보 목록은 완전한 목록과 똑같이 생겼다. 「절단」이 audit 에 없으면 볼 사람이 봐도 모른다.
+    """
+    from agora import tools
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="problem")
+    ctx.store.locate_search = {tid: {"candidates": 250, "pages": 5, "truncated": True}}
+    plain = tools.read(ctx, thread_id=tid)
+    if "transport_search" in plain:
+        raise AssertionError("평시 화면이 시끄러워졌다")
+    audit = tools.read(ctx, thread_id=tid, audit=True)
+    if audit.get("transport_search") != {"candidates": 250, "pages": 5, "truncated": True}:
+        raise AssertionError(f"audit 에 검색 사실이 안 실린다: {audit.get('transport_search')}")
+
+
 def _case_github_lookup_is_cached() -> None:
     """스레드 번호는 한 번만 찾는다 — 매번 검색하면 한도를 검색으로 태운다."""
     from agora.store_github import GitHubStore
@@ -3789,6 +3958,15 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                  "M253-filter-answered-ignored", "M254-filter-os-ignored",
                  "M255-filter-app-ignored", "M256-filter-tag-ignored",
                  "M257-filter-query-ignored"),
+    # ★봉합 라운드 2(codex 재검증 2026-08-26 PARTIAL 4) — 봉합이 닿지 않던 **진입점**들.
+    "결박생성경로": ("M258-genesis-does-not-bind",),
+    "결박병합": ("M259-bind-skips-reread", "M260-bind-overwrites-conflict"),
+    "검색전수": ("M261-search-reads-one-page", "M262-truncated-search-still-binds",
+                 "M263-audit-hides-search-truncation"),
+    "응답상한": ("M264-audit-lists-not-paged", "M265-pending-sections-hidden",
+                 "M266-cursor-section-ignored"),
+    "재검증": ("M267-unverified-treated-as-received",),
+    "설정폴더": ("M268-context-does-not-pin-config-dir",),
 
     "절차개입": ("M224-abort-without-operator-check", "M225-operator-gate-writes-anyway",
                  "M226-delegate-without-operator-check",
@@ -6338,6 +6516,79 @@ def _case_read_pages_with_cursor() -> None:
         tools.READ_PAGE_EVENTS = keep
 
 
+def _case_read_caps_the_whole_response() -> None:
+    """상한은 **응답 전체**에 있다 — 격리·stale·refs 도 같은 커서로 이어 받는다(M-d 라운드 2).
+
+    ★라운드 1 은 `events` 만 잘랐다. 무효 글 700건이면 `events 1 · quarantined 700 · 119KB` 가
+      한 응답에 실렸다(codex 재현). 인자(`cursor`)는 있으니 부르는 쪽은 **상한이 있는 줄 안다** —
+      그것이 상한 없음보다 나쁘다.
+    ★네 방향으로 잰다: ⑴한 페이지의 목록 합계 바이트가 상한 안이다 ⑵페이지를 끝까지 이어 받으면
+      전건과 **빠짐·중복 없이** 같다 ⑶못 실은 목록은 빈 목록이 아니라 `pending` 에 이름이 있다
+      ⑷맨몸 커서(라운드 1 형식)는 여전히 events 로 읽힌다 · 모르는 키는 10.
+    ★상한 상수를 흔들지 않고 **실제 상한**으로 잰다 — 700건 픽스처가 상한을 진짜로 넘는다.
+    """
+    from agora import tools
+    from agora.contract_open import READ_PAGE_BYTES
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="knowhow")
+    for i in range(700):
+        ctx.store.inject_raw(thread_id=tid, body=f"웹에서 손으로 쓴 글 {i} " + "x" * 80,
+                             created_at=f"2026-01-02T{i // 3600:02d}:{(i // 60) % 60:02d}:{i % 60:02d}Z")
+    lists = ("events", "quarantined", "stale", "refs")
+    # 전건 — 상한을 잠깐 무한대로.
+    keep = (tools.READ_PAGE_BYTES, tools.READ_PAGE_EVENTS)
+    try:
+        tools.READ_PAGE_BYTES, tools.READ_PAGE_EVENTS = 10 ** 9, 10 ** 9
+        whole = tools.read(ctx, thread_id=tid, audit=True)
+    finally:
+        tools.READ_PAGE_BYTES, tools.READ_PAGE_EVENTS = keep
+    if whole["next_cursor"] is not None or len(whole["quarantined"]) != 700:
+        raise AssertionError(f"전건 픽스처가 틀리다: {len(whole['quarantined'])} · {whole['next_cursor']}")
+
+    pages: list[dict[str, Any]] = []
+    cursor = None
+    for _ in range(50):
+        page = tools.read(ctx, thread_id=tid, audit=True, cursor=cursor)
+        pages.append(page)
+        used = sum(tools._bytes_of(page[k]) for k in lists)
+        if used > READ_PAGE_BYTES and sum(len(page[k]) for k in lists) > 1:
+            raise AssertionError(f"한 페이지가 상한을 넘었다: {used} > {READ_PAGE_BYTES}")
+        if page["state"] != whole["state"]:
+            raise AssertionError("자른 페이지가 상태를 바꿨다")
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    else:
+        raise AssertionError("50페이지가 넘도록 끝이 안 난다")
+    if len(pages) < 2:
+        raise AssertionError("700건이 한 페이지에 다 실렸다 — 상한이 안 걸렸다")
+    for k in lists:
+        # events 는 read 마다 신뢰경계 표식이 새로 붙으므로 **id 로** 대조한다. 나머지는 전문.
+        def key_of(r: dict[str, Any], k: str = k) -> str:
+            return r["message_id"] if k == "events" else json.dumps(r, sort_keys=True)
+        got = [key_of(r) for p in pages for r in p[k]]
+        want = [key_of(r) for r in whole[k]]
+        if got != want:
+            raise AssertionError(f"{k}: 이어 받은 것이 전건과 다르다({len(got)} vs {len(want)})")
+    first = pages[0]
+    if not first.get("pending"):
+        raise AssertionError("못 실은 목록이 있는데 pending 이 비었다 — 빈 목록이 「없다」로 읽힌다")
+    if any("pending" in p for p in pages[-1:]):
+        raise AssertionError("마지막 페이지에 pending 이 남았다")
+    # 맨몸 커서(라운드 1 형식) = events 의 message_id.
+    mid = whole["events"][0]["message_id"]
+    legacy = tools.read(ctx, thread_id=tid, cursor=mid)
+    if [e["message_id"] for e in legacy["events"]] != [e["message_id"] for e in whole["events"][1:]]:
+        raise AssertionError("맨몸 커서가 events 로 안 읽힌다")
+    try:
+        tools.read(ctx, thread_id=tid, audit=True, cursor="quarantined:없는-키")
+    except AgoraError as e:
+        if e.code != errors.ARGUMENT:
+            raise AssertionError(f"코드가 {e.code}") from None
+    else:
+        raise AssertionError("모르는 목록 커서를 조용히 처음부터로 읽었다")
+
+
 def _case_audit_shows_transport_candidates() -> None:
     """후보가 여럿이었다는 사실이 **화면까지** 온다(H1 · R-13 · 구현≠배선).
 
@@ -6570,6 +6821,96 @@ def _case_watch_notifies_only_verified() -> None:
         raise AssertionError(f"명부 없이 통과시켰다: {blind}")
     if not f:
         raise AssertionError("픽스처 없음")
+
+
+def _case_unverified_is_reverified_when_roster_appears() -> None:
+    """「봤다」는 영구 무시 표식이 아니다 — 명부가 생기면 **다시 검증돼 온다**(M-e 라운드 2).
+
+    ★★codex 재검증(2026-08-26): `spool.seen()` 이 재검증보다 먼저라, 명부 없이 본 정상 글은
+      명부를 공급한 다음 주기에 `duplicates=1, new=0` 으로 **영구 건너뛰었다.** 단계 순서에
+      `unverified_seen` 을 맨 앞에 둔 이유(나중에 앞으로 갈 수 있게)가 dedupe 에 막혀 있었다.
+    ★네 방향으로 잰다: ⑴명부 없이 본 글 = 미검증 ⑵명부를 주면 **온다**(new) ⑶그 뒤 단계가
+      `fetched` 다 ⑷받은 뒤에는 중복이다(fetched 이상만 duplicate) — 그리고 미검증이 반복돼도
+      spool 줄이 불어나지 않는다(두 번째부터는 다시 적지 않는다).
+    """
+    from agora import spool as spool_mod
+    from agora import watch
+    store, spool, cursor, _d = _w_env()
+    _w_post(store, _wt("t1"), 1, 1)
+    first = watch.poll_once(store=store, spool=spool, cursor=cursor)          # 명부 없음
+    if first["new"] != 0 or first["unverified"] != 1:
+        raise AssertionError(f"명부 없이 통과시켰다: {first}")
+    again = watch.poll_once(store=store, spool=spool, cursor=cursor)          # 아직 명부 없음
+    if again["unverified"] != 1 or again["duplicates"] != 0:
+        raise AssertionError(f"미검증이 중복으로 갈렸다: {again}")
+    rows = [r for r in spool.rows() if r.get("stage") == spool_mod.UNVERIFIED_SEEN]
+    if len(rows) != 1:
+        raise AssertionError(f"미검증이 주기마다 한 줄씩 불어난다: {len(rows)}")
+    second = watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())
+    if second["new"] != 1 or second["duplicates"] != 0 or second["unverified"] != 0:
+        raise AssertionError(f"명부를 줬는데 안 온다 — 「봤다」가 영구 무시 표식이다: {second}")
+    stages = {row.get("stage") for row in spool.state().values()}
+    if stages != {spool_mod.FETCHED}:
+        raise AssertionError(f"재검증 뒤 단계가 fetched 가 아니다: {stages}")
+    third = watch.poll_once(store=store, spool=spool, cursor=cursor, **_w_roster())
+    if third["new"] != 0 or third["duplicates"] != 1:
+        raise AssertionError(f"받은 뒤에는 중복이어야 한다: {third}")
+
+
+def _case_config_dir_is_pinned_once_for_both_layers() -> None:
+    """설정 폴더는 컨텍스트를 세울 때 **한 번** 정해지고, scrub·서명기가 **같은 자리**를 본다(M-f 라운드 2).
+
+    ★★codex 재검증(2026-08-26): CLI `dir=<폴더>` 경로에서 `context_from_config()` 만 그 폴더를 쓰고
+      scrub·서명기는 환경의 `config_dir()` 를 다시 봤다 ⇒ 명시한 폴더에 이름 목록이 있어도
+      `NAMES_LOADED 0 · BLOCKED 0`. 두 겹이 서로 다른 폴더를 보면 재검사는 재검사가 아니다.
+    ★양 진입점을 잰다: ⑴`dir=`(명시 폴더 · 환경은 다른 곳을 가리킨다) ⑵환경변수만.
+      각각에서 ①컨텍스트가 폴더를 적고 ②scrub 이 그 폴더의 목록을 읽고 ③**서명기(subprocess)**가
+      같은 목록으로 차단한다(code 3) — 코어만 재고 서명기를 안 재면 반쪽이다.
+    """
+    import tempfile
+    from agora import scrub, tools
+    from agora.sign import sign_event
+    from agora.store_mock import MockStore
+    f = _fixtures()
+    keep = os.environ.get("AGORA_CONFIG_DIR")
+    try:
+        d = _config_dir_fixture(operators_text=None)
+        with open(os.path.join(d, scrub.NAMES_FILENAME), "w", encoding="utf-8") as fh:
+            fh.write("# 이 참가자가 가릴 이름\n라마바\n")
+        elsewhere = tempfile.mkdtemp(prefix="agora-elsewhere-")     # 이름 목록 없음
+        os.environ["AGORA_CONFIG_DIR"] = elsewhere
+        ev = _r2_post("7" * 32, "라마바 님이 그렇게 말했습니다", thread_id=_wt("t9"))
+
+        def check_both_layers(label: str) -> None:
+            if scrub.names_path() != os.path.join(d, scrub.NAMES_FILENAME):
+                raise AssertionError(f"{label}: scrub 이 다른 폴더를 본다: {scrub.names_path()}")
+            report = scrub.check({"payload": {"body": "라마바 님이 그렇게 말했습니다"}})
+            if report["names_loaded"] != 1 or report["blocked"] != 1:
+                raise AssertionError(f"{label}: 코어 스크럽이 목록을 안 읽는다: {report}")
+            try:
+                _with_key(f["key_a"], lambda: sign_event(ev))
+            except AgoraError as e:
+                if e.code != errors.GATE_REJECT:
+                    raise AssertionError(f"{label}: 서명기 코드가 {e.code}") from None
+            else:
+                raise AssertionError(f"{label}: 서명기가 다른 목록을 봤다 — 차단 없이 서명했다")
+
+        # ⑴ dir= 진입점 — 환경은 다른 곳을 가리키는 채로.
+        ctx = tools.context_from_config(d, store=MockStore())
+        if ctx.config_dir != d:
+            raise AssertionError(f"컨텍스트가 설정 폴더를 안 적는다: {ctx.config_dir}")
+        check_both_layers("dir=")
+        # ⑵ 환경변수 진입점.
+        os.environ["AGORA_CONFIG_DIR"] = d
+        ctx2 = tools.context_from_config(None, store=MockStore())
+        if ctx2.config_dir != d:
+            raise AssertionError(f"환경 진입점에서 폴더가 다르다: {ctx2.config_dir}")
+        check_both_layers("env")
+    finally:
+        if keep is None:
+            os.environ.pop("AGORA_CONFIG_DIR", None)
+        else:
+            os.environ["AGORA_CONFIG_DIR"] = keep
 
 
 def _case_receipt_only_for_our_own_format() -> None:
@@ -7484,6 +7825,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("denylist: 8범주 규칙 실재",     _case_denylist_covers_eight_categories, None),
     ("keygen: 권한이 유일한 장벽",    _case_keygen_locks_down_the_files, None),
     ("scrub: 이름 목록은 참가자 것",  _case_name_list_comes_from_the_participant_folder, None),
+    ("scrub: 설정 폴더는 한 번 정한다", _case_config_dir_is_pinned_once_for_both_layers, None),
     ("denylist: 정상문 오탐 0",       _case_denylist_no_false_positive, None),
     ("denylist: 규칙 파손 → 3",       _case_denylist_broken_rules_file_is_fail_closed, errors.GATE_REJECT),
     ("scrub: 이름 목록 부재는 보인다", _case_names_absence_is_visible, None),
@@ -7652,12 +7994,18 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("배선: 본문은 데이터 표식",      _case_read_wraps_bodies_as_untrusted_data, None),
     ("읽기: 진 글도 audit 에 나온다",  _case_audit_shows_the_races_that_were_lost, None),
     ("읽기: 커서로 나눠 준다",         _case_read_pages_with_cursor, None),
+    ("읽기: 응답 전체에 상한",       _case_read_caps_the_whole_response, None),
     ("결박: 후보가 화면까지 온다",     _case_audit_shows_transport_candidates, None),
+    ("결박: 만든 자리에서 묶는다",     _case_genesis_binds_at_creation, None),
+    ("결박: 잠금 안 병합·충돌 → 2",    _case_bind_merges_under_lock_and_refuses_conflict, None),
+    ("결박: 검색은 끝까지·절단이면 거부", _case_locate_pages_the_search_and_refuses_truncation, None),
+    ("결박: 절단이 화면까지 온다",     _case_audit_shows_search_truncation, None),
     ("사슬: 거부가 막지 않는다",       _case_rejected_event_does_not_wedge_the_chain, None),
     ("MCP: 예시대로 서버가 뜬다",      _case_example_mcp_config_actually_starts_the_server, None),
     ("MCP: 기동은 도구가 아니다",      _case_mcp_serve_is_not_itself_a_tool, None),
     ("영수증: 감시가 배달을 적는다",   _case_watch_writes_the_delivery_receipt, None),
     ("감시: 검증 통과분만 알린다",     _case_watch_notifies_only_verified, None),
+    ("감시: 미검증은 다시 검증한다",  _case_unverified_is_reverified_when_roster_appears, None),
     ("영수증: 서식 아닌 글엔 없다",    _case_receipt_only_for_our_own_format, None),
     ("영수증: 원장 없으면 안 적는다",  _case_delivery_receipt_needs_a_ledger, None),
     ("code 8: 도구가 판정한다",        _case_unknown_commit_is_settled_by_the_tool, None),
@@ -7910,7 +8258,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    since = seen_until",
      "watch: 겹치기로 경계 보존"),
     ("M116-watch-no-dedupe", "agora/watch.py",
-     "            if spool.seen(node_id):",
+     "            if spool.received(node_id):",
      "            if False:",
      "watch: 중복 게시 → 1건"),
     ("M117-watch-cursor-in-memory", "agora/watch.py",
@@ -8666,9 +9014,34 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        bound = None',
      "결박: 묶인 번호만 쓴다"),
     ("M237-binding-not-persisted", "agora/store_github.py",
-     '        _save_bindings(self._bindings_path, self._bindings)',
-     '        pass',
+     '            _save_bindings(self._bindings_path, self._bindings)',
+     '            pass',
      "결박: 묶인 번호만 쓴다"),
+    # ★라운드 2 — 봉합이 닿지 않던 진입점 셋(생성 경로 · 병렬 병합 · 검색 전수).
+    ("M258-genesis-does-not-bind", "agora/store_github.py",
+     '            self._bind(thread_id, node)\n            self._numbers[thread_id] = node["number"]',
+     '            self._numbers[thread_id] = node["number"]',
+     "결박: 만든 자리에서 묶는다"),
+    ("M259-bind-skips-reread", "agora/store_github.py",
+     '            current = _load_bindings(self._bindings_path)',
+     '            current = dict(self._bindings)',
+     "결박: 잠금 안 병합·충돌 → 2"),
+    ("M260-bind-overwrites-conflict", "agora/store_github.py",
+     '            if existing and existing != entry:',
+     '            if False:',
+     "결박: 잠금 안 병합·충돌 → 2"),
+    ("M261-search-reads-one-page", "agora/store_github.py",
+     '            if not page.get("hasNextPage") or pages >= LOCATE_SEARCH_PAGES:',
+     '            if True:',
+     "결박: 검색은 끝까지·절단이면 거부"),
+    ("M262-truncated-search-still-binds", "agora/store_github.py",
+     '            if truncated:\n                raise AgoraError(\n                    errors.STORE, "검색 결과가 절단됐다',
+     '            if False:\n                raise AgoraError(\n                    errors.STORE, "검색 결과가 절단됐다',
+     "결박: 검색은 끝까지·절단이면 거부"),
+    ("M263-audit-hides-search-truncation", "agora/tools.py",
+     '            view["transport_search"] = dict(searched[thread_id])',
+     '            pass',
+     "결박: 절단이 화면까지 온다"),
     ("M238-candidates-not-recorded", "agora/store_github.py",
      '            self.locate_candidates[thread_id] = sorted(n["number"] for n in nodes)',
      '            pass',
@@ -8699,9 +9072,22 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "MCP: 나쁜 인자에도 산다"),
     # ★M-d — 인자만 있고 동작이 없던 자리(응답 상한 부재).
     ("M244-read-never-pages", "agora/tools.py",
-     '    view["events"], view["next_cursor"] = _page(view["events"], cursor)',
-     '    view["next_cursor"] = None',
+     '        view["events"], tail = _page(view["events"], key)',
+     '        view["events"], tail = view["events"], None',
      "읽기: 커서로 나눠 준다"),
+    # ★M-d 라운드 2 — events 만 자르고 나머지 목록은 전건 복사하던 자리(응답 상한이 안 잠겼다).
+    ("M264-audit-lists-not-paged", "agora/tools.py",
+     '            if out and budget - size < 0:',
+     '            if False:',
+     "읽기: 응답 전체에 상한"),
+    ("M265-pending-sections-hidden", "agora/tools.py",
+     '    if pending:\n        view["pending"] = pending',
+     '    if False:\n        view["pending"] = pending',
+     "읽기: 응답 전체에 상한"),
+    ("M266-cursor-section-ignored", "agora/tools.py",
+     '    if sep and head in READ_SECTIONS:\n        return head, key',
+     '    if False:\n        return head, key',
+     "읽기: 응답 전체에 상한"),
     ("M245-page-forgets-the-rest", "agora/tools.py",
      '            return out, out[-1].get("message_id")',
      '            return out, None',
@@ -8716,14 +9102,24 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if not allowed_signers_path:\n        return True, None',
      "감시: 검증 통과분만 알린다"),
     ("M248-unverified-not-recorded", "agora/watch.py",
-     '                spool.record(node_id=node_id, stage=spool_mod.UNVERIFIED_SEEN,\n                             thread_id=item.get("thread_id"))',
-     '                pass',
+     '                    spool.record(node_id=node_id, stage=spool_mod.UNVERIFIED_SEEN,\n                                 thread_id=item.get("thread_id"))',
+     '                    pass',
      "감시: 검증 통과분만 알린다"),
+    # ★M-e 라운드 2 — 「봤다」가 영구 무시 표식이 되던 자리.
+    ("M267-unverified-treated-as-received", "agora/spool.py",
+     '        return stage is not None and _RANK[stage] >= _RANK[FETCHED]',
+     '        return stage is not None',
+     "감시: 미검증은 다시 검증한다"),
     # ★M-f — 참가자가 문서대로 둔 이름 목록을 아무도 안 읽던 자리.
     ("M249-names-path-pinned-to-repo", "agora/scrub.py",
      '    local = os.path.join(config_dir(), NAMES_FILENAME)\n    return local if os.path.exists(local) else DEFAULT_NAMES_PATH',
      '    local = os.path.join(config_dir(), NAMES_FILENAME)\n    return DEFAULT_NAMES_PATH',
      "scrub: 이름 목록은 참가자 것"),
+    # ★M-f 라운드 2 — `dir=` 로 온 폴더를 컨텍스트만 쓰고 scrub·서명기는 환경을 다시 보던 자리.
+    ("M268-context-does-not-pin-config-dir", "agora/tools.py",
+     '    _os.environ["AGORA_CONFIG_DIR"] = d',
+     '    pass',
+     "scrub: 설정 폴더는 한 번 정한다"),
     # ★M-g(LOW) — 암호가 없으니 권한이 유일한 장벽이다.
     ("M250-key-file-world-readable", "agora/keygen.py",
      '    os.chmod(key_path, 0o600)',

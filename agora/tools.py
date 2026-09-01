@@ -48,8 +48,11 @@ class Context:
                  revoked_path: str | None = None,
                  config: dict[str, Any] | None = None,
                  operators: frozenset[str] = frozenset(),
-                 prompt: Any = None, isatty: Any = None) -> None:
+                 prompt: Any = None, isatty: Any = None,
+                 config_dir: str | None = None) -> None:
         self.store = store
+        # ★설정 폴더는 **한 번 정해지고** 여기 적힌다(M-f 라운드 2). 층마다 다시 찾지 않는다.
+        self.config_dir = config_dir
         self.ledger = ledger
         self.spool = spool
         self.allowed_signers_path = allowed_signers_path
@@ -377,13 +380,101 @@ def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
         seen = getattr(ctx.store, "locate_candidates", None) or {}
         if thread_id in seen:
             view["transport_candidates"] = list(seen[thread_id])
+        # ★검색이 **끝까지 봤는가**도 싣는다(라운드 2). 후보 목록만 보이면 「그 뒤가 잘렸다」는
+        #   사실이 화면에 없고, 잘린 목록은 완전한 목록과 똑같이 생겼다.
+        searched = getattr(ctx.store, "locate_search", None) or {}
+        if thread_id in searched:
+            view["transport_search"] = dict(searched[thread_id])
     # ★★M-d(codex 2026-08-26) — `cursor` 인자는 있는데 **아무도 안 쓰고** `next_cursor` 는
     #   늘 None 이었다. 즉 응답에 **상한이 없었다**: 스레드가 길어지면 한 호출이 얼마든 커지고,
     #   부르는 쪽은 나눠 받을 방법이 없다(인자가 있으니 **있는 줄 안다** — 더 나쁘다).
     # ★⚠자르는 것은 **화면뿐**이다. 상태·격리 판정은 위에서 이미 **전건으로** 끝났다.
     #   자른 뒤의 상태는 상태가 아니다 — 그 실수를 하면 페이지마다 다른 사실이 생긴다.
-    view["events"], view["next_cursor"] = _page(view["events"], cursor)
+    # ★★라운드 2(codex 재검증) — 라운드 1 은 `events` 만 잘랐다. `quarantined`·`stale`·`refs` 는
+    #   전건 복사라 **최종 응답의 바이트 상한이 안 잠겼다**(무효 글 700건 재현: events 1 · quarantined 700 ·
+    #   119KB). 상한은 「이벤트 수」가 아니라 **응답 전체**에 있어야 한다.
+    #   ⇒ 커서 하나가 네 목록을 차례로 가리킨다(`<목록>:<키>` · 맨몸 message_id = events 호환).
+    section, key = _parse_cursor(cursor)
+    if section == "events":
+        view["events"], tail = _page(view["events"], key)
+        view["next_cursor"] = f"events:{tail}" if tail else None
+    else:
+        view["events"] = []            # 앞 페이지에서 이미 건넸다
+        view["next_cursor"] = None
+    _page_sections(view, section, key,
+                   READ_PAGE_BYTES - _bytes_of(view["events"]))
     return view
+
+
+# 응답 안의 목록 네 개 — 커서가 이 **차례로** 가리킨다. 이름이 커서에 그대로 실린다.
+READ_SECTIONS = ("events", "quarantined", "stale", "refs")
+
+
+def _parse_cursor(cursor: str | None) -> tuple[str, str | None]:
+    """`<목록>:<키>` → (목록, 키). 맨몸 값은 라운드 1 형식(= events 의 message_id)이다."""
+    if not cursor:
+        return "events", None
+    head, sep, key = cursor.partition(":")
+    if sep and head in READ_SECTIONS:
+        return head, key
+    return "events", cursor
+
+
+def _bytes_of(rows: list[dict[str, Any]]) -> int:
+    return sum(len(json.dumps(r, ensure_ascii=False).encode("utf-8")) for r in rows)
+
+
+def _section_key(section: str, entry: dict[str, Any], index: int) -> str:
+    """이어 읽기 키 — events 는 message_id · 격리·stale 은 node_id · refs 는 위치(링크엔 고유 id 가 없다)."""
+    if section == "refs":
+        return str(index)
+    return str(entry.get("node_id") or entry.get("message_id") or index)
+
+
+def _page_sections(view: dict[str, Any], section: str, key: str | None,
+                   budget: int) -> None:
+    """events 뒤의 목록들을 **같은 바이트 예산** 안에서 이어 준다.
+
+    ★못 실은 목록은 **빈 목록으로 두지 않고 이름을 댄다**(`pending`). 빈 목록은 「없다」와
+      「이번 페이지엔 못 실었다」가 같아 보이고, 격리 목록에서 그 둘은 정반대 사실이다.
+    ★한 페이지에 적어도 한 건은 싣는다 — 한 건이 예산보다 커도 진행은 해야 한다(무한 같은 페이지 금지).
+    """
+    order = list(READ_SECTIONS[1:])
+    present = [s for s in order if s in view]
+    # 앞 목록(events)이 더 남았으면 뒤 목록은 이 페이지에 안 실린다 — 차례가 있어야 커서가 뜻을 갖는다.
+    if view.get("next_cursor"):
+        for s in present:
+            view[s] = []
+        view["pending"] = present
+        return
+    pending: list[str] = []
+    cut = False
+    for s in present:
+        rows = list(view[s])
+        if cut or (section != "events" and order.index(s) < order.index(section)):
+            view[s] = []               # 뒤(예산 소진) 또는 앞(이미 건넸다) — 둘 다 이 페이지엔 없다
+            if cut:
+                pending.append(s)
+            continue
+        start = 0
+        if section == s:
+            keys = [_section_key(s, r, i) for i, r in enumerate(rows)]
+            if key not in keys:
+                raise AgoraError(errors.ARGUMENT, "그 cursor 가 이 스레드에 없다",
+                                 {"cursor": f"{s}:{key}"})
+            start = keys.index(key) + 1
+        out: list[dict[str, Any]] = []
+        for i in range(start, len(rows)):
+            size = len(json.dumps(rows[i], ensure_ascii=False).encode("utf-8"))
+            if out and budget - size < 0:
+                view["next_cursor"] = f"{s}:{_section_key(s, rows[i - 1], i - 1)}"
+                cut = True
+                break
+            out.append(rows[i])
+            budget -= size
+        view[s] = out
+    if pending:
+        view["pending"] = pending
 
 
 def _page(events: list[dict[str, Any]],
@@ -725,6 +816,12 @@ def context_from_config(directory: str | None = None, *,
     from agora.participant import config_dir, load
     from agora.spool import Spool
     d = directory or config_dir()
+    # ★★M-f 라운드 2(codex 재검증) — 설정 폴더를 **여기서 한 번** 확정하고 환경에 고정한다.
+    #   그전에는 `dir=` 로 온 폴더를 이 함수만 썼고, scrub(이름 목록)과 서명기(별도 프로세스)는
+    #   환경의 `config_dir()` 를 **다시** 봤다 ⇒ 두 겹이 서로 다른 폴더를 봤다(재현: 명시한 폴더에
+    #   목록이 있어도 `NAMES_LOADED 0 · BLOCKED 0`). 환경에 적는 이유: 서명기는 subprocess 라
+    #   인자가 아니라 **환경을 상속**한다 — 같은 규칙으로 같은 자리를 보게 하는 유일한 통로다.
+    _os.environ["AGORA_CONFIG_DIR"] = d
     doc = load(d)
     cfg = load_config(d)
     if store is None:
@@ -735,7 +832,7 @@ def context_from_config(directory: str | None = None, *,
                    allowed_signers_path=_os.path.join(d, "allowed_signers"),
                    revoked_path=_os.path.join(d, "revoked_keys"),
                    operators=roster.operators(path=_os.path.join(d, "operators")),
-                   participant_id=doc["id"], config=cfg)
+                   participant_id=doc["id"], config=cfg, config_dir=d)
 
 
 def _store_from_config(cfg: dict[str, Any], directory: str | None = None) -> Any:

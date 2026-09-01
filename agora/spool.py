@@ -127,8 +127,25 @@ class Spool:
         return None
 
     def seen(self, node_id: str) -> bool:
-        """dedupe 의 판정 — 이 node_id 를 이미 받았는가(at-least-once 의 짝)."""
+        """이 node_id 가 spool 에 **어떤 단계로든** 있는가(본 것 포함)."""
         return node_id in self.state()
+
+    def stage_of(self, node_id: str) -> str | None:
+        """이 node_id 의 현재 단계. 없으면 None."""
+        row = self.state().get(node_id)
+        return row["stage"] if row else None
+
+    def received(self, node_id: str) -> bool:
+        """dedupe 의 판정 — 이 node_id 를 이미 **받았는가**(at-least-once 의 짝).
+
+        ★★M-e 라운드 2(codex 재검증) — 그전에는 `seen()` 으로 판정해서 `unverified_seen` 도 중복으로
+          건너뛰었다. 즉 「봤다」가 **영구 무시 표식**이 됐다: 명부 없이 본 정상 글은 명부를 고쳐도
+          영영 안 왔다(재현 `SECOND duplicates=1, new=0`). 단계 순서에 `unverified_seen` 을 맨 앞에
+          둔 이유가 「나중에 앞으로 갈 수 있게」였는데 그 앞길을 dedupe 가 막고 있었다.
+        ⇒ 받았다 = **fetched 이상**. 본 것은 다시 검증 대상이다.
+        """
+        stage = self.stage_of(node_id)
+        return stage is not None and _RANK[stage] >= _RANK[FETCHED]
 
     def pending(self, stage: str) -> list[str]:
         """그 단계에 **머물러 있는** node_id 들. 「전달됨에 머문 것」이 곧 미소비다."""
