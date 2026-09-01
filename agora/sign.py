@@ -30,23 +30,36 @@ BAD = "BAD"
 UNSIGNED = "unsigned"
 
 
-def sign_event(event: Any, timeout: int = 60) -> dict[str, Any]:
-    """서명기 프로세스에 위임한다. 키 경로는 넘기지 않는다(환경이 정한다)."""
+def sign_event(event: Any, timeout: int = 60,
+               config_dir: str | None = None) -> dict[str, Any]:
+    """서명기 프로세스에 위임한다. 키 경로는 넘기지 않는다(환경이 정한다).
+
+    ★R3-②(master#238398): 설정 폴더는 **호출별 env** 로 넘긴다 — 절대경로로. 서명기는 저장소 루트
+      cwd 로 돌므로 상대경로를 물려주면 코어와 다른 폴더를 본다(codex 라운드 2 재현: 코어는 차단·서명기는 code 0).
+      전역 환경을 바꾸지 않는 이유: 한 프로세스의 Context 둘이 서로를 덮었다.
+    """
+    env = dict(os.environ)
+    if config_dir:
+        env["AGORA_CONFIG_DIR"] = os.path.abspath(config_dir)
     proc = subprocess.run(
         [SIGNER_BIN],
         input=json.dumps({"event": event}, ensure_ascii=False),
-        capture_output=True, text=True, timeout=timeout, cwd=_ROOT,
+        capture_output=True, text=True, timeout=timeout, cwd=_ROOT, env=env,
     )
     if proc.returncode != 0:
         try:
             payload = json.loads(proc.stderr.strip() or "{}")
         except ValueError:
             payload = {"message": proc.stderr.strip()[:300]}
+        # ★어느 층이 막았는지 표식을 단다(R3-②). 코어 스크럽과 서명기 재검사는 같은 code 3 을 내므로,
+        #   표식이 없으면 「코어가 안 걸렀는데 서명기가 가려 준」 상태가 초록으로 남는다.
+        detail = payload.get("detail")
+        detail = {**detail, "layer": "signer"} if type(detail) is dict else {"layer": "signer"}
         raise AgoraError(
             payload.get("code", errors.SIGNATURE) if payload.get("code") in errors.ALL_CODES
             else errors.SIGNATURE,
             payload.get("message", "서명기 실패"),
-            payload.get("detail"),
+            detail,
         )
     return json.loads(proc.stdout)
 

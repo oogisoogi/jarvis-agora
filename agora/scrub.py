@@ -37,8 +37,13 @@ NAMES_FILENAME = "scrub-names.txt"
 DEFAULT_NAMES_PATH = os.path.join(_ROOT, NAMES_FILENAME.join(("config/", "")))
 
 
-def names_path() -> str:
+def names_path(config_dir: str | None = None) -> str:
     """이름 목록이 실제로 있는 자리 — **참가자 설정 폴더가 먼저**다(M-f · codex 2026-08-26).
+
+    ★R3-②(master#238398): 폴더는 **호출자가 넘긴다**(Context 상태). 라운드 2 는 컨텍스트 생성 시
+      전역 환경변수를 고정했는데, 한 프로세스에 Context 가 둘이면 나중 것이 앞의 것을 덮었다
+      (codex 재현: A 의 금지 이름이 A 발행에서 안 걸렸다). 전역은 Context 별 설정이 아니다.
+      넘기지 않으면 환경(`config_dir()`)으로 돌아간다 — 서명기(별도 프로세스)가 그 경로다.
 
     ★★그전에는 저장소 안의 한 경로로 **고정**돼 있었다. 그런데 이름 목록은 참가자 로컬이라
       `ONBOARDING` 이 시키는 대로 `AGORA_CONFIG_DIR` 에 둔 사람의 목록은 **아무도 안 읽었다.**
@@ -48,8 +53,9 @@ def names_path() -> str:
       두 겹(코어·서명기)이 서로 다른 목록을 볼 수 있고, 그러면 재검사가 재검사가 아니다.
       같은 규칙으로 **같은 자리를** 찾게 두는 것이 두 겹을 진짜 두 겹으로 만든다.
     """
-    from agora.participant import config_dir
-    local = os.path.join(config_dir(), NAMES_FILENAME)
+    from agora.participant import config_dir as env_config_dir
+    base = os.path.abspath(config_dir) if config_dir else env_config_dir()
+    local = os.path.join(base, NAMES_FILENAME)
     return local if os.path.exists(local) else DEFAULT_NAMES_PATH
 
 # URL 은 호스트만 본다. 경로·질의는 denylist 와 필드 길이가 따로 본다.
@@ -231,7 +237,8 @@ def check_names(payload: Any, names: frozenset[str]) -> list[dict[str, Any]]:
 
 def check(payload: Any, rules: Rules | None = None,
           allow: AllowRules | None = None,
-          names: frozenset[str] | None = None) -> dict[str, Any]:
+          names: frozenset[str] | None = None,
+          names_path: str | None = None) -> dict[str, Any]:
     """구조 전체의 문자열을 훑어 차단 사유를 모은다.
 
     반환은 **보고서**이지 판정 집행이 아니다 — 집행(전송 중단)은 호출자가 한다.
@@ -240,7 +247,7 @@ def check(payload: Any, rules: Rules | None = None,
     """
     rules = rules or load_rules()
     allow = allow or load_allow()
-    names = load_names() if names is None else names
+    names = load_names(names_path) if names is None else names
     findings: list[dict[str, Any]] = list(check_allow(payload, allow))
     findings.extend(check_names(payload, names))
     for where, text in _walk_strings(payload):
@@ -282,9 +289,10 @@ def current_bundle() -> str:
 
 def enforce(payload: Any, rules: Rules | None = None,
             allow: AllowRules | None = None,
-            names: frozenset[str] | None = None) -> dict[str, Any]:
+            names: frozenset[str] | None = None,
+            names_path: str | None = None) -> dict[str, Any]:
     """차단이 1건이라도 있으면 code 3 으로 멈춘다. 통과하면 보고서를 돌려준다."""
-    report = check(payload, rules, allow, names)
+    report = check(payload, rules, allow, names, names_path=names_path)
     if report["blocked"]:
         raise AgoraError(errors.GATE_REJECT, "스크럽 게이트 차단",
                          {"blocked": report["blocked"],

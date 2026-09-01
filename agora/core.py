@@ -56,7 +56,8 @@ def publish_event(*, store: Any, event: dict[str, Any], category: str,
                   config: dict[str, Any] | None = None,
                   prompt: Any = None, isatty: Any = None,
                   ledger: Any = None,
-                  before_write: Any = None) -> dict[str, Any]:
+                  before_write: Any = None,
+                  config_dir: str | None = None) -> dict[str, Any]:
     """한 이벤트를 운반층에 올린다 — 위 5단계를 그 순서대로.
 
     ★code 8(저장 성공 불명)은 **삼키지 않는다.** 그대로 올려 호출자가 재조회로 판정하게 한다
@@ -69,9 +70,12 @@ def publish_event(*, store: Any, event: dict[str, Any], category: str,
       던지면 그대로 올라간다 — 여기서 삼키면 CAS 가 있으나 마나가 된다.
     """
     schema.validate(event)                     # ⑴ 계약
-    report = scrub.enforce(event)              # ⑵ 게이트 — 여기서 막히면 아래로 못 간다
+    # ★R3-② — 이름 목록의 자리는 **Context 의 설정 폴더**에서 온다(전역 환경이 아니라). 코어에는
+    #   경로를 명시하고, 서명기(별도 프로세스)에는 같은 절대경로를 **호출별 env** 로 준다.
+    #   두 겹이 같은 폴더를 보게 하는 통로가 하나뿐이면 어느 쪽도 조용히 다른 목록을 못 본다.
+    report = scrub.enforce(event, names_path=scrub.names_path(config_dir))   # ⑵ 게이트
     approval = approval_gate(config=config, prompt=prompt, isatty=isatty)   # ⑶ 승인
-    signed = sign.sign_event(event)            # ⑷ 서명(서명기가 게이트를 재검사한다)
+    signed = sign.sign_event(event, config_dir=config_dir)   # ⑷ 서명(서명기가 게이트를 재검사한다)
     body = render_post(event, signed["signature"])
     if before_write is not None:
         before_write()                         # ⑸ 마지막 관문(CAS 등) — 던지면 안 쓴다
@@ -139,7 +143,7 @@ def envelope_check(envelope: Any) -> dict[str, Any]:
     return {"ok": not errs, "errors": errs, "scrub_report": report}
 
 
-def declare_scrub(event: dict[str, Any]) -> dict[str, Any]:
+def declare_scrub(event: dict[str, Any], config_dir: str | None = None) -> dict[str, Any]:
     """이벤트의 `scrub` 칸을 **정직하게** 채운다(§2-1).
 
     ★이 칸은 서명 대상 안에 있으므로 **이벤트를 만들 때** 채워야 한다 — 나중에 덮어쓰면
@@ -149,7 +153,7 @@ def declare_scrub(event: dict[str, Any]) -> dict[str, Any]:
       대신 대가가 있다: 묶음이 바뀌면 수신 측은 **세 겹(denylist·allowlist·도메인) 전부**를
       갖고 있어야 같은 값을 다시 만들 수 있다 — 규칙 배포 경로가 이 선택의 전제다.
     """
-    report = scrub.check(event)
+    report = scrub.check(event, names_path=scrub.names_path(config_dir))
     event["scrub"] = {"rules": report["bundle"], "blocked": report["blocked"],
                       "redacted": report["redacted"]}
     return event

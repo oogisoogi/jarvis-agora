@@ -3967,7 +3967,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                  "M266-cursor-section-ignored", "M273-fit-loop-never-shrinks",
                  "M274-wire-size-ignores-envelopes"),
     "재검증": ("M267-unverified-treated-as-received",),
-    "설정폴더": ("M268-context-does-not-pin-config-dir",),
+    "설정폴더": ("M268-context-does-not-pin-config-dir", "M275-publish-drops-names-path",
+                 "M276-signer-env-not-passed", "M277-publish-drops-config-dir"),
     # ★NFR-8 — 2026-08-26 까지 「행 없음·미측정」이던 칸(성찰 J-1). 검사기 자신도 조준한다.
     "정본적재": ("M269-body-written-to-docs", "M270-allowed-sink-writes-body",
                  "M271-scanner-forgets-docs-marker", "M272-scanner-blind-to-os-replace"),
@@ -6866,14 +6867,15 @@ def _case_unverified_is_reverified_when_roster_appears() -> None:
 
 
 def _case_config_dir_is_pinned_once_for_both_layers() -> None:
-    """설정 폴더는 컨텍스트를 세울 때 **한 번** 정해지고, scrub·서명기가 **같은 자리**를 본다(M-f 라운드 2).
+    """설정 폴더는 컨텍스트를 세울 때 **한 번·절대경로로** 정해지고, scrub·서명기가 **같은 자리**를 본다.
 
-    ★★codex 재검증(2026-08-26): CLI `dir=<폴더>` 경로에서 `context_from_config()` 만 그 폴더를 쓰고
-      scrub·서명기는 환경의 `config_dir()` 를 다시 봤다 ⇒ 명시한 폴더에 이름 목록이 있어도
-      `NAMES_LOADED 0 · BLOCKED 0`. 두 겹이 서로 다른 폴더를 보면 재검사는 재검사가 아니다.
-    ★양 진입점을 잰다: ⑴`dir=`(명시 폴더 · 환경은 다른 곳을 가리킨다) ⑵환경변수만.
-      각각에서 ①컨텍스트가 폴더를 적고 ②scrub 이 그 폴더의 목록을 읽고 ③**서명기(subprocess)**가
-      같은 목록으로 차단한다(code 3) — 코어만 재고 서명기를 안 재면 반쪽이다.
+    ★★M-f 라운드 2(codex 2026-08-26) → R3-②(master#238398 로 되돌림 · 이력을 남긴다):
+      라운드 2 는 `context_from_config()` 가 전역 환경변수를 고정하는 안이었고 master 가 채택했다.
+      codex 라운드 2 재검증이 그 안을 뒤집었다 — 한 프로세스에 Context 둘이면 나중 것이 앞의 것을 덮고,
+      상대경로는 cwd 가 다른 서명기에서 다른 폴더가 된다. 그래서 이제 **전역을 건드리지 않고**
+      Context 상태로만 든다: 코어는 `names_path` 명시, 서명기는 호출별 env.
+    ★양 진입점(`dir=` · 환경변수)에서 ①`ctx.config_dir` 이 절대경로 ②전역 환경은 **바뀌지 않는다**
+      ③코어 scrub 이 그 폴더의 목록을 읽고 ④서명기(subprocess)가 같은 목록으로 차단한다(code 3).
     """
     import tempfile
     from agora import scrub, tools
@@ -6889,14 +6891,15 @@ def _case_config_dir_is_pinned_once_for_both_layers() -> None:
         os.environ["AGORA_CONFIG_DIR"] = elsewhere
         ev = _r2_post("7" * 32, "라마바 님이 그렇게 말했습니다", thread_id=_wt("t9"))
 
-        def check_both_layers(label: str) -> None:
-            if scrub.names_path() != os.path.join(d, scrub.NAMES_FILENAME):
-                raise AssertionError(f"{label}: scrub 이 다른 폴더를 본다: {scrub.names_path()}")
-            report = scrub.check({"payload": {"body": "라마바 님이 그렇게 말했습니다"}})
+        def check_both_layers(label: str, cfg: str) -> None:
+            if scrub.names_path(cfg) != os.path.join(d, scrub.NAMES_FILENAME):
+                raise AssertionError(f"{label}: scrub 이 다른 폴더를 본다: {scrub.names_path(cfg)}")
+            report = scrub.check({"payload": {"body": "라마바 님이 그렇게 말했습니다"}},
+                                 names_path=scrub.names_path(cfg))
             if report["names_loaded"] != 1 or report["blocked"] != 1:
                 raise AssertionError(f"{label}: 코어 스크럽이 목록을 안 읽는다: {report}")
             try:
-                _with_key(f["key_a"], lambda: sign_event(ev))
+                _with_key(f["key_a"], lambda: sign_event(ev, config_dir=cfg))
             except AgoraError as e:
                 if e.code != errors.GATE_REJECT:
                     raise AssertionError(f"{label}: 서명기 코드가 {e.code}") from None
@@ -6905,16 +6908,79 @@ def _case_config_dir_is_pinned_once_for_both_layers() -> None:
 
         # ⑴ dir= 진입점 — 환경은 다른 곳을 가리키는 채로.
         ctx = tools.context_from_config(d, store=MockStore())
-        if ctx.config_dir != d:
+        if ctx.config_dir != os.path.abspath(d):
             raise AssertionError(f"컨텍스트가 설정 폴더를 안 적는다: {ctx.config_dir}")
-        check_both_layers("dir=")
+        if os.environ.get("AGORA_CONFIG_DIR") != elsewhere:
+            raise AssertionError("컨텍스트 생성이 전역 환경을 바꿨다 — Context 둘이면 서로를 덮는다")
+        check_both_layers("dir=", ctx.config_dir)
         # ⑵ 환경변수 진입점.
         os.environ["AGORA_CONFIG_DIR"] = d
         ctx2 = tools.context_from_config(None, store=MockStore())
-        if ctx2.config_dir != d:
+        if ctx2.config_dir != os.path.abspath(d):
             raise AssertionError(f"환경 진입점에서 폴더가 다르다: {ctx2.config_dir}")
-        check_both_layers("env")
+        check_both_layers("env", ctx2.config_dir)
     finally:
+        if keep is None:
+            os.environ.pop("AGORA_CONFIG_DIR", None)
+        else:
+            os.environ["AGORA_CONFIG_DIR"] = keep
+
+
+def _case_config_dir_is_context_state_not_global() -> None:
+    """설정 폴더는 **Context 의 것**이다 — 둘이 공존해도, 상대경로로 받아도, 제품 경로에서 그 목록이 걸린다(R3-②).
+
+    ★codex 라운드 2 재현 두 가지를 그대로 되돌려 잰다:
+      ⑴ Context A(금지 이름 있음)·B(없음)를 같은 프로세스에 두고 **B 를 나중에** 만든 뒤 A 로 발행 →
+         code 3(name-list). 라운드 2 는 B 생성이 전역을 덮어 A 발행이 그대로 저장됐다.
+      ⑵ cwd 를 저장소 밖으로 옮기고 **상대경로** `dir=` 로 세운 Context → 서명기(cwd = 저장소 루트 고정)가
+         같은 목록으로 차단한다(code 3). 라운드 2 는 코어만 차단하고 서명기는 code 0 이었다.
+    ★그리고 A 의 옆에서 B 로 발행하면 **통과**한다 — 한쪽만 재면 「전부 차단」도 초록이다.
+    """
+    from agora import scrub, tools
+    from agora.sign import sign_event
+    from agora.store_mock import MockStore
+    f = _fixtures()
+    keep = os.environ.get("AGORA_CONFIG_DIR")
+    cwd = os.getcwd()
+    try:
+        os.environ.pop("AGORA_CONFIG_DIR", None)
+        a = _config_dir_fixture(operators_text=None)
+        b = _config_dir_fixture(operators_text=None)
+        with open(os.path.join(a, scrub.NAMES_FILENAME), "w", encoding="utf-8") as fh:
+            fh.write("라마바\n")
+        ctx_a = tools.context_from_config(a, store=MockStore())
+        ctx_b = tools.context_from_config(b, store=MockStore())      # 나중에 — 라운드 2 라면 A 를 덮는다
+        tid_a = _tools_thread(ctx_a, gtype="knowhow")
+        try:
+            _with_key(f["key_a"], lambda: tools.say(ctx_a, thread_id=tid_a, body="라마바 님이 그렇게 말했다"))
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT or "name-list" not in (e.detail or {}).get("rules", []):
+                raise AssertionError(f"A 발행이 A 의 목록으로 안 막혔다: {e.code} {e.detail}") from None
+            # ★그 층만의 표식 — 코어가 먼저 막아야 한다. 서명기가 막은 것이면 코어는 목록을 못 본 것이다
+            #   (두 겹이 서로 가리면 한 겹이 비어도 초록 · 라운드 1 교훈 2).
+            if (e.detail or {}).get("layer") == "signer":
+                raise AssertionError("코어 스크럽이 A 의 목록을 안 보고 서명기가 대신 막았다") from None
+        else:
+            raise AssertionError("B 가 나중에 생기자 A 의 금지 이름이 A 발행에서 안 걸렸다(전역 덮임)")
+        tid_b = _tools_thread(ctx_b, gtype="knowhow")
+        _with_key(f["key_a"], lambda: tools.say(ctx_b, thread_id=tid_b, body="라마바 님이 그렇게 말했다"))
+        # ⑵ 상대경로 — cwd 를 저장소 밖(설정 폴더의 부모)으로.
+        os.chdir(os.path.dirname(a))
+        ctx_r = tools.context_from_config(os.path.basename(a), store=MockStore())
+        # macOS 는 /var → /private/var 심볼릭 링크라 문자열이 아니라 **실경로**로 대조한다.
+        if not os.path.isabs(ctx_r.config_dir) or \
+                os.path.realpath(ctx_r.config_dir) != os.path.realpath(a):
+            raise AssertionError(f"상대경로가 절대경로로 안 잡혔다: {ctx_r.config_dir}")
+        ev = _r2_post("9" * 32, "라마바 님이", thread_id=_wt("t7"))
+        try:
+            _with_key(f["key_a"], lambda: sign_event(ev, config_dir=ctx_r.config_dir))
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT:
+                raise AssertionError(f"상대경로 서명기 코드가 {e.code}") from None
+        else:
+            raise AssertionError("상대경로 dir= 에서 서명기가 다른 폴더를 봤다(code 0)")
+    finally:
+        os.chdir(cwd)
         if keep is None:
             os.environ.pop("AGORA_CONFIG_DIR", None)
         else:
@@ -7913,6 +7979,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("keygen: 권한이 유일한 장벽",    _case_keygen_locks_down_the_files, None),
     ("scrub: 이름 목록은 참가자 것",  _case_name_list_comes_from_the_participant_folder, None),
     ("scrub: 설정 폴더는 한 번 정한다", _case_config_dir_is_pinned_once_for_both_layers, None),
+    ("scrub: 설정 폴더는 Context 의 것", _case_config_dir_is_context_state_not_global, None),
     ("denylist: 정상문 오탐 0",       _case_denylist_no_false_positive, None),
     ("denylist: 규칙 파손 → 3",       _case_denylist_broken_rules_file_is_fail_closed, errors.GATE_REJECT),
     ("scrub: 이름 목록 부재는 보인다", _case_names_absence_is_visible, None),
@@ -8510,8 +8577,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     # ★첫 판(enforce → check)은 **살아남았다**: 게이트를 꺼도 서명기가 같은 code 3 을 낸다.
     #   그래서 이 축의 변이는 「쓰기를 게이트보다 앞에 둔다」로 바꿨다 — 그것이 AC 가 재는 결함이다.
     ("M75-publish-writes-before-gate", "agora/core.py",
-     "    report = scrub.enforce(event)              # ⑵ 게이트 — 여기서 막히면 아래로 못 간다",
-     '    store.append(thread_id=event["thread_id"], category=category, title="",\n                 body="", is_genesis=False)\n    report = scrub.enforce(event)',
+     "    report = scrub.enforce(event, names_path=scrub.names_path(config_dir))   # ⑵ 게이트",
+     '    store.append(thread_id=event["thread_id"], category=category, title="",\n                 body="", is_genesis=False)\n    report = scrub.enforce(event, names_path=scrub.names_path(config_dir))',
      "쓰기: 차단이면 저장 호출 0"),
     ("M76-name-list-ignored", "agora/scrub.py",
      "            if name in low:",
@@ -9209,14 +9276,27 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "감시: 미검증은 다시 검증한다"),
     # ★M-f — 참가자가 문서대로 둔 이름 목록을 아무도 안 읽던 자리.
     ("M249-names-path-pinned-to-repo", "agora/scrub.py",
-     '    local = os.path.join(config_dir(), NAMES_FILENAME)\n    return local if os.path.exists(local) else DEFAULT_NAMES_PATH',
-     '    local = os.path.join(config_dir(), NAMES_FILENAME)\n    return DEFAULT_NAMES_PATH',
+     '    local = os.path.join(base, NAMES_FILENAME)\n    return local if os.path.exists(local) else DEFAULT_NAMES_PATH',
+     '    local = os.path.join(base, NAMES_FILENAME)\n    return DEFAULT_NAMES_PATH',
      "scrub: 이름 목록은 참가자 것"),
     # ★M-f 라운드 2 — `dir=` 로 온 폴더를 컨텍스트만 쓰고 scrub·서명기는 환경을 다시 보던 자리.
     ("M268-context-does-not-pin-config-dir", "agora/tools.py",
-     '    _os.environ["AGORA_CONFIG_DIR"] = d',
-     '    pass',
+     '    d = _os.path.abspath(directory or config_dir())',
+     '    d = directory or config_dir()',
+     "scrub: 설정 폴더는 Context 의 것"),
+    # ★R3-② — 전역 env 고정을 되돌린 자리(master#238398): 코어 명시 목록 · 서명기 호출별 env · 배선.
+    ("M275-publish-drops-names-path", "agora/core.py",
+     '    report = scrub.enforce(event, names_path=scrub.names_path(config_dir))   # ⑵ 게이트',
+     '    report = scrub.enforce(event)   # ⑵ 게이트',
+     "scrub: 설정 폴더는 Context 의 것"),
+    ("M276-signer-env-not-passed", "agora/sign.py",
+     '        env["AGORA_CONFIG_DIR"] = os.path.abspath(config_dir)',
+     '        pass',
      "scrub: 설정 폴더는 한 번 정한다"),
+    ("M277-publish-drops-config-dir", "agora/tools.py",
+     '                                 config_dir=ctx.config_dir,',
+     '                                 config_dir=None,',
+     "scrub: 설정 폴더는 Context 의 것"),
     # ★NFR-8 정적 검사 — 제품 코드에 적재 경로를 심는 변이 2 + 검사기 자신을 무디게 하는 변이 2.
     ("M269-body-written-to-docs", "agora/tools.py",
      '        wrapped = brief.wrap_untrusted(body)',

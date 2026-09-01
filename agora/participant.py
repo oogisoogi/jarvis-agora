@@ -23,7 +23,9 @@ FILENAME = "participant.json"
 
 
 def config_dir() -> str:
-    return os.environ.get("AGORA_CONFIG_DIR") or DEFAULT_DIR
+    # ★절대경로로 돌려준다(R3-② · master#238398). 상대경로를 그대로 두면 cwd 가 다른 프로세스(서명기는
+    #   저장소 루트 고정)가 **다른 폴더**를 본다 — 같은 문자열이 두 자리를 가리키는 셈이다.
+    return os.path.abspath(os.environ.get("AGORA_CONFIG_DIR") or DEFAULT_DIR)
 
 
 def _require_mode(path: str, want: int, what: str) -> None:

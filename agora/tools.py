@@ -118,7 +118,7 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
         "from": ctx.participant_id, "roster": _roster_digest(ctx),
         "ts": now_iso(), "payload": payload,
     }
-    core.declare_scrub(event)          # ★서명 대상 안에 들어가므로 **만들 때** 채운다
+    core.declare_scrub(event, config_dir=ctx.config_dir)   # ★서명 대상 안 — **만들 때** 채운다
 
     def cas() -> None:
         """쓰기 **직전**에 상태를 다시 본다(§4 code 9).
@@ -136,6 +136,7 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
                                  title=title, is_genesis=is_genesis,
                                  config=ctx.config, prompt=ctx.prompt,
                                  isatty=ctx.isatty, ledger=ctx.ledger,
+                                 config_dir=ctx.config_dir,
                                  # genesis 에는 견줄 앞 상태가 없다(K-4 · expected_state = "")
                                  before_write=None if is_genesis else cas)
     except AgoraError as e:
@@ -857,13 +858,11 @@ def context_from_config(directory: str | None = None, *,
     from agora.ledger import Ledger
     from agora.participant import config_dir, load
     from agora.spool import Spool
-    d = directory or config_dir()
-    # ★★M-f 라운드 2(codex 재검증) — 설정 폴더를 **여기서 한 번** 확정하고 환경에 고정한다.
-    #   그전에는 `dir=` 로 온 폴더를 이 함수만 썼고, scrub(이름 목록)과 서명기(별도 프로세스)는
-    #   환경의 `config_dir()` 를 **다시** 봤다 ⇒ 두 겹이 서로 다른 폴더를 봤다(재현: 명시한 폴더에
-    #   목록이 있어도 `NAMES_LOADED 0 · BLOCKED 0`). 환경에 적는 이유: 서명기는 subprocess 라
-    #   인자가 아니라 **환경을 상속**한다 — 같은 규칙으로 같은 자리를 보게 하는 유일한 통로다.
-    _os.environ["AGORA_CONFIG_DIR"] = d
+    # ★★M-f 라운드 2 → R3-②(master#238398 로 되돌림): 라운드 2 는 여기서 전역 환경변수를 고정했다.
+    #   한 프로세스에 Context 둘이면 나중 것이 앞의 것을 덮고(codex 재현: A 의 금지 이름이 A 발행에서
+    #   안 걸렸다), 상대경로는 cwd 가 다른 서명기에서 다른 폴더가 됐다. ⇒ **절대경로로 한 번 정하고
+    #   Context 상태로만 들고 다닌다**: 코어에는 `names_path` 명시, 서명기에는 호출별 env(core.publish_event).
+    d = _os.path.abspath(directory or config_dir())
     doc = load(d)
     cfg = load_config(d)
     if store is None:
