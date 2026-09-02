@@ -73,12 +73,14 @@ def _load_bindings(path: str | None) -> dict[str, dict[str, Any]]:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError) as e:
+        # ★R5-①(codex 라운드 4) — 이 겹도 `layer=binding` 이다. 없으면 생성자·경계 안 재읽기에서 난 읽기 실패가
+        #   「어느 겹인가」를 말하지 않아 genesis 의 code 8 cause 에 겹이 빠진다(재현 BIND_LOAD … layer=None).
         raise AgoraError(errors.PRECONDITION, "결박 원장을 읽을 수 없다",
-                         {"file": BINDINGS_FILENAME, "why": str(e)}) from None
+                         {"file": BINDINGS_FILENAME, "why": str(e), "layer": "binding"}) from None
     threads = (data or {}).get("threads")
     if not isinstance(threads, dict):
         raise AgoraError(errors.PRECONDITION, "결박 원장의 모양이 다르다",
-                         {"file": BINDINGS_FILENAME})
+                         {"file": BINDINGS_FILENAME, "layer": "binding"})
     return threads
 
 
