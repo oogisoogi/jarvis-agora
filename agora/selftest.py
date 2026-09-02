@@ -4163,6 +4163,8 @@ S6_AXES: dict[str, tuple[str, ...]] = {
 # ★S7 은 **실물에서 드러난 것**을 재는 축이다. 실물 절차를 밟기 전에는 전부 초록이었다 —
 #   「시험이 통과한다」와 「사람이 문서를 보고 쓸 수 있다」는 다른 질문이라는 증거다.
 S7_AXES: dict[str, tuple[str, ...]] = {
+    # ★S1-8 AC ② — 강제 종료 뒤 복원이 실제 SIGKILL 에서 도는가(B③ 드릴 · 하네스 자기 파일 조준).
+    "강제종료복원": ("M296-recovery-does-not-restore", "M297-run-skips-recovery"),
     "온보딩공백": ("M188-repo-config-not-checked", "M189-json-guessed-by-shape",
                    "M190-unexpected-error-leaks-message"),
     "읽기정직": ("M191-read-shows-rejected-as-valid",
@@ -7211,6 +7213,103 @@ def _case_mcp_error_carries_retryable() -> None:
         raise AssertionError(f"message·detail 이 함께 안 나간다: {data}")
 
 
+def _case_recovery_survives_sigkill() -> None:
+    """하네스가 **실제로 SIGKILL 을 맞아도** 다음 실행이 소스를 원본으로 되돌린다(S1-8 AC ② · B③ 드릴).
+
+    ★`finally` 는 SIGKILL 을 못 이긴다 — 실증: 2분 타임아웃에 죽은 실행이 `cli.py` 에 변이를 남겼고(당시 저널 부재)
+      다음 실행도 복구하지 않아, 그 상태로 잰 3 적색·M3 생존을 하마터면 다른 변경 탓으로 볼 뻔했다.
+      저널(`_recover_leftover`)은 그 뒤 생겼지만 **실제 강제 종료로 잰 적이 없었다** — 「구현했다」와 「강제 종료에서 돈다」는
+      다른 말이다. 그래서 여기서 진짜로 죽인다.
+    ★격리 사본(`agora/` 패키지만 복사)에서 ⑴자식이 진짜 하네스 경로(`_run_mutations` · 저널 쓰기 → 변이 쓰기)로 변이를
+      적용한 뒤 killer 자리에서 멈춘다 → ⑵부모가 SIGKILL → 변이 잔존·저널 실재 단언(전제가 성립해야 드릴이 뜻을 갖는다)
+      → ⑶새 자식이 `run()` 을 부른다(케이스·뮤턴트 단계는 비움) → 보고의 `복구` 칸에 복원 사실 · 소스 sha256 = 원본 ·
+      저널 소거. `run()` 을 통해 재는 것이 배선 단언이다(`_recover_leftover` 직접 호출은 배선이 빠져도 초록이다).
+    ⚠SIGKILL 대상은 이 케이스가 띄운 자식 하나뿐이다.
+    """
+    import hashlib
+    import shutil
+    import signal
+    import tempfile
+    import time
+    root = tempfile.mkdtemp(prefix="agora-sigkill-drill-")
+    shutil.copytree(os.path.join(_ROOT, "agora"), os.path.join(root, "agora"),
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    # ★드릴 표본 = **하네스 자기 파일이 아닌** 첫 뮤턴트. 자기 파일(M296 등)을 고르면 사본의 복구 루틴 자체가
+    #   변이돼 「복구가 안 된다」가 드릴의 결함인지 표본의 결함인지 갈리지 않는다(실측: M296 표본에서 0바이트 복원).
+    mid, relpath, old, new, _killer = next(m for m in MUTATIONS if m[1] != "agora/selftest.py")
+    target = os.path.join(root, relpath)
+    with open(target, encoding="utf-8") as fh:
+        pristine = fh.read()
+    if old not in pristine:
+        raise AssertionError(f"드릴 픽스처가 틀리다 — {mid} 대상이 사본에 없다")
+    journal = os.path.join(root, ".agora-mutation-journal")
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    try:
+        _sigkill_drill(root, target, pristine, journal, env, mid, relpath, new)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _sigkill_drill(root: str, target: str, pristine: str, journal: str, env: dict[str, str],
+                   mid: str, relpath: str, new: str) -> None:
+    import hashlib
+    import signal
+    import time
+    # ⑴ 진짜 하네스 경로로 변이를 쓰고 killer 자리에서 멈추는 자식.
+    child1 = (
+        "import sys, time; sys.path.insert(0, %r);"
+        "import agora.selftest as st;"
+        "st.MUTATIONS = tuple(m for m in st.MUTATIONS if m[0] == %r);"
+        "st._case_passes_in_subprocess = lambda killer: time.sleep(120);"
+        "st._run_mutations()"
+    ) % (root, mid)
+    proc = subprocess.Popen([sys.executable, "-B", "-c", child1], cwd=root, env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            with open(target, encoding="utf-8") as fh:
+                mutated = new in fh.read()
+            if mutated and os.path.exists(journal):
+                break
+            if proc.poll() is not None:
+                raise AssertionError(f"자식이 변이를 쓰기 전에 끝났다: {proc.stderr.read().decode()[-300:]}")
+            time.sleep(0.1)
+        else:
+            raise AssertionError("30초 안에 변이·저널이 나타나지 않았다")
+        os.kill(proc.pid, signal.SIGKILL)                     # ⑵ 진짜 강제 종료
+        proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    with open(target, encoding="utf-8") as fh:
+        after_kill = fh.read()
+    if new not in after_kill or after_kill == pristine:
+        raise AssertionError("SIGKILL 뒤에 변이가 남아 있지 않다 — finally 가 돌았거나 픽스처가 틀리다")
+    if not os.path.exists(journal):
+        raise AssertionError("SIGKILL 뒤에 저널이 없다 — 복구할 근거가 없다")
+    # ⑶ 새 자식이 run() 을 부른다 — 배선까지 잰다.
+    child2 = (
+        "import sys, json; sys.path.insert(0, %r);"
+        "import agora.selftest as st;"
+        "st._run_cases = lambda: ([], set()); st._run_mutations = lambda: [];"
+        "print(json.dumps(st.run()['복구'], ensure_ascii=False))"
+    ) % root
+    done = subprocess.run([sys.executable, "-B", "-c", child2], cwd=root, env=env,
+                          capture_output=True, text=True, timeout=120)
+    if done.returncode != 0:
+        raise AssertionError(f"복구 실행이 실패했다: {done.stderr[-300:]}")
+    report = json.loads(done.stdout.strip().splitlines()[-1])
+    if not report or report.get("restored") != relpath or report.get("mutation") != mid:
+        raise AssertionError(f"run() 이 복구 사실을 보고하지 않는다: {report}")
+    with open(target, encoding="utf-8") as fh:
+        restored = fh.read()
+    if hashlib.sha256(restored.encode("utf-8")).hexdigest() != hashlib.sha256(pristine.encode("utf-8")).hexdigest():
+        raise AssertionError("복구 뒤 소스 해시가 원본과 다르다")
+    if os.path.exists(journal):
+        raise AssertionError("복구 뒤에도 저널이 남아 있다 — 다음 실행이 또 되돌린다")
+
+
 def _case_audit_shows_transport_candidates() -> None:
     """후보가 여럿이었다는 사실이 **화면까지** 온다(H1 · R-13 · 구현≠배선).
 
@@ -8462,6 +8561,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("bad-error-code → 10",       _case_bad_error_code,       errors.ARGUMENT),
     ("argparse-reject → 10",      _case_argparse_reject,      errors.ARGUMENT),
     ("retryable = {7,8}",         _case_retryable_contract,   None),
+    ("복구: 강제 종료 뒤에도 원본이다", _case_recovery_survives_sigkill, None),
     ("codes-defined-once",        _case_codes_defined_once,   None),
     ("mcp-names-derive-from-cli", _case_mcp_names_derive_from_cli, None),
     ("contract-constants",        _case_contract_constants,   None),
@@ -8810,6 +8910,15 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
 # ── 뮤테이션 ────────────────────────────────────────────────────────────────
 # (id, 파일, 찾을 문자열, 바꿀 문자열, 이 변이를 잡아야 하는 케이스 이름)
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+    # ★S1-8 AC ②(B③ 드릴) — 하네스 자기 파일을 조준한다. 복구 루틴 무력 · run() 미배선.
+    ("M296-recovery-does-not-restore", "agora/selftest.py",
+     '        with open(path, "w", encoding="utf-8") as fh:\n            fh.write(entry["original"])',
+     '        with open(path, "w", encoding="utf-8") as fh:\n            pass',
+     "복구: 강제 종료 뒤에도 원본이다"),
+    ("M297-run-skips-recovery", "agora/selftest.py",
+     '    recovered = _recover_leftover()\n    case_rows, observed = _run_cases()',
+     '    recovered = None\n    case_rows, observed = _run_cases()',
+     "복구: 강제 종료 뒤에도 원본이다"),
     ("M1-retryable-widened", "agora/errors.py",
      "RETRYABLE: frozenset[int] = frozenset({STORE, UNKNOWN_COMMIT})",
      "RETRYABLE: frozenset[int] = frozenset({STORE, UNKNOWN_COMMIT, GATE_REJECT})",
