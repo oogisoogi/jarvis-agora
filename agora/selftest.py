@@ -4165,7 +4165,8 @@ S6_AXES: dict[str, tuple[str, ...]] = {
 S7_AXES: dict[str, tuple[str, ...]] = {
     # ★S1-8 AC ② — 강제 종료 뒤 복원이 실제 SIGKILL 에서 도는가(B③ 드릴 · 하네스 자기 파일 조준).
     "강제종료복원": ("M296-recovery-does-not-restore", "M297-run-skips-recovery",
-                     "M298-drill-accepts-any-exit", "M299-drill-setup-failure-leaves-zombie"),
+                     "M298-drill-accepts-any-exit", "M299-drill-setup-failure-leaves-zombie",
+                     "M303-drill-oracle-matches-substring"),
     # ★J-6 — 봉투 필수/선택의 기준이 코드가 아니라 03 §3-2 표인가(표를 변조하면 적색).
     "봉투정본": ("M300-envelope-table-drops-required", "M301-envelope-env-required-unchecked"),
     # ★병렬 전체 selftest 공유 소스 부패(선재 경계) — 두 번째 실행은 즉시 거부되는가.
@@ -7364,12 +7365,15 @@ def _case_drill_demands_real_sigkill() -> None:
     def terminate(pid: int, _sig: int) -> None:
         os.kill(pid, signal.SIGTERM)
 
+    # ★오라클 자기검사 먼저: 표식만 든 무관한 실패에 속으면 이 케이스는 아무것도 안 잰다(codex b3r2 반례).
+    if _is_drill_exit_mismatch(AssertionError("무관한 준비 오류(-9 표식만 포함)")):
+        raise AssertionError("오라클이 -9 표식만으로 속는다 — 형이 아니라 문구를 본다")
     root, *fx = _sigkill_fixture()
     try:
         try:
             _sigkill_drill(root, *fx, kill=terminate)
         except AssertionError as e:
-            if "-9" not in str(e):
+            if not _is_drill_exit_mismatch(e):
                 raise AssertionError(f"드릴이 다른 이유로 실패했다: {e}") from e
             return
         raise AssertionError("SIGTERM 치환에도 드릴이 초록이다 — 종료코드 -9 를 단언하지 않는다")
@@ -7436,6 +7440,16 @@ def _sigkill_fixture() -> tuple[str, str, str, str, dict[str, str], str, str, st
     return root, target, pristine, journal, env, mid, relpath, new
 
 
+class _DrillExitMismatch(AssertionError):
+    """드릴 전제(자식이 **-9 로** 죽는다)가 깨졌을 때만 나는 예외 — 케이스 오라클은 **형(type)** 으로 가른다."""
+
+
+def _is_drill_exit_mismatch(e: BaseException) -> bool:
+    """★오라클(백로그 · codex b3r2 PARTIAL 1): 전에는 `"-9" in str(e)` 부분 문자열이라 「-9 표식만 포함한 무관한
+      AssertionError」로 드릴을 치환해도 초록이었다. 형으로 가르면 문구는 오라클에 들어오지 않는다."""
+    return isinstance(e, _DrillExitMismatch)
+
+
 def _sigkill_drill(root: str, target: str, pristine: str, journal: str, env: dict[str, str],
                    mid: str, relpath: str, new: str, *,
                    kill: Any = os.kill, clock: Any = None, popen: Any = None) -> None:
@@ -7470,7 +7484,7 @@ def _sigkill_drill(root: str, target: str, pristine: str, journal: str, env: dic
         kill(proc.pid, signal.SIGKILL)                        # ⑵ 진짜 강제 종료
         rc = proc.wait(timeout=10)
         if rc != -signal.SIGKILL:                             # 「죽었다」가 아니라 「-9 로 죽었다」(codex b3 MEDIUM 1)
-            raise AssertionError(f"자식이 -9 로 죽지 않았다: rc={rc} — 드릴 전제(SIGKILL) 가 성립하지 않는다")
+            raise _DrillExitMismatch(f"자식이 -9 로 죽지 않았다: rc={rc} — 드릴 전제(SIGKILL) 가 성립하지 않는다")
     finally:
         if proc.poll() is None:                               # 준비 실패 분기 — kill 한 자식은 거둔다(codex b3 MEDIUM 2)
             proc.kill()
@@ -10376,6 +10390,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "            if pid is not None and _pid_alive(pid):\n                raise AgoraError(errors.PRECONDITION,",
      "            if False:\n                raise AgoraError(errors.PRECONDITION,",
      "잠금: 두 번째 실행은 즉시 거부된다"),
+    # ★하네스 LOW 오라클(codex b3r2) — 형 대신 문구 부분 일치로 되돌리면 표식만 든 무관한 실패에 속는다.
+    ("M303-drill-oracle-matches-substring", "agora/selftest.py",
+     "def _is_drill_exit_mismatch(e: BaseException) -> bool:\n    \"\"\"",
+     "def _is_drill_exit_mismatch(e: BaseException) -> bool:\n    return \"-9\" in str(e)\n    \"\"\"",
+     "복구: 드릴은 진짜 -9 를 요구한다"),
 )
 
 
