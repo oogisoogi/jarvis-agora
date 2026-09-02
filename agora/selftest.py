@@ -4122,6 +4122,10 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "응답상한": ("M264-audit-lists-not-paged", "M265-pending-sections-hidden",
                  "M266-cursor-section-ignored", "M273-fit-loop-never-shrinks",
                  "M274-wire-size-ignores-envelopes"),
+    # ★R3-⑤ — 커서가 태어난 모드·상태를 모르던 자리.
+    "커서문법": ("M283-cursor-empty-key-allowed", "M284-cursor-mode-unchecked",
+                 "M285-cursor-state-unchecked", "M286-cursor-absent-section-accepted",
+                 "M287-refs-key-is-position"),
     "재검증": ("M267-unverified-treated-as-received",),
     "설정폴더": ("M268-context-does-not-pin-config-dir", "M275-publish-drops-names-path",
                  "M276-signer-env-not-passed", "M277-publish-drops-config-dir"),
@@ -6754,6 +6758,98 @@ def _case_read_caps_the_whole_response() -> None:
         raise AssertionError("모르는 목록 커서를 조용히 처음부터로 읽었다")
 
 
+def _expect_cursor_rejected(ctx: Any, tid: str, cursor: str, *, audit: bool, what: str) -> None:
+    from agora import tools
+    try:
+        tools.read(ctx, thread_id=tid, audit=audit, cursor=cursor)
+    except AgoraError as e:
+        if e.code != errors.ARGUMENT:
+            raise AssertionError(f"{what}: 코드가 {e.code}") from None
+        return
+    raise AssertionError(f"{what}: 조용히 통과했다({cursor})")
+
+
+def _case_read_cursor_carries_mode_and_state() -> None:
+    """커서는 **모드·상태를 안다** — 빈 키·모드 불일치·없는 목록·상태 변화 = 전부 10(R3-⑤ · codex 라운드 2).
+
+    ★라운드 2 커서는 `<목록>:<키>` 뿐이었다. 빈 키(`events:`)는 `_page` 의 falsy 검사로 **첫 페이지로
+      되감겼고**, audit 로 받은 커서를 평시에 넣으면 그 목록이 응답에 없어 **빈 결과**가 났고, 그 사이
+      스레드가 바뀌어도 아무도 몰랐다. 조용한 되감기·조용한 빈 결과는 상한보다 나쁘다 — 부르는 쪽이
+      진행하고 있다고 믿는다.
+    ★반드시 `read` 를 통해 잰다(파서 단독 초록은 배선 회귀를 못 잡는다 — M244 교훈).
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="knowhow")
+    _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="첫째 발언"))
+    _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="둘째 발언"))
+    keep = tools.READ_PAGE_EVENTS
+    try:
+        tools.READ_PAGE_EVENTS = 2
+        first = tools.read(ctx, thread_id=tid, audit=True)
+        cur = first["next_cursor"]
+        if not cur or "@1:" not in cur:
+            raise AssertionError(f"커서에 모드·상태 표식이 없다: {cur}")
+        body, _at, stamp = cur.rpartition("@")
+        state12 = stamp.partition(":")[2]
+        if len(state12) != 12 or state12 != (first["state_hash"] or "")[:12]:
+            raise AssertionError(f"커서의 상태 표식이 state_hash 와 다르다: {stamp}")
+        key = body.partition(":")[2]
+        # ⓐ 빈 키 · 빈 목록 · 표식 없는 목록형 — 전부 10(되감기 없음).
+        _expect_cursor_rejected(ctx, tid, f"events:@{stamp}", audit=True, what="빈 키")
+        _expect_cursor_rejected(ctx, tid, f":{key}@{stamp}", audit=True, what="빈 목록")
+        _expect_cursor_rejected(ctx, tid, f"events:{key}", audit=True, what="표식 없는 목록형")
+        # ⓑ 모드 불일치 — audit 로 만든 커서를 평시에.
+        _expect_cursor_rejected(ctx, tid, cur, audit=False, what="모드 불일치")
+        # ⓒ audit 을 끈 채 응답에 없는 목록을 가리킨다(모드 표식은 맞춰 준다).
+        _expect_cursor_rejected(ctx, tid, f"quarantined:아무키@0:{state12}", audit=False,
+                                what="없는 목록")
+        # 정상 이어 읽기 — 같은 모드·같은 상태.
+        rest = tools.read(ctx, thread_id=tid, audit=True, cursor=cur)
+        got = [e["message_id"] for e in first["events"] + rest["events"]]
+        if len(got) != 3 or len(set(got)) != 3 or rest["next_cursor"] is not None:
+            raise AssertionError(f"정상 커서로 이어 받은 것이 이상하다: {got} · {rest['next_cursor']}")
+        # ⓓ 상태 변화 — 그 사이 다른 참가자의 글이 올라오면 옛 커서는 10(같은 키는 라운드 예산이 찬다).
+        other = _tools_ctx(store=ctx.store, participant_id="operator-b")
+        _with_key(f["key_b"], lambda: tools.say(other, thread_id=tid, body="셋째 발언"))
+        _expect_cursor_rejected(ctx, tid, cur, audit=True, what="상태 변화")
+    finally:
+        tools.READ_PAGE_EVENTS = keep
+
+
+def _case_refs_cursor_is_content_addressed() -> None:
+    """refs 커서는 **자리가 아니라 내용**이다 — 같은 링크는 어느 위치에 있어도 같은 키(R3-⑤).
+
+    ★라운드 2 는 refs 키가 위치(index)였다. `refs:0` 뒤에 앞자리에 링크가 끼면 같은 커서가 다른 링크를
+      가리켜 이어 읽기가 **중복·누락을 조용히** 냈다(codex 재현: A 뒤 X 앞삽입 → 다시 A,B). 이제 키는
+      링크 내용의 sha256 앞 16자다. 잰다: ⑴키가 위치에 안 묶인다 ⑵그 키로 `read` 를 이어 받으면 다음
+      링크부터다 ⑶서로 다른 링크는 키가 다르다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="knowhow")
+    targets = [_tools_thread(ctx, gtype="knowhow") for _ in range(3)]
+    # 한 발언에 링크 셋 — 같은 출처(from_message_id)·다른 대상이라 내용 키가 서로 달라야 한다.
+    _with_key(f["key_a"], lambda: tools.say(
+        ctx, thread_id=tid, body="인용 셋",
+        refs=[{"thread_id": t, "why": f"이유 {i}"} for i, t in enumerate(targets)]))
+    whole = tools.read(ctx, thread_id=tid)
+    refs = whole["refs"]
+    if len(refs) != 3:
+        raise AssertionError(f"픽스처가 틀리다 — refs {len(refs)}")
+    k0 = tools._section_key("refs", refs[0], 0)
+    if tools._section_key("refs", refs[0], 7) != k0:
+        raise AssertionError("refs 키가 위치에 묶여 있다")
+    if len({tools._section_key("refs", r, 0) for r in refs}) != 3:
+        raise AssertionError("서로 다른 링크가 같은 키를 받았다")
+    cur = f"refs:{k0}@0:{(whole['state_hash'] or '')[:12]}"
+    rest = tools.read(ctx, thread_id=tid, cursor=cur)
+    if rest["refs"] != refs[1:] or rest["events"] or rest["next_cursor"] is not None:
+        raise AssertionError(f"내용 키로 이어 받은 것이 다음 링크부터가 아니다: {rest['refs']}")
+
+
 def _case_audit_shows_transport_candidates() -> None:
     """후보가 여럿이었다는 사실이 **화면까지** 온다(H1 · R-13 · 구현≠배선).
 
@@ -8305,6 +8401,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("읽기: 진 글도 audit 에 나온다",  _case_audit_shows_the_races_that_were_lost, None),
     ("읽기: 커서로 나눠 준다",         _case_read_pages_with_cursor, None),
     ("읽기: 응답 전체에 상한",       _case_read_caps_the_whole_response, None),
+    ("읽기: 커서는 모드·상태를 안다",  _case_read_cursor_carries_mode_and_state, None),
+    ("읽기: refs 커서는 내용이다",     _case_refs_cursor_is_content_addressed, None),
     ("결박: 후보가 화면까지 온다",     _case_audit_shows_transport_candidates, None),
     ("결박: 만든 자리에서 묶는다",     _case_genesis_binds_at_creation, None),
     ("결박: 잠금 안 병합·충돌 → 2",    _case_bind_merges_under_lock_and_refuses_conflict, None),
@@ -9419,6 +9517,27 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    return len(compact.encode("utf-8"))',
      "읽기: 응답 전체에 상한"),
     # ★M-d 라운드 2 — events 만 자르고 나머지 목록은 전건 복사하던 자리(응답 상한이 안 잠겼다).
+    # ★R3-⑤ — 커서가 조용히 되감기거나 빈 결과를 내던 자리(codex 라운드 2 신규 MEDIUM).
+    ("M283-cursor-empty-key-allowed", "agora/tools.py",
+     '    if not sep or head not in READ_SECTIONS or not key:',
+     '    if not sep or head not in READ_SECTIONS:',
+     "읽기: 커서는 모드·상태를 안다"),
+    ("M284-cursor-mode-unchecked", "agora/tools.py",
+     '    if mode != ("1" if audit else "0"):',
+     '    if False:',
+     "읽기: 커서는 모드·상태를 안다"),
+    ("M285-cursor-state-unchecked", "agora/tools.py",
+     '    if seen != _hash_prefix(state_hash):',
+     '    if False:',
+     "읽기: 커서는 모드·상태를 안다"),
+    ("M286-cursor-absent-section-accepted", "agora/tools.py",
+     '    if section != "events" and section not in present:',
+     '    if False:',
+     "읽기: 커서는 모드·상태를 안다"),
+    ("M287-refs-key-is-position", "agora/tools.py",
+     '        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]',
+     '        return str(index)',
+     "읽기: refs 커서는 내용이다"),
     ("M264-audit-lists-not-paged", "agora/tools.py",
      '            if out and budget - size < 0:',
      '            if False:',
@@ -9428,8 +9547,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if False:\n        view["pending"] = pending',
      "읽기: 응답 전체에 상한"),
     ("M266-cursor-section-ignored", "agora/tools.py",
-     '    if sep and head in READ_SECTIONS:\n        return head, key',
-     '    if False:\n        return head, key',
+     '    return head, key\n',
+     '    return "events", key\n',
      "읽기: 응답 전체에 상한"),
     ("M245-page-forgets-the-rest", "agora/tools.py",
      '            return out, out[-1].get("message_id")',

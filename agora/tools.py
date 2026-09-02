@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -399,13 +400,20 @@ def read(ctx: Context, *, thread_id: str, since_event: str | None = None,
     #   첫 페이지 목록 합 65,434B ≤ 65,536 인데 실제 JSON 은 66,575B · CLI(indent 2)는 89,303B 였다.
     #   상한은 「내가 센 것」이 아니라 **전송되는 것**에 걸려야 한다 ⇒ 후보 페이지를 실제 포장(CLI·MCP)으로
     #   직렬화해 재고, 넘치면 채움 예산을 비율로 줄여 다시 채운다(수렴 · 한 건은 반드시 싣는다).
-    section, key = _parse_cursor(cursor)
+    # ★★R3-⑤(codex 라운드 2) — 커서는 **어느 모드·어느 상태에서** 만든 것인지를 자기 안에 싣는다.
+    #   그전에는 audit 로 받은 커서를 평시 읽기에 넣어도, 그 사이 스레드가 바뀌어도 조용히 통과했다 —
+    #   격리 목록 커서가 평시엔 「없는 목록」이라 빈 결과가 되고, refs 는 위치라 앞이 바뀌면 중복·누락이
+    #   소리 없이 났다. 모드·상태가 다르면 **code 10** 이다(부르는 쪽이 비교하지 않아도 잡힌다).
+    stamp = _cursor_stamp(audit=audit, state_hash=view.get("state_hash"))
+    section, key = _parse_cursor(cursor, audit=audit, state_hash=view.get("state_hash"))
     base = {k: v for k, v in view.items() if k not in READ_SECTIONS}   # 고정 메타(state·refs 밖)
     lists = {k: list(view[k]) for k in READ_SECTIONS if k in view}
     budget = READ_PAGE_BYTES
     candidate: dict[str, Any] = {}
     for _ in range(READ_FIT_ROUNDS):
         page = _fill_page(lists, section, key, budget)
+        if page.get("next_cursor"):
+            page["next_cursor"] += stamp          # 표식은 포장 크기에 들어간다 — 재기 전에 붙인다
         candidate = {**base, **page}
         wire = _wire_size(candidate)
         if wire <= READ_PAGE_BYTES or _page_items(page) <= 1:
@@ -453,14 +461,44 @@ def _fill_page(lists: dict[str, list[dict[str, Any]]], section: str,
 READ_SECTIONS = ("events", "quarantined", "stale", "refs")
 
 
-def _parse_cursor(cursor: str | None) -> tuple[str, str | None]:
-    """`<목록>:<키>` → (목록, 키). 맨몸 값은 라운드 1 형식(= events 의 message_id)이다."""
+def _hash_prefix(state_hash: str | None) -> str:
+    return (state_hash or "")[:12]
+
+
+def _cursor_stamp(*, audit: bool, state_hash: str | None) -> str:
+    """커서 꼬리 `@<audit 0/1>:<state_hash 앞 12자>` — 커서가 태어난 모드·상태."""
+    return f"@{1 if audit else 0}:{_hash_prefix(state_hash)}"
+
+
+def _parse_cursor(cursor: str | None, *, audit: bool = False,
+                  state_hash: str | None = None) -> tuple[str, str | None]:
+    """`<목록>:<키>@<모드>:<상태>` → (목록, 키). 맨몸 값은 라운드 1 형식(= events 의 message_id)이다.
+
+    ★빈 목록·빈 키·표식 없는 목록형·모드 불일치·상태 변화 = 전부 **code 10**. 조용히 첫 페이지로
+      되감는 길은 없다 — 되감으면 부르는 쪽은 같은 페이지를 받으며 진행한다고 믿는다.
+    """
     if not cursor:
         return "events", None
-    head, sep, key = cursor.partition(":")
-    if sep and head in READ_SECTIONS:
-        return head, key
-    return "events", cursor
+    if "@" not in cursor:
+        head, sep, _key = cursor.partition(":")
+        if sep and head in READ_SECTIONS:
+            raise AgoraError(errors.ARGUMENT,
+                             "커서에 모드·상태 표식이 없다 — 응답의 next_cursor 를 그대로 써라",
+                             {"cursor": cursor})
+        return "events", cursor            # 맨몸 = 라운드 1 형식 · events 전용
+    body, _at, stamp = cursor.rpartition("@")
+    mode, _colon, seen = stamp.partition(":")
+    if mode != ("1" if audit else "0"):
+        raise AgoraError(errors.ARGUMENT, "커서의 audit 모드가 이 호출과 다르다",
+                         {"cursor": cursor, "audit": audit})
+    if seen != _hash_prefix(state_hash):
+        raise AgoraError(errors.ARGUMENT, "커서를 만든 뒤 스레드 상태가 바뀌었다 — 다시 읽어라",
+                         {"cursor": cursor, "state_hash": _hash_prefix(state_hash)})
+    head, sep, key = body.partition(":")
+    if not sep or head not in READ_SECTIONS or not key:
+        raise AgoraError(errors.ARGUMENT, "커서 문법이 틀리다 — <목록>:<키>@<모드>:<상태>",
+                         {"cursor": cursor})
+    return head, key
 
 
 def _bytes_of(rows: list[dict[str, Any]]) -> int:
@@ -468,9 +506,18 @@ def _bytes_of(rows: list[dict[str, Any]]) -> int:
 
 
 def _section_key(section: str, entry: dict[str, Any], index: int) -> str:
-    """이어 읽기 키 — events 는 message_id · 격리·stale 은 node_id · refs 는 위치(링크엔 고유 id 가 없다)."""
+    """이어 읽기 키 — events 는 message_id · 격리·stale 은 node_id · refs 는 **내용 다이제스트**.
+
+    ★R3-⑤ — refs 는 위치를 키로 썼다(링크엔 고유 id 가 없다). 앞에 링크가 끼면 같은 위치가 다른
+      링크를 가리켜 이어 읽기가 중복·누락을 낸다. 위치 대신 링크의 내용(role·출처 message_id·
+      대상 thread_id·대상 message_id)을 sha256 으로 접어 앞 16자를 쓴다 — 자리가 바뀌어도 같은 링크는
+      같은 키다. (같은 링크가 같은 글에서 두 번 걸리면 키가 겹쳐 그 사이가 **한 번 더** 실릴 수 있다 —
+      빠지지는 않는다.)
+    """
     if section == "refs":
-        return str(index)
+        raw = "|".join(str(entry.get(k) or "")
+                       for k in ("role", "from_message_id", "thread_id", "message_id"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
     return str(entry.get("node_id") or entry.get("message_id") or index)
 
 
@@ -484,6 +531,11 @@ def _page_sections(view: dict[str, Any], lists: dict[str, list[dict[str, Any]]],
     """
     order = list(READ_SECTIONS[1:])
     present = [s for s in order if s in lists]
+    # ★R3-⑤ — 이 응답에 **없는** 목록을 가리키는 커서는 10 이다. audit 을 끈 채 `quarantined:` 커서를
+    #   주면 검증할 목록 자체가 없어 빈 결과가 됐다 — 「없다」와 「못 본다」가 같은 화면이었다.
+    if section != "events" and section not in present:
+        raise AgoraError(errors.ARGUMENT, "그 목록은 이 응답에 없다 — audit 모드를 확인하라",
+                         {"cursor": f"{section}:{key}", "sections": ["events", *present]})
     # 앞 목록(events)이 더 남았으면 뒤 목록은 이 페이지에 안 실린다 — 차례가 있어야 커서가 뜻을 갖는다.
     if view.get("next_cursor"):
         for s in present:
