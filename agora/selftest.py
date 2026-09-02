@@ -4164,7 +4164,8 @@ S6_AXES: dict[str, tuple[str, ...]] = {
 #   「시험이 통과한다」와 「사람이 문서를 보고 쓸 수 있다」는 다른 질문이라는 증거다.
 S7_AXES: dict[str, tuple[str, ...]] = {
     # ★S1-8 AC ② — 강제 종료 뒤 복원이 실제 SIGKILL 에서 도는가(B③ 드릴 · 하네스 자기 파일 조준).
-    "강제종료복원": ("M296-recovery-does-not-restore", "M297-run-skips-recovery"),
+    "강제종료복원": ("M296-recovery-does-not-restore", "M297-run-skips-recovery",
+                     "M298-drill-accepts-any-exit", "M299-drill-setup-failure-leaves-zombie"),
     "온보딩공백": ("M188-repo-config-not-checked", "M189-json-guessed-by-shape",
                    "M190-unexpected-error-leaks-message"),
     "읽기정직": ("M191-read-shows-rejected-as-valid",
@@ -7226,11 +7227,82 @@ def _case_recovery_survives_sigkill() -> None:
       저널 소거. `run()` 을 통해 재는 것이 배선 단언이다(`_recover_leftover` 직접 호출은 배선이 빠져도 초록이다).
     ⚠SIGKILL 대상은 이 케이스가 띄운 자식 하나뿐이다.
     """
-    import hashlib
+    import shutil
+    root, *fx = _sigkill_fixture()
+    try:
+        _sigkill_drill(root, *fx)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _case_drill_demands_real_sigkill() -> None:
+    """드릴은 「죽었다」가 아니라 「**-9 로** 죽었다」를 단언한다(B③-r2 · codex b3 MEDIUM 1).
+
+    ★codex 재현: `os.kill` 을 SIGTERM 으로 치환해도 드릴이 초록이었다 — 「finally 는 SIGKILL 을 못 이긴다」는
+      전제를 드릴이 회귀로 잡지 못했다(우연히 -9 였을 뿐). 여기서는 같은 치환을 주입하고 드릴이 **실패해야** 초록이다.
+    """
     import shutil
     import signal
+
+    def terminate(pid: int, _sig: int) -> None:
+        os.kill(pid, signal.SIGTERM)
+
+    root, *fx = _sigkill_fixture()
+    try:
+        try:
+            _sigkill_drill(root, *fx, kill=terminate)
+        except AssertionError as e:
+            if "-9" not in str(e):
+                raise AssertionError(f"드릴이 다른 이유로 실패했다: {e}") from e
+            return
+        raise AssertionError("SIGTERM 치환에도 드릴이 초록이다 — 종료코드 -9 를 단언하지 않는다")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _case_drill_reaps_child_on_setup_failure() -> None:
+    """준비 30초 실패 분기도 kill 한 자식을 **거둔다**(reap · B③-r2 · codex b3 MEDIUM 2).
+
+    ★codex 재현: 시간을 주입해 준비 실패를 내면 `finally` 가 `kill()` 만 하고 `wait()` 가 없어 자식이 좀비로
+      남았다(returncode None). 시계를 주입해 첫 검사에서 30초를 넘기게 하고, 드릴이 띄운 자식의 returncode 가
+      **채워져 있는지**(= 거뒀는지) 잰다.
+    """
+    import itertools
+    import shutil
+    ticks = itertools.count(0, 31)               # 호출마다 31초씩 — 첫 검사에서 이미 마감을 넘긴다
+    spawned: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def record(*args: Any, **kwargs: Any) -> subprocess.Popen:
+        proc = real_popen(*args, **kwargs)
+        spawned.append(proc)
+        return proc
+
+    root, *fx = _sigkill_fixture()
+    try:
+        try:
+            _sigkill_drill(root, *fx, clock=lambda: float(next(ticks)), popen=record)
+        except AssertionError as e:
+            if "30초" not in str(e):
+                raise AssertionError(f"준비 실패 분기가 아니라 다른 이유로 실패했다: {e}") from e
+        else:
+            raise AssertionError("시계를 앞당겼는데 준비 실패 분기에 들어가지 않았다")
+        if len(spawned) != 1:
+            raise AssertionError(f"드릴이 띄운 자식이 1이 아니다: {len(spawned)}")
+        if spawned[0].returncode is None:
+            raise AssertionError("준비 실패 뒤 자식을 거두지 않았다(returncode None = 좀비)")
+    finally:
+        for proc in spawned:                      # 실패했더라도 좀비를 남기지 않는다
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _sigkill_fixture() -> tuple[str, str, str, str, dict[str, str], str, str, str]:
+    """드릴 픽스처 — 격리 사본 + 표본 뮤턴트. 호출자가 `root` 를 지운다."""
+    import shutil
     import tempfile
-    import time
     root = tempfile.mkdtemp(prefix="agora-sigkill-drill-")
     shutil.copytree(os.path.join(_ROOT, "agora"), os.path.join(root, "agora"),
                     ignore=shutil.ignore_patterns("__pycache__"))
@@ -7244,17 +7316,18 @@ def _case_recovery_survives_sigkill() -> None:
         raise AssertionError(f"드릴 픽스처가 틀리다 — {mid} 대상이 사본에 없다")
     journal = os.path.join(root, ".agora-mutation-journal")
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-    try:
-        _sigkill_drill(root, target, pristine, journal, env, mid, relpath, new)
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    return root, target, pristine, journal, env, mid, relpath, new
 
 
 def _sigkill_drill(root: str, target: str, pristine: str, journal: str, env: dict[str, str],
-                   mid: str, relpath: str, new: str) -> None:
+                   mid: str, relpath: str, new: str, *,
+                   kill: Any = os.kill, clock: Any = None, popen: Any = None) -> None:
+    """★`kill`·`clock`·`popen` 은 주입 자리다(전역 패치 대신) — 케이스가 SIGTERM 치환·시계 앞당김·자식 포착을 넣는다."""
     import hashlib
     import signal
     import time
+    clock = clock or time.time
+    popen = popen or subprocess.Popen
     # ⑴ 진짜 하네스 경로로 변이를 쓰고 killer 자리에서 멈추는 자식.
     child1 = (
         "import sys, time; sys.path.insert(0, %r);"
@@ -7263,11 +7336,11 @@ def _sigkill_drill(root: str, target: str, pristine: str, journal: str, env: dic
         "st._case_passes_in_subprocess = lambda killer: time.sleep(120);"
         "st._run_mutations()"
     ) % (root, mid)
-    proc = subprocess.Popen([sys.executable, "-B", "-c", child1], cwd=root, env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    proc = popen([sys.executable, "-B", "-c", child1], cwd=root, env=env,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
-        deadline = time.time() + 30
-        while time.time() < deadline:
+        deadline = clock() + 30
+        while clock() < deadline:
             with open(target, encoding="utf-8") as fh:
                 mutated = new in fh.read()
             if mutated and os.path.exists(journal):
@@ -7277,11 +7350,14 @@ def _sigkill_drill(root: str, target: str, pristine: str, journal: str, env: dic
             time.sleep(0.1)
         else:
             raise AssertionError("30초 안에 변이·저널이 나타나지 않았다")
-        os.kill(proc.pid, signal.SIGKILL)                     # ⑵ 진짜 강제 종료
-        proc.wait(timeout=10)
+        kill(proc.pid, signal.SIGKILL)                        # ⑵ 진짜 강제 종료
+        rc = proc.wait(timeout=10)
+        if rc != -signal.SIGKILL:                             # 「죽었다」가 아니라 「-9 로 죽었다」(codex b3 MEDIUM 1)
+            raise AssertionError(f"자식이 -9 로 죽지 않았다: rc={rc} — 드릴 전제(SIGKILL) 가 성립하지 않는다")
     finally:
-        if proc.poll() is None:
+        if proc.poll() is None:                               # 준비 실패 분기 — kill 한 자식은 거둔다(codex b3 MEDIUM 2)
             proc.kill()
+            proc.wait(timeout=10)
     with open(target, encoding="utf-8") as fh:
         after_kill = fh.read()
     if new not in after_kill or after_kill == pristine:
@@ -8562,6 +8638,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("argparse-reject → 10",      _case_argparse_reject,      errors.ARGUMENT),
     ("retryable = {7,8}",         _case_retryable_contract,   None),
     ("복구: 강제 종료 뒤에도 원본이다", _case_recovery_survives_sigkill, None),
+    ("복구: 드릴은 진짜 -9 를 요구한다", _case_drill_demands_real_sigkill, None),
+    ("복구: 준비 실패에도 자식을 거둔다", _case_drill_reaps_child_on_setup_failure, None),
     ("codes-defined-once",        _case_codes_defined_once,   None),
     ("mcp-names-derive-from-cli", _case_mcp_names_derive_from_cli, None),
     ("contract-constants",        _case_contract_constants,   None),
@@ -8919,6 +8997,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    recovered = _recover_leftover()\n    case_rows, observed = _run_cases()',
      '    recovered = None\n    case_rows, observed = _run_cases()',
      "복구: 강제 종료 뒤에도 원본이다"),
+    ("M298-drill-accepts-any-exit", "agora/selftest.py",
+     "rc = proc.wait(timeout=10)\n        if rc != -signal.SIGKILL:",
+     "rc = proc.wait(timeout=10)\n        if rc != -signal.SIGKILL and False:",
+     "복구: 드릴은 진짜 -9 를 요구한다"),
+    ("M299-drill-setup-failure-leaves-zombie", "agora/selftest.py",
+     "            proc.kill()\n            proc.wait(timeout=10)\n    with open(target",
+     "            proc.kill()\n    with open(target",
+     "복구: 준비 실패에도 자식을 거둔다"),
     ("M1-retryable-widened", "agora/errors.py",
      "RETRYABLE: frozenset[int] = frozenset({STORE, UNKNOWN_COMMIT})",
      "RETRYABLE: frozenset[int] = frozenset({STORE, UNKNOWN_COMMIT, GATE_REJECT})",
