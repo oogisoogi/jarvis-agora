@@ -4193,7 +4193,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "투영정합": ("M229-close-projects-unconditionally", "M230-acceptance-always-true"),
     # ★우리 방언으로만 참이던 도구 표면(성찰 I-8).
     "전송규약": ("M231-rpc-envelope-stripped", "M232-rpc-answers-notifications",
-                 "M233-rpc-error-sent-as-result", "M234-rpc-claims-unsupported-protocol"),
+                 "M233-rpc-error-sent-as-result", "M234-rpc-claims-unsupported-protocol",
+                 "M295-mcp-error-hand-built"),
     # ★서명 능력 없이 운반체를 갈아치울 수 있던 자리(codex H1 · THREAT R-13).
     "운반체결박": ("M235-locate-takes-first-node", "M236-binding-not-consulted",
                    "M237-binding-not-persisted", "M238-candidates-not-recorded",
@@ -4254,7 +4255,7 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     # ★code 8 을 던지는 곳은 셋인데 판정하는 곳이 0 이던 자리.
     "불명판정": ("M217-tool-does-not-settle-code8", "M218-settle-assumes-committed",
                  "M219-settle-invents-a-url", "M289-settle-failure-drops-recovery",
-                 "M292-settle-failure-stays-retryable"),
+                 "M292-settle-failure-stays-retryable", "M294-recovery-material-by-truthiness"),
 }
 
 S5_AXES: dict[str, tuple[str, ...]] = {
@@ -7125,6 +7126,91 @@ def _case_partial_commit_is_not_retryable() -> None:
         sg._save_bindings = keep
 
 
+def _case_recovery_material_is_a_key_not_a_truthy_value() -> None:
+    """복구 재료의 유무는 **키 존재 ∧ 비None** 이다 — number=0 도 재료다(R6 ⓐ · codex 라운드 5).
+
+    ★R5-② 의 `known` 은 truthiness 였다. number=0 이면 재료가 둘 다 있어도 「없음」으로 판정돼 retryable true 가
+      새고, 문자 그대로 따르는 호출자가 원 작업을 재실행했다(codex 재현 RETRY_LOOP_NUMBER0 creations 4).
+      실물 번호는 1부터지만 03 문면은 「키가 있으면」이라 코드 기준은 키다.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    creations: list[str] = []
+
+    def failing_append(**kw: Any) -> dict[str, Any]:
+        creations.append(kw["thread_id"])
+        raise AgoraError(errors.UNKNOWN_COMMIT, "게시물은 만들어졌는데 결박을 못 남겼다",
+                         {"thread_id": kw["thread_id"], "number": 0, "node_id": "D_ZERO",
+                          "url": "https://x/0", "recover": "rebind"})
+
+    def failing_fetch(**_kw: Any) -> dict[str, Any]:
+        raise AgoraError(errors.PRECONDITION, "결박 원장을 쓸 수 없다", {"layer": "binding"})
+
+    ctx.store.append = failing_append
+    ctx.store.fetch = failing_fetch
+    last: AgoraError | None = None
+    for _ in range(4):
+        try:
+            _with_key(f["key_a"], lambda: tools.propose(ctx, type="debate", title="가짜 제목", body="가짜 발제"))
+        except AgoraError as e:
+            last = e
+            if not e.retryable:
+                break
+            continue
+        raise AssertionError("재조회가 실패했는데 성공으로 돌아왔다")
+    if len(creations) != 1 or last is None or last.retryable:
+        raise AssertionError(f"number=0 을 재료 없음으로 읽었다 — 원격 생성 {len(creations)}회 · "
+                             f"retryable={getattr(last, 'retryable', None)}")
+    if (last.detail or {}).get("retry_action") != "rebind" or (last.detail or {}).get("number") != 0:
+        raise AssertionError(f"복구 동작·재료가 detail 에 없다: {last.detail}")
+
+
+def _case_mcp_error_carries_retryable() -> None:
+    """MCP 오류 `data` 는 `to_dict` 에서 파생된다 — 인스턴스 `retryable` 이 stdio 로 나간다(R6 ⓑ · codex 라운드 5).
+
+    ★mcp_server 는 오류 data 를 {agora_code, name, detail} 로 손조립했다. retryable·message 가 MCP 에 없었다 —
+      03 §4 「오류 = {code, retryable, message, detail}」 미달의 선재 공백. R5 가 retryable 을 인스턴스 판단으로
+      만들자 MCP 호출자만 그 판단을 못 받게 됐다(CLI 는 to_json 경유로 false 를 냈다).
+    ★잰다: 재조회까지 실패한 code 8(retryable false)을 stdio 로 흘려 data.retryable 이 **false** 이고
+      agora_code·name·detail(번호)·message 가 함께 있는가. 서버는 in-process `serve` 로 띄운다(가짜 저장층 주입).
+    """
+    import io
+    from agora import mcp_server, tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+
+    def failing_append(**kw: Any) -> dict[str, Any]:
+        raise AgoraError(errors.UNKNOWN_COMMIT, "게시물은 만들어졌는데 결박을 못 남겼다",
+                         {"thread_id": kw["thread_id"], "number": 42, "node_id": "D_NEW",
+                          "url": "https://x/42", "recover": "rebind"})
+
+    def failing_fetch(**_kw: Any) -> dict[str, Any]:
+        raise AgoraError(errors.PRECONDITION, "결박 원장을 쓸 수 없다", {"layer": "binding"})
+
+    ctx.store.append = failing_append
+    ctx.store.fetch = failing_fetch
+    frames = (
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18",'
+        '"capabilities":{},"clientInfo":{"name":"selftest","version":"0"}}}',
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agora.propose",'
+        '"arguments":{"type":"debate","title":"가짜 제목","body":"가짜 발제"}}}',
+    )
+    out = io.StringIO()
+    _with_key(f["key_a"], lambda: mcp_server.serve(io.StringIO("\n".join(frames) + "\n"), out, ctx=ctx))
+    lines = [json.loads(raw) for raw in out.getvalue().splitlines() if raw.strip()]
+    err = next((l["error"] for l in lines if l.get("id") == 2 and "error" in l), None)
+    if err is None:
+        raise AssertionError(f"code 8 이 오류 응답으로 안 나왔다: {lines}")
+    data = err.get("data") or {}
+    if data.get("agora_code") != errors.UNKNOWN_COMMIT or data.get("name") != "unknown_commit":
+        raise AssertionError(f"기존 키가 깨졌다: {data}")
+    if data.get("retryable") is not False:
+        raise AssertionError(f"MCP 가 인스턴스 retryable 을 안 내보낸다: {data}")
+    if not data.get("message") or (data.get("detail") or {}).get("number") != 42:
+        raise AssertionError(f"message·detail 이 함께 안 나간다: {data}")
+
+
 def _case_audit_shows_transport_candidates() -> None:
     """후보가 여럿이었다는 사실이 **화면까지** 온다(H1 · R-13 · 구현≠배선).
 
@@ -8680,6 +8766,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("읽기: refs 커서는 내용이다",     _case_refs_cursor_is_content_addressed, None),
     ("불명: 재조회 실패도 복구 재료를 남긴다", _case_settle_failure_keeps_recovery_detail, None),
     ("불명: 생성 뒤 8 은 재실행을 부르지 않는다", _case_partial_commit_is_not_retryable, None),
+    ("불명: 번호 0 도 복구 재료다",       _case_recovery_material_is_a_key_not_a_truthy_value, None),
+    ("MCP: 오류에 retryable 이 실린다",   _case_mcp_error_carries_retryable, None),
     ("읽기: 같은 링크 둘도 커서가 나아간다", _case_duplicate_refs_cursor_advances, None),
     ("결박: 후보가 화면까지 온다",     _case_audit_shows_transport_candidates, None),
     ("결박: 만든 자리에서 묶는다",     _case_genesis_binds_at_creation, None),
@@ -9599,6 +9687,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                         retryable=False if known else None) from None',
      '                         retryable=None) from None',
      "불명: 생성 뒤 8 은 재실행을 부르지 않는다"),
+    ("M294-recovery-material-by-truthiness", "agora/tools.py",
+     '        known = base.get("number") is not None and base.get("node_id") is not None',
+     '        known = bool(base.get("number") and base.get("node_id"))',
+     "불명: 번호 0 도 복구 재료다"),
+    ("M295-mcp-error-hand-built", "agora/mcp_server.py",
+     '                             {"agora_code": e.code,\n                              **{k: v for k, v in e.to_dict().items() if k != "code"}})})',
+     '                             {"agora_code": e.code, "name": errors.NAMES.get(e.code),\n                              "detail": e.detail})})',
+     "MCP: 오류에 retryable 이 실린다"),
     ("M219-settle-invents-a-url", "agora/tools.py",
      '            "node_id": None, "url": None}',
      '            "node_id": "unknown", "url": "unknown://"}',

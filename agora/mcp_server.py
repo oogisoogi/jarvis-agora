@@ -217,8 +217,11 @@ def serve(stdin: Any = None, stdout: Any = None, *, ctx: Any = None) -> int:
                          "error": _rpc_error(
                              RPC_METHOD_NOT_FOUND if unknown else RPC_INTERNAL_ERROR,
                              e.message,
-                             {"agora_code": e.code, "name": errors.NAMES.get(e.code),
-                              "detail": e.detail})})
+                             # ★R6 ⓑ(codex 라운드 5) — data 는 to_dict 에서 **파생**한다(손조립 금지). 손으로 세 키만 옮기니
+                             #   retryable·message 가 MCP 에 안 나갔다 — 03 §4 「오류 = {code, retryable, message, detail}」
+                             #   미달의 선재 공백이었고, retryable 이 인스턴스 판단이 되면서(R5) 그 공백이 실제 의미를 가졌다.
+                             {"agora_code": e.code,
+                              **{k: v for k, v in e.to_dict().items() if k != "code"}})})
             continue
         except Exception as e:                # noqa: BLE001 — 최후 경계는 넓어야 한다
             # ★★M-c(codex 2026-08-26) — **한 요청이 서버 전체를 죽이던 자리.**

@@ -173,7 +173,10 @@ def _settle_unknown(ctx: Context, event: dict[str, Any],
         #   retryable:true 로 두면 문자 그대로 따르는 호출자가 propose 를 재실행해 게시물을 또 만든다(재현 4회).
         #   ⇒ false + retry_action:"rebind". 재료가 없는 8(진짜 불명)은 코드별 기본(true · 재조회가 재시도)을 둔다.
         base = dict(err.detail or {})
-        known = bool(base.get("number") and base.get("node_id"))
+        # ★R6 ⓐ(codex 라운드 5) — 「재료가 있는가」는 값의 참·거짓이 아니라 **키 존재 ∧ 비None** 이다. truthiness 로
+        #   재면 number=0 이 「재료 없음」이 돼 retryable true 로 새고 원 작업이 재실행된다(재현 4회). 실물 번호는 1부터지만
+        #   03 문면은 「키가 있으면」이라 코드 기준을 그렇게 잰다.
+        known = base.get("number") is not None and base.get("node_id") is not None
         if known:
             base["retry_action"] = "rebind"
         raise AgoraError(errors.UNKNOWN_COMMIT, "재조회도 실패했다 — 원래 부분 커밋 정보를 보존한다",
