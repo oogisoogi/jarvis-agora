@@ -4200,7 +4200,7 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                    "M216-receipt-taken-from-any-body"),
     # ★code 8 을 던지는 곳은 셋인데 판정하는 곳이 0 이던 자리.
     "불명판정": ("M217-tool-does-not-settle-code8", "M218-settle-assumes-committed",
-                 "M219-settle-invents-a-url"),
+                 "M219-settle-invents-a-url", "M289-settle-failure-drops-recovery"),
 }
 
 S5_AXES: dict[str, tuple[str, ...]] = {
@@ -6909,6 +6909,48 @@ def _case_refs_cursor_is_content_addressed() -> None:
         raise AssertionError(f"내용 키로 이어 받은 것이 다음 링크부터가 아니다: {rest['refs']}")
 
 
+def _case_settle_failure_keeps_recovery_detail() -> None:
+    """재조회가 **실패해도** 원래 code 8 의 복구 재료는 남는다(R4 ④-b · codex 라운드 3).
+
+    ★code 8 은 즉시 `_settle_unknown` 으로 간다(fetch → _locate → _bind). 결박 I/O 가 계속 막혀 있으면
+      안쪽 code 2 가 그대로 올라가 number·node_id·url·recover 가 사라졌다 — 절단 검색이면 파일을 고친 뒤에도
+      어느 번호를 rebind 할지 응답에 없다. 이제 재조회 실패는 원래 detail 위에 `settle_error` 로 중첩되고 코드는 8 이다.
+    ★반드시 `propose` 를 통해 잰다(도구 경계가 그 중첩을 하는지가 배선의 문제다).
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+
+    def failing_append(**kw: Any) -> dict[str, Any]:
+        raise AgoraError(errors.UNKNOWN_COMMIT, "게시물은 만들어졌는데 결박을 못 남겼다",
+                         {"thread_id": kw["thread_id"], "number": 42, "node_id": "D_NEW",
+                          "url": "https://x/42", "cause_code": errors.PRECONDITION,
+                          "cause": {"layer": "binding"}, "recover": "rebind"})
+
+    def failing_fetch(**_kw: Any) -> dict[str, Any]:
+        raise AgoraError(errors.PRECONDITION, "결박 원장을 쓸 수 없다",
+                         {"file": "thread-bindings.json", "why": "still broken", "layer": "binding"})
+
+    ctx.store.append = failing_append
+    ctx.store.fetch = failing_fetch
+    try:
+        _with_key(f["key_a"], lambda: tools.propose(ctx, type="debate", title="가짜 제목", body="가짜 발제"))
+    except AgoraError as e:
+        if e.code != errors.UNKNOWN_COMMIT:
+            raise AssertionError(f"코드가 {e.code} — 재조회 실패가 원래 8 을 덮었다")
+        det = e.detail or {}
+        if (det.get("number"), det.get("node_id"), det.get("url"), det.get("recover")) != \
+                (42, "D_NEW", "https://x/42", "rebind"):
+            raise AssertionError(f"원래 복구 재료가 사라졌다: {det}")
+        if not det.get("event_hash"):
+            raise AssertionError("서명기가 잰 event_hash 가 detail 에 없다")
+        se = det.get("settle_error") or {}
+        if se.get("code") != errors.PRECONDITION or (se.get("detail") or {}).get("layer") != "binding":
+            raise AssertionError(f"재조회 실패가 중첩돼 있지 않다: {se}")
+        return
+    raise AssertionError("재조회가 실패했는데 성공으로 돌아왔다")
+
+
 def _case_audit_shows_transport_candidates() -> None:
     """후보가 여럿이었다는 사실이 **화면까지** 온다(H1 · R-13 · 구현≠배선).
 
@@ -8462,6 +8504,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("읽기: 응답 전체에 상한",       _case_read_caps_the_whole_response, None),
     ("읽기: 커서는 모드·상태를 안다",  _case_read_cursor_carries_mode_and_state, None),
     ("읽기: refs 커서는 내용이다",     _case_refs_cursor_is_content_addressed, None),
+    ("불명: 재조회 실패도 복구 재료를 남긴다", _case_settle_failure_keeps_recovery_detail, None),
     ("결박: 후보가 화면까지 온다",     _case_audit_shows_transport_candidates, None),
     ("결박: 만든 자리에서 묶는다",     _case_genesis_binds_at_creation, None),
     ("결박: 잠금 안 병합·충돌 → 2",    _case_bind_merges_under_lock_and_refuses_conflict, None),
@@ -9371,6 +9414,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if settled["verdict"] != core.COMMITTED:',
      "    if False:",
      "code 8: 도구가 판정한다"),
+    ("M289-settle-failure-drops-recovery", "agora/tools.py",
+     '    except AgoraError as se:\n        raise AgoraError(errors.UNKNOWN_COMMIT, "재조회도 실패했다 — 원래 부분 커밋 정보를 보존한다",',
+     '    except AgoraError as se:\n        raise se from None\n        raise AgoraError(errors.UNKNOWN_COMMIT, "재조회도 실패했다 — 원래 부분 커밋 정보를 보존한다",',
+     "불명: 재조회 실패도 복구 재료를 남긴다"),
     ("M219-settle-invents-a-url", "agora/tools.py",
      '            "node_id": None, "url": None}',
      '            "node_id": "unknown", "url": "unknown://"}',

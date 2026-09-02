@@ -162,8 +162,17 @@ def _settle_unknown(ctx: Context, event: dict[str, Any],
     ★**확정된 부재는 「불명」이 아니다.** 재조회로 안 올라간 것이 확인되면 code 7(저장층
       실패·재시도 가능)로 **좁힌다** — 8 인 채로 두면 호출자는 영원히 「모르겠다」를 받는다.
     """
-    settled = core.settle_unknown(store=ctx.store, ledger=ctx.ledger, event=event,
-                                  event_hash=(err.detail or {}).get("event_hash") or "")
+    # ★R4 ④-b(codex 라운드 3) — 재조회 **자체가** 실패하면(결박 I/O 가 계속 막힘 등) 그 안쪽 오류가 그대로
+    #   올라가 원래 code 8 의 복구 재료(number·node_id·url·recover)가 사라졌다. 절단 검색이면 파일을 고친 뒤에도
+    #   어느 번호를 rebind 할지 응답에서 알 수 없다. ⇒ 원래 8 의 detail 을 지키고 재조회 실패를 **중첩**해 다시 8 로.
+    try:
+        settled = core.settle_unknown(store=ctx.store, ledger=ctx.ledger, event=event,
+                                      event_hash=(err.detail or {}).get("event_hash") or "")
+    except AgoraError as se:
+        raise AgoraError(errors.UNKNOWN_COMMIT, "재조회도 실패했다 — 원래 부분 커밋 정보를 보존한다",
+                         {**(err.detail or {}),
+                          "settle_error": {"code": se.code, "message": se.message,
+                                           "detail": se.detail}}) from None
     if settled["verdict"] != core.COMMITTED:
         raise AgoraError(errors.STORE, "저장되지 않았다 — 재조회로 확인했다",
                          {"settled": settled["verdict"],
