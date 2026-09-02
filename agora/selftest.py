@@ -4167,7 +4167,7 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "강제종료복원": ("M296-recovery-does-not-restore", "M297-run-skips-recovery",
                      "M298-drill-accepts-any-exit", "M299-drill-setup-failure-leaves-zombie"),
     # ★J-6 — 봉투 필수/선택의 기준이 코드가 아니라 03 §3-2 표인가(표를 변조하면 적색).
-    "봉투정본": ("M300-envelope-table-drops-required",),
+    "봉투정본": ("M300-envelope-table-drops-required", "M301-envelope-env-required-unchecked"),
     "온보딩공백": ("M188-repo-config-not-checked", "M189-json-guessed-by-shape",
                    "M190-unexpected-error-leaks-message"),
     "읽기정직": ("M191-read-shows-rejected-as-valid",
@@ -5851,7 +5851,10 @@ def _case_envelope_table_is_the_source_and_code_matches() -> None:
       기준이 문서여야 드리프트가 적색이 된다. 제품 코드가 문서를 런타임에 읽게 하지는 않는다
       (설치본에 `.appbuild` 가 없으면 게이트가 깨진다) — 시험이 읽고 대조하는 것으로 충분하다.
     ★검사기 자신을 먼저 의심한다: 표 행이 9개가 아니면 「못 읽었다」로 적색(0건 = 초록 병 차단).
-    ★표만 맞고 검사기가 다른 목록을 쓰면 헛돈다 — 표의 필수 칸 하나씩을 빼서 코드가 실제로 code 3 을 내는지도 잰다.
+    ★표만 맞고 검사기가 다른 목록을 쓰면 헛돈다 — 표의 필수 칸 **5개 전건**(최상위 3 · env 안 2)을 하나씩 빼서
+      코드가 실제로 code 3·칸 이름·자리(where)를 내는지도 잰다.
+    ⚠r2(codex B④ OPEN 1 · 2026-09-02): 처음엔 최상위 3칸만 돌아 중첩 필수 2칸의 실거부 경로가 0회 실행이었다 —
+      「필수 칸 하나씩」이라고 적어 놓고 5칸 중 3칸만 쟀다. 술어가 코드보다 컸다. M301 이 그 자리를 조준한다.
     """
     import re
     from agora import schema
@@ -5871,16 +5874,21 @@ def _case_envelope_table_is_the_source_and_code_matches() -> None:
                              ("env 선택", env_opt, schema.ENVELOPE_ENV_OPTIONAL)):
         if set(doc) != set(code):
             raise AssertionError(f"봉투 {label} 칸이 표와 코드에서 다르다: 표={sorted(doc)} 코드={sorted(code)}")
-    for key in top_req:
+    probes = ([(key, "envelope", None) for key in top_req]
+              + [(key, "envelope.env", "env") for key in env_req])
+    if len(probes) != 5:
+        raise AssertionError(f"실거부 표본이 5개가 아니다({len(probes)}) — 표를 덜 읽었다")
+    for key, where, parent in probes:
         env: dict[str, Any] = {"env": {"os": "x", "app": "y"}, "symptom": "s", "repro_steps": ["1"]}
-        del env[key]
+        del (env[parent] if parent else env)[key]
         try:
             schema._check_envelope(env)
         except AgoraError as e:
-            if e.code != errors.GATE_REJECT or (e.detail or {}).get("key") != key:
-                raise AssertionError(f"표의 필수 칸 {key} 결손이 code 3·칸 이름으로 안 나온다: {e.code} {e.detail}")
+            d = e.detail or {}
+            if e.code != errors.GATE_REJECT or d.get("key") != key or d.get("where") != where:
+                raise AssertionError(f"표의 필수 칸 {where}.{key} 결손이 code 3·칸 이름·자리로 안 나온다: {e.code} {d}")
         else:
-            raise AssertionError(f"표의 필수 칸 {key} 결손을 코드가 안 잡는다")
+            raise AssertionError(f"표의 필수 칸 {where}.{key} 결손을 코드가 안 잡는다")
 
 
 def _case_docs_five_exist() -> None:
@@ -10289,6 +10297,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("M300-envelope-table-drops-required", ".appbuild/03-architecture.md",
      "| `symptom` | 필수 |",
      "| `symptom` | 선택 |",
+     "봉투: 정본 표와 코드가 같다"),
+    # ★B④-r2(codex b4 OPEN 1) — 중첩 필수 루프를 끈다. `_need` 가 대신 code 10 을 내므로 「code 3·자리」 단언이 잡는다.
+    ("M301-envelope-env-required-unchecked", "agora/schema.py",
+     "    for key in ENVELOPE_ENV_REQUIRED:\n        if key not in e:",
+     "    for key in ENVELOPE_ENV_REQUIRED:\n        if False:",
      "봉투: 정본 표와 코드가 같다"),
 )
 
