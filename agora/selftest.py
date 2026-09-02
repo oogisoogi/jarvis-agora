@@ -4184,7 +4184,7 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     # ★R3-⑤ — 커서가 태어난 모드·상태를 모르던 자리.
     "커서문법": ("M283-cursor-empty-key-allowed", "M284-cursor-mode-unchecked",
                  "M285-cursor-state-unchecked", "M286-cursor-absent-section-accepted",
-                 "M287-refs-key-is-position"),
+                 "M287-refs-key-is-position", "M290-refs-duplicates-share-a-key"),
     "재검증": ("M267-unverified-treated-as-received",),
     "설정폴더": ("M268-context-does-not-pin-config-dir", "M275-publish-drops-names-path",
                  "M276-signer-env-not-passed", "M277-publish-drops-config-dir"),
@@ -6851,9 +6851,9 @@ def _case_read_cursor_carries_mode_and_state() -> None:
         if not cur or "@1:" not in cur:
             raise AssertionError(f"커서에 모드·상태 표식이 없다: {cur}")
         body, _at, stamp = cur.rpartition("@")
-        state12 = stamp.partition(":")[2]
-        if len(state12) != 12 or state12 != (first["state_hash"] or "")[:12]:
-            raise AssertionError(f"커서의 상태 표식이 state_hash 와 다르다: {stamp}")
+        state32 = stamp.partition(":")[2]
+        if len(state32) != 32 or state32 != (first["state_hash"] or "")[:32]:
+            raise AssertionError(f"커서의 상태 표식이 128비트 state_hash 가 아니다: {stamp}")
         key = body.partition(":")[2]
         # ⓐ 빈 키 · 빈 목록 · 표식 없는 목록형 — 전부 10(되감기 없음).
         _expect_cursor_rejected(ctx, tid, f"events:@{stamp}", audit=True, what="빈 키")
@@ -6862,7 +6862,7 @@ def _case_read_cursor_carries_mode_and_state() -> None:
         # ⓑ 모드 불일치 — audit 로 만든 커서를 평시에.
         _expect_cursor_rejected(ctx, tid, cur, audit=False, what="모드 불일치")
         # ⓒ audit 을 끈 채 응답에 없는 목록을 가리킨다(모드 표식은 맞춰 준다).
-        _expect_cursor_rejected(ctx, tid, f"quarantined:아무키@0:{state12}", audit=False,
+        _expect_cursor_rejected(ctx, tid, f"quarantined:아무키@0:{state32}", audit=False,
                                 what="없는 목록")
         # 정상 이어 읽기 — 같은 모드·같은 상태.
         rest = tools.read(ctx, thread_id=tid, audit=True, cursor=cur)
@@ -6898,15 +6898,59 @@ def _case_refs_cursor_is_content_addressed() -> None:
     refs = whole["refs"]
     if len(refs) != 3:
         raise AssertionError(f"픽스처가 틀리다 — refs {len(refs)}")
-    k0 = tools._section_key("refs", refs[0], 0)
-    if tools._section_key("refs", refs[0], 7) != k0:
+    keys = tools._section_keys("refs", refs)
+    k0 = keys[0]
+    if tools._section_keys("refs", [refs[2], refs[1], refs[0]])[2] != k0:
         raise AssertionError("refs 키가 위치에 묶여 있다")
-    if len({tools._section_key("refs", r, 0) for r in refs}) != 3:
+    if len(set(keys)) != 3:
         raise AssertionError("서로 다른 링크가 같은 키를 받았다")
-    cur = f"refs:{k0}@0:{(whole['state_hash'] or '')[:12]}"
+    cur = f"refs:{k0}@0:{(whole['state_hash'] or '')[:32]}"
     rest = tools.read(ctx, thread_id=tid, cursor=cur)
     if rest["refs"] != refs[1:] or rest["events"] or rest["next_cursor"] is not None:
         raise AssertionError(f"내용 키로 이어 받은 것이 다음 링크부터가 아니다: {rest['refs']}")
+
+
+def _case_duplicate_refs_cursor_advances() -> None:
+    """같은 링크를 **두 번** 건 글에서도 refs 커서가 나아가고 끝난다(R4 ⑤-a · codex 라운드 3).
+
+    ★R3 는 refs 키를 내용 다이제스트로만 만들었다. 스키마·reducer 는 중복 refs 를 허용하므로 같은 출처가 같은
+      링크를 두 번 걸면 키가 겹치고, 이어 읽기는 늘 첫 중복 다음으로 돌아가 **같은 커서가 무한히 재발급**됐다 —
+      뒤 링크는 영구 누락. R3 주석의 「한 번 더 실릴 뿐·빠지지 않는다」는 틀렸다.
+    ★반드시 `read` 페이지 경계에 중복을 두고 잰다(상한을 낮춰 한 페이지 한 건) — 끝나는가 · 전건이 순서대로 오는가.
+    """
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx, gtype="knowhow")
+    t1, t2 = _tools_thread(ctx, gtype="knowhow"), _tools_thread(ctx, gtype="knowhow")
+    _with_key(f["key_a"], lambda: tools.say(
+        ctx, thread_id=tid, body="같은 링크 둘",
+        refs=[{"thread_id": t1, "why": "첫째"}, {"thread_id": t1, "why": "둘째"},
+              {"thread_id": t2, "why": "셋째"}]))
+    whole = tools.read(ctx, thread_id=tid)
+    if len(whole["refs"]) != 3:
+        raise AssertionError(f"픽스처가 틀리다 — refs {len(whole['refs'])}")
+    keep = (tools.READ_PAGE_BYTES, tools.READ_PAGE_EVENTS)
+    got: list[dict[str, Any]] = []
+    cursors: list[str] = []
+    try:
+        tools.READ_PAGE_BYTES, tools.READ_PAGE_EVENTS = 1, 1      # 한 페이지 한 건 — 중복이 경계에 선다
+        cursor = None
+        for _ in range(12):
+            page = tools.read(ctx, thread_id=tid, cursor=cursor)
+            got.extend(page["refs"])
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+            if cursor in cursors:
+                raise AssertionError(f"같은 커서가 다시 발급됐다 — 정체: {cursor}")
+            cursors.append(cursor)
+        else:
+            raise AssertionError("12페이지가 넘도록 끝이 안 난다 — 중복 링크에서 커서가 정체했다")
+    finally:
+        tools.READ_PAGE_BYTES, tools.READ_PAGE_EVENTS = keep
+    if got != whole["refs"]:
+        raise AssertionError(f"이어 받은 refs 가 전건과 다르다: {[r['why'] for r in got]}")
 
 
 def _case_settle_failure_keeps_recovery_detail() -> None:
@@ -8505,6 +8549,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("읽기: 커서는 모드·상태를 안다",  _case_read_cursor_carries_mode_and_state, None),
     ("읽기: refs 커서는 내용이다",     _case_refs_cursor_is_content_addressed, None),
     ("불명: 재조회 실패도 복구 재료를 남긴다", _case_settle_failure_keeps_recovery_detail, None),
+    ("읽기: 같은 링크 둘도 커서가 나아간다", _case_duplicate_refs_cursor_advances, None),
     ("결박: 후보가 화면까지 온다",     _case_audit_shows_transport_candidates, None),
     ("결박: 만든 자리에서 묶는다",     _case_genesis_binds_at_creation, None),
     ("결박: 잠금 안 병합·충돌 → 2",    _case_bind_merges_under_lock_and_refuses_conflict, None),
@@ -9645,6 +9690,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if section != "events" and section not in present:',
      '    if False:',
      "읽기: 커서는 모드·상태를 안다"),
+    ("M290-refs-duplicates-share-a-key", "agora/tools.py",
+     '            base = f"{base}.{n}"',
+     '            base = base',
+     "읽기: 같은 링크 둘도 커서가 나아간다"),
     ("M287-refs-key-is-position", "agora/tools.py",
      '        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]',
      '        return str(index)',

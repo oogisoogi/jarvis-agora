@@ -471,11 +471,13 @@ READ_SECTIONS = ("events", "quarantined", "stale", "refs")
 
 
 def _hash_prefix(state_hash: str | None) -> str:
-    return (state_hash or "")[:12]
+    # ★R4(master 결정 2026-09-02) — 표식은 128비트(32 hex). 12자(48비트)는 우발 오인은 극소해도 충돌 저항을
+    #   주장하기엔 짧았다(codex 라운드 3 논쟁점). 커서는 서버가 발급하고 그대로 되돌리는 불투명 문자열이라 비용은 길이뿐.
+    return (state_hash or "")[:32]
 
 
 def _cursor_stamp(*, audit: bool, state_hash: str | None) -> str:
-    """커서 꼬리 `@<audit 0/1>:<state_hash 앞 12자>` — 커서가 태어난 모드·상태."""
+    """커서 꼬리 `@<audit 0/1>:<state_hash 앞 32자>` — 커서가 태어난 모드·상태."""
     return f"@{1 if audit else 0}:{_hash_prefix(state_hash)}"
 
 
@@ -520,14 +522,31 @@ def _section_key(section: str, entry: dict[str, Any], index: int) -> str:
     ★R3-⑤ — refs 는 위치를 키로 썼다(링크엔 고유 id 가 없다). 앞에 링크가 끼면 같은 위치가 다른
       링크를 가리켜 이어 읽기가 중복·누락을 낸다. 위치 대신 링크의 내용(role·출처 message_id·
       대상 thread_id·대상 message_id)을 sha256 으로 접어 앞 16자를 쓴다 — 자리가 바뀌어도 같은 링크는
-      같은 키다. (같은 링크가 같은 글에서 두 번 걸리면 키가 겹쳐 그 사이가 **한 번 더** 실릴 수 있다 —
-      빠지지는 않는다.)
+      같은 키다.
+    ★R4 ⑤-a(codex 라운드 3) — 같은 글이 같은 링크를 두 번 걸면(스키마·reducer 는 중복을 허용) 다이제스트가 겹쳐
+      이어 읽기가 늘 첫 중복 다음으로 돌아갔다 — 「한 번 더 실린다」가 아니라 **같은 커서가 무한히 재발급**돼
+      뒤 링크가 영구 누락됐다(R3 주석의 주장이 틀렸다). 그래서 목록 안의 키는 `_section_keys` 가
+      다이제스트에 **발생 순번**을 붙여 만든다 — 상태 표식이 삽입 변화를 이미 거부하므로 순번은 위치 문제를 되살리지 않는다.
     """
     if section == "refs":
         raw = "|".join(str(entry.get(k) or "")
                        for k in ("role", "from_message_id", "thread_id", "message_id"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
     return str(entry.get("node_id") or entry.get("message_id") or index)
+
+
+def _section_keys(section: str, rows: list[dict[str, Any]]) -> list[str]:
+    """목록 전체의 이어 읽기 키 — 같은 다이제스트가 거듭 나오면 `<digest>.<발생 순번>` 으로 갈라 유일하게 한다."""
+    keys: list[str] = []
+    seen: dict[str, int] = {}
+    for i, row in enumerate(rows):
+        base = _section_key(section, row, i)
+        if section == "refs":
+            n = seen.get(base, 0)
+            seen[base] = n + 1
+            base = f"{base}.{n}"
+        keys.append(base)
+    return keys
 
 
 def _page_sections(view: dict[str, Any], lists: dict[str, list[dict[str, Any]]],
@@ -561,8 +580,8 @@ def _page_sections(view: dict[str, Any], lists: dict[str, list[dict[str, Any]]],
                 pending.append(s)
             continue
         start = 0
+        keys = _section_keys(s, rows)
         if section == s:
-            keys = [_section_key(s, r, i) for i, r in enumerate(rows)]
             if key not in keys:
                 raise AgoraError(errors.ARGUMENT, "그 cursor 가 이 스레드에 없다",
                                  {"cursor": f"{s}:{key}"})
@@ -571,7 +590,7 @@ def _page_sections(view: dict[str, Any], lists: dict[str, list[dict[str, Any]]],
         for i in range(start, len(rows)):
             size = len(json.dumps(rows[i], ensure_ascii=False).encode("utf-8"))
             if out and budget - size < 0:
-                view["next_cursor"] = f"{s}:{_section_key(s, rows[i - 1], i - 1)}"
+                view["next_cursor"] = f"{s}:{keys[i - 1]}"
                 cut = True
                 break
             out.append(rows[i])
