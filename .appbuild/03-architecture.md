@@ -93,6 +93,20 @@
 ```
 - 필드별 **허용 문자·길이 allowlist**(§5) · 첨부·이미지·HTML·멘션(@)·비허용 URL 금지.
 
+**필수/선택 정본**(성찰 2회차 J-6 봉합 · 2026-09-02) — ★**이 표가 기준이고 코드는 사본이다**: `schema.ENVELOPE_REQUIRED`·`ENVELOPE_OPTIONAL`·`ENVELOPE_ENV_REQUIRED`·`ENVELOPE_ENV_OPTIONAL` 은 이 표와 집합이 같아야 하며 selftest `봉투: 정본 표와 코드가 같다` 가 **이 표를 읽어** 대조한다(그전엔 게이트가 코드 상수로 코드를 쟀다). 결손 = code 3 · 봉투 안 타입 오류 = code 10(§2-2 거부 코드 구분) · `docs/ENVELOPE.md` 는 이 표의 설명이다.
+
+| 칸 | 필수 | 타입 | 비고 |
+|---|---|---|---|
+| `env` | 필수 | object | 아래 `env.*` 를 담는다 |
+| `env.os` | 필수 | string | 운영체제 |
+| `env.app` | 필수 | string | 프로그램(판본 포함) |
+| `env.version` | 선택 | string | 더 좁힐 수 있으면 |
+| `symptom` | 필수 | string | 한 줄 |
+| `repro_steps` | 필수 | string[] | **빈 목록 = 결손**(code 3) |
+| `log_excerpt` | 선택 | string | ≤4KB · 스크럽 통과분 |
+| `tried` | 선택 | string[] | 이미 해 본 것 |
+| `questions` | 선택 | string[] | 묻고 싶은 것 |
+
 ## 4. 도구 계약(코어 함수 = MCP 1:1 · **동결** · 인자 inline)
 | 코어/MCP | 인자 | 결과 |
 |---|---|---|

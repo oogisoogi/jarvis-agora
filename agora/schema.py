@@ -55,8 +55,14 @@ def _closed(obj: dict[str, Any], allowed: tuple[str, ...], where: str) -> None:
 
 
 # 봉투의 필수 칸(설계 §3-2). 하나라도 없으면 **그 유형으로 올릴 자격**이 없다 → 정책 거부(3).
+# ★정본은 **03 §3-2 의 필수/선택 표**이고 아래 넷은 그 **사본**이다(성찰 J-6 · 2026-09-02).
+#   전에는 게이트가 이 상수로 결손을 만들고 이 상수로 판정했다 — 코드가 코드를 재는 구조라
+#   01 이 6칸처럼 읽히고 설계가 침묵해도 초록이었다. 이제 `봉투: 정본 표와 코드가 같다` 가
+#   표를 읽어 넷과 대조한다. 표를 고치면 여기도 고쳐라 — 안 고치면 그 케이스가 적색이다.
 ENVELOPE_REQUIRED = ("env", "symptom", "repro_steps")
+ENVELOPE_OPTIONAL = ("log_excerpt", "tried", "questions")
 ENVELOPE_ENV_REQUIRED = ("os", "app")
+ENVELOPE_ENV_OPTIONAL = ("version",)
 
 
 def _envelope_missing(env: dict[str, Any], key: str, where: str) -> None:
@@ -72,13 +78,12 @@ def _envelope_missing(env: dict[str, Any], key: str, where: str) -> None:
 
 
 def _check_envelope(env: dict[str, Any]) -> None:
-    _closed(env, ("env", "symptom", "repro_steps", "log_excerpt", "tried", "questions"),
-            "envelope")
+    _closed(env, ENVELOPE_REQUIRED + ENVELOPE_OPTIONAL, "envelope")
     for key in ENVELOPE_REQUIRED:
         if key not in env:
             _envelope_missing(env, key, "envelope")
     e = _need(env, "env", dict, "envelope")
-    _closed(e, ("os", "app", "version"), "envelope.env")
+    _closed(e, ENVELOPE_ENV_REQUIRED + ENVELOPE_ENV_OPTIONAL, "envelope.env")
     for key in ENVELOPE_ENV_REQUIRED:
         if key not in e:
             _envelope_missing(e, key, "envelope.env")

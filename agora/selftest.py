@@ -4166,6 +4166,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     # ★S1-8 AC ② — 강제 종료 뒤 복원이 실제 SIGKILL 에서 도는가(B③ 드릴 · 하네스 자기 파일 조준).
     "강제종료복원": ("M296-recovery-does-not-restore", "M297-run-skips-recovery",
                      "M298-drill-accepts-any-exit", "M299-drill-setup-failure-leaves-zombie"),
+    # ★J-6 — 봉투 필수/선택의 기준이 코드가 아니라 03 §3-2 표인가(표를 변조하면 적색).
+    "봉투정본": ("M300-envelope-table-drops-required",),
     "온보딩공백": ("M188-repo-config-not-checked", "M189-json-guessed-by-shape",
                    "M190-unexpected-error-leaks-message"),
     "읽기정직": ("M191-read-shows-rejected-as-valid",
@@ -5839,6 +5841,46 @@ def _case_task_table_covers_the_task_list() -> None:
     #   그래서 방어를 케이스 안에 둔다: 읽어 낸 작업 수가 터무니없으면 그 자리에서 적색.
     if len(ids) < 40:
         raise AssertionError(f"작업 id 를 못 읽었다({len(ids)}) — 검사기가 고장난 것이다")
+
+
+def _case_envelope_table_is_the_source_and_code_matches() -> None:
+    """봉투 필수/선택의 정본은 **03 §3-2 표**다 — 코드 상수는 사본이고, 여기서 표를 읽어 대조한다(성찰 J-6 · 2026-09-02).
+
+    ★★전에는 게이트가 `ENVELOPE_REQUIRED` 로 결손 픽스처를 만들고 `ENVELOPE_REQUIRED` 로 판정했다 —
+      **코드가 코드를 재는 구조**라 01 은 6칸처럼 읽히고 설계는 침묵해도 초록이었다.
+      기준이 문서여야 드리프트가 적색이 된다. 제품 코드가 문서를 런타임에 읽게 하지는 않는다
+      (설치본에 `.appbuild` 가 없으면 게이트가 깨진다) — 시험이 읽고 대조하는 것으로 충분하다.
+    ★검사기 자신을 먼저 의심한다: 표 행이 9개가 아니면 「못 읽었다」로 적색(0건 = 초록 병 차단).
+    ★표만 맞고 검사기가 다른 목록을 쓰면 헛돈다 — 표의 필수 칸 하나씩을 빼서 코드가 실제로 code 3 을 내는지도 잰다.
+    """
+    import re
+    from agora import schema
+    text = _doc(os.path.join(".appbuild", "03-architecture.md"))
+    start = text.index("### 3-2.")
+    section = text[start:text.index("## 4.", start)]
+    rows = re.findall(r"^\| `([a-z_.]+)` \| (필수|선택) \|", section, re.M)
+    if len(rows) != 9:
+        raise AssertionError(f"03 §3-2 표를 못 읽었다(행 {len(rows)}) — 검사기가 고장난 것이다")
+    top_req = tuple(n for n, r in rows if "." not in n and r == "필수")
+    top_opt = tuple(n for n, r in rows if "." not in n and r == "선택")
+    env_req = tuple(n.split(".", 1)[1] for n, r in rows if n.startswith("env.") and r == "필수")
+    env_opt = tuple(n.split(".", 1)[1] for n, r in rows if n.startswith("env.") and r == "선택")
+    for label, doc, code in (("필수", top_req, schema.ENVELOPE_REQUIRED),
+                             ("선택", top_opt, schema.ENVELOPE_OPTIONAL),
+                             ("env 필수", env_req, schema.ENVELOPE_ENV_REQUIRED),
+                             ("env 선택", env_opt, schema.ENVELOPE_ENV_OPTIONAL)):
+        if set(doc) != set(code):
+            raise AssertionError(f"봉투 {label} 칸이 표와 코드에서 다르다: 표={sorted(doc)} 코드={sorted(code)}")
+    for key in top_req:
+        env: dict[str, Any] = {"env": {"os": "x", "app": "y"}, "symptom": "s", "repro_steps": ["1"]}
+        del env[key]
+        try:
+            schema._check_envelope(env)
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT or (e.detail or {}).get("key") != key:
+                raise AssertionError(f"표의 필수 칸 {key} 결손이 code 3·칸 이름으로 안 나온다: {e.code} {e.detail}")
+        else:
+            raise AssertionError(f"표의 필수 칸 {key} 결손을 코드가 안 잡는다")
 
 
 def _case_docs_five_exist() -> None:
@@ -8982,6 +9024,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("MCP: 나쁜 인자에도 산다",        _case_mcp_survives_a_bad_argument, None),
     ("MCP: 규약으로 말한다",           _case_mcp_speaks_jsonrpc_not_our_dialect, None),
     ("MCP: 판본 협상은 규약대로",     _case_mcp_negotiates_protocol_the_way_the_spec_says, None),
+    ("봉투: 정본 표와 코드가 같다",    _case_envelope_table_is_the_source_and_code_matches, None),
 )
 
 
@@ -10241,6 +10284,12 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if f.get("query") and f["query"] not in item["title"]:',
      '    if False:',
      "목록: 필터 7종이 거른다"),
+    # ★J-6(2026-09-02) — 정본 **표**를 변조한다: 필수 칸 하나를 선택으로 바꾸면 대조 케이스가 죽어야 한다.
+    #   문서를 조준하는 뮤턴트다 — 표가 기준이라는 말은 표를 바꿨을 때 적색이 나야 참이다.
+    ("M300-envelope-table-drops-required", ".appbuild/03-architecture.md",
+     "| `symptom` | 필수 |",
+     "| `symptom` | 선택 |",
+     "봉투: 정본 표와 코드가 같다"),
 )
 
 
