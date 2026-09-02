@@ -57,7 +57,8 @@ COMMANDS: dict[str, dict[str, Any]] = {
     "abort":          {"core": False, "built": True,  "slice": "S7-3"},
 }
 
-# MCP 에 노출하지 않는 것 — 설계 §4 가 예외로 명시한 4종.
+# MCP 에 노출하지 않는 것 — 정본 = 설계 §4 「(CLI만)」 행(예외 계수는 그 한 곳에만 · J-7 2026-09-02).
+#   이 집합은 그 행과 같아야 한다(`_case_mcp_names_derive_from_cli`·`_case_local_commands_are_not_tools` 가 잰다).
 MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
                         "reconcile", "mcp-serve", "delegate-chair", "abort"})
 
