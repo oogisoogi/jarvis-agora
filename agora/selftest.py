@@ -4168,6 +4168,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                      "M298-drill-accepts-any-exit", "M299-drill-setup-failure-leaves-zombie"),
     # ★J-6 — 봉투 필수/선택의 기준이 코드가 아니라 03 §3-2 표인가(표를 변조하면 적색).
     "봉투정본": ("M300-envelope-table-drops-required", "M301-envelope-env-required-unchecked"),
+    # ★병렬 전체 selftest 공유 소스 부패(선재 경계) — 두 번째 실행은 즉시 거부되는가.
+    "동시실행거부": ("M302-lock-treats-live-holder-as-stale",),
     "온보딩공백": ("M188-repo-config-not-checked", "M189-json-guessed-by-shape",
                    "M190-unexpected-error-leaks-message"),
     "읽기정직": ("M191-read-shows-rejected-as-valid",
@@ -5889,6 +5891,71 @@ def _case_envelope_table_is_the_source_and_code_matches() -> None:
                 raise AssertionError(f"표의 필수 칸 {where}.{key} 결손이 code 3·칸 이름·자리로 안 나온다: {e.code} {d}")
         else:
             raise AssertionError(f"표의 필수 칸 {where}.{key} 결손을 코드가 안 잡는다")
+
+
+def _case_second_selftest_is_refused_at_once() -> None:
+    """전체 selftest 가 도는 동안 두 번째 실행은 **즉시** code 2 로 거부되고, 죽은 실행의 잠금은 회수된다.
+
+    ★선재 경계(codex b3): 전체 selftest 둘이 같은 소스를 변이하면 서로의 원본을 되쓴다. 규율(「병렬로 돌리지 마라」)은
+      기억이라 구조로 바꾼다 — mkdir 원자 락. 여기서는 ⑴ 잠금을 쥔 채 토큰 없는 자식이 `run()` 을 부르면 즉시 거부
+      (자식은 두 단계를 스텁해 거부가 없더라도 전체 실행으로 번지지 않게 한다) ⑵ 같은 토큰을 물려받은 자식은 통과
+      ⑶ 죽은 pid 의 잠금은 임시 폴더에서 회수되는지를 잰다.
+    ★전체 실행 안에서는 부모가 이미 잠금을 쥐고 있고(토큰 상속 → `_acquire_lock` 이 None), 단건 실행에서는
+      이 케이스가 직접 잡는다 — 어느 쪽이든 잡은 만큼만 푼다.
+    """
+    import json as _json
+    import shutil
+    import tempfile
+    own = _acquire_lock()
+    if own is not None:
+        os.environ[_LOCK_TOKEN_ENV] = own
+    try:
+        stub = (
+            "import sys, json; sys.path.insert(0, %r);"
+            "import agora.selftest as st; from agora.errors import AgoraError;"
+            "st._run_cases = lambda: ([], set()); st._run_mutations = lambda: [];"
+            "st._recover_leftover = lambda: None\n"
+            "try:\n    st.run(); print('NO-REFUSAL')\n"
+            "except AgoraError as e:\n    print(json.dumps({'code': e.code, 'reason': (e.detail or {}).get('reason')}))"
+        ) % _ROOT
+        # ⑴ 토큰 없는 자식 = 남의 실행 → 즉시 거부.
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        env.pop(_LOCK_TOKEN_ENV, None)
+        r = subprocess.run([sys.executable, "-B", "-c", stub], env=env, cwd=_ROOT,
+                           capture_output=True, text=True, timeout=60)
+        out = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+        if out == "NO-REFUSAL" or not out:
+            raise AssertionError(f"잠금이 있는데 두 번째 실행이 거부되지 않았다: {out!r} {r.stderr[-200:]}")
+        got = _json.loads(out)
+        if got != {"code": errors.PRECONDITION, "reason": "selftest_running"}:
+            raise AssertionError(f"거부 사유가 계약과 다르다: {got}")
+        # ⑵ 같은 토큰을 물려받은 자식 = 같은 실행 → 통과(드릴 child2 가 이 길을 쓴다).
+        r = subprocess.run([sys.executable, "-B", "-c", stub], env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+                           cwd=_ROOT, capture_output=True, text=True, timeout=60)
+        if r.stdout.strip().splitlines()[-1:] != ["NO-REFUSAL"]:
+            raise AssertionError(f"같은 실행의 자식이 거부됐다: {r.stdout[-200:]} {r.stderr[-200:]}")
+        # ⑶ 죽은 pid 의 잠금은 회수된다 — 임시 폴더에서(진짜 잠금은 건드리지 않는다).
+        tmp = tempfile.mkdtemp(prefix="agora-lock-")
+        try:
+            dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                                  capture_output=True, text=True, timeout=30)
+            dead_pid = int(dead.stdout.strip())
+            stale = os.path.join(tmp, "lock")
+            os.mkdir(stale)
+            with open(os.path.join(stale, "holder"), "w", encoding="utf-8") as fh:
+                fh.write(f"{dead_pid} deadbeef")
+            tok = _acquire_lock(stale)
+            if tok is None:
+                raise AssertionError("죽은 잠금을 회수하지 못했다")
+            _release_lock(tok, stale)
+            if os.path.exists(stale):
+                raise AssertionError("회수한 잠금이 풀리지 않았다")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    finally:
+        if own is not None:
+            os.environ.pop(_LOCK_TOKEN_ENV, None)
+        _release_lock(own)
 
 
 def _case_docs_five_exist() -> None:
@@ -9033,6 +9100,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("MCP: 규약으로 말한다",           _case_mcp_speaks_jsonrpc_not_our_dialect, None),
     ("MCP: 판본 협상은 규약대로",     _case_mcp_negotiates_protocol_the_way_the_spec_says, None),
     ("봉투: 정본 표와 코드가 같다",    _case_envelope_table_is_the_source_and_code_matches, None),
+    ("잠금: 두 번째 실행은 즉시 거부된다", _case_second_selftest_is_refused_at_once, None),
 )
 
 
@@ -10303,6 +10371,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    for key in ENVELOPE_ENV_REQUIRED:\n        if key not in e:",
      "    for key in ENVELOPE_ENV_REQUIRED:\n        if False:",
      "봉투: 정본 표와 코드가 같다"),
+    # ★동시 실행 거부 잠금 — 살아 있는 잠금을 죽은 것으로 보면 두 번째 실행이 회수·진입한다.
+    ("M302-lock-treats-live-holder-as-stale", "agora/selftest.py",
+     "            if pid is not None and _pid_alive(pid):\n                raise AgoraError(errors.PRECONDITION,",
+     "            if False:\n                raise AgoraError(errors.PRECONDITION,",
+     "잠금: 두 번째 실행은 즉시 거부된다"),
 )
 
 
@@ -10369,6 +10442,75 @@ def _run_one(case_name: str) -> bool:
 
 
 _JOURNAL = os.path.join(_ROOT, ".agora-mutation-journal")
+# ★동시 실행 거부 잠금(백로그 · master 결정 2026-09-02 · codex b3 선재 경계): 전체 selftest 둘이 같은 소스를
+#   변이하면 서로의 원본을 되쓴다(공유 소스 부패). mkdir 은 원자적이라 두 번째 실행은 **즉시** code 2 로 거부된다.
+#   ★잠금은 `run()` 경계에만 있다 — 단건 `_run_one`(킬러 자식)·드릴 child1 은 잠그지 않는다.
+#   ★드릴 child2 는 `run()` 을 부른다 → 잡은 쪽이 토큰을 환경에 실어 주고, 같은 토큰을 물려받은 자식은 **같은 실행**으로 본다.
+#   ★죽은 pid 의 잠금(SIGKILL 잔존)은 회수한다 — 안 그러면 한 번 죽은 뒤 영영 못 돈다.
+_LOCK = os.path.join(_ROOT, ".agora-selftest-lock")
+_LOCK_TOKEN_ENV = "AGORA_SELFTEST_LOCK_TOKEN"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # 남의 프로세스 — 살아 있다
+    return True
+
+
+def _lock_holder(lock_dir: str) -> tuple[int | None, str]:
+    """(pid, token) — 파일이 없거나 깨졌으면 (None, "")."""
+    try:
+        with open(os.path.join(lock_dir, "holder"), encoding="utf-8") as fh:
+            pid_s, _, token = fh.read().strip().partition(" ")
+        return int(pid_s), token
+    except (OSError, ValueError):
+        return None, ""
+
+
+def _acquire_lock(lock_dir: str = _LOCK) -> str | None:
+    """잠금을 잡고 토큰을 돌려준다. 물려받은 토큰이 잠금의 것과 같으면 **같은 실행**이므로 None(잡지 않음).
+
+    ★os.environ 은 건드리지 않는다 — 토큰을 환경에 싣는 것은 `run()` 의 몫이다(시험이 임시 잠금 폴더로
+      이 함수를 불러도 부모 실행의 토큰이 덮이지 않게).
+    """
+    import secrets
+    import shutil
+    inherited = os.environ.get(_LOCK_TOKEN_ENV, "")
+    for attempt in (1, 2):
+        try:
+            os.mkdir(lock_dir)
+        except FileExistsError:
+            pid, token = _lock_holder(lock_dir)
+            if inherited and token == inherited:
+                return None
+            if pid is not None and _pid_alive(pid):
+                raise AgoraError(errors.PRECONDITION,
+                                 "selftest 가 이미 돌고 있다 — 병렬 실행은 공유 소스를 부패시킨다",
+                                 {"reason": "selftest_running", "pid": pid, "lock": lock_dir,
+                                  "recover": "그 실행이 끝나기를 기다려라. 그 pid 가 없는데도 남아 있으면 잠금 폴더를 지워라."})
+            if attempt == 1:
+                shutil.rmtree(lock_dir, ignore_errors=True)   # 죽은 실행의 잔존 — 회수
+                continue
+            raise AgoraError(errors.PRECONDITION, "selftest 잠금을 회수하지 못했다",
+                             {"reason": "selftest_lock_stuck", "lock": lock_dir})
+        token = secrets.token_hex(8)
+        with open(os.path.join(lock_dir, "holder"), "w", encoding="utf-8") as fh:
+            fh.write(f"{os.getpid()} {token}")
+        return token
+    raise AgoraError(errors.PRECONDITION, "selftest 잠금 실패", {"lock": lock_dir})
+
+
+def _release_lock(token: str | None, lock_dir: str = _LOCK) -> None:
+    import shutil
+    if token is None:
+        return
+    _pid, held = _lock_holder(lock_dir)
+    if held == token:
+        shutil.rmtree(lock_dir, ignore_errors=True)
 
 
 def _recover_leftover() -> dict[str, Any] | None:
@@ -10447,6 +10589,18 @@ def _run_mutations() -> list[dict[str, Any]]:
 
 
 def run() -> dict[str, Any]:
+    token = _acquire_lock()
+    if token is not None:
+        os.environ[_LOCK_TOKEN_ENV] = token       # 자식(드릴 child2 등)이 같은 실행임을 증명할 수 있게
+    try:
+        return _run_locked()
+    finally:
+        if token is not None:
+            os.environ.pop(_LOCK_TOKEN_ENV, None)
+        _release_lock(token)
+
+
+def _run_locked() -> dict[str, Any]:
     recovered = _recover_leftover()
     case_rows, observed = _run_cases()
     mutation_rows = _run_mutations()

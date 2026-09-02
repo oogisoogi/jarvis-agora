@@ -26,3 +26,5 @@ __pycache__/
 
 # 뮤테이션 저널 — 강제 종료 시 복원용(런타임 산출물)
 .agora-mutation-journal
+# 동시 실행 거부 잠금(런타임 산출물 · 죽은 pid 면 다음 실행이 회수한다)
+.agora-selftest-lock/
