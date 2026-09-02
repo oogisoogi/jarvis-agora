@@ -169,10 +169,18 @@ def _settle_unknown(ctx: Context, event: dict[str, Any],
         settled = core.settle_unknown(store=ctx.store, ledger=ctx.ledger, event=event,
                                       event_hash=(err.detail or {}).get("event_hash") or "")
     except AgoraError as se:
+        # ★R5-②(codex 라운드 4) — 복구 재료(number·node_id)가 있는 8 은 원격 생성이 **이미 1회** 일어난 것이다.
+        #   retryable:true 로 두면 문자 그대로 따르는 호출자가 propose 를 재실행해 게시물을 또 만든다(재현 4회).
+        #   ⇒ false + retry_action:"rebind". 재료가 없는 8(진짜 불명)은 코드별 기본(true · 재조회가 재시도)을 둔다.
+        base = dict(err.detail or {})
+        known = bool(base.get("number") and base.get("node_id"))
+        if known:
+            base["retry_action"] = "rebind"
         raise AgoraError(errors.UNKNOWN_COMMIT, "재조회도 실패했다 — 원래 부분 커밋 정보를 보존한다",
-                         {**(err.detail or {}),
+                         {**base,
                           "settle_error": {"code": se.code, "message": se.message,
-                                           "detail": se.detail}}) from None
+                                           "detail": se.detail}},
+                         retryable=False if known else None) from None
     if settled["verdict"] != core.COMMITTED:
         raise AgoraError(errors.STORE, "저장되지 않았다 — 재조회로 확인했다",
                          {"settled": settled["verdict"],

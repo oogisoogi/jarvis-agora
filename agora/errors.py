@@ -47,7 +47,8 @@ NAMES: dict[int, str] = {
 class AgoraError(Exception):
     """계약대로 직렬화되는 유일한 실패 표현."""
 
-    def __init__(self, code: int, message: str, detail: Any = None) -> None:
+    def __init__(self, code: int, message: str, detail: Any = None, *,
+                 retryable: bool | None = None) -> None:
         if code not in ALL_CODES:
             # 계약 밖 코드로 실패를 만들려는 시도 자체가 인자 오류다.
             raise AgoraError(ARGUMENT, "계약에 없는 오류 코드", {"code": code})
@@ -55,9 +56,16 @@ class AgoraError(Exception):
         self.code = code
         self.message = message
         self.detail = detail
+        # ★R5-②(codex 라운드 4 · master 결정 2026-09-02) — `retryable` 은 기본은 코드별이지만 **인스턴스가
+        #   내릴 수 있다.** code 8 이 「재조회 후 판정」인데 원격 생성이 **이미 1회 일어난** 8(detail 에 number·node_id)을
+        #   호출자가 문자 그대로 재시도하면 propose 가 매번 새 thread_id 로 새 게시물을 만든다(재현 4회 = 4 게시물).
+        #   그런 8 은 false + `retry_action:"rebind"` — 원 작업 재실행이 아니라 복구 동작만 남는다.
+        self.retryable_override = retryable
 
     @property
     def retryable(self) -> bool:
+        if self.retryable_override is not None:
+            return self.retryable_override
         return self.code in RETRYABLE
 
     def to_dict(self) -> dict[str, Any]:

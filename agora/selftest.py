@@ -4227,7 +4227,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     # ★R3-④ — 생성은 됐는데 결박을 못 남긴 것이 「생성 실패」로 읽히던 자리.
     "결박부분커밋": ("M279-genesis-bind-failure-leaks-raw", "M280-rebind-does-not-bind",
                      "M281-bind-remembers-before-saving", "M282-rebind-trusts-the-number",
-                     "M288-bind-lock-open-leaks-raw", "M291-binding-read-failure-drops-layer"),
+                     "M288-bind-lock-open-leaks-raw", "M291-binding-read-failure-drops-layer",
+                     "M293-genesis-partial-commit-stays-retryable"),
     "검색전수": ("M261-search-reads-one-page", "M262-truncated-search-still-binds",
                  "M263-audit-hides-search-truncation"),
     "응답상한": ("M264-audit-lists-not-paged", "M265-pending-sections-hidden",
@@ -4252,7 +4253,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                    "M216-receipt-taken-from-any-body"),
     # ★code 8 을 던지는 곳은 셋인데 판정하는 곳이 0 이던 자리.
     "불명판정": ("M217-tool-does-not-settle-code8", "M218-settle-assumes-committed",
-                 "M219-settle-invents-a-url", "M289-settle-failure-drops-recovery"),
+                 "M219-settle-invents-a-url", "M289-settle-failure-drops-recovery",
+                 "M292-settle-failure-stays-retryable"),
 }
 
 S5_AXES: dict[str, tuple[str, ...]] = {
@@ -7047,6 +7049,82 @@ def _case_settle_failure_keeps_recovery_detail() -> None:
     raise AssertionError("재조회가 실패했는데 성공으로 돌아왔다")
 
 
+def _case_partial_commit_is_not_retryable() -> None:
+    """원격 생성이 **이미 1회** 일어난 code 8 은 재실행을 부르지 않는다(R5-② · codex 라운드 4 · master 추가 1).
+
+    ★R4 ④-b 가 재조회 실패를 8 로 다시 올리자 `retryable:true`(코드별 상수)가 따라붙었다. 문자 그대로 따르는
+      호출자가 propose 를 재호출하면 매번 새 thread_id 로 새 게시물이 생겼다(codex 재현: 4회 = 4 thread_id).
+      원래 R3-④ 의 8(생성 뒤 결박 실패)도 같은 성격이다 — 원격 생성 뒤의 8 은 전건 false + retry_action:rebind.
+    ★잰다: ⑴도구층(재조회 실패) — retryable 을 문자 그대로 따르는 재호출 루프에서 **원격 생성 1회** · to_dict 의
+      retryable false · retry_action rebind ⑵복구 재료 없는 8(진짜 불명)은 코드별 기본(true) 유지
+      ⑶저장층(GitHubStore 생성 뒤 결박 실패) — 같은 규칙.
+    """
+    from agora import store_github as sg
+    from agora import tools
+    from agora.store_github import GitHubStore
+    f = _fixtures()
+    ctx = _tools_ctx()
+    creations: list[str] = []
+
+    def failing_append(**kw: Any) -> dict[str, Any]:
+        creations.append(kw["thread_id"])
+        raise AgoraError(errors.UNKNOWN_COMMIT, "게시물은 만들어졌는데 결박을 못 남겼다",
+                         {"thread_id": kw["thread_id"], "number": 42, "node_id": "D_NEW",
+                          "url": "https://x/42", "recover": "rebind"})
+
+    def failing_fetch(**_kw: Any) -> dict[str, Any]:
+        raise AgoraError(errors.PRECONDITION, "결박 원장을 쓸 수 없다", {"layer": "binding"})
+
+    ctx.store.append = failing_append
+    ctx.store.fetch = failing_fetch
+    last: AgoraError | None = None
+    for _ in range(4):                       # retryable 을 문자 그대로 따르는 호출자
+        try:
+            _with_key(f["key_a"], lambda: tools.propose(ctx, type="debate", title="가짜 제목", body="가짜 발제"))
+        except AgoraError as e:
+            last = e
+            if not e.retryable:
+                break
+            continue
+        raise AssertionError("재조회가 실패했는데 성공으로 돌아왔다")
+    if last is None or last.code != errors.UNKNOWN_COMMIT:
+        raise AssertionError(f"코드가 {getattr(last, 'code', None)}")
+    if len(creations) != 1:
+        raise AssertionError(f"원격 생성이 {len(creations)}회 — 8 을 따라 propose 를 재실행했다")
+    if last.retryable or last.to_dict()["retryable"] is not False:
+        raise AssertionError("원격 생성 뒤의 8 이 retryable:true 다")
+    if (last.detail or {}).get("retry_action") != "rebind" or (last.detail or {}).get("number") != 42:
+        raise AssertionError(f"복구 동작·재료가 detail 에 없다: {last.detail}")
+    # ⑵ 복구 재료 없는 8(응답이 비었다 — 진짜 불명)은 코드별 기본(true)이다.
+    def unknown_append(**kw: Any) -> dict[str, Any]:
+        raise AgoraError(errors.UNKNOWN_COMMIT, "생성 결과가 비었다", {"thread_id": kw["thread_id"]})
+    ctx.store.append = unknown_append
+    try:
+        _with_key(f["key_a"], lambda: tools.propose(ctx, type="debate", title="가짜 제목", body="가짜 발제"))
+    except AgoraError as e:
+        if e.code != errors.UNKNOWN_COMMIT or not e.retryable or "retry_action" in (e.detail or {}):
+            raise AssertionError(f"재료 없는 8 의 판단이 바뀌었다: {e.code} · {e.retryable} · {e.detail}") from None
+    else:
+        raise AssertionError("재조회가 실패했는데 성공으로 돌아왔다")
+    # ⑶ 저장층 — 생성 뒤 결박 실패의 8 도 같은 규칙.
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(prefix="agora-8-retry-"), "thread-bindings.json")
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=_genesis_transport(), bindings_path=path)
+    keep = sg._save_bindings
+    sg._save_bindings = lambda *_a, **_k: (_ for _ in ()).throw(OSError("injected"))
+    try:
+        store.append(thread_id="a" * 32, category="debate", title="[selftest] 가짜", body="본문", is_genesis=True)
+    except AgoraError as e:
+        if e.code != errors.UNKNOWN_COMMIT or e.retryable or e.to_dict()["retryable"] is not False \
+                or (e.detail or {}).get("retry_action") != "rebind":
+            raise AssertionError(f"저장층의 생성 뒤 8 이 재실행을 부른다: {e.retryable} · {e.detail}") from None
+    else:
+        raise AssertionError("결박을 못 남겼는데 성공으로 돌아왔다")
+    finally:
+        sg._save_bindings = keep
+
+
 def _case_audit_shows_transport_candidates() -> None:
     """후보가 여럿이었다는 사실이 **화면까지** 온다(H1 · R-13 · 구현≠배선).
 
@@ -8601,6 +8679,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("읽기: 커서는 모드·상태를 안다",  _case_read_cursor_carries_mode_and_state, None),
     ("읽기: refs 커서는 내용이다",     _case_refs_cursor_is_content_addressed, None),
     ("불명: 재조회 실패도 복구 재료를 남긴다", _case_settle_failure_keeps_recovery_detail, None),
+    ("불명: 생성 뒤 8 은 재실행을 부르지 않는다", _case_partial_commit_is_not_retryable, None),
     ("읽기: 같은 링크 둘도 커서가 나아간다", _case_duplicate_refs_cursor_advances, None),
     ("결박: 후보가 화면까지 온다",     _case_audit_shows_transport_candidates, None),
     ("결박: 만든 자리에서 묶는다",     _case_genesis_binds_at_creation, None),
@@ -9513,9 +9592,13 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if False:",
      "code 8: 도구가 판정한다"),
     ("M289-settle-failure-drops-recovery", "agora/tools.py",
-     '    except AgoraError as se:\n        raise AgoraError(errors.UNKNOWN_COMMIT, "재조회도 실패했다 — 원래 부분 커밋 정보를 보존한다",',
-     '    except AgoraError as se:\n        raise se from None\n        raise AgoraError(errors.UNKNOWN_COMMIT, "재조회도 실패했다 — 원래 부분 커밋 정보를 보존한다",',
+     '        raise AgoraError(errors.UNKNOWN_COMMIT, "재조회도 실패했다 — 원래 부분 커밋 정보를 보존한다",\n                         {**base,',
+     '        raise se from None\n        raise AgoraError(errors.UNKNOWN_COMMIT, "재조회도 실패했다 — 원래 부분 커밋 정보를 보존한다",\n                         {**base,',
      "불명: 재조회 실패도 복구 재료를 남긴다"),
+    ("M292-settle-failure-stays-retryable", "agora/tools.py",
+     '                         retryable=False if known else None) from None',
+     '                         retryable=None) from None',
+     "불명: 생성 뒤 8 은 재실행을 부르지 않는다"),
     ("M219-settle-invents-a-url", "agora/tools.py",
      '            "node_id": None, "url": None}',
      '            "node_id": "unknown", "url": "unknown://"}',
@@ -9671,6 +9754,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                         {"file": BINDINGS_FILENAME, "why": str(e), "layer": "binding"}) from None',
      '                         {"file": BINDINGS_FILENAME, "why": str(e)}) from None',
      "결박: 읽기 실패도 겹을 말한다"),
+    ("M293-genesis-partial-commit-stays-retryable", "agora/store_github.py",
+     '                                 retryable=False) from None   # ★R5-② 원격 생성은 이미 1회 — 재실행 금지',
+     '                                 retryable=None) from None   # ★R5-② 원격 생성은 이미 1회 — 재실행 금지',
+     "불명: 생성 뒤 8 은 재실행을 부르지 않는다"),
     ("M282-rebind-trusts-the-number", "agora/store_github.py",
      '        if disc["id"] != node_id or thread_id not in (disc.get("body") or ""):',
      '        if False:',

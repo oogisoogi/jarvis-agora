@@ -481,7 +481,8 @@ class GitHubStore:
                                  {"thread_id": thread_id, "number": node["number"],
                                   "node_id": node["id"], "url": node.get("url"),
                                   "cause_code": e.code, "cause": e.detail,
-                                  "recover": "rebind"}) from None
+                                  "recover": "rebind", "retry_action": "rebind"},
+                                 retryable=False) from None   # ★R5-② 원격 생성은 이미 1회 — 재실행 금지
             self._numbers[thread_id] = node["number"]
             self._ids[thread_id] = node["id"]
             return {"node_id": node["id"], "url": node.get("url"),

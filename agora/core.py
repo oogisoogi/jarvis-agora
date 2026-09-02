@@ -90,7 +90,8 @@ def publish_event(*, store: Any, event: dict[str, Any], category: str,
         #   (`settle_unknown`)을 할 수 있도록 **해시를 실어** 보낸다. 그 값은 발신자의
         #   주장이 아니라 **서명기가 직접 잰 것**이다(M-11) — 판정의 근거는 잰 값이어야 한다.
         raise AgoraError(e.code, e.message,
-                         {**(e.detail or {}), "event_hash": signed["hash"]}) from None
+                         {**(e.detail or {}), "event_hash": signed["hash"]},
+                         retryable=e.retryable_override) from None   # 인스턴스 판단을 잃지 않는다(R5-②)
     row = None
     if ledger is not None:
         row = record_sent(ledger=ledger, event=event, event_hash=signed["hash"],
