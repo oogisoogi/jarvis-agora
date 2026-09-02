@@ -3150,6 +3150,64 @@ def _case_genesis_binding_failure_is_a_structured_partial_commit() -> None:
         raise AssertionError("복구된 결박을 새 세션이 안 쓴다")
 
 
+def _case_lock_open_failure_is_a_structured_partial_commit() -> None:
+    """잠금 파일을 **못 여는** 실패도 부분 커밋이다 — 봉합은 저장 호출이 아니라 I/O 경계에(R4 ④-a · codex 라운드 3).
+
+    ★R3-④ 는 `_save_bindings` 만 감쌌다. sidecar 잠금 `open(path + ".lock")` 은 try 밖이라 부모 폴더 부재
+      같은 실패에서 원격 게시물은 생기고 FileNotFoundError 가 날것으로 샜다(code 8·번호·복구 지시 없음).
+      같은 병의 두 번째 진입점 — 진입점을 세지 말고 **경계**를 감싸야 한다.
+    ★잰다: ⑴부모 폴더 없는 결박 경로에서 genesis → code 8 + number/node_id/recover ⑵메모리 미결박
+      ⑶같은 경로에서 `_locate` 의 재읽기도 날것이 아니라 code 2(layer=binding).
+    """
+    import tempfile
+    from agora.store_github import GitHubStore
+    path = os.path.join(tempfile.mkdtemp(prefix="agora-lock-io-"), "없는-폴더", "thread-bindings.json")
+    tid = "e" * 32
+
+    def transport(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        if "repository(owner:" in query and "discussion" not in query:
+            return {"repository": {"id": "R_1"}}
+        if "createDiscussion" in query:
+            return {"createDiscussion": {"discussion": {
+                "id": "D_NEW", "number": 42, "url": "https://x/42",
+                "createdAt": "2026-03-01T00:00:00Z"}}}
+        if "search(" in query:
+            return {"search": {"pageInfo": {"hasNextPage": False},
+                               "nodes": [{"id": "D_NEW", "number": 42, "createdAt": "2026-03-01T00:00:00Z"}]}}
+        return {}
+
+    store = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=transport, bindings_path=path)
+    try:
+        store.append(thread_id=tid, category="debate", title="[selftest] 가짜",
+                     body="본문", is_genesis=True)
+    except AgoraError as e:
+        if e.code != errors.UNKNOWN_COMMIT:
+            raise AssertionError(f"코드가 {e.code} — 잠금 열기 실패가 code 8 로 안 나온다")
+        det = e.detail or {}
+        if (det.get("number"), det.get("node_id"), det.get("recover")) != (42, "D_NEW", "rebind"):
+            raise AssertionError(f"detail 에 받은 번호·복구 경로가 없다: {det}")
+        if (det.get("cause") or {}).get("layer") != "binding":
+            raise AssertionError(f"실패한 겹이 detail 에 없다: {det}")
+    except OSError as e:
+        raise AssertionError(f"잠금 열기 실패가 날것으로 샜다: {type(e).__name__}") from None
+    else:
+        raise AssertionError("결박을 못 남겼는데 성공으로 돌아왔다")
+    if store._bindings.get(tid) or tid in store._numbers:
+        raise AssertionError("디스크에 못 남겼는데 메모리는 묶였다")
+    later = GitHubStore("fake-owner", "fake-repo", {"debate": "CAT_1"},
+                        transport=transport, bindings_path=path)
+    try:
+        later._locate(tid)
+    except AgoraError as e:
+        if e.code != errors.PRECONDITION or (e.detail or {}).get("layer") != "binding":
+            raise AssertionError(f"재읽기 실패의 코드·겹이 다르다: {e.code} · {e.detail}") from None
+        return
+    except OSError as e:
+        raise AssertionError(f"재읽기의 잠금 열기 실패가 날것으로 샜다: {type(e).__name__}") from None
+    raise AssertionError("잠금을 못 여는 경로에서 조회가 성공했다")
+
+
 def _case_locate_pages_the_search_and_refuses_truncation() -> None:
     """검색은 **끝까지** 넘겨 보고, 끝까지 못 봤으면 결박하지 않는다(H1 라운드 2).
 
@@ -4116,7 +4174,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                  "M278-locate-uses-stale-bindings"),
     # ★R3-④ — 생성은 됐는데 결박을 못 남긴 것이 「생성 실패」로 읽히던 자리.
     "결박부분커밋": ("M279-genesis-bind-failure-leaks-raw", "M280-rebind-does-not-bind",
-                     "M281-bind-remembers-before-saving", "M282-rebind-trusts-the-number"),
+                     "M281-bind-remembers-before-saving", "M282-rebind-trusts-the-number",
+                     "M288-bind-lock-open-leaks-raw"),
     "검색전수": ("M261-search-reads-one-page", "M262-truncated-search-still-binds",
                  "M263-audit-hides-search-truncation"),
     "응답상한": ("M264-audit-lists-not-paged", "M265-pending-sections-hidden",
@@ -8408,6 +8467,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("결박: 잠금 안 병합·충돌 → 2",    _case_bind_merges_under_lock_and_refuses_conflict, None),
     ("결박: 동료의 결박을 본다",     _case_locate_sees_bindings_made_by_a_peer, None),
     ("결박: 결박 실패는 부분 커밋",   _case_genesis_binding_failure_is_a_structured_partial_commit, None),
+    ("결박: 잠금 열기 실패도 부분 커밋", _case_lock_open_failure_is_a_structured_partial_commit, None),
     ("결박: 검색은 끝까지·절단이면 거부", _case_locate_pages_the_search_and_refuses_truncation, None),
     ("결박: 절단이 화면까지 온다",     _case_audit_shows_search_truncation, None),
     ("사슬: 거부가 막지 않는다",       _case_rejected_event_does_not_wedge_the_chain, None),
@@ -9455,9 +9515,13 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        pass\n        self._numbers[thread_id] = number',
      "결박: 결박 실패는 부분 커밋"),
     ("M281-bind-remembers-before-saving", "agora/store_github.py",
-     '            try:\n                _save_bindings(self._bindings_path, current)',
-     '            self._bindings = current\n            try:\n                _save_bindings(self._bindings_path, current)',
+     '                current[thread_id] = entry\n',
+     '                current[thread_id] = entry\n                self._bindings = current\n',
      "결박: 결박 실패는 부분 커밋"),
+    ("M288-bind-lock-open-leaks-raw", "agora/store_github.py",
+     '        except OSError as e:\n            raise AgoraError(errors.PRECONDITION, "결박 원장을 쓸 수 없다",',
+     '        except ():\n            raise AgoraError(errors.PRECONDITION, "결박 원장을 쓸 수 없다",',
+     "결박: 잠금 열기 실패도 부분 커밋"),
     ("M282-rebind-trusts-the-number", "agora/store_github.py",
      '        if disc["id"] != node_id or thread_id not in (disc.get("body") or ""):',
      '        if False:',

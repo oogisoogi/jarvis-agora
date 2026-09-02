@@ -378,8 +378,13 @@ class GitHubStore:
         """디스크 원장이 정본이다 — 잠금 아래 다시 읽어 메모리 사본을 갈아 끼운다(경로 없으면 그대로)."""
         if not self._bindings_path:
             return
-        with _bindings_lock(self._bindings_path):
-            self._bindings = _load_bindings(self._bindings_path)
+        try:
+            with _bindings_lock(self._bindings_path):
+                self._bindings = _load_bindings(self._bindings_path)
+        except OSError as e:       # ★R4 ④-a — 재읽기도 같은 경계(잠금 open 실패가 날것으로 새지 않는다)
+            raise AgoraError(errors.PRECONDITION, "결박 원장을 다시 읽을 수 없다",
+                             {"file": BINDINGS_FILENAME, "why": str(e),
+                              "layer": "binding"}) from None
 
     def _bind(self, thread_id: str, node: dict[str, Any]) -> None:
         """결박을 디스크에 남긴다. 경로가 없으면 이 프로세스 안에서만 산다.
@@ -395,27 +400,30 @@ class GitHubStore:
         if not self._bindings_path:
             self._bindings[thread_id] = entry
             return
-        with _bindings_lock(self._bindings_path):
-            current = _load_bindings(self._bindings_path)
-            existing = current.get(thread_id)
-            if existing and existing != entry:
-                raise AgoraError(
-                    errors.PRECONDITION, "같은 thread_id 가 이미 다른 게시물에 결박돼 있다",
-                    {"thread_id": thread_id, "bound": existing["number"],
-                     "attempted": entry["number"], "file": BINDINGS_FILENAME,
-                     "layer": "binding"})
-            current[thread_id] = entry
-            # ★R3-④(codex 라운드 2 신규 MEDIUM) — 디스크에 **남긴 뒤에만** 기억한다. 그전에는 쓰기가
-            #   OSError 로 실패해도 메모리는 이미 묶여 있어(재현 `MEMORY_BOUND True`) 이 프로세스만
-            #   「결박됐다」고 믿었다 — 재시작하면 사라지는 결박이다. 실패는 날것으로 새지 않고
-            #   계약 코드로 나간다(`layer=binding` — 호출자가 「어느 겹이 실패했는가」를 안다).
-            try:
+        # ★R4 ④-a(codex 라운드 3) — 잠금 열기·재읽기·저장 **전체**가 한 I/O 경계다. R3 는 저장 호출만 감쌌고
+        #   sidecar 잠금 open 은 밖에 있어 부모 폴더 부재 같은 실패가 여전히 날것으로 샜다(재현 FileNotFoundError ·
+        #   원격 생성됨 · code 8 없음). 경계 안의 어떤 OSError 도 code 2(layer=binding)로 나간다 — genesis 는
+        #   그것을 code 8 로 감싼다. 봉합은 진입점이 아니라 **경계**에 걸어야 새 진입점이 생겨도 닿는다.
+        try:
+            with _bindings_lock(self._bindings_path):
+                current = _load_bindings(self._bindings_path)
+                existing = current.get(thread_id)
+                if existing and existing != entry:
+                    raise AgoraError(
+                        errors.PRECONDITION, "같은 thread_id 가 이미 다른 게시물에 결박돼 있다",
+                        {"thread_id": thread_id, "bound": existing["number"],
+                         "attempted": entry["number"], "file": BINDINGS_FILENAME,
+                         "layer": "binding"})
+                current[thread_id] = entry
+                # ★R3-④(codex 라운드 2 신규 MEDIUM) — 디스크에 **남긴 뒤에만** 기억한다. 그전에는 쓰기가
+                #   OSError 로 실패해도 메모리는 이미 묶여 있어(재현 `MEMORY_BOUND True`) 이 프로세스만
+                #   「결박됐다」고 믿었다 — 재시작하면 사라지는 결박이다.
                 _save_bindings(self._bindings_path, current)
-            except OSError as e:
-                raise AgoraError(errors.PRECONDITION, "결박 원장을 쓸 수 없다",
-                                 {"thread_id": thread_id, "file": BINDINGS_FILENAME,
-                                  "why": str(e), "layer": "binding"}) from None
-            self._bindings = current          # 병합본이 이제 이 프로세스의 기억이다
+        except OSError as e:
+            raise AgoraError(errors.PRECONDITION, "결박 원장을 쓸 수 없다",
+                             {"thread_id": thread_id, "file": BINDINGS_FILENAME,
+                              "why": str(e), "layer": "binding"}) from None
+        self._bindings = current          # 병합본이 이제 이 프로세스의 기억이다
 
     def _all_replies(self, comment: dict[str, Any]) -> list[dict[str, Any]]:
         """한 댓글의 답글을 **끝까지** 따라간다.
