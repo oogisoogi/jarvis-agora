@@ -4171,6 +4171,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "봉투정본": ("M300-envelope-table-drops-required", "M301-envelope-env-required-unchecked"),
     # ★병렬 전체 selftest 공유 소스 부패(선재 경계) — 두 번째 실행은 즉시 거부되는가.
     "동시실행거부": ("M302-lock-treats-live-holder-as-stale",),
+    # ★J-7 잔여 — 정본 한 곳(03 §4)의 목록이 코드와 갈리면 적색인가(문서 조준).
+    "문서정합": ("M304-design-exempt-list-renames-one",),
     "온보딩공백": ("M188-repo-config-not-checked", "M189-json-guessed-by-shape",
                    "M190-unexpected-error-leaks-message"),
     "읽기정직": ("M191-read-shows-rejected-as-valid",
@@ -5957,6 +5959,35 @@ def _case_second_selftest_is_refused_at_once() -> None:
         if own is not None:
             os.environ.pop(_LOCK_TOKEN_ENV, None)
         _release_lock(own)
+
+
+def _case_design_exempt_list_matches_code() -> None:
+    """03 §4 「(CLI만)」 행(MCP 예외의 정본 · J-7)의 **목록·계수**가 `cli.MCP_EXEMPT` 와 같다(J-7 잔여 백로그 · 2026-09-02).
+
+    ★codex b4 실측: 03 에서 이름 하나를 바꿔도(abort→abort-renamed) 기존 케이스 2종은 코드↔코드만 재서 초록이었다.
+      J-7 이 계수 자리를 한 곳으로 줄였으니, 이제 그 한 곳이 코드와 갈리는지를 기계가 센다(J-6 과 같은 형태).
+    ★검사기 자기의심: 정본 행이 정확히 1개 · 이름 5개 미만이면 「못 읽었다」로 적색.
+    """
+    import re
+    from agora import cli
+    text = _doc(os.path.join(".appbuild", "03-architecture.md"))
+    start = text.index("## 4.")
+    section = text[start:text.index("## 5.", start)]
+    rows = [ln for ln in section.splitlines() if ln.startswith("| (CLI만)")]
+    if len(rows) != 1:
+        raise AssertionError(f"03 §4 「(CLI만)」 행이 {len(rows)}개 — 정본 자리는 하나여야 한다")
+    row = rows[0]
+    declared = re.search(r"MCP 예외 (\d+)종", row)
+    if declared is None:
+        raise AssertionError("정본 행에 「MCP 예외 N종」 계수가 없다")
+    names = set(re.findall(r"`([a-z][a-z-]*)(?: \[[^\]]*\])?`", row))
+    if len(names) < 5:
+        raise AssertionError(f"정본 행에서 이름을 못 읽었다({sorted(names)}) — 검사기가 고장난 것이다")
+    if int(declared.group(1)) != len(names):
+        raise AssertionError(f"정본 행의 계수 {declared.group(1)} 과 목록 {len(names)} 이 다르다")
+    code = set(cli.MCP_EXEMPT)
+    if names != code:
+        raise AssertionError(f"03 §4 목록과 코드가 다르다: 문서만={sorted(names - code)} 코드만={sorted(code - names)}")
 
 
 def _case_docs_five_exist() -> None:
@@ -9115,6 +9146,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("MCP: 판본 협상은 규약대로",     _case_mcp_negotiates_protocol_the_way_the_spec_says, None),
     ("봉투: 정본 표와 코드가 같다",    _case_envelope_table_is_the_source_and_code_matches, None),
     ("잠금: 두 번째 실행은 즉시 거부된다", _case_second_selftest_is_refused_at_once, None),
+    ("계약: 03 예외 목록은 코드와 같다", _case_design_exempt_list_matches_code, None),
 )
 
 
@@ -10395,6 +10427,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "def _is_drill_exit_mismatch(e: BaseException) -> bool:\n    \"\"\"",
      "def _is_drill_exit_mismatch(e: BaseException) -> bool:\n    return \"-9\" in str(e)\n    \"\"\"",
      "복구: 드릴은 진짜 -9 를 요구한다"),
+    # ★J-7 잔여(codex b4) — 정본 행의 이름 하나를 바꾼다: 문서↔코드 대조가 없으면 초록이었다.
+    ("M304-design-exempt-list-renames-one", ".appbuild/03-architecture.md",
+     "· `abort` | |",
+     "· `abort-renamed` | |",
+     "계약: 03 예외 목록은 코드와 같다"),
 )
 
 
