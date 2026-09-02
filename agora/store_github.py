@@ -226,6 +226,15 @@ query($owner: String!, $name: String!, $number: Int!) {
 }
 """
 
+# ★R3-④ — 결박 **복구**용. 받은 번호가 정말 그 thread_id 의 게시물인지 되묻는다(id · 본문만).
+_VERIFY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    discussion(number: $number) { id body }
+  }
+}
+"""
+
 
 class GitHubStore:
     def __init__(self, owner: str, name: str, categories: dict[str, str],
@@ -393,10 +402,20 @@ class GitHubStore:
                 raise AgoraError(
                     errors.PRECONDITION, "같은 thread_id 가 이미 다른 게시물에 결박돼 있다",
                     {"thread_id": thread_id, "bound": existing["number"],
-                     "attempted": entry["number"], "file": BINDINGS_FILENAME})
+                     "attempted": entry["number"], "file": BINDINGS_FILENAME,
+                     "layer": "binding"})
             current[thread_id] = entry
+            # ★R3-④(codex 라운드 2 신규 MEDIUM) — 디스크에 **남긴 뒤에만** 기억한다. 그전에는 쓰기가
+            #   OSError 로 실패해도 메모리는 이미 묶여 있어(재현 `MEMORY_BOUND True`) 이 프로세스만
+            #   「결박됐다」고 믿었다 — 재시작하면 사라지는 결박이다. 실패는 날것으로 새지 않고
+            #   계약 코드로 나간다(`layer=binding` — 호출자가 「어느 겹이 실패했는가」를 안다).
+            try:
+                _save_bindings(self._bindings_path, current)
+            except OSError as e:
+                raise AgoraError(errors.PRECONDITION, "결박 원장을 쓸 수 없다",
+                                 {"thread_id": thread_id, "file": BINDINGS_FILENAME,
+                                  "why": str(e), "layer": "binding"}) from None
             self._bindings = current          # 병합본이 이제 이 프로세스의 기억이다
-            _save_bindings(self._bindings_path, self._bindings)
 
     def _all_replies(self, comment: dict[str, Any]) -> list[dict[str, Any]]:
         """한 댓글의 답글을 **끝까지** 따라간다.
@@ -438,7 +457,21 @@ class GitHubStore:
             #   첫 `_locate` 까지 기다렸다 ⇒ 「결박 전 첫 조회」 창이 짧은 것이 아니라
             #   **다음 조회까지 시간 상한 없이** 열려 있었다(codex 재현 `H1_CREATE_BINDING_EXISTS False`).
             #   우리가 방금 만든 게시물보다 더 확실한 원본은 없다 — 검색을 기다릴 이유가 없다.
-            self._bind(thread_id, node)
+            try:
+                self._bind(thread_id, node)
+            except AgoraError as e:
+                # ★★R3-④ — 게시물은 **이미 생겼는데** 결박을 못 남겼다 = 부분 커밋이다. 날것 예외로
+                #   새면 호출자는 「생성 실패」로 읽고 다시 만든다(중복 게시물) — 그리고 재시작한 세션은
+                #   이 스레드를 결박 없이 본다. 그래서 **code 8(저장 성공 불명)** 로 올린다: 재조회 판정
+                #   (`settle_unknown` → fetch → `_locate` → 절단 아닌 검색이면 거기서 묶인다)이 그대로 닿고,
+                #   detail 에 **받은 번호·node id·url** 을 실어 절단 등으로 재조회가 막히면 `rebind` 로
+                #   그 번호를 확인해 묶을 수 있게 한다. 실패한 겹(cause)은 감추지 않는다.
+                raise AgoraError(errors.UNKNOWN_COMMIT,
+                                 "게시물은 만들어졌는데 결박을 못 남겼다 — 재조회 또는 rebind 로 복구하라",
+                                 {"thread_id": thread_id, "number": node["number"],
+                                  "node_id": node["id"], "url": node.get("url"),
+                                  "cause_code": e.code, "cause": e.detail,
+                                  "recover": "rebind"}) from None
             self._numbers[thread_id] = node["number"]
             self._ids[thread_id] = node["id"]
             return {"node_id": node["id"], "url": node.get("url"),
@@ -453,6 +486,33 @@ class GitHubStore:
                              {"thread_id": thread_id})
         return {"node_id": node["id"], "url": node.get("url"),
                 "created_at": node.get("createdAt")}
+
+    def rebind(self, *, thread_id: str, number: int, node_id: str) -> dict[str, Any]:
+        """결박 **복구** — 생성은 됐는데 결박을 못 남긴 스레드(code 8 · `recover=rebind`)를 그 번호로 묶는다.
+
+        ★번호를 **믿지 않는다.** 운반층에 되물어 ⑴그 번호의 게시물 node id 가 받은 것과 같고
+          ⑵본문에 이 thread_id 가 들어 있을 때만 묶는다 — 아니면 손으로 준 번호 하나로 결박을
+          갈아치우는 길이 되고, 그것은 R-13 이 막으려던 바로 그 문이다.
+        ★결박 자체는 `_bind` 가 한다(잠금·재읽기·충돌 code 2 그대로) — 복구 경로가 따로 쓰면
+          그 경로만 병합을 건너뛴다.
+        """
+        data = self._run(_VERIFY, owner=self.owner, name=self.name, number=number)
+        disc = (((data.get("repository") or {}).get("discussion")) or {})
+        if not disc.get("id"):
+            raise AgoraError(errors.STORE, "복구하려는 번호의 게시물을 읽지 못했다",
+                             {"thread_id": thread_id, "number": number})
+        if disc["id"] != node_id or thread_id not in (disc.get("body") or ""):
+            raise AgoraError(errors.PRECONDITION,
+                             "복구하려는 번호가 그 스레드의 게시물이 아니다 — 묶지 않는다",
+                             {"thread_id": thread_id, "number": number,
+                              "id_matches": disc["id"] == node_id,
+                              "body_has_thread_id": thread_id in (disc.get("body") or "")})
+        node = {"number": number, "id": node_id}
+        self._bind(thread_id, node)
+        self._numbers[thread_id] = number
+        self._ids[thread_id] = node_id
+        return {"thread_id": thread_id, "number": number, "node_id": node_id,
+                "bound": True}
 
     def list_threads(self, *, updated_since: str | None = None,
                      limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
