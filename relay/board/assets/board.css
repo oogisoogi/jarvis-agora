@@ -1,0 +1,168 @@
+/* board.css — 박람회장 보드 화면층.
+ * 색·치수·글자 크기는 tokens.css 의 var() 만 쓴다. 여기에 생색·생px 을 두지 않는다.
+ * (예외 = 레이아웃 한계값(폭·비율)과 1px 테두리 — 색이 아니다.)
+ */
+
+/* ── 바닥 ─────────────────────────────────────────────────────────
+ * ★html(=:root)에 건다. rem 은 :root 기준이라 body 에 걸면 선언과 렌더가 어긋난다.
+ *   body 에도 명시한다 — 상속만 믿으면 남의 CSS 한 줄에 본문 크기가 통째로 추락한다.
+ */
+html { font-size: 125%; -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-body);         /* 20px */
+  line-height: 1.7;
+  color: var(--ink);
+  background: var(--paper);
+  overflow-wrap: break-word;
+  word-break: keep-all;                /* 한글은 어절 단위로 끊어야 읽힌다 */
+}
+* { box-sizing: border-box; }
+
+a { color: var(--accent-hover); }
+a:hover { color: var(--accent-deep); }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: var(--radius-s); }
+
+.wrap { width: 100%; max-width: 900px; margin-inline: auto; padding-inline: var(--space-5); }
+
+/* ── 상단바 ───────────────────────────────────────────────────── */
+.topbar { border-bottom: 1px solid var(--line); background: var(--paper); }
+.topbar .wrap {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-4); min-height: 72px; flex-wrap: wrap;
+}
+.brand { font-size: var(--text-title-s); font-weight: var(--weight-heading); color: var(--ink); text-decoration: none; letter-spacing: -.02em; }
+.brand:hover { color: var(--ink); }
+.topnav { display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap; }
+.topnav a { font-size: var(--text-small); }
+.cta {
+  display: inline-block; padding: var(--space-2) var(--space-4);
+  background: var(--accent); color: var(--p-white); text-decoration: none;
+  border-radius: var(--radius-pill); font-size: var(--text-small); font-weight: var(--weight-strong);
+}
+.cta:hover { background: var(--accent-hover); color: var(--p-white); }
+
+/* ── 소개 ─────────────────────────────────────────────────────── */
+.hero { padding-block: var(--space-6) var(--space-5); }
+.hero h1 { margin: 0 0 var(--space-3); font-size: var(--text-title-l); letter-spacing: -.03em; }
+.hero p { margin: 0 0 var(--space-3); color: var(--ink-soft); max-width: 60ch; }
+
+main { padding-bottom: var(--space-8); }
+.section-title { margin: var(--space-6) 0 var(--space-4); font-size: var(--text-title-m); }
+
+/* ── 목록·카드 ────────────────────────────────────────────────── */
+.list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-4); }
+
+.card {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius-m); padding: var(--space-5);
+  box-shadow: var(--shadow-raise);
+}
+.card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-3); }
+.card-title { font-size: var(--text-title-s); font-weight: var(--weight-heading); text-decoration: none; letter-spacing: -.02em; }
+.card-title:hover { text-decoration: underline; }
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.chip {
+  display: inline-block; padding: 2px var(--space-3); border-radius: var(--radius-pill);
+  font-size: var(--text-small); font-weight: var(--weight-strong); white-space: nowrap;
+}
+/* ★색만으로 뜻을 전하지 않는다 — 알약 안에 언제나 낱말이 함께 있다. */
+.chip-type  { background: var(--surface-muted); color: var(--ink-soft); }
+.chip-kind  { background: var(--surface-muted); color: var(--ink-soft); }
+.chip-live  { background: var(--accent-soft); color: var(--accent-deep); border: 1px solid var(--accent-line); }
+.chip-quiet { background: var(--pending-soft); color: var(--pending); }
+
+.badge {
+  display: inline-block; padding: 2px var(--space-3); border-radius: var(--radius-pill);
+  font-size: var(--text-small); font-weight: var(--weight-strong); white-space: nowrap;
+}
+.badge-ok    { background: var(--accent-soft); color: var(--accent-deep); border: 1px solid var(--accent-line); }
+.badge-quiet { background: var(--pending-soft); color: var(--pending); }
+
+.fields { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); }
+.field { display: flex; gap: var(--space-2); align-items: baseline; }
+.field-k { color: var(--muted); font-size: var(--text-small); }
+.field-v { color: var(--ink-soft); font-size: var(--text-small); }
+
+.archive-resolution {
+  margin: var(--space-4) 0 0; padding-top: var(--space-3);
+  border-top: 1px solid var(--line); color: var(--ink-soft);
+}
+
+/* ── 방 화면 ──────────────────────────────────────────────────── */
+.room-head { padding-block: var(--space-6) var(--space-4); }
+.room-head h1 { margin: 0 0 var(--space-3); font-size: var(--text-title-l); letter-spacing: -.03em; }
+.backlink { display: inline-block; margin-bottom: var(--space-3); font-size: var(--text-small); }
+
+.ribbon {
+  margin: var(--space-4) 0; padding: var(--space-3) var(--space-4);
+  background: var(--pending-soft); color: var(--pending);
+  border-radius: var(--radius-s); font-size: var(--text-small); font-weight: var(--weight-strong);
+}
+
+.resolution {
+  margin: var(--space-5) 0; padding: var(--space-5);
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: var(--radius-m);
+}
+.resolution-title { margin: 0 0 var(--space-2); font-size: var(--text-title-m); color: var(--accent-deep); }
+.resolution-note { margin: 0 0 var(--space-4); font-size: var(--text-small); color: var(--ink-soft); }
+.resolution-summary { margin: 0 0 var(--space-4); }
+.resolution-sub { margin: var(--space-4) 0 var(--space-2); font-size: var(--text-title-s); }
+.resolution-list { margin: 0; padding-left: 1.2em; }
+.resolution-list li { margin-bottom: var(--space-2); }
+
+.speech {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius-m); padding: var(--space-5); margin-bottom: var(--space-4);
+}
+.speech-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-3); }
+.speech-who { font-weight: var(--weight-strong); }
+.speech-when { color: var(--muted); font-size: var(--text-small); }
+.speech-body { margin: 0 0 var(--space-4); white-space: pre-wrap; }
+.speech-nobody { margin: 0 0 var(--space-4); color: var(--muted); font-size: var(--text-small); }
+
+.divider {
+  display: flex; align-items: center; gap: var(--space-4);
+  margin: var(--space-5) 0; color: var(--muted); font-size: var(--text-small);
+}
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.divider-text { white-space: nowrap; font-weight: var(--weight-strong); }
+
+.raw { margin-top: var(--space-3); }
+.raw summary { cursor: pointer; color: var(--muted); font-size: var(--text-small); }
+.raw-pre {
+  margin: var(--space-3) 0 0; padding: var(--space-4);
+  background: var(--paper-sunken); border-radius: var(--radius-s);
+  font-size: var(--text-small); line-height: 1.6;
+  overflow-x: auto; white-space: pre; word-break: normal;
+}
+.folded { margin-bottom: var(--space-4); }
+
+/* ── 「없음」 세 가지는 서로 다른 문장이자 서로 다른 자리다 ──────── */
+.note { margin: var(--space-5) 0; padding: var(--space-4) var(--space-5); border-radius: var(--radius-s); font-size: var(--text-small); }
+.note-empty   { background: var(--paper-sunken); color: var(--ink-soft); }
+.note-error   { background: var(--pending-soft); color: var(--pending); font-weight: var(--weight-strong); }
+.note-partial { background: var(--paper-sunken); color: var(--pending); }
+
+/* ── 하단 ─────────────────────────────────────────────────────── */
+.sitefoot { border-top: 1px solid var(--line); padding-block: var(--space-5); margin-top: var(--space-7); }
+.sitefoot p { margin: 0 0 var(--space-2); color: var(--muted); font-size: var(--text-small); }
+
+.noscript {
+  margin: var(--space-5) 0; padding: var(--space-5);
+  background: var(--surface); border: 1px solid var(--accent-line); border-radius: var(--radius-m);
+}
+.noscript p { margin: 0 0 var(--space-3); }
+
+/* ── 좁은 화면(390 기준) ──────────────────────────────────────── */
+@media (max-width: 560px) {
+  .wrap { padding-inline: var(--space-4); }
+  .topbar .wrap { min-height: 0; padding-block: var(--space-3); gap: var(--space-3); }
+  .hero h1, .room-head h1 { font-size: 1.6rem; }
+  .card, .speech, .resolution { padding: var(--space-4); }
+  .fields { gap: var(--space-2) var(--space-4); }
+}

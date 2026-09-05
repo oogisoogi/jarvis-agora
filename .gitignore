@@ -28,3 +28,7 @@ __pycache__/
 .agora-mutation-journal
 # 동시 실행 거부 잠금(런타임 산출물 · 죽은 pid 면 다음 실행이 회수한다)
 .agora-selftest-lock/
+
+# 보드 검증 산출물 — 측정 JSON 은 실행할 때마다 다시 난다(스크린샷은 증거라 남긴다)
+relay/board/dev/out/
+relay/board/dev/shots/

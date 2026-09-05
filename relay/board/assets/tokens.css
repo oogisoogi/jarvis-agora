@@ -1,0 +1,96 @@
+/* tokens.css — 박람회장 보드 · 토큰층 (TIER 1 → TIER 2)
+ *
+ * ★출처 = 설치 안내 사이트의 토큰층을 **복사해 넣은 것**(원본 최종 커밋 d770386).
+ *   실행 시간에 남의 저장소를 읽지 않는다 — 경로 의존 0. 원본이 바뀌어도 이 파일은 안 바뀐다.
+ *
+ * 규칙 두 줄 (daniel 「다니엘처럼」 설계 언어와 같은 문법 · 값은 이 사이트 고유):
+ *   ① hex 리터럴은 TIER 1(--p-*)에만 존재한다.
+ *   ② TIER 2(의미 토큰)는 var(--p-*) 참조만 한다.
+ * 그래서 색을 바꾸는 일이 「팔레트를 평행 복사하는 일」이 아니라 **몇 줄을 다시 겨누는 일**이 된다.
+ *
+ * 액센트를 daniel 의 초록(#2f7d4f)에서 떼어 **점토색(clay)** 으로 세운 이유:
+ *   이 사이트는 교회 앨범이 아니라 **배우러 오는 사람의 관문**이다. 같은 웜 계열을 쓰되
+ *   색이 같으면 두 사이트가 같은 서비스로 읽힌다. 따뜻한 계열 안에서 초록과 가장 멀고
+ *   AA 를 여유 있게 통과하는 자리가 이 점토색이다.
+ *
+ * ★대비는 전부 실측값이다(WCAG 2.1 상대휘도 계산 · 2026-08-18 · docs/HUB-DESIGN.md §3 에 표로 박제).
+ */
+
+:root {
+  /* ── TIER 1 · primitives — 리터럴이 사는 유일한 자리 ───────────────── */
+
+  /* 중성 — 웜 화이트 · 잉크 */
+  --p-warm-50:   #fbf7f0;   /* 페이지 바탕 */
+  --p-warm-100:  #f5efe4;   /* 가라앉은 표면 */
+  --p-warm-150:  #efe7d9;   /* 트랙·구분면 */
+  --p-warm-200:  #e4d9c6;   /* 경계선 */
+  --p-white:     #ffffff;   /* 카드 표면 */
+  --p-ink-900:   #2a2622;   /* 본문 잉크      · 바탕 대비 14.06:1 */
+  --p-ink-700:   #4a423b;   /* 진한 보조      · 바탕 대비  9.22:1 */
+  --p-ink-500:   #6b625a;   /* 흐린 글        · 바탕 대비  5.59:1 */
+
+  /* 액센트 — 점토(clay) */
+  --p-clay-600:  #a8521b;   /* 액센트 본색 · 흰 글자 5.40:1 */
+  --p-clay-700:  #8f3f14;   /* 눌림·호버   · 흰 글자 7.27:1 / 바탕 6.81:1 */
+  --p-clay-800:  #6f2f0e;   /* 가장 진한 단계(테두리·강조 글자) · 바탕 9.41:1 */
+  --p-clay-50:   #fbeee4;   /* 옅은 표면(알약·배지) */
+  --p-clay-100:  #f2ddca;   /* 그 표면의 경계선 */
+
+  /* 상태(중립 알림) — 액센트를 쓰지 않는 자리 */
+  --p-slate-600: #4d5b63;   /* 「추후 안내」 같은 미정 표기 · 카드 표면 대비 7.02:1 */
+  --p-slate-50:  #eef1f3;
+
+  /* ── TIER 2 · semantics — 참조만 ───────────────────────────────────── */
+
+  --paper:        var(--p-warm-50);
+  --paper-sunken: var(--p-warm-100);
+  --surface:      var(--p-white);
+  --surface-muted:var(--p-warm-150);
+  --line:         var(--p-warm-200);
+
+  --ink:          var(--p-ink-900);
+  --ink-soft:     var(--p-ink-700);
+  --muted:        var(--p-ink-500);
+
+  --accent:       var(--p-clay-600);
+  --accent-hover: var(--p-clay-700);
+  --accent-deep:  var(--p-clay-800);
+  --accent-soft:  var(--p-clay-50);
+  --accent-line:  var(--p-clay-100);
+
+  --pending:      var(--p-slate-600);
+  --pending-soft: var(--p-slate-50);
+
+  /* ── 치수·리듬 ────────────────────────────────────────────────────── */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 64px;
+
+  --radius-s: 10px; --radius-m: 16px; --radius-l: 24px; --radius-pill: 999px;
+
+  --shadow-raise: 0 1px 2px rgba(42, 38, 34, .06), 0 4px 14px rgba(42, 38, 34, .06);
+  --shadow-float: 0 2px 6px rgba(42, 38, 34, .08), 0 14px 32px rgba(42, 38, 34, .10);
+
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --ease-out: cubic-bezier(.2, .7, .3, 1);
+
+  /* ── 글자 ─────────────────────────────────────────────────────────
+   * ★바닥은 상속 뿌리에 건다. rem 은 :root 기준이라 body 에 걸면 선언과 렌더가 어긋난다.
+   *   125% = 브라우저 기본 16px 환경에서 20px — 사용자가 기본 크기를 올려 두면 함께 올라간다
+   *   (px 로 못박으면 그 설정을 무시하게 된다).
+   */
+  --text-body:    1rem;      /* 20px — 본문 시작값 */
+  --text-small:   .9rem;     /* 18px — 바닥. 이보다 작은 글자를 두지 않는다 */
+  --text-lead:    1.15rem;   /* 23px */
+  --text-title-s: 1.15rem;   /* 23px — h3 */
+  --text-title-m: 1.3rem;    /* 26px — h2 */
+  --text-title-l: 1.7rem;    /* 34px — h1(모바일 1.6rem) */
+
+  --weight-body: 400;
+  --weight-strong: 600;
+  --weight-heading: 700;
+  --weight-display: 800;
+
+  --font-sans: Pretendard, "Pretendard Variable", "Noto Sans KR",
+               -apple-system, BlinkMacSystemFont, "Malgun Gothic", system-ui, sans-serif;
+}
