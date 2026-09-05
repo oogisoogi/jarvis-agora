@@ -178,13 +178,19 @@ def _retry_delay(err: AgoraError, fallback: float) -> float:
 
 def relay_transport(method: str, url: str, *, payload: dict[str, Any] | None = None,
                     accept: str = "json", timeout: int = DEFAULT_TIMEOUT_SECONDS,
-                    write: bool = False) -> Any:
+                    write: bool = False, with_status: bool = False) -> Any:
     """실제 호출 자리 — 여기 말고는 네트워크를 만지지 않는다.
 
     ★`write` 가 실패 분류를 가른다. **응답을 못 받은 것**은 읽기에서는 그냥 재시도(7)지만,
       쓰기에서는 **성공 불명(8)** 이다 — 서버가 이미 받았을 수 있기 때문이다.
       반대로 **요청이 나가기 전에** 죽은 것(연결 거부·DNS)은 쓰기여도 8 이 아니라 7 이다.
       8 을 남발하면 재조회 왕복만 늘고, 8 을 안 쓰면 같은 말이 두 번 나간다.
+    ★`with_status` = **성공 응답의 HTTP 상태도 돌려준다**(`(본문, 상태)` 쌍 · master 채택 2026-09-06).
+      전에는 실패 경로만 `status` 를 실었다 — 그래서 **201 인지 200 인지를 아무도 못 봤고**,
+      P4 실물 발행에서 계약이 말하는 201 을 「추론」으로만 적어야 했다(같은 값을 다시 재려면
+      **두 번째 라이브 쓰기**가 필요했다 — 관측 하나를 아껴 쓰기 하나를 더 하는 거래는 나쁘다).
+      ⚠멱등 200 과 새 행 201 은 계약이 **다른 사건**으로 갈라 둔 값이라, 이 칸이 없으면
+      「이미 있던 것을 받았다」와 「새로 적었다」가 클라이언트 쪽에서 구별되지 않는다.
     """
     data = None
     headers = {"Accept": "application/json" if accept == "json" else "text/plain",
@@ -193,9 +199,11 @@ def relay_transport(method: str, url: str, *, payload: dict[str, Any] | None = N
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    status = 0
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
+            status = int(getattr(resp, "status", 0) or 0)
     except urllib.error.HTTPError as e:                     # 서버가 상태로 답했다
         body = e.read()
         detail: Any
@@ -223,14 +231,38 @@ def relay_transport(method: str, url: str, *, payload: dict[str, Any] | None = N
                          {"reason": type(e).__name__, "sent_maybe": True,
                           "retry": code == errors.STORE}) from None
     if accept != "json":
-        return raw.decode("utf-8", "replace")
+        text = raw.decode("utf-8", "replace")
+        return (text, status) if with_status else text
     if not raw:
-        return {}
+        return ({}, status) if with_status else {}
     try:
-        return json.loads(raw.decode("utf-8"))
+        body = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as e:
         raise AgoraError(errors.STORE, "릴레이 응답이 JSON 이 아니다",
                          {"error": type(e).__name__}) from None
+    return (body, status) if with_status else body
+
+
+def _carry_status(result: Any) -> tuple[dict[str, Any], int]:
+    """`with_status` 로 받은 `(본문, 상태)` 를 **본문 + 관측된 상태**로 편다.
+
+    ★이름은 실패 경로와 **같은 `status`** 다(master 채택 2026-09-06) — 같은 것을 두 이름으로
+      부르면 읽는 쪽이 어느 칸을 봐야 하는지 매번 고른다.
+    ⚠서버 본문이 이미 `status` 를 쓰면 **덮지 않는다** — 남의 값과 우리 관측을 한 칸에 뭉치면
+      그 칸을 읽는 쪽이 무엇을 보고 있는지 모른다. 그때는 서버 것을 `body_status` 로 옮겨 둔다
+      (계약 §3-0 이 「상태와 본문 code 가 갈리면 code 가 이긴다」로 둘을 가른 것과 같은 규율).
+    ⚠운반체가 상태를 못 준 경우(주입된 더블 등)는 **0** 이다 — 「못 쟀다」를 0 으로 말하고
+      201 이라고 지어내지 않는다.
+    """
+    if type(result) is tuple and len(result) == 2:
+        body, status = result
+    else:
+        body, status = result, 0
+    if type(body) is not dict:
+        return {"body": body, "status": status}
+    if "status" in body:
+        return {**body, "body_status": body["status"], "status": status}
+    return {**body, "status": status}
 
 
 def is_retryable_store(err: AgoraError) -> bool:
@@ -269,12 +301,19 @@ class RelayStore:
 
     # ── 내부 ────────────────────────────────────────────────────────────────
     def _run(self, method: str, path: str, *, payload: dict[str, Any] | None = None,
-             accept: str = "json", write: bool = False) -> Any:
+             accept: str = "json", write: bool = False,
+             with_status: bool = False) -> Any:
         delay = BACKOFF_BASE_SECONDS
         last: AgoraError | None = None
         for attempt in range(self._attempts):
             self.calls += 1
             try:
+                if with_status:
+                    # ★주입된 운반체(시험용 더블)가 이 인자를 모를 수 있다 — 모르면 **상태 없이**
+                    #   그대로 돌려받고, 부르는 쪽이 「못 쟀다」를 0 으로 본다. 지어내지 않는다.
+                    return self._transport(method, self.base_url + path, payload=payload,
+                                           accept=accept, timeout=self._timeout,
+                                           write=write, with_status=True)
                 return self._transport(method, self.base_url + path, payload=payload,
                                        accept=accept, timeout=self._timeout, write=write)
             except AgoraError as e:
@@ -302,17 +341,19 @@ class RelayStore:
           두지 않는다.** 원장에는 들어갔는데 서버 리듀서가 격리했다는 사실을 글쓴이가 그 자리에서
           알 수 있게 하는 것이 이 칸의 값이고, 판정의 정본은 여전히 우리 reducer 다(설계 §3).
         """
-        out = self._run("POST", "/events", write=True, payload={
+        out = _carry_status(self._run("POST", "/events", write=True, with_status=True, payload={
             "thread_id": thread_id, "category": category, "title": title,
-            "body": body, "is_genesis": bool(is_genesis)})
+            "body": body, "is_genesis": bool(is_genesis)}))
         node_id = out.get("event_id") or out.get("node_id")
         if not node_id:
             # 성공도 실패도 단정하지 않는다 — 재조회 후에만 판정한다.
             raise AgoraError(errors.UNKNOWN_COMMIT,
                              "릴레이 응답에 이벤트 id 가 없다 — 재조회 후 판정하라",
                              {"thread_id": thread_id})
+        # ★계약이 **새 행 201 · 멱등 200** 으로 갈라 둔 값을 그대로 올린다 — 이 칸이 없으면
+        #   「새로 적었다」와 「이미 있던 것을 받았다」가 부르는 쪽에서 구별되지 않는다.
         row = {"node_id": node_id, "url": out.get("url"),
-               "created_at": out.get("created_at")}
+               "created_at": out.get("created_at"), "status": out.get("status", 0)}
         if out.get("verdict") is not None:
             row["relay_verdict"] = out["verdict"]
         return row
@@ -424,7 +465,8 @@ class RelayStore:
         payload = {"participant_id": participant_id, "display_name": display_name,
                    "public_key": public_key, "fingerprint": fingerprint,
                    "signature": signature}
-        return self._run("POST", "/register", write=True, payload=payload)
+        return _carry_status(self._run("POST", "/register", write=True,
+                                       with_status=True, payload=payload))
 
     def roster_checkpoint(self) -> dict[str, Any] | None:
         """운영자 서명 체크포인트(`GET /participants/checkpoint`). **받은 것을 그대로** 돌려준다.
@@ -454,9 +496,10 @@ class RelayStore:
         ★실패는 그대로 올린다: 403(운영자 아님)·409(서명한 해시 ≠ 지금 명부)·401(서명 무효)은
           **서로 다른 조치**를 부른다 — 한 칸에 뭉치지 않는다.
         """
-        return self._run("POST", "/participants/checkpoint", write=True, payload={
+        return _carry_status(self._run("POST", "/participants/checkpoint", write=True,
+                                       with_status=True, payload={
             "checkpoint": doc["checkpoint"], "signer": doc["signer"],
-            "signed_at": doc["signed_at"], "signature": doc["signature"]})
+            "signed_at": doc["signed_at"], "signature": doc["signature"]}))
 
     def roster(self) -> dict[str, str]:
         """명부 3종 원문. 셋을 **한 번에** 받는다 — 반쪽만 갱신되면 「그때의 명부」가 갈라진다.

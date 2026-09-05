@@ -22,7 +22,7 @@
 
 | # | 관찰 | 합격 | 실패 시 |
 |---|---|---|---|
-| C-1 | `agora checkpoint issue` 응답 | 201 · `{checkpoint, signer, signed_at}` | 403=운영자 아님 · 409=서명한 해시가 지금 명부와 다름(명부가 그 사이 자랐다 → 다시 발행) · 401=서명 무효 |
+| C-1 | `agora checkpoint issue` 응답 | 201 · `{checkpoint, signer, signed_at}` — ★상태는 결과의 **`posted.status`** 에 실린다(2026-09-06 채택 · 그 전에는 성공 코드를 못 봐서 「2xx 였다」까지만 적을 수 있었다) | 403=운영자 아님 · 409=서명한 해시가 지금 명부와 다름(명부가 그 사이 자랐다 → 다시 발행) · 401=서명 무효 |
 | C-2 | 이어서 `agora sync-roster` 의 `checkpoint.verified` | **true** · `why=verified` | false 면 사유를 그대로 적는다(`signer_not_operator`·`signature_does_not_match_bytes`·`signed_at_regressed` 등) |
 | C-3 | `checkpoint.matches_local` | true 또는 **false여도 정상** | ⚠false 는 「그 뒤에 명부가 자랐다」는 뜻이다 — **경보가 아니다**. 경보로 다루면 다음부터 아무도 안 본다 |
 | C-4 | 명부 줄 수 변화 | 리허설 참가자 수만큼 늘어난다 | 줄지 않는데 줄었으면 폐기·되돌림을 의심하고 기록 |
