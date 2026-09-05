@@ -285,6 +285,45 @@ def main():
         print("  %-16s -> %s %s %s" % (ev["kind"], code, v.get("reducer"), v.get("reason") or ""))
     results.append(("세트3 절차 거부", t3, b3))
 
+    # ── 세트 4: debate 전 구간 ─────────────────────────────────────────────
+    # ★설계 성찰이 「안 덮였다」고 적은 전이를 실제로 태운다:
+    #   advance(의장만) · r2 반론 필수 · resolution(r3 에서만) · 라운드 밖 발언 거부.
+    print("\n== 세트 4: debate 전 구간(r0→r3 → resolution → close) ==")
+    t7 = new_id()
+    b7 = Builder(t7, args.workdir, allowed, revoked, [op["id"]], now)
+    b7.add(alice, "genesis", {"type": "debate", "title": "토론", "body": "쟁점"})
+    b7.add(bob, "post", {"round": 0, "body": "r0 발언"})
+    b7.add(bob, "advance", {"from_round": 0, "to_round": 1})       # ← 의장이 아니다(거부되어야 한다)
+    b7.add(alice, "advance", {"from_round": 0, "to_round": 1})
+    r1_post, _ = b7.add(bob, "post", {"round": 1, "body": "r1 주장"})
+    b7.add(bob, "post", {"round": 0, "body": "지난 라운드 발언"})    # ← 라운드 밖(거부)
+    b7.add(alice, "advance", {"from_round": 1, "to_round": 2})
+    b7.add(bob, "post", {"round": 2, "body": "반론 없는 r2 발언"})   # ← counter 없음(거부)
+    b7.add(bob, "post", {"round": 2, "body": "반론",
+                         "counter": [{"target_message_id": r1_post["message_id"],
+                                      "point": "그 전제가 성립하지 않는다"}]})
+    b7.add(alice, "advance", {"from_round": 2, "to_round": 3})
+    b7.add(bob, "post", {"round": 3, "body": "마무리 발언"})
+    b7.add(bob, "resolution", {"summary": "요약", "dissent": [],
+                               "recommended_actions": [{"text": "권고", "execution": "forbidden"}]})  # ← 의장 아님(거부)
+    b7.add(alice, "resolution", {"summary": "합의 요약", "dissent": [],
+                                 "recommended_actions": [{"text": "이렇게 하기를 권한다",
+                                                          "execution": "forbidden"}]})
+    b7.add(alice, "close", {"reason": "unresolved"})
+    throttled = 0
+    for ev, sig in b7.posted:
+        code, body = send(args.base, t7, "debate", "토론", ev, sig, ev["kind"] == "genesis")
+        v = body.get("verdict", {}) if isinstance(body, dict) else {}
+        if code == 429:
+            throttled += 1
+        print("  %-16s -> %s %-11s %s" % (ev["kind"], code, v.get("reducer"), v.get("reason") or ""))
+    if throttled:
+        # ★429 는 「구현이 틀렸다」가 아니라 「상한이 사용 형태와 안 맞는다」다. 조용히 넘기면
+        #   뒤의 대조 불일치를 **엉뚱한 원인**으로 읽게 된다(2026-09-05 실제로 그럴 뻔했다).
+        print("  ★경고: 정상 진행 중 429 가 %d 건 — 속도 상한이 사용 형태와 안 맞는다(대조 결과를 그 탓으로 읽지 마라)"
+              % throttled)
+    results.append(("세트4 debate 전구간", t7, b7))
+
     # ── 3자 대조 ──────────────────────────────────────────────────────────
     print("\n== 3자 대조(파이썬 리듀서 == 서버 파생) ==")
     all_ok = True

@@ -24,6 +24,18 @@ import domainsText from "../../config/allow-domains.txt";
 
 const REGISTER_PURPOSE = "agora-register-v1";
 
+// ── 속도 상한(docs/RELAY.md §7) ────────────────────────────────────────────
+// ★값의 근거는 **실측된 사용 형태**다(2026-09-05). 토론 한 바퀴에서 의장 한 사람이
+//   genesis·advance 3회·resolution·close = 6회를 **몇 초 안에** 쓴다. 처음에 둔 분당 10회는
+//   그 정상 동작을 429 로 막았다(골든 세트 4 가 중간에서 잘렸다).
+//   ⇒ 시험을 위해 상한을 푼 것이 아니라, **상한이 실제 동작과 안 맞았던 것**이다.
+// ⚠등록 IP 상한은 워크숍처럼 **여럿이 한 회선(NAT)** 뒤에 있을 때 정상 참가자를 막는다.
+//   그 판단은 운영 결정이라 값만 올려 두고 master 게이트로 올린다(RELAY.md §7 각주).
+const REGISTER_PER_IP_HOUR = 30;
+const REGISTER_GLOBAL_HOUR = 200;
+const EVENTS_PER_PID_MIN = 30;
+const EVENTS_PER_ROOM_MIN = 120;
+
 let bundleCache: scrub.ScrubBundle | null = null;
 async function scrubBundle(): Promise<scrub.ScrubBundle> {
   if (!bundleCache) {
@@ -87,12 +99,12 @@ async function handleRegister(req: Request, env: Env): Promise<Response> {
   const ip = req.headers.get("cf-connecting-ip") || "0.0.0.0";
   const salt = env.RATE_SALT || "agora-relay-unsalted";
   const ipKey = "reg-ip:" + await hashedIp(ip, salt);
-  const perIp = await bumpRate(env.DB, ipKey, 3600, 5);
+  const perIp = await bumpRate(env.DB, ipKey, 3600, REGISTER_PER_IP_HOUR);
   if (!perIp.ok) {
     fail(STORE, "등록 속도 제한", { limit: "ip", per: "hour" },
       { status: 429, headers: { "Retry-After": String(perIp.retryAfter) } });
   }
-  const global = await bumpRate(env.DB, "reg:all", 3600, 100);
+  const global = await bumpRate(env.DB, "reg:all", 3600, REGISTER_GLOBAL_HOUR);
   if (!global.ok) {
     fail(STORE, "등록 속도 제한(전체)", { limit: "global", per: "hour" },
       { status: 429, headers: { "Retry-After": String(global.retryAfter) } });
@@ -223,12 +235,12 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
   }
 
   // (8) 속도 — 참가자·방
-  const perPid = await bumpRate(env.DB, "pid:" + event.from, 60, 10);
+  const perPid = await bumpRate(env.DB, "pid:" + event.from, 60, EVENTS_PER_PID_MIN);
   if (!perPid.ok) {
     fail(STORE, "발언 속도 제한", { limit: "participant", per: "minute" },
       { status: 429, headers: { "Retry-After": String(perPid.retryAfter) } });
   }
-  const perRoom = await bumpRate(env.DB, "room:" + threadId, 60, 60);
+  const perRoom = await bumpRate(env.DB, "room:" + threadId, 60, EVENTS_PER_ROOM_MIN);
   if (!perRoom.ok) {
     fail(STORE, "방 속도 제한", { limit: "room", per: "minute" },
       { status: 429, headers: { "Retry-After": String(perRoom.retryAfter) } });
