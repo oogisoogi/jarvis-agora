@@ -14,7 +14,7 @@ import * as schema from "./lib/schema.ts";
 import * as scrub from "./lib/scrub.ts";
 import { b64decode, checkSignatureBytes, fingerprintOf, hasArmor, parseArmored,
          parsePublicKeyBlob } from "./lib/sshsig.ts";
-import { bumpRate, deriveThread, eventIdOf, hashedIp, nowIso, rosterView, threadEvents,
+import { bumpRate, deriveThread, eventIdOf, nowIso, rosterView, threadEvents,
          upsertRoom, type Env } from "./lib/store.ts";
 
 // 저장소의 **정본 규칙 파일**을 원문 그대로 싣는다(wrangler rules: Text).
@@ -31,8 +31,9 @@ const REGISTER_PURPOSE = "agora-register-v1";
 //   ⇒ 시험을 위해 상한을 푼 것이 아니라, **상한이 실제 동작과 안 맞았던 것**이다.
 // ⚠등록 IP 상한은 워크숍처럼 **여럿이 한 회선(NAT)** 뒤에 있을 때 정상 참가자를 막는다.
 //   그 판단은 운영 결정이라 값만 올려 두고 master 게이트로 올린다(RELAY.md §7 각주).
-const REGISTER_PER_IP_HOUR = 30;
-const REGISTER_GLOBAL_HOUR = 200;
+// 등록 전체 상한 = 시간당 300. 근거: 워크숍 한 자리(수십 명)가 한 시간 안에 다 등록해도 여유가 있고,
+// 그 위로는 사람 손이 아니라 자동화라고 볼 수 있는 구간이다. 등록 1건에는 키 생성 + 서명이 이미 든다.
+const REGISTER_GLOBAL_HOUR = 300;
 const EVENTS_PER_PID_MIN = 30;
 const EVENTS_PER_ROOM_MIN = 120;
 
@@ -96,14 +97,11 @@ function needStr(o: Record<string, unknown>, key: string): string {
 
 // ── POST /register ─────────────────────────────────────────────────────────
 async function handleRegister(req: Request, env: Env): Promise<Response> {
-  const ip = req.headers.get("cf-connecting-ip") || "0.0.0.0";
-  const salt = env.RATE_SALT || "agora-relay-unsalted";
-  const ipKey = "reg-ip:" + await hashedIp(ip, salt);
-  const perIp = await bumpRate(env.DB, ipKey, 3600, REGISTER_PER_IP_HOUR);
-  if (!perIp.ok) {
-    fail(STORE, "등록 속도 제한", { limit: "ip", per: "hour" },
-      { status: 429, headers: { "Retry-After": String(perIp.retryAfter) } });
-  }
+  // ★등록에 **IP 축을 두지 않는다**(master 판정 2026-09-05 · 선택지 ⓒ).
+  //   IP 상한은 공격자에게 약하고(주소를 바꾸면 그만) 정상 사용자에게만 강하다 —
+  //   워크숍처럼 여럿이 한 회선(NAT) 뒤에 있으면 릴레이에는 한 사람으로 보여
+  //   n+1 번째부터 **정상 참가자가 막힌다.** 남는 방어는 소유 증명 서명(필수)·전체 상한·폐기·abort 다.
+  //   ⇒ 부수 효과: IP 를 아예 안 만지므로 해시용 비밀(RATE_SALT)도 필요 없어졌다.
   const global = await bumpRate(env.DB, "reg:all", 3600, REGISTER_GLOBAL_HOUR);
   if (!global.ok) {
     fail(STORE, "등록 속도 제한(전체)", { limit: "global", per: "hour" },
@@ -234,19 +232,12 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
       { verdict: "unsigned", why: "principal_mismatch" });
   }
 
-  // (8) 속도 — 참가자·방
-  const perPid = await bumpRate(env.DB, "pid:" + event.from, 60, EVENTS_PER_PID_MIN);
-  if (!perPid.ok) {
-    fail(STORE, "발언 속도 제한", { limit: "participant", per: "minute" },
-      { status: 429, headers: { "Retry-After": String(perPid.retryAfter) } });
-  }
-  const perRoom = await bumpRate(env.DB, "room:" + threadId, 60, EVENTS_PER_ROOM_MIN);
-  if (!perRoom.ok) {
-    fail(STORE, "방 속도 제한", { limit: "room", per: "minute" },
-      { status: 429, headers: { "Retry-After": String(perRoom.retryAfter) } });
-  }
-
-  // (9) 멱등 — 같은 (from, message_id) + 같은 해시는 새 행을 만들지 않는다.
+  // (8) 멱등 — 같은 (from, message_id) + 같은 해시는 새 행을 만들지 않는다.
+  // ★★속도 제한**보다 먼저** 본다(agy 지적 2 · 2026-09-05). 뒤에 두면 **재시도가 발언 예산을 깎는다** —
+  //   응답을 못 받아 다시 보내는 것은 새 발언이 아닌데도 예산이 준다. 그러면 「재시도가 안전하다」는
+  //   계약(§3-2 · code 8 을 「재조회로 판정하라」고 말할 자격)이 무너진다.
+  //   ⚠받아들인 대가: 같은 요청을 무한 반복하면 쓰기 상한을 안 태운다. 대신 그 요청은
+  //   **아무것도 쓰지 않고**(행 0) 유효 서명까지 필요하다 — 남는 비용은 조회뿐이다.
   const existing = await env.DB.prepare(
     "SELECT seq, hash, created_at FROM events WHERE from_id = ?1 AND message_id = ?2"
   ).bind(event.from, event.message_id).first<{ seq: number; hash: string; created_at: string }>();
@@ -262,6 +253,18 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
     // 재시도가 아니라 **다른 글**이다. 새 message_id 로 써야 한다.
     fail(GATE_REJECT, "같은 message_id 로 다른 내용을 보냈다",
       { conflict: "message_id_reused", message_id: event.message_id }, { status: 422 });
+  }
+
+  // (9) 속도 — 참가자·방. **새 이벤트일 때만** 예산을 쓴다(위 멱등 반환을 지나온 요청).
+  const perPid = await bumpRate(env.DB, "pid:" + event.from, 60, EVENTS_PER_PID_MIN);
+  if (!perPid.ok) {
+    fail(STORE, "발언 속도 제한", { limit: "participant", per: "minute" },
+      { status: 429, headers: { "Retry-After": String(perPid.retryAfter) } });
+  }
+  const perRoom = await bumpRate(env.DB, "room:" + threadId, 60, EVENTS_PER_ROOM_MIN);
+  if (!perRoom.ok) {
+    fail(STORE, "방 속도 제한", { limit: "room", per: "minute" },
+      { status: 429, headers: { "Retry-After": String(perRoom.retryAfter) } });
   }
 
   // (10) 적재

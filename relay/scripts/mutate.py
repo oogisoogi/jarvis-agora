@@ -48,6 +48,32 @@ MUTATIONS = [
      'function nfc(s: string): string {\n  return s;\n}',
      "vitest", "golden 5변형(NFD 입력)"),
 
+    ("M8 속도 상한 부등호(off-by-one)", "src/lib/store.ts",
+     "  return { ok: count <= limit, retryAfter: Math.max(1, retryAfter) };",
+     "  return { ok: count < limit, retryAfter: Math.max(1, retryAfter) };",
+     "vitest", "상한까지 통과 · 상한+1 차단"),
+
+    ("M9 event_id 고정폭 제거", "src/lib/store.ts",
+     '  return "ev_" + String(seq).padStart(16, "0");',
+     '  return "ev_" + String(seq);',
+     "vitest", "문자열 정렬 = 도착 순서"),
+
+    ("M10 거부 시 head 전진 제거", "src/lib/reducer.ts",
+     "    state.head = entry.hash;\n  };",
+     "  };",
+     "harness", "3자 대조 세트3·4(절차 거부 포함)"),
+
+    ("M11 서명 파싱 예외를 원시 Error 로", "src/lib/sshsig.ts",
+     'if (n < 0 || this.i + n > this.b.length) fail(SIGNATURE, "서명 블록이 짧다", { want: n });',
+     'if (n < 0 || this.i + n > this.b.length) throw new Error("서명 블록이 짧다");',
+     "harness", "잘린 서명 = 401(500 아님)"),
+
+    ("M12 멱등 앞에 속도 계수 복귀", "src/index.ts",
+     "  // (8) 멱등 — 같은 (from, message_id) + 같은 해시는 새 행을 만들지 않는다.",
+     '  await bumpRate(env.DB, "pid:" + event.from, 60, EVENTS_PER_PID_MIN);\n'
+     "  // (8) 멱등 — 같은 (from, message_id) + 같은 해시는 새 행을 만들지 않는다.",
+     "harness", "재시도 뒤 정상 발언이 통과"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",

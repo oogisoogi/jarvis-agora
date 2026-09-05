@@ -461,6 +461,114 @@ def main():
     moved = (before is not None and after is not None and after > before)
     record("updated_at 이 움직인다", True, moved, "%s -> %s" % (before, after))
 
+    print("\n== agy 지적 봉합 축(2026-09-05 1라운드) ==")
+    # (A) 조작된 서명 블록이 401(code 4)로 나가는가 — 원시 예외가 새면 500(code 7)이 된다.
+    tA = new_id()
+    bA = Builder(tA, args.workdir, allowed, revoked, [op["id"]], now)
+    evA, sigA = bA.make(alice, "genesis", {"type": "knowhow", "title": "잘린 서명",
+                                           "body": "본문", "envelope": env})
+    import base64 as _b64
+    _body = "".join(l for l in sigA.splitlines() if "-----" not in l)
+    _raw = _b64.b64decode(_body)
+    truncated = ("-----BEGIN SSH SIGNATURE-----\n"
+                 + _b64.b64encode(_raw[:20]).decode() + "\n-----END SSH SIGNATURE-----\n")
+    code, body = send(args.base, tA, "knowhow", "잘린 서명", evA, truncated, True)
+    record("잘린 서명 블록 = 401(500 아님)", 401, code,
+           "code=%s" % (body.get("code") if isinstance(body, dict) else "?"))
+    # 길이 필드만 부풀린 변형(내용은 그대로) — 파서가 경계를 넘어 읽으려 한다
+    _tamper = bytearray(_raw)
+    _tamper[10:14] = (0x7fffff00).to_bytes(4, "big")
+    inflated = ("-----BEGIN SSH SIGNATURE-----\n"
+                + _b64.b64encode(bytes(_tamper)).decode() + "\n-----END SSH SIGNATURE-----\n")
+    code, body = send(args.base, tA, "knowhow", "길이 조작", evA, inflated, True)
+    record("길이 필드 조작 = 401(500 아님)", 401, code,
+           "code=%s" % (body.get("code") if isinstance(body, dict) else "?"))
+
+    # (B) 멱등 재시도가 발언 예산을 깎지 않는가 — 깎으면 정상 발언이 429 로 막힌다.
+    tB = new_id()
+    bB = Builder(tB, args.workdir, allowed, revoked, [op["id"]], now)
+    gB, gBs = bB.add(alice, "genesis", {"type": "knowhow", "title": "재시도 예산",
+                                        "body": "본문", "envelope": env})
+    code, _ = send(args.base, tB, "knowhow", "재시도 예산", gB, gBs, True)
+    repeats = 0
+    for _ in range(35):
+        c, _b = send(args.base, tB, "knowhow", "재시도 예산", gB, gBs, True)
+        if c == 200:
+            repeats += 1
+    record("멱등 재시도 35회가 모두 200", 35, repeats)
+    pB, pBs = bB.add(alice, "post", {"round": 0, "body": "재시도 뒤의 정상 발언"})
+    code, body = send(args.base, tB, "knowhow", "재시도 예산", pB, pBs, False)
+    record("재시도 뒤 정상 발언이 통과", 201, code,
+           "code=%s" % (body.get("code") if isinstance(body, dict) else "-"))
+
+    print("\n== 페이지·경계 축 ==")
+    # 이벤트 페이지 — 나눠 받아도 전건이고 겹치지 않는다
+    t_full = results[3][1]      # 세트4(debate) = 이벤트가 가장 많다
+    code, one = http("GET", args.base + "/rooms/" + t_full + "/events?limit=200")
+    total = len(one["items"]) if code == 200 else -1
+    seen_ids, pages, cursor = [], 0, None
+    while True:
+        url = args.base + "/rooms/" + t_full + "/events?limit=3" + ("&cursor=" + cursor if cursor else "")
+        code, page = http("GET", url)
+        if code != 200:
+            break
+        pages += 1
+        seen_ids.extend(i["event_id"] for i in page["items"])
+        cursor = page.get("next_cursor")
+        if not cursor or pages > 50:
+            break
+    record("이벤트 페이지: 합계 = 전건", total, len(seen_ids), "%d 쪽" % pages)
+    record("이벤트 페이지: 중복 0", len(set(seen_ids)), len(seen_ids))
+    record("이벤트 페이지: 2쪽 이상", True, pages >= 2)
+
+    # 방 목록 페이지·updated_since
+    # ★전제를 먼저 단언한다. 앞선 판본은 **캐시를 비우는 시험 뒤에** 재서 목록이 0건이었고,
+    #   0 == 0 이 통과로 보였다(2026-09-05 두 번째 자기적발 — 같은 병을 또 만들었다).
+    code, allrooms = http("GET", args.base + "/rooms?limit=100")
+    n_open = len(allrooms["items"])
+    record("측정 전제: 열린 방이 2개 이상", True, n_open >= 2, "%d개" % n_open)
+    code, first = http("GET", args.base + "/rooms?limit=1")
+    got, cur, guard = [], first.get("next_cursor"), 0
+    got.extend(r["room_id"] for r in first["items"])
+    while cur and guard < 20:
+        guard += 1
+        code, pg = http("GET", args.base + "/rooms?limit=1&cursor=" + cur)
+        got.extend(r["room_id"] for r in pg["items"])
+        cur = pg.get("next_cursor")
+    record("방 목록 페이지: 합계 = 전건", n_open, len(got), "%d 쪽" % (guard + 1))
+    record("방 목록 페이지: 중복 0", len(set(got)), len(got))
+    newest = max(r["updated_at"] for r in allrooms["items"]) if n_open else ""
+    code, since = http("GET", args.base + "/rooms?limit=100&updated_since=" + newest)
+    record("updated_since = 최신값이면 0건", 0, len(since["items"]))
+
+    # 64KB 경계 — canonical 이 상한을 넘으면 413
+    big = Builder(new_id(), args.workdir, allowed, revoked, [op["id"]], now)
+    huge_body = "가" * 70000
+    try:
+        ev_big, sig_big = big.make(alice, "genesis", {"type": "knowhow", "title": "큰 이벤트",
+                                                      "body": huge_body, "envelope": env})
+        code, body = send(args.base, big.thread_id, "knowhow", "큰 이벤트", ev_big, sig_big, True)
+        record("64KB 초과 이벤트", 413, code,
+               "code=%s" % (body.get("code") if isinstance(body, dict) else "?"))
+    except SystemExit:
+        raise
+    except Exception as e:
+        # 클라이언트(파이썬)가 먼저 막는 것도 정상이다 — 두 겹 다 있는 것이 계약이다.
+        record("64KB 초과: 클라 게이트가 선차단", True, True, type(e).__name__)
+
+    # ★그런데 그것만 재면 **서버 축은 무검증**이다(클라를 안 쓰는 발신자가 바로 그 위협이다).
+    #   그래서 클라 게이트를 우회해 큰 본문을 손으로 만들어 보낸다.
+    ev_small, sig_small = big.make(alice, "genesis", {"type": "knowhow", "title": "작은 것",
+                                                      "body": "본문", "envelope": env})
+    fat = dict(ev_small)
+    fat["payload"] = dict(ev_small["payload"], body="나" * 70000)
+    raw_body = "<!-- agora-event v1 -->\n```json\n" + json.dumps(fat, ensure_ascii=False) + "\n```\n" + sig_small
+    code, body = http("POST", args.base + "/events", {
+        "thread_id": big.thread_id, "category": "knowhow", "title": "큰 이벤트",
+        "body": raw_body, "is_genesis": True})
+    record("64KB 초과: 서버가 막는다", 413, code,
+           "code=%s" % (body.get("code") if isinstance(body, dict) else "?"))
+
     # 파생 캐시 자가치유(R-7) — 캐시를 지워도 조회가 다시 채운다
     subprocess.run([os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "node_modules/.bin/wrangler"), "d1", "execute", "agora-relay",

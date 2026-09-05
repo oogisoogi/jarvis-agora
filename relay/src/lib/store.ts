@@ -15,7 +15,6 @@ export interface Env {
   DB: D1Database;
   AGORA_NAMESPACE: string;
   CORS_ALLOW_ORIGINS: string;
-  RATE_SALT?: string;
 }
 
 /** 고정폭 단조 식별자 — 리듀서 동률 규칙이 문자열 사전순이라 자릿수가 곧 계약이다. */
@@ -176,22 +175,16 @@ export async function upsertRoom(db: D1Database, threadId: string, d: Derived,
 export async function bumpRate(db: D1Database, bucket: string, windowSeconds: number,
                                limit: number, atMs = Date.now()): Promise<{ ok: boolean; retryAfter: number }> {
   const windowStart = Math.floor(atMs / 1000 / windowSeconds) * windowSeconds;
-  await db.prepare(
-    `INSERT INTO rate_windows (bucket, window_start, count) VALUES (?1, ?2, 1)
-     ON CONFLICT(bucket, window_start) DO UPDATE SET count = count + 1`
-  ).bind(bucket, windowStart).run();
+  // ★증가와 읽기를 **한 문장**으로 한다(RETURNING). 두 문장으로 나누면 그 사이에 다른 요청이
+  //   끼어들어 같은 값을 읽거나 남의 차례를 자기 것으로 읽는다 — 상한이 조용히 새는 창이다
+  //   (agy 지적 3 · 2026-09-05). 부수 효과로 질의가 2개에서 1개로 준다(호출당 50개 예산).
   const row = await db.prepare(
-    "SELECT count FROM rate_windows WHERE bucket = ?1 AND window_start = ?2"
+    `INSERT INTO rate_windows (bucket, window_start, count) VALUES (?1, ?2, 1)
+     ON CONFLICT(bucket, window_start) DO UPDATE SET count = count + 1
+     RETURNING count`
   ).bind(bucket, windowStart).first<{ count: number }>();
   const count = row?.count ?? 1;
   const retryAfter = windowStart + windowSeconds - Math.floor(atMs / 1000);
   return { ok: count <= limit, retryAfter: Math.max(1, retryAfter) };
 }
 
-export async function hashedIp(ip: string, salt: string): Promise<string> {
-  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(salt + "|" + ip));
-  const b = new Uint8Array(d);
-  let s = "";
-  for (let i = 0; i < 8; i++) s += b[i].toString(16).padStart(2, "0");
-  return s;
-}

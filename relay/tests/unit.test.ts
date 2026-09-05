@@ -17,6 +17,7 @@ import { checkSignatureBytes, fingerprintOf, parseArmored, b64decode,
 import { apply, order, stateHash, type ValidEntry } from "../src/lib/reducer.ts";
 import { checkpointOf } from "../src/lib/roster.ts";
 import { loadBundle, check as scrubCheck } from "../src/lib/scrub.ts";
+import { bumpRate, eventIdOf, nowIso } from "../src/lib/store.ts";
 
 const REPO = new URL("../../", import.meta.url).pathname;
 const GOLDEN = JSON.parse(readFileSync(REPO + "tests/golden/canonical-vectors.json", "utf8"));
@@ -276,5 +277,68 @@ describe("scrub — 백스톱이 실제로 잡는가", () => {
   it("서버는 이름 목록을 갖지 않는다(0 이 정상이고 그 사실이 드러난다)", async () => {
     const b = await loadBundle(rules, allow, domains);
     expect(scrubCheck({ body: "x" }, b).names_loaded).toBe(0);
+  });
+});
+
+// ── 속도 제한 경계값 ────────────────────────────────────────────────────────
+/** 최소 가짜 D1 — `bumpRate` 가 쓰는 두 질의만 흉내 낸다(계수 논리만 잰다). */
+function fakeD1() {
+  const rows = new Map<string, number>();
+  return {
+    rows,
+    prepare(sql: string) {
+      return {
+        _binds: [] as unknown[],
+        bind(...a: unknown[]) { this._binds = a; return this; },
+        async run() { return { success: true }; },
+        async first<T>() {
+          const k = `${this._binds[0]}|${this._binds[1]}`;
+          // 실물과 같게: 증가와 읽기가 **한 문장**이다(INSERT … RETURNING count).
+          if (sql.includes("INSERT INTO rate_windows")) rows.set(k, (rows.get(k) ?? 0) + 1);
+          return { count: rows.get(k) ?? 0 } as T;
+        },
+      };
+    },
+  } as unknown as D1Database;
+}
+
+describe("속도 제한 — 경계에서 하나 틀리지 않는가", () => {
+  it("상한까지는 통과하고 상한+1 에서 막힌다", async () => {
+    const db = fakeD1();
+    const at = 1_700_000_000_000;
+    const verdicts: boolean[] = [];
+    for (let i = 0; i < 4; i++) {
+      verdicts.push((await bumpRate(db, "pid:x", 60, 3, at)).ok);
+    }
+    expect(verdicts).toEqual([true, true, true, false]);   // 3 까지 통과 · 4번째 차단
+  });
+
+  it("창이 바뀌면 다시 센다(고정창)", async () => {
+    const db = fakeD1();
+    const at = 1_700_000_000_000;
+    for (let i = 0; i < 3; i++) await bumpRate(db, "pid:y", 60, 3, at);
+    expect((await bumpRate(db, "pid:y", 60, 3, at)).ok).toBe(false);
+    const next = at + 60_000;
+    expect((await bumpRate(db, "pid:y", 60, 3, next)).ok).toBe(true);
+  });
+
+  it("Retry-After 는 창의 남은 시간이고 최소 1초다", async () => {
+    const db = fakeD1();
+    const at = 1_700_000_000_000 + 59_000;   // 창 끝자락
+    const r = await bumpRate(db, "pid:z", 60, 1, at);
+    expect(r.retryAfter).toBeGreaterThanOrEqual(1);
+    expect(r.retryAfter).toBeLessThanOrEqual(60);
+  });
+});
+
+describe("식별자 — 정렬이 곧 계약이다", () => {
+  it("event_id 는 고정폭이라 문자열 정렬 = 도착 순서", () => {
+    const ids = [2, 10, 1].map(eventIdOf).sort();
+    expect(ids).toEqual([eventIdOf(1), eventIdOf(2), eventIdOf(10)]);
+  });
+
+  it("created_at 은 밀리초 고정폭 ISO 다", () => {
+    expect(nowIso(new Date(0))).toBe("1970-01-01T00:00:00.000Z");
+    expect(nowIso()).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   });
 });

@@ -33,7 +33,10 @@ export interface VerifyResult {
 class Reader {
   constructor(private b: Uint8Array, private i = 0) {}
   bytes(n: number): Uint8Array {
-    if (n < 0 || this.i + n > this.b.length) throw new Error("서명 블록이 짧다");
+    // ★계약 오류로 던진다. 원시 Error 로 새면 라우터가 그것을 「알 수 없는 실패」로 읽어
+    //   401(code 4)이어야 할 응답이 500(code 7)으로 나간다 — 조작된 길이 필드 하나로
+    //   실패 계약이 뒤집힌다(agy 지적 1 · 2026-09-05).
+    if (n < 0 || this.i + n > this.b.length) fail(SIGNATURE, "서명 블록이 짧다", { want: n });
     const s = this.b.subarray(this.i, this.i + n);
     this.i += n;
     return s;
