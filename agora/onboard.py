@@ -120,6 +120,10 @@ def register(*, directory: str | None = None, relay_url: str,
     _write_json(_config_path(directory), cfg)
     return {"participant_id": claim["participant_id"], "relay": relay_url,
             "transport": "relay", "registered": bool(out.get("registered", True)),
+            # ★서버가 답한 상태를 그대로 올린다(201 = 새 등록 · 200 = 멱등 재등록).
+            #   전에는 이 둘이 한 칸에 뭉쳐 「이미 등록돼 있었다」를 사람에게 말하지 못했다
+            #   (TRANSPORT-RELAY §15 「잔여」 첫 줄이 그것이었다 · master 채택 2026-09-06).
+            "status": out.get("status", 0),
             "proof_hash": signed["hash"],
             "human_approval": cfg.get("human_approval", True),
             "config_file": CONFIG_FILENAME,

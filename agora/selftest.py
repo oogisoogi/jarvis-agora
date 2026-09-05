@@ -4420,11 +4420,14 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     #   그 공백은 실물에서만 드러난다(같은 병을 이 저장소에서 네 번 겪었다).
     "더블충실도": ("M353-double-skips-category-binding", "M354-double-skips-title-binding",
                    "M355-double-skips-skeleton"),
+    # ★서버가 답한 **상태 코드**를 위로 올리는 자리. 여기가 비면 201/200 이 한 칸에 뭉쳐
+    #   「새로 적었다」와 「이미 있었다」가 구별되지 않는다(P4 에서 실제로 못 쟀다).
+    "쓰기상태": ("M356-write-drops-http-status",),
 }
 
 
 def _case_s8_axes_have_nets() -> None:
-    """S8 의 12축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도)도 같은 방식으로 덮인다."""
+    """S8 의 13축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태)도 같은 방식으로 덮인다."""
     _axes_have_nets(S8_AXES, "S8")
 
 
@@ -9878,6 +9881,46 @@ def _case_cli_takes_documented_positional() -> None:
                 raise AssertionError(f"문서가 자리 인자 서식을 안 적었다: {path}")
 
 
+def _case_write_result_carries_http_status() -> None:
+    """쓰기 결과가 **응답 상태 코드**를 싣는다 — 성공 2xx 까지(master 채택 2026-09-06 · P4 후속).
+
+    ★전에는 실패 경로만 `status` 를 실었다. 그래서 **201 인지 200 인지 아무도 못 봤고**, 실물
+      체크포인트 발행(P4)에서 계약이 말하는 201 을 「추론」으로만 적어야 했다 — 다시 재려면
+      **두 번째 라이브 쓰기**가 필요했다. ★관측 하나를 아끼려고 쓰기를 한 번 더 하는 거래는 나쁘다.
+    ★계약이 **새 행 201 · 멱등 200** 으로 갈라 둔 값이라, 이 칸이 없으면 「새로 적었다」와
+      「이미 있던 것을 받았다」가 부르는 쪽에서 구별되지 않는다 — 그 둘은 다른 사건이다.
+    """
+    from agora import onboard, tools
+    f = _fixtures()
+    d = _onboard_dir()
+    with _fake_relay().serving() as (url, relay):
+        relay.roster_text["allowed_signers"] = open(f["roster_ab"], encoding="utf-8").read()
+        # ⑴ 등록 = 201(계약 §3-1)
+        reg = _with_key(os.path.join(d, "id_ed25519"),
+                        lambda: onboard.register(directory=d, relay_url=url, unattended=True))
+        if reg.get("status") != 201:
+            raise AssertionError(f"등록 응답 상태가 안 실렸다: {reg}")
+        # ⑵ 체크포인트 발행 = 201(계약 §3-6b) — P4 에서 못 잰 바로 그 칸이다.
+        relay.roster_text["operators"] = "operator-a\n"
+        out = _with_key(f["key_a"], lambda: onboard.issue_checkpoint(
+            directory=d, relay_url=url, signer="operator-a"))
+        if out["posted"].get("status") != 201:
+            raise AssertionError(f"체크포인트 POST 상태가 안 실렸다: {out['posted']}")
+    # ⑶ 이벤트 = 새 행 201 · **같은 글 재전송 200**(멱등) — 두 사건이 갈린다.
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 마디"))
+        if not said.get("message_id"):
+            raise AssertionError("발언이 안 됐다 — 뒤의 판정이 공허하다")
+        body = relay.rooms[room]["events"][-1]["body"]
+        again = ctx.store.append(thread_id=room, category="debate", title="",
+                                 body=body, is_genesis=False)
+        if again.get("status") != 200:
+            raise AssertionError(f"멱등 재전송이 200 으로 안 온다: {again}")
+        if len(relay.rooms[room]["events"]) != 2:
+            raise AssertionError("멱등인데 새 행이 생겼다 — 200 의 뜻이 다르다")
+
+
 def _case_checkpoint_issue_round_trip() -> None:
     """`agora checkpoint issue` → `sync-roster` 가 **verified:true** 를 낸다(계약 §3-6b · r4).
 
@@ -10770,6 +10813,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("체크포인트: 문은 신탁이 아니다", _case_checkpoint_door_is_not_a_signing_oracle, None),
     ("리허설: 하네스가 완주한다",     _case_rehearsal_harness_completes, None),
     ("계약: RELAY.md 와 대조",        _case_contract_parity_with_relay_doc, None),
+    ("릴레이: 쓰기는 상태를 싣는다",  _case_write_result_carries_http_status, None),
     ("리허설: 영수증을 안 건너뛴다",  _case_rehearsal_does_not_skip_the_receipt, None),
     ("더블: 증명은 그 키의 것인가",   _case_double_binds_proof_to_its_key, None),
     ("더블: 결박을 실제로 댄다",     _case_double_binds_request_args_to_signature, None),
@@ -10808,6 +10852,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if now and doc["signed_at"] > _plus_hours(now, FUTURE_GRACE_HOURS):',
      '    if False:',
      "명부: 체크포인트 서명 검증"),
+    # ★P4 후속(2026-09-06 · master 채택) — 쓰기 결과의 응답 상태.
+    ("M356-write-drops-http-status", "agora/store_relay.py",
+     '    return {**body, "status": status}',
+     '    return dict(body)',
+     "릴레이: 쓰기는 상태를 싣는다"),
     # ★agy 2R 봉합(2026-09-06) — 더블의 결박·뼈대.
     ("M353-double-skips-category-binding", "tests/fake_relay.py",
      '        bindings.append(("category", payload.get("category"), signed_payload.get("type")))',
