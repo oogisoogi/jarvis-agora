@@ -122,6 +122,9 @@ def sync_roster(*, directory: str | None = None, relay_url: str | None = None,
       대조할 것이 없지만(어떤 방식에서도 그렇다), **그 뒤의 변화는 사람이 봐야 한다.**
     ★차이가 있는데 `--yes` 가 없으면 **아무것도 쓰지 않고** code 3 으로 멈춘다.
       반쪽만 갱신하는 것보다 안 하는 것이 낫다.
+    ⚠**진짜 원자성은 없다**(파일이 셋이다 · agy 적대검증 2026-09-05 정정): 임시 파일 3개를 먼저 쓰므로
+      받기·쓰기 실패는 실물을 안 건드리지만 **교체 3회 사이의 창**은 남는다. 그 창에서 죽으면
+      code 7 에 `wrote`(이미 바뀐 파일)·`failed` 를 실어 올린다 — 숨기지 않는다.
     """
     directory = os.path.abspath(directory or config_dir())
     cfg = _load_config(directory)
@@ -169,11 +172,21 @@ def sync_roster(*, directory: str | None = None, relay_url: str | None = None,
         tmps.append((path, tmp))
     wrote: list[str] = []
     for path, tmp in tmps:
-        if os.path.exists(path):
-            # 되돌릴 손잡이 — 잘못된 명부를 받았을 때 직전 것이 옆에 있어야 한다.
-            with open(path, "rb") as src, open(path + ".prev", "wb") as dst:
-                dst.write(src.read())
-        os.replace(tmp, path)
+        try:
+            if os.path.exists(path):
+                # 되돌릴 손잡이 — 잘못된 명부를 받았을 때 직전 것이 옆에 있어야 한다.
+                with open(path, "rb") as src, open(path + ".prev", "wb") as dst:
+                    dst.write(src.read())
+            os.replace(tmp, path)
+        except OSError as e:
+            # ★★교체 도중에 죽으면 **이미 바뀐 파일이 남는다**(agy 적대검증 2026-09-05 지적).
+            #   날것 예외로 새면 호출자는 **어디까지 바뀌었는지 모른 채** 실패만 본다 —
+            #   그 상태가 곧 「그때의 명부가 갈라진」 상태이므로 **무엇이 바뀌었는지**를 실어 올린다.
+            raise AgoraError(errors.STORE, "명부 교체가 중간에 실패했다 — 일부만 바뀌었을 수 있다",
+                             {"wrote": wrote, "failed": os.path.basename(path),
+                              "error": type(e).__name__,
+                              "how": "남은 임시 파일(<파일>.tmp)과 직전 사본(<파일>.prev)이 옆에 있다",
+                              "reason": "roster_partial_replace"}) from None
         wrote.append(os.path.basename(path))
 
     checkpoint = _fetch_checkpoint(store, directory)

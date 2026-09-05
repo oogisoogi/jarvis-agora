@@ -119,7 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
     for name, meta in COMMANDS.items():
         tag = "" if meta["built"] else f"  [미구현 — {meta['slice']}]"
         sp = sub.add_parser(name, help=name + tag, add_help=True)
-        sp.add_argument("rest", nargs="*", help=argparse.SUPPRESS)
+        # ★`REMAINDER` 여야 한다 — `nargs="*"` 는 **`--relay` 같은 인자를 「모르는 옵션」으로 보고
+        #   서브커맨드를 시작도 하기 전에 거부한다**(argparse 의 기본 동작).
+        #   ⚠이것이 실물에서 터졌다(2026-09-05 CLI 실사격): `_kv` 는 `--key value` 를 읽을 줄 아는데
+        #   그 값이 **거기까지 오지 못했다** — 시험이 `_kv` 를 직접 불러 재고 있어서 초록이었다.
+        #   ⇒ 「등록됐다」와 「동작한다」의 그 자리다. 이제 케이스가 **`bin/agora` 를 실제로 부른다.**
+        sp.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     return p
 
 
@@ -231,6 +236,10 @@ def _kv(rest: list[str]) -> dict[str, Any]:
 
     ★값의 타입을 **추측하지 않는다.** 정수·불리언은 위 목록의 칸에서만 그렇게 읽고,
       JSON 은 `{`·`[` 로 시작할 때만, 나머지는 **문자열 그대로** 둔다.
+    ⚠**제약(의도한 것 · agy 적대검증 2026-09-05 논쟁점)**: 값이 `--` 로 시작하면 `--key value`
+      서식으로 못 준다 — 그 토큰을 **다음 플래그**로 보기 때문이다(그래야 `--body --relay x` 같은
+      오타에서 플래그가 값으로 조용히 삼켜지지 않는다). 그런 값은 `--key=--value` 나 `key=--value`
+      로 준다. **오염을 막는 쪽**을 골랐고, 그 대가를 여기 적어 둔다.
     """
     out: dict[str, Any] = {}
     index = 0
@@ -327,11 +336,28 @@ def main(argv: list[str] | None = None) -> int:
         if not argv:
             parser.print_help()
             return errors.OK
-        ns = parser.parse_args(argv)
-        if not ns.command:
+        # ★★서브커맨드 **뒤는 argparse 에 넘기지 않는다**(2026-09-05 CLI 실사격에서 터진 자리).
+        #   argparse 는 `--topic` 같은 토큰을 **모르는 옵션**으로 보고 서브커맨드가 시작되기도 전에
+        #   거부한다(`nargs="*"` 도 `REMAINDER` 도 부모 파서가 「unrecognized arguments」로 죽인다 — 실측).
+        #   그래서 `_kv` 가 `--key value` 를 읽을 줄 알아도 **그 값이 거기까지 오지 못했다.**
+        #   ⇒ 최상위 플래그만 여기서 처리하고, 나머지는 **손대지 않고** 그대로 넘긴다.
+        #   ⚠파서는 버리지 않는다 — 도움말과 「모르는 최상위 인자」 판정은 여전히 그쪽 몫이다.
+        while argv and argv[0].startswith("-"):
+            token = argv.pop(0)
+            if token in ("-h", "--help"):
+                parser.print_help()
+                return errors.OK
+            if token != "--json":
+                raise AgoraError(errors.ARGUMENT, "모르는 최상위 인자",
+                                 {"arg_len": len(token)})
+        if not argv:
             parser.print_help()
             return errors.OK
-        result = dispatch(ns.command, ns)
+        command, rest = argv[0], argv[1:]
+        if "-h" in rest or "--help" in rest:
+            parser.parse_args([command, "--help"])      # 서브커맨드 도움말(SystemExit 0)
+            return errors.OK
+        result = dispatch(command, argparse.Namespace(rest=rest))
         if result is not None:
             print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
         # selftest 는 계약 오류가 아니라 **검사 실패**를 낸다 — 계약 코드(2~10)를 쓰지 않고

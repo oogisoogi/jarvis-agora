@@ -4393,6 +4393,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     "여정경계": ("M315-enter-opens-its-own-write-path", "M316-browse-shows-closed-rooms",
                  "M317-join-enters-closed-rooms"),
     "운반선택": ("M318-transport-precedence-flipped",),
+    # ★도구 층이 아니라 **진입점**을 재는 축. 여기가 비어 있어서 CLI 가 플래그를 거부하는 채로 초록이었다.
+    "진입점": ("M322-cli-entry-rejects-flags",),
 }
 
 
@@ -9442,6 +9444,51 @@ def _case_journey_tools_call_the_existing_ones() -> None:
         raise AssertionError("join 이 이벤트를 만든다 — 로컬 동작이어야 한다(kind 9종 동결)")
 
 
+def _case_cli_surface_accepts_flag_arguments() -> None:
+    """★**`bin/agora` 의 진입점**이 `--key value` 를 실제로 받는다(설치 한 줄이 그 서식이다).
+
+    ★★이 그물이 없어서 뚫렸다(2026-09-05 CLI 실사격): `cli._kv` 는 세 서식을 읽을 줄 아는데
+      **argparse 가 그 값을 거기까지 보내지 않았다** — 서브커맨드 뒤의 `--topic` 을 「모르는 옵션」으로
+      보고 죽였다. 시험은 `_kv` 를 **직접** 부르고 있어서 전건 초록이었다.
+      ⇒ 「등록됐다」와 「동작한다」의 그 자리다. 그래서 이 케이스는 **진입점(`cli.main`)을 부른다.**
+    ★한 명령이 아니라 **설치 한 줄의 순서 그대로** 태운다(register → sync-roster → enter) —
+      낱개로 재면 「따로는 되는데 이어서는 안 되는」 조합이 안 보인다.
+    """
+    import contextlib
+    import io as _io
+    from agora import cli
+    d = _onboard_dir()
+    key = os.path.join(d, "id_ed25519")
+    old_dir = os.environ.get("AGORA_CONFIG_DIR")
+    os.environ["AGORA_CONFIG_DIR"] = d
+    try:
+        with _fake_relay().serving() as (url, relay):
+            relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
+
+            def run(argv: list[str]) -> int:
+                with contextlib.redirect_stdout(_io.StringIO()):
+                    return _with_key(key, lambda: cli.main(argv))
+
+            for argv in (["register", "--relay", url, "--unattended"],
+                         ["sync-roster"],
+                         ["whoami"],
+                         ["enter", "--topic", "가짜 주제", "--kind", "debate"]):
+                rc = run(argv)
+                if rc != errors.OK:
+                    raise AssertionError(f"CLI 가 이 인자를 못 받았다: {argv[0]} rc={rc}")
+            if len(relay.rooms) != 1:
+                raise AssertionError(f"CLI 로 연 방이 릴레이에 없다: {len(relay.rooms)}")
+            # 기존 서식(`key=value`)도 그대로여야 한다 — 새 서식을 들이면서 옛 서식을 깨지 않는다.
+            room = next(iter(relay.rooms))
+            if run(["join", f"room_id={room}"]) != errors.OK:
+                raise AssertionError("key=value 서식이 깨졌다")
+    finally:
+        if old_dir is None:
+            os.environ.pop("AGORA_CONFIG_DIR", None)
+        else:
+            os.environ["AGORA_CONFIG_DIR"] = old_dir
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -9816,6 +9863,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("명부: 폐기 목록 없으면 멈춤",   _case_sync_roster_stops_when_revocations_are_missing, None),
     ("whoami: 첫 칸이 승인 게이트",   _case_whoami_puts_the_approval_gate_first, None),
     ("여정: 기존 도구를 부른다",      _case_journey_tools_call_the_existing_ones, None),
+    ("CLI: 진입점이 플래그를 받는다", _case_cli_surface_accepts_flag_arguments, None),
     ("S8: 8축이 그물을 갖는다",       _case_s8_axes_have_nets, None),
 )
 
@@ -9861,9 +9909,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if changes and not first_sync and not yes:',
      '    if changes and not first_sync and not yes and False:',
      "명부: TOFU 뒤 변경은 확인"),
+    # ★2026-09-05 재조준 — agy 봉합으로 이 블록이 try 안으로 들어가며 들여쓰기가 바뀌었다.
+    #   조준을 안 옮기면 「.prev 보존」 축이 NOT-APPLIED 로 조용히 꺼진다(오늘 세 번째 같은 형태).
     ("M311-sync-roster-keeps-no-previous", "agora/onboard.py",
-     '        if os.path.exists(path):\n            # 되돌릴 손잡이 — 잘못된 명부를 받았을 때 직전 것이 옆에 있어야 한다.',
-     '        if False:\n            # 되돌릴 손잡이 — 잘못된 명부를 받았을 때 직전 것이 옆에 있어야 한다.',
+     '            if os.path.exists(path):\n                # 되돌릴 손잡이 — 잘못된 명부를 받았을 때 직전 것이 옆에 있어야 한다.',
+     '            if False:\n                # 되돌릴 손잡이 — 잘못된 명부를 받았을 때 직전 것이 옆에 있어야 한다.',
      "명부: TOFU 뒤 변경은 확인"),
     ("M312-register-drops-proof", "agora/onboard.py",
      '        public_key=claim["public_key"], fingerprint=claim["fingerprint"],\n        signature=signed["signature"])',
@@ -9889,6 +9939,12 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if reduced["state"] == "closed":\n        raise AgoraError(errors.PRECONDITION, "닫힌 방에는 참가할 수 없다",',
      '    if False:\n        raise AgoraError(errors.PRECONDITION, "닫힌 방에는 참가할 수 없다",',
      "릴레이: J2 로비~참가~발언"),
+    # ★첫 조준은 **등가 뮤턴트**였다(SURVIVED): 서브파서의 `nargs` 를 되돌려도 진입점이 이제
+    #   서브커맨드 뒤를 argparse 에 안 넘기므로 동작이 안 바뀐다. ⇒ **동작을 만드는 자리**를 조준한다.
+    ("M322-cli-entry-rejects-flags", "agora/cli.py",
+     "        command, rest = argv[0], argv[1:]",
+     "        command, rest = parser.parse_args(argv).command, []",
+     "CLI: 진입점이 플래그를 받는다"),
     ("M318-transport-precedence-flipped", "agora/tools.py",
      '    if (cfg.get("relay") or {}).get("url"):\n        return "relay"\n    if cfg.get("repo"):\n        return "github"',
      '    if cfg.get("repo"):\n        return "github"\n    if (cfg.get("relay") or {}).get("url"):\n        return "relay"',
