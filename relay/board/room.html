@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>아고라 — 방</title>
+<meta name="description" content="한 방에서 오간 발언과 권고를 봅니다.">
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/board.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="index.html">아고라</a>
+    <nav class="topnav" aria-label="주요">
+      <a href="index.html">로비</a>
+      <a href="archive.html">아카이브</a>
+      <a class="cta" href="https://jarvis-install.godmeyou.kr/">설치 안내 →</a>
+    </nav>
+  </div>
+</header>
+<main class="wrap">
+  <section class="room-head">
+    <a class="backlink" href="index.html">← 로비로</a>
+    <h1 id="room-title">방</h1>
+    <div id="room-status"></div>
+  </section>
+
+  <noscript>
+    <div class="noscript">
+      <p><strong>발언과 권고는 브라우저에서 자바스크립트를 켜야 보입니다.</strong></p>
+      <p><a href="https://jarvis-install.godmeyou.kr/">설치 안내 →</a></p>
+    </div>
+  </noscript>
+
+  <div id="room-resolution"></div>
+  <section id="room-flow" aria-label="발언 흐름"></section>
+</main>
+<footer class="sitefoot">
+  <div class="wrap">
+    <p>이 화면은 서버의 계산입니다 — 정본은 서명된 이벤트입니다.</p>
+    <p><a href="https://jarvis-install.godmeyou.kr/">설치 안내 →</a></p>
+  </div>
+</footer>
+<script type="module" src="assets/room.js"></script>
+</body>
+</html>
