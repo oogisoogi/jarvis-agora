@@ -525,7 +525,16 @@ async function postCheckpoint(req: Request, env: Env): Promise<Response> {
     fail(STATE_CONFLICT, "서명한 체크포인트가 지금 명부와 다르다",
       { signed: checkpoint, current: roster.checkpoint });
   }
-  const message = canonicalBytes({ checkpoint, purpose: "agora-roster-checkpoint-v1", signer });
+  // ★signed_at 은 **운영자가 정해 서명한 값**이고 서버 시계가 아니다(RL-6 · 643 상신 · master 판정 2026-09-06).
+  //   서명 대상에 넣지 않으면 「언제의 명부인가」를 서버가 마음대로 적을 수 있다 — 그러면 이 칸이
+  //   옮기려던 신뢰가 다시 릴레이에게 돌아온다(§3-6b 가 서버 서명을 금지한 것과 같은 이유다).
+  const signedAt = needStr(body, "signed_at");
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(signedAt)) {
+    fail(ARGUMENT, "signed_at 은 밀리초 고정폭 ISO 여야 한다", { signed_at: signedAt });
+  }
+  const message = canonicalBytes({
+    checkpoint, purpose: "agora-roster-checkpoint-v1", signed_at: signedAt, signer,
+  });
   if (!hasArmor(signature)) fail(SIGNATURE, "서명이 없다", null);
   const checked = await checkSignatureBytes(message, parseArmored(signature), env.AGORA_NAMESPACE);
   if (!checked.ok) fail(SIGNATURE, "체크포인트 서명이 유효하지 않다", { why: checked.why });
@@ -533,7 +542,6 @@ async function postCheckpoint(req: Request, env: Env): Promise<Response> {
   if (!entry || entry.principal !== signer || entry.revoked) {
     fail(SIGNATURE, "그 키는 이 운영자의 키가 아니다", { why: "principal_mismatch" });
   }
-  const signedAt = nowIso();
   await env.DB.prepare(
     `INSERT INTO roster_checkpoints (checkpoint, signer, signature, signed_at)
      VALUES (?1,?2,?3,?4) ON CONFLICT(checkpoint) DO UPDATE SET
@@ -565,12 +573,14 @@ export default {
         if (m) {
           // ★사람이 이 주소를 브라우저로 열면 JSON 이 보였다 — 계약 §3-2 의 `url` 이 바로 이 경로다.
           //   Accept 로 갈라 브라우저만 보드 화면으로 보낸다(master 판정 2026-09-05).
+          //   ⚠목적지는 **확장자 없는 `/room`** 이다. 자산 라우팅(html_handling 기본 auto-trailing-slash)이
+          //     `/room.html` 을 다시 `/room` 으로 307 로 튕겨 한 홉이 더 생긴다(master 라이브 실측 2026-09-06).
           //   ⚠조각(#<message_id>)은 Location 에 안 붙인다. 조각은 브라우저가 서버에 보내지도 않고,
           //     넘겨받은 주소에 그대로 남긴다 — 여기서 붙이면 원래 조각을 덮어쓴다.
           //   ⚠D1 을 건드리기 전에 답한다: 화면으로 보낼 것에 질의를 쓰지 않는다(호출당 50개 예산).
           if (prefersHtml(req.headers.get("Accept"))) {
             return new Response(null, { status: 302,
-              headers: { location: "/room.html?id=" + m[1], ...corsHeaders(req, env) } });
+              headers: { location: "/room?id=" + m[1], ...corsHeaders(req, env) } });
           }
           return await roomStatus(req, env, m[1]);
         }

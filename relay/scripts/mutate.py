@@ -104,6 +104,11 @@ MUTATIONS = [
      '        created_at: existing.created_at, status: "already",\n',
      "harness", "이벤트 200 본문 = 계약 세 칸"),
 
+    ("M19 체크포인트 signed_at 결박 제거", "src/index.ts",
+     "    checkpoint, purpose: \"agora-roster-checkpoint-v1\", signed_at: signedAt, signer,",
+     '    checkpoint, purpose: "agora-roster-checkpoint-v1", signer,',
+     "harness", "signed_at 만 바꾼 재제출 = 401"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",
@@ -125,6 +130,18 @@ def run(kind: str) -> tuple[bool, str]:
 
 
 def main() -> int:
+    # ★로컬 D1 표가 없으면 기준선부터 500 으로 죽는다 — 그 실패는 「그물이 없다」가 아니라
+    #   「환경이 안 차려졌다」인데, 뮤테이션 결과표에서는 둘이 구별되지 않는다.
+    #   run-local.py 가 같은 점검을 하지만, mutate 를 단독으로 돌리는 경로가 있으므로 여기서도 알린다.
+    env0 = {k: v for k, v in os.environ.items() if k != "NODE_OPTIONS"}
+    probe = subprocess.run([os.path.join(RELAY, "node_modules/.bin/wrangler"), "d1", "execute",
+                            "agora-relay", "--local", "--command", "SELECT 1 FROM events LIMIT 1;"],
+                           cwd=RELAY, capture_output=True, text=True, env=env0)
+    if probe.returncode != 0 and "no such table" in (probe.stdout + probe.stderr):
+        print("로컬 D1 에 표가 없다 — run-local.py 가 첫 실행에서 먹인다(또는 직접):")
+        print("  cd relay && unset NODE_OPTIONS && "
+              "npx wrangler d1 migrations apply agora-relay --local")
+
     print("== 기준선(변이 없음) ==")
     base_h, _ = run("harness")
     base_v, _ = run("vitest")

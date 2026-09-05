@@ -656,12 +656,65 @@ def main():
     st, loc, _b = http_get_raw(args.base + "/rooms/" + room_live,
                                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
     record("브라우저형 Accept = 302", 302, st, "location=%s" % loc)
-    record("302 목적지 = 보드 방 화면", "/room.html?id=" + room_live, loc)
+    # ★확장자 없이 보낸다 — /room.html 은 자산 라우팅이 /room 으로 307 을 한 번 더 낸다(master 라이브 실측).
+    record("302 목적지 = 보드 방 화면", "/room?id=" + room_live, loc)
     st2, _l2, body2 = http_get_raw(args.base + "/rooms/" + room_live, "application/json")
     record("JSON형 Accept = 200(불변)", 200, st2,
            "room_id=%s" % (json.loads(body2).get("room_id") if body2.strip().startswith("{") else "?"))
     st3, _l3, _b3 = http_get_raw(args.base + "/rooms/" + room_live)
     record("Accept 없음 = 200(스크립트 불변)", 200, st3)
+
+    # 명부 체크포인트(§3-6b · RL-6) — 서명 대상에 signed_at 이 **결박**돼 있는가.
+    # ★측정 전제: 지금 명부 해시(current)를 서버가 준다. 그것을 못 받으면 아래 축은 무엇을 쟀는지 모른다.
+    code, cp0 = http("GET", args.base + "/participants/checkpoint")
+    record("측정 전제: 체크포인트 조회 200", 200, code)
+    current = cp0.get("current") if isinstance(cp0, dict) else None
+    record("측정 전제: 지금 명부 해시가 있다", True, bool(current), str(current)[:16] + "…")
+    record("아직 없을 때 = 200 + null(404 아님)", True, cp0.get("checkpoint") is None and cp0.get("stale") is True)
+
+    # ★운영자 표시는 **DB 쪽 일**이다(등록 API 로는 못 만든다 — 서버가 스스로 운영자를 임명하지 않는다).
+    #   실제 운영에서도 master 가 D1 에 직접 적는다. 시험에서도 같은 경로로 세운다.
+    subprocess.run([os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "node_modules/.bin/wrangler"), "d1", "execute", "agora-relay",
+                    "--local", "--command",
+                    "UPDATE participants SET is_operator=1 WHERE participant_id='%s'" % op["id"]],
+                   capture_output=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                   env={k: v for k, v in os.environ.items() if k != "NODE_OPTIONS"})
+    code, _cp = http("GET", args.base + "/participants/operators")
+    record("측정 전제: 그 참가자가 운영자다", True,
+           isinstance(_cp, str) and op["id"] in _cp, "operators 명부 렌더")
+
+    # ★해시를 **운영자 표시 뒤에** 다시 읽는다 — operators 도 명부의 일부라 표시 한 번에 체크포인트가 바뀐다.
+    #   앞에서 읽은 값으로 서명하면 409(지금 명부와 다르다)가 나고, 그것을 「결박이 깨졌다」로 오독하게 된다.
+    code, cp_now = http("GET", args.base + "/participants/checkpoint")
+    current = cp_now.get("current") if isinstance(cp_now, dict) else None
+    record("측정 전제: 표시 뒤 명부 해시가 갱신됐다", True,
+           bool(current) and current != cp0.get("current"), str(current)[:16] + "…")
+
+    signed_at = "2026-09-06T01:00:00.000Z"
+    cp_msg = {"checkpoint": current, "purpose": "agora-roster-checkpoint-v1",
+              "signed_at": signed_at, "signer": op["id"]}
+    cp_sig = sign_bytes(op["key"], canonical_bytes(cp_msg), args.workdir)
+    code, body = http("POST", args.base + "/participants/checkpoint", {
+        "checkpoint": current, "signer": op["id"], "signed_at": signed_at, "signature": cp_sig})
+    record("체크포인트 보관 = 201", 201, code,
+           "signed_at=%s" % (body.get("signed_at") if isinstance(body, dict) else "?"))
+    code, cp1 = http("GET", args.base + "/participants/checkpoint")
+    record("보관된 signed_at = 운영자가 서명한 값", signed_at,
+           cp1.get("signed_at") if isinstance(cp1, dict) else "?")
+    record("지금 명부와 같으면 stale=False", False, cp1.get("stale") if isinstance(cp1, dict) else "?")
+
+    # ★결박 증명 — **같은 서명**에 signed_at 만 다른 값으로 보내면 거부돼야 한다.
+    #   서명 대상에서 signed_at 이 빠져 있으면 이 요청이 통과한다(= 서버가 시각을 마음대로 적을 수 있다).
+    code, body = http("POST", args.base + "/participants/checkpoint", {
+        "checkpoint": current, "signer": op["id"],
+        "signed_at": "2026-01-01T00:00:00.000Z", "signature": cp_sig})
+    record("signed_at 만 바꾼 재제출 = 401", 401, code,
+           "code=%s" % (body.get("code") if isinstance(body, dict) else "?"))
+    code, body = http("POST", args.base + "/participants/checkpoint", {
+        "checkpoint": current, "signer": op["id"], "signed_at": "2026-09-06", "signature": cp_sig})
+    record("signed_at 서식 오류 = 400", 400, code,
+           "code=%s" % (body.get("code") if isinstance(body, dict) else "?"))
 
     # 파생 캐시 자가치유(R-7) — 캐시를 지워도 조회가 다시 채운다
     subprocess.run([os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
