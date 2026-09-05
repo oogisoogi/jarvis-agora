@@ -62,7 +62,9 @@ export const KIND = {
 //   빈칸으로 삼키지도 않는다(BOARD.md §4-1·§4-2 마지막 줄).
 export function labelOf(table, key) {
   if (key === null || key === undefined || key === '') return null;
-  const hit = table[key];
+  // ★내장 이름(__proto__·constructor …)이 값으로 오면 표에 없는데도 무언가가 잡힌다.
+  //   「표에 있는가」는 **표가 직접 가진 칸인가**로 물어야 한다.
+  const hit = Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
   if (hit === undefined) return String(key);
   return typeof hit === 'string' ? hit : hit.label;
 }

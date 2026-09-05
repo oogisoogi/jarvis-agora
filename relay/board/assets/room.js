@@ -16,6 +16,7 @@ import {
 } from './render.js';
 import { verdictBadgesOn } from './flags.js';
 import { parsePost } from './parse.js';
+import { isHidden } from './render.js';
 
 const titleEl  = document.getElementById('room-title');
 const statusEl = document.getElementById('room-status');
@@ -38,9 +39,15 @@ function httpText(e, what) {
   return `${what}을(를) 가져오지 못했습니다. 연결을 확인하고 새로 고쳐 주세요.`;
 }
 
-/** 제목은 방 상태 응답에 없다 — genesis 이벤트의 payload.title 이 정본이다. */
+/**
+ * 제목은 genesis 이벤트의 payload.title 에서 읽는다.
+ * ★**가려진 항목은 건너뛴다.** 안 그러면 서버가 격리했거나 경합에 밀어낸 위조 genesis 의 제목이
+ *   방 제목과 브라우저 탭 제목이 된다 — 「가린 글의 본문은 꺼내지 않는다」가 제목 칸으로 우회된다.
+ *   (이 화면에서 가림 규율이 새는 자리는 본문만이 아니다 · 이종 검토 HIGH 지적 2026-09-06)
+ */
 function titleFromEvents(items) {
   for (const item of items) {
+    if (isHidden(item)) continue;
     const { event } = parsePost(typeof item.body === 'string' ? item.body : '');
     if (event && event.kind === 'genesis') {
       const t = event.payload && event.payload.title;
@@ -60,6 +67,7 @@ async function drawStatus() {
     chairResolved(null);
     // ★배지는 자동으로 꺼진다 — 서버가 말한 적 없으면 안 그린다(성찰 F-2).
     statusEl.appendChild(errorLine(httpText(e, `${NOUN.room} 상태`)));
+    statusEl.removeAttribute('aria-busy');   // 오류도 「다 그린 상태」다 — 안 내리면 계기가 영영 기다린다
     return;
   }
   chairResolved(typeof room.chair === 'string' ? room.chair : null);

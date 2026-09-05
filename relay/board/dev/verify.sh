@@ -241,5 +241,26 @@ sys.exit(0 if ok else 1)"; then
   fi
 fi
 
+echo "== 10. 오류 화면도 「다 그렸다」고 말하는가 =="
+if [ -x "$CHROME" ]; then
+  PORT=$(free_port)
+  SRV=$(start_relay "$PORT") || fail "가짜 릴레이가 안 떴다"
+  if [ -n "${SRV:-}" ]; then
+    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room?id=ffffffffffffffffffffffffffffffff" 1440 "" > "$OUT/err.json" 2>/dev/null
+    kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+    if python3 -c "
+import json,sys
+d=json.load(open('$OUT/err.json'))
+notes=' '.join(d['notes'])
+ok = d['settled'] is True and '찾지 못했습니다' in notes
+print('      정착', d['settled'], '· 알림', len(d['notes']))
+sys.exit(0 if ok else 1)"; then
+      pass "없는 방에서도 오류를 말하고 정착 신고를 내린다"
+    else
+      fail "오류 화면이 「아직 그리는 중」으로 남았거나 오류를 안 말했다"
+    fi
+  fi
+fi
+
 echo "== 결과: $([ $rc -eq 0 ] && echo PASS || echo FAIL) =="
 exit $rc

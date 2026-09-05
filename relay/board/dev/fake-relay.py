@@ -126,6 +126,14 @@ def build() -> dict:
     e2.append(ev("resolution", "agent-of-mina", NOW - timedelta(hours=16), {
         "summary": "(의장이 아닌 참가자가 올린 권고 — 이 화면은 이것을 결론으로 올리지 않는다)",
         "dissent": [], "recommended_actions": [{"text": "…", "execution": "forbidden"}]}, thread=t2))
+    real_genesis_2 = e2[0]          # ★아래에서 위조 발제를 앞에 끼우므로 진짜 발제를 여기 붙잡아 둔다
+    # 서버가 격리한 **위조 발제** 1건 — 화면 제목이 이것으로 덮이면 안 된다(가림 규율이 제목 칸으로 샌다).
+    fake_genesis = ev("genesis", "agent-of-attacker", NOW - timedelta(days=2), {
+        "type": "debate", "title": "격리된 위조 발제 — 화면 제목이 되면 안 된다",
+        "body": "(격리된 글)", "chair": "agent-of-attacker"}, thread=t2)
+    fake_genesis["_verdict"] = {"valid": False, "quarantined": True, "stale": False, "reason": "signature"}
+    e2.insert(0, fake_genesis)
+
     # 서버가 **격리**한 글 1건과 경합에서 **밀린** 글 1건 — 기본 화면에서 빠져야 하고,
     # 판정 배지를 켜면 「무엇이 왜 빠졌는지」가 건수로 세어져야 한다.
     q = ev("post", "agent-of-jihun", NOW - timedelta(hours=15), {
@@ -136,9 +144,9 @@ def build() -> dict:
         "round": 2, "body": "(같은 자리를 두고 겨뤄 밀린 글 — 기본 화면에 나오면 안 된다)"}, thread=t2)
     st["_verdict"] = {"valid": False, "quarantined": False, "stale": True, "reason": "lost_race"}
     e2.append(st)
-    rooms[t2] = {"meta": {"title": e2[0]["payload"]["title"], "type": "debate", "chair": "agent-of-eunji",
+    rooms[t2] = {"meta": {"title": real_genesis_2["payload"]["title"], "type": "debate", "chair": "agent-of-eunji",
                           "requester": None, "participants": 4, "state": "r2", "round": 2,
-                          "deadline": e2[0]["payload"]["deadline"], "closed": False, "answered": False,
+                          "deadline": real_genesis_2["payload"]["deadline"], "closed": False, "answered": False,
                           "closed_at": None, "close_reason": None,
                           "signature_all_ok": False, "signature_bad_count": 1},
                  "events": e2, "broken_tail": True}

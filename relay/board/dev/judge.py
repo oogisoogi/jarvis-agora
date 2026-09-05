@@ -17,6 +17,8 @@ MUST_HAVE_FIELD = {"room-resolved": "의장", "room-r2": "의장", "lobby": "의
 #   그 화면에 상자가 뜨면 이 화면이 남의 글을 방의 결론이라고 말한 것이다.
 MUST_HAVE_RESOLUTION = {"room-resolved"}
 MUST_NOT_HAVE_RESOLUTION = {"room-r2"}
+# ★가려진 글의 **제목**도 새면 안 된다(본문만 막으면 제목 칸으로 우회된다 · 이종 검토 2026-09-06).
+FORBIDDEN_IN_TITLE = "격리된 위조 발제"
 # ★판정 배지는 플래그 뒤에 있고 **기본은 꺼짐**이다 — 기본 측정 화면에 하나라도 있으면 기본값이 샌 것이다.
 #   (켠 화면은 파일 이름이 -on- 이라 이 표에 안 들어온다.)
 
@@ -53,6 +55,8 @@ for f in files:
     for w in PLACEHOLDER_WORDS:
         if w in text: bad.append(f"자리 메움 문구 「{w}」가 화면에 있다")
     stem = f.stem.rsplit("-", 1)[0]
+    if FORBIDDEN_IN_TITLE in (d.get("title") or ""):
+        bad.append("가려진 글의 제목이 화면 제목이 됐다")
     vb = d.get("verdictBadges") or []
     if vb: bad.append(f"판정 배지가 기본 화면에 {len(vb)}개 떠 있다(기본값 off 가 새고 있다)")
     box = d.get("hasResolutionBox")

@@ -76,6 +76,16 @@ MUTATIONS = [
      "export function hiddenSummaryLine(hiddenReasons) {\n  if (!hiddenReasons || hiddenReasons.size === 0) return null;",
      "export function hiddenSummaryLine(hiddenReasons) {\n  if (hiddenReasons) return null;\n  if (!hiddenReasons || hiddenReasons.size === 0) return null;",
      "켠 화면에서 「무엇을 왜 가렸는지」가 사라지면 적색이 나는가"),
+    ("가려진 글의 제목을 방 제목으로 씀",
+     "relay/board/assets/room.js",
+     "    if (isHidden(item)) continue;\n    const { event } = parsePost(typeof item.body === 'string' ? item.body : '');",
+     "    const { event } = parsePost(typeof item.body === 'string' ? item.body : '');",
+     "가림 규율이 제목 칸으로 새면 적색이 나는가"),
+    ("오류 화면이 aria-busy 를 안 내림",
+     "relay/board/assets/room.js",
+     "    statusEl.removeAttribute('aria-busy');   // 오류도 「다 그린 상태」다 — 안 내리면 계기가 영영 기다린다",
+     "    // (변이) aria-busy 를 안 내린다",
+     "오류 화면이 「아직 그리는 중」으로 남으면 적색이 나는가"),
 ]
 
 # 두 파일을 함께 고쳐야 성립하는 변이(집계는 같고 배치만 어긋난다)
