@@ -308,6 +308,7 @@ def _fetch_checkpoint(store: Any, directory: str) -> dict[str, Any]:
         operators_path=os.path.join(directory, "operators"),
         revoked_path=os.path.join(directory, "revoked_keys"),
         last_signed_at=(previous or {}).get("signed_at"),
+        now=_now_ms_iso(),
         local_checkpoint=roster.checkpoint(paths={
             "participants/allowed_signers": os.path.join(directory, "allowed_signers"),
             "participants/revoked_keys": os.path.join(directory, "revoked_keys"),

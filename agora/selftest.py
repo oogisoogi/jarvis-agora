@@ -4399,7 +4399,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                    "M339-checkpoint-signed-at-unbound", "M340-checkpoint-verdict-not-wired",
                    "M343-checkpoint-accepts-rollback", "M344-checkpoint-writes-before-verify",
                    "M345-issue-signs-my-copy", "M346-issue-skips-operator-check",
-                   "M347-checkpoint-door-open", "M348-checkpoint-time-format-unchecked"),
+                   "M347-checkpoint-door-open", "M348-checkpoint-time-format-unchecked",
+                   "M350-checkpoint-accepts-far-future"),
     "소유증명": ("M312-register-drops-proof", "M313-register-door-accepts-extra-fields",
                  "M323-register-signs-four-fields", "M324-register-purpose-not-pinned",
                  "M333-relay-register-without-proof"),
@@ -4410,7 +4411,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     # ★도구 층이 아니라 **진입점**을 재는 축. 여기가 비어 있어서 CLI 가 플래그를 거부하는 채로 초록이었다.
     "진입점": ("M322-cli-entry-rejects-flags", "M342-cli-drops-positional"),
     # ★r4 — 리허설 하네스. **기본값이 안전 쪽인가**가 이 축의 전부다.
-    "리허설": ("M349-rehearsal-defaults-to-live",),
+    "리허설": ("M349-rehearsal-defaults-to-live", "M351-rehearsal-skips-missing-post",
+               "M352-rehearsal-skips-undelivered"),
     # ★서버가 계산해 준 판정을 **대조 축으로만** 쓰는 자리(계약 §3-2·§3-5). 여기가 비면
     #   「참고값」이 슬며시 근거가 되어도 아무도 모른다.
     "파생대조": ("M331-relay-drops-verdict",),
@@ -9746,6 +9748,27 @@ def _case_checkpoint_signature_is_verified() -> None:
         last_signed_at="2026-09-06T01:00:00.000Z")
     if out["verified"] or out["why"] != "signed_at_regressed":
         raise AssertionError(f"되돌리기를 통과시켰다: {out}")
+    # ⑹-a **먼 미래 값은 기준으로 삼지 않는다**(agy 2026-09-06 지적 · 수용): 시계가 틀어진 기계가
+    #   미래를 서명해 올리면 단조 규칙이 그 값을 기준선으로 삼아 **그 뒤를 영원히 거부**한다.
+    far = _signed_checkpoint(f["key_a"], checkpoint=local,
+                             signed_at="2027-01-01T00:00:00.000Z")
+    out = roster_mod.verify_checkpoint(
+        far, allowed_signers_path=paths["participants/allowed_signers"],
+        operators_path=paths["participants/operators"],
+        revoked_path=paths["participants/revoked_keys"],
+        now="2026-09-06T01:00:00.000Z")
+    if out["verified"] or out["why"] != "signed_at_in_future":
+        raise AssertionError(f"먼 미래 값을 받아들였다: {out}")
+    # ⑹-b 그러나 **과거 쪽에는 창을 두지 않는다** — 오래된 체크포인트는 정상이다(계약: 대부분 stale).
+    old_but_valid = _signed_checkpoint(f["key_a"], checkpoint=local,
+                                       signed_at="2026-01-01T00:00:00.000Z")
+    out = roster_mod.verify_checkpoint(
+        old_but_valid, allowed_signers_path=paths["participants/allowed_signers"],
+        operators_path=paths["participants/operators"],
+        revoked_path=paths["participants/revoked_keys"],
+        now="2026-09-06T01:00:00.000Z")
+    if not out["verified"]:
+        raise AssertionError(f"오래된 것을 위조로 읽었다(상시 경보의 씨앗이다): {out}")
     # ⑹ `signature` 가 문자열이 아니다 — **거부**해야지 터지면 안 된다(같은 검증의 지적).
     out = check(dict(good, signature=1234))
     if out["verified"] or out["why"] != "missing_field:signature":
@@ -10022,6 +10045,52 @@ def _case_contract_parity_with_relay_doc() -> None:
         row = re.search(rf"\|\s*{status}\s*\|\s*\**{code}\**\s*\|", text)
         if not row:
             raise AssertionError(f"상태→코드 표가 계약과 다르다: {status}→{code}")
+
+
+def _case_rehearsal_does_not_skip_the_receipt() -> None:
+    """리허설은 **못 한 것을 건너뛰지 않는다** — 못 했으면 실패로 적는다(agy 2026-09-06 봉합).
+
+    ★조건부로 단계를 빼면 그 실패가 「단계 없음」으로 사라지고 요약이 **실패 0** 으로 초록이 된다.
+      이 저장소가 계속 잡아 온 형태다: **안 잰 것과 통과한 것은 같은 칸에 적지 않는다.**
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "rehearsal_guard", os.path.join(_ROOT, "tools", "rehearsal.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for message_id, watched, why in ((None, {"delivered": 1}, "no_post_to_ack"),
+                                     ("a" * 32, {}, "nothing_delivered"),
+                                     ("a" * 32, None, "nothing_delivered")):
+        try:
+            module._ack_or_explain(None, message_id, watched)
+        except AgoraError as e:
+            if e.code != errors.PRECONDITION or (e.detail or {}).get("reason") != why:
+                raise AssertionError(f"사유가 다르다: {e.code} {e.detail}") from None
+        else:
+            raise AssertionError(f"못 한 것을 조용히 넘겼다: {message_id} {watched}")
+
+
+def _case_double_binds_proof_to_its_key() -> None:
+    """**더블도 「이 서명이 이 키의 것인가」를 본다**(agy 2026-09-06 지적 · 계약 §4).
+
+    ★`check-novalidate` 만 보면 「남의 공개키를 싣고 내 키로 서명」이 통과한다 — 소유 증명이
+      막으려던 바로 그것이다. 더블이 무르면 그 구멍은 **실물에서만** 드러난다(오늘 한 번 그랬다).
+    """
+    from agora import signer as signer_mod
+    f = _fixtures()
+    fake = _fake_relay()
+    raw = b"proof-bytes"
+    signature = signer_mod.sign_bytes(raw, f["key_a"])
+    with open(f["key_a"] + ".pub", encoding="utf-8") as fh:
+        pub_a = fh.read().strip()
+    with open(f["key_b"] + ".pub", encoding="utf-8") as fh:
+        pub_b = fh.read().strip()
+    if not fake._signature_matches(raw, signature, principal="operator-a",
+                                   allowed_signers=f"operator-a {pub_a}\n"):
+        raise AssertionError("자기 키로 만든 서명을 못 알아본다")
+    if fake._signature_matches(raw, signature, principal="operator-a",
+                               allowed_signers=f"operator-a {pub_b}\n"):
+        raise AssertionError("남의 공개키를 실었는데 통과시켰다")
 
 
 def _case_register_carries_proof_of_possession() -> None:
@@ -10635,6 +10704,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("체크포인트: 문은 신탁이 아니다", _case_checkpoint_door_is_not_a_signing_oracle, None),
     ("리허설: 하네스가 완주한다",     _case_rehearsal_harness_completes, None),
     ("계약: RELAY.md 와 대조",        _case_contract_parity_with_relay_doc, None),
+    ("리허설: 영수증을 안 건너뛴다",  _case_rehearsal_does_not_skip_the_receipt, None),
+    ("더블: 증명은 그 키의 것인가",   _case_double_binds_proof_to_its_key, None),
     ("S8: 8축이 그물을 갖는다",       _case_s8_axes_have_nets, None),
 )
 
@@ -10665,6 +10736,19 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        "signed_at": doc.get("signed_at"), "signer": doc.get("signer")})',
      '        "signed_at": "", "signer": doc.get("signer")})',
      "명부: 체크포인트 서명 검증"),
+    # ★agy 적대검증 r4 봉합(2026-09-06).
+    ("M350-checkpoint-accepts-far-future", "agora/roster.py",
+     '    if now and doc["signed_at"] > _plus_hours(now, FUTURE_GRACE_HOURS):',
+     '    if False:',
+     "명부: 체크포인트 서명 검증"),
+    ("M351-rehearsal-skips-missing-post", "tools/rehearsal.py",
+     '    if not message_id:',
+     '    if False:',
+     "리허설: 영수증을 안 건너뛴다"),
+    ("M352-rehearsal-skips-undelivered", "tools/rehearsal.py",
+     '    if not (watched or {}).get("delivered"):',
+     '    if False:',
+     "리허설: 영수증을 안 건너뛴다"),
     ("M349-rehearsal-defaults-to-live", "tools/rehearsal.py",
      'def run(*, live: bool = False, relay_url: str | None = None,',
      'def run(*, live: bool = True, relay_url: str | None = None,',

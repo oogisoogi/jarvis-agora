@@ -237,6 +237,34 @@ def _checkpoint_canonical(payload: dict[str, Any]) -> bytes:
                       separators=(",", ":")).encode("utf-8")
 
 
+def _event_gate(payload: dict[str, Any]) -> tuple[int, str, dict[str, Any]] | None:
+    """서명 앞에 오는 값싼 검사들 — 계약 §3-2 의 **1(크기) · 4(결박) · 5(genesis 정합)**.
+
+    ★순서가 곧 방어다: 크기·결박은 한 건만 보고 답할 수 있고, 서명 검증보다 훨씬 싸다.
+    ⚠**여기 없는 것(정직)**: 스키마 9종 닫힌 검증(3)과 스크럽 백스톱(7)은 더블에 안 넣었다 —
+      그 둘은 **클라이언트가 서명 전에 이미 강제**하고, 더블에서 다시 하려면 우리 모듈을 그대로
+      불러야 해서 「우리 계산으로 우리 계산을 재는」 대조가 된다. 그 한계를 여기 적어 둔다.
+    """
+    from agora.event import parse_post
+    body = payload.get("body", "")
+    if len(body.encode("utf-8")) > 64 * 1024:
+        return (413, "크기 상한 초과", {"bytes": len(body.encode("utf-8"))})
+    try:
+        event = parse_post(body)["event"]
+    except Exception:            # noqa: BLE001 — 서식은 다음 관문이 본다
+        return None
+    for field in ("thread_id", "category"):
+        sent, signed = payload.get(field), (event.get(field) if field != "category" else None)
+        if field == "thread_id" and sent != event.get("thread_id"):
+            return (400, "요청 인자가 서명된 값과 다르다",
+                    {"field": field, "sent": sent, "signed": event.get("thread_id")})
+    is_genesis = bool(payload.get("is_genesis"))
+    if is_genesis != (event.get("kind") == "genesis"):
+        return (400, "is_genesis 가 서명된 kind 와 안 맞는다",
+                {"is_genesis": is_genesis, "kind": event.get("kind")})
+    return None
+
+
 def _event_verdict(body: str, allowed_signers: str) -> tuple[str, str]:
     """이벤트 한 건의 서명 판정 — `ok` / `BAD` / `unsigned`(계약 §4 의 3값 그대로).
 
@@ -277,8 +305,15 @@ def _event_verdict(body: str, allowed_signers: str) -> tuple[str, str]:
     return "ok", "verified"
 
 
-def _signature_matches(raw: bytes, signature: str) -> bool:
-    """서명이 **그 바이트**에 대한 것인가 — 명부와 무관한 질문(`-Y check-novalidate`)."""
+def _signature_matches(raw: bytes, signature: str, *,
+                      principal: str | None = None,
+                      allowed_signers: str | None = None) -> bool:
+    """서명이 **그 바이트**에 대한 것인가 — 그리고 `principal` 이 주어지면 **그 이름의 키인가**.
+
+    ★agy 적대검증 2026-09-06 지적(수용): `check-novalidate` 만 보면 「남의 공개키를 싣고 내 키로
+      서명」이 통과한다(등록의 소유 증명이 막으려던 바로 그것). 그래서 이름이 있는 경우에는
+      `ssh-keygen -Y verify -I <principal>` 까지 본다 — 계약 §4 가 하는 일 그대로다.
+    """
     import subprocess
     import tempfile
     if not signature or "BEGIN SSH SIGNATURE" not in signature:
@@ -287,11 +322,22 @@ def _signature_matches(raw: bytes, signature: str) -> bool:
         sig_path = os.path.join(tmp, "proof.sig")
         with open(sig_path, "w", encoding="utf-8") as fh:
             fh.write(signature)
-        proc = subprocess.run(
+        checked = subprocess.run(
             ["ssh-keygen", "-Y", "check-novalidate", "-n", "jarvis-agora@godmeyou.kr",
              "-s", sig_path],
             input=raw, capture_output=True, timeout=30)
-    return proc.returncode == 0
+        if checked.returncode != 0:
+            return False
+        if principal is None or allowed_signers is None:
+            return True
+        roster_path = os.path.join(tmp, "allowed_signers")
+        with open(roster_path, "w", encoding="utf-8") as fh:
+            fh.write(allowed_signers)
+        verified = subprocess.run(
+            ["ssh-keygen", "-Y", "verify", "-n", "jarvis-agora@godmeyou.kr",
+             "-f", roster_path, "-I", principal, "-s", sig_path],
+            input=raw, capture_output=True, timeout=30)
+        return verified.returncode == 0
 
 
 def _message_id_of(body: str) -> str | None:
@@ -467,6 +513,10 @@ class _Handler(BaseHTTPRequestHandler):
             #   통째로 빼먹었고, 그래서 「`from` 은 의장인데 서명은 남의 키」인 글이 초록으로
             #   지나갔다 — **실물은 401(principal_mismatch)로 거부한다**(2026-09-06 라이브 실측).
             #   ⇒ 더블이 계약을 덜 지키면 그만큼 시험이 공허해진다. 같은 병의 세 번째 판이다.
+            gate = _event_gate(payload)      # 계약 §3-2 검사 1·4·5(크기·결박·genesis 정합)
+            if gate:
+                self._fail(gate[0], gate[1], **gate[2])
+                return
             if self.relay.verify_events:
                 verdict, why = _event_verdict(payload.get("body", ""),
                                               self.relay.roster_text["allowed_signers"])
@@ -503,7 +553,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._fail(403, "운영자 명부에 없다", why="not_an_operator")
                 return
             if not _signature_matches(_checkpoint_canonical(payload),
-                                      payload.get("signature", "")):
+                                      payload.get("signature", ""),
+                                      principal=signer,
+                                      allowed_signers=self.relay.roster_text["allowed_signers"]):
                 self._fail(401, "서명이 계약 바이트와 안 맞는다", why="principal_mismatch")
                 return
             current = _roster_digest(self.relay.roster_text)
@@ -524,7 +576,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self._fail(401, "소유 증명 서명이 없다", reason="proof_required")
                 return
             if self.relay.require_proof and not _signature_matches(
-                    _register_canonical(payload), payload.get("signature", "")):
+                    _register_canonical(payload), payload.get("signature", ""),
+                    principal=pid,
+                    # ★**제출된 공개키**로 임시 명부를 만들어 대조한다 — 「이 서명이 이 키의 것인가」를
+                    #   보는 것이 소유 증명의 전부다(남의 키를 싣고 내 키로 서명하면 여기서 걸린다).
+                    allowed_signers=f"{pid} {payload.get('public_key', '').strip()}\n"):
                 # ★★**다섯 칸 바이트에 대한 서명인가**(계약 §3-1). 네 칸만 서명한 클라는 여기서 걸린다 —
                 #   서명 자체는 유효한데 **다른 문서의 서명**이다.
                 self._fail(401, "소유 증명이 계약 바이트와 안 맞는다",

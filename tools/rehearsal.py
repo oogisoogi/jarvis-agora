@@ -175,9 +175,11 @@ def run(*, live: bool = False, relay_url: str | None = None,
             if item.get("kind") == "post" and item.get("from") == chair:
                 target_message = item.get("message_id")
                 break
-        if target_message and (watched or {}).get("delivered"):
-            rec.step("ack(수신 영수증)", reader,
-                     lambda: tools.ack(ctxs[reader], message_id=target_message))
+        # ★★**조용히 건너뛰지 않는다**(agy 적대검증 2026-09-06 지적 · 수용): 앞 단계가 아무것도
+        #   건네지 못했을 때 ack 단계를 빼면, 실패가 「단계 없음」으로 사라지고 요약은 **실패 0**
+        #   으로 초록이 된다. 못 하는 상황이면 **못 했다고 적는다.**
+        rec.step("ack(수신 영수증)", reader,
+                 lambda: _ack_or_explain(ctxs[reader], target_message, watched))
 
         # ★★**말하는 사람을 되돌린다.** 위에서 읽는 참가자로 바꿔 놓고 그대로 의장 일을 하면,
         #   이벤트의 `from` 은 의장인데 서명은 남의 키가 된다 — 가짜 릴레이는 서명을 안 보고
@@ -198,6 +200,17 @@ def run(*, live: bool = False, relay_url: str | None = None,
         rec.step("threads(종결 확인)", chair,
                  lambda: tools.threads(ctxs[chair]), store=stores[chair])
         return _finish(rec, started_at, live, url, room, out_path, workdir)
+
+
+def _ack_or_explain(ctx: Any, message_id: str | None, watched: dict[str, Any] | None) -> Any:
+    """영수증을 쓴다 — 쓸 수 없으면 **그 사실을 실패로 올린다**(건너뛰지 않는다)."""
+    if not message_id:
+        raise AgoraError(errors.PRECONDITION, "ack 할 글을 못 찾았다 — 읽기 단계가 비었다",
+                         {"reason": "no_post_to_ack"})
+    if not (watched or {}).get("delivered"):
+        raise AgoraError(errors.PRECONDITION, "감시가 아무것도 건네지 않았다 — ack 할 것이 없다",
+                         {"reason": "nothing_delivered", "watch": watched})
+    return tools.ack(ctx, message_id=message_id)
 
 
 def _watch_once(ctx: Any, directory: str) -> dict[str, Any]:
