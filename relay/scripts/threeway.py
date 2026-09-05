@@ -352,6 +352,17 @@ def main():
     record("경로2c 명부 밖 키(결박 통과 후)", 401, code,
            (body.get("detail", {}) or {}).get("why", "") if isinstance(body, dict) else "")
 
+    # (2d) ★사칭 — **등록된 키**로 서명하고 `from` 만 남의 이름으로 적는다.
+    #      앞의 2b·2c 는 「명부 밖 키」만 재고 이 축을 한 번도 안 쟀다(뮤테이션 M3 가 살아남아 드러났다).
+    b4c = Builder(t4, args.workdir, allowed, revoked, [op["id"]], now)
+    ev_imp, _sig_unused = b4c.make(alice, "genesis", {"type": "knowhow", "title": "사칭",
+                                                      "body": "본문", "envelope": env})
+    ev_imp["from"] = bob["id"]                       # 이름만 바꾸고
+    sig_imp = sign_bytes(alice["key"], canonical_bytes(ev_imp), args.workdir)   # 서명은 alice 키로
+    code, body = send(args.base, t4, "knowhow", "사칭", ev_imp, sig_imp, True)
+    record("경로2d 사칭(등록된 키 + 남의 이름)", 401, code,
+           (body.get("detail", {}) or {}).get("why", "") if isinstance(body, dict) else "")
+
     # (3) 사슬 충돌 — 세트2 에서 진 글이 stale 로 적재됐다(거절이 아니다).
     code, evs = http("GET", args.base + "/rooms/" + results[1][1] + "/events?limit=50")
     stale_n = sum(1 for i in evs["items"] if i["stale"]) if code == 200 else -1
