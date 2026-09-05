@@ -209,12 +209,16 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
     fail(ARGUMENT, "category 가 genesis 의 유형과 다르다",
       { category, type: event.payload.type });
   }
+  // ★★래퍼의 `title` 은 **서명 대상이 아니다.** 그대로 저장하면 보드에 뜨는 방 제목을
+  //   서명 밖에서 바꿔치기할 수 있다(agy 2라운드 지적 2). 서명된 값과 같을 때만 받는다.
+  if (isGenesis && title !== event.payload.title) {
+    fail(ARGUMENT, "title 이 서명된 제목과 다르다",
+      { arg: title, signed: event.payload.title });
+  }
 
-  // (6) 봉투·스크럽 백스톱 — fail-closed
-  const bundle = await scrubBundle();
-  scrub.enforce(event.payload, bundle);
-
-  // (7) 서명·명부·폐기
+  // (6) 서명·명부·폐기 — ★**스크럽보다 먼저** 한다(agy 2라운드 지적 3).
+  //   스크럽은 정규식 다발이라 상대적으로 비싸다. 서명 없는 쓰레기를 그 앞에 통과시키면
+  //   **아무나 서버 CPU 를 태울 수 있다.** 서명 검증은 고정 비용이고 자격을 먼저 가른다.
   const roster = await rosterView(env.DB);
   if (!hasArmor(parsed.signature)) fail(SIGNATURE, "서명이 없다", { from: event.from });
   const sig = parseArmored(parsed.signature as string);
@@ -231,6 +235,10 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
     fail(SIGNATURE, "그 키는 이 참가자의 키가 아니다",
       { verdict: "unsigned", why: "principal_mismatch" });
   }
+
+  // (7) 봉투·스크럽 백스톱 — fail-closed. 자격을 가른 뒤에 내용을 본다.
+  const bundle = await scrubBundle();
+  scrub.enforce(event.payload, bundle);
 
   // (8) 멱등 — 같은 (from, message_id) + 같은 해시는 새 행을 만들지 않는다.
   // ★★속도 제한**보다 먼저** 본다(agy 지적 2 · 2026-09-05). 뒤에 두면 **재시도가 발언 예산을 깎는다** —
@@ -269,13 +277,31 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
 
   // (10) 적재
   const createdAt = nowIso();
-  const inserted = await env.DB.prepare(
+  let inserted: { seq: number } | null = null;
+  try {
+    inserted = await env.DB.prepare(
     `INSERT INTO events (thread_id, message_id, from_id, kind, prev, hash, canonical, signature,
        category, title, is_genesis, created_at)
      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) RETURNING seq`
-  ).bind(threadId, event.message_id, event.from, event.kind, event.prev, hash, parsed.canonical,
-         parsed.signature, category, title, isGenesis ? 1 : 0, createdAt)
-   .first<{ seq: number }>();
+    ).bind(threadId, event.message_id, event.from, event.kind, event.prev, hash, parsed.canonical,
+           parsed.signature, category, title, isGenesis ? 1 : 0, createdAt)
+     .first<{ seq: number }>();
+  } catch (e) {
+    // ★동시에 **같은** 이벤트가 둘 들어오면 하나는 UNIQUE(from,message_id) 에 걸린다.
+    //   그것은 실패가 아니라 **멱등이 뒤늦게 성립한 것**이다 — 500 으로 내보내면
+    //   호출자는 재시도해야 할지 말지 알 수 없다(agy 2라운드 논쟁점 3).
+    const again = await env.DB.prepare(
+      "SELECT seq, hash, created_at FROM events WHERE from_id = ?1 AND message_id = ?2"
+    ).bind(event.from, event.message_id).first<{ seq: number; hash: string; created_at: string }>();
+    if (again && again.hash === hash) {
+      return json({
+        event_id: eventIdOf(again.seq),
+        url: roomUrl(req, threadId, event.message_id),
+        created_at: again.created_at, status: "already",
+      }, 200);
+    }
+    throw e;
+  }
   if (!inserted) fail(STORE, "적재 결과를 읽지 못했다", null);
 
   // (11) 파생 — 원장은 그대로 두고 **판정만** 드러낸다.

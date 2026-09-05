@@ -118,6 +118,8 @@ export function parsePublicKeyBlob(blob: Uint8Array): { type: string; key: Uint8
   const r = new Reader(blob);
   const type = dec.decode(r.str());
   const key = r.str();
+  // ★끝에 남은 바이트는 조용히 넘기지 않는다 — 파서가 「다 읽었다」를 말할 수 있어야 한다.
+  if (r.rest !== 0) fail(SIGNATURE, "공개키 blob 뒤에 잉여 바이트가 있다", { rest: r.rest });
   return { type, key };
 }
 
@@ -125,6 +127,7 @@ function parseSignatureBlob(blob: Uint8Array): { type: string; sig: Uint8Array }
   const r = new Reader(blob);
   const type = dec.decode(r.str());
   const sig = r.str();
+  if (r.rest !== 0) fail(SIGNATURE, "서명 blob 뒤에 잉여 바이트가 있다", { rest: r.rest });
   return { type, sig };
 }
 

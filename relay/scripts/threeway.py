@@ -324,6 +324,23 @@ def main():
               % throttled)
     results.append(("세트4 debate 전구간", t7, b7))
 
+    # ── 세트 5: vote 가 낀 사슬 ────────────────────────────────────────────
+    # ★agy 2라운드 지적 1 이 드러낸 축: vote 는 상태도 **head 도** 바꾸지 않는다.
+    #   전진시키면 vote 가 낀 사슬에서 state_hash 가 갈라진다 — 앞선 4세트에는 vote 가 없어 안 보였다.
+    print("\n== 세트 5: vote 가 낀 사슬(head 동결 축) ==")
+    t8 = new_id()
+    b8 = Builder(t8, args.workdir, allowed, revoked, [op["id"]], now)
+    b8.add(alice, "genesis", {"type": "problem", "title": "투표 낀 방",
+                              "body": "본문", "envelope": env})
+    p8, _ = b8.add(bob, "post", {"round": 0, "body": "답 후보"})
+    b8.add(bob, "vote", {"target": p8["message_id"], "value": 1})
+    b8.add(alice, "answer_selected", {"post_message_id": p8["message_id"]})
+    for ev, sig in b8.posted:
+        code, body = send(args.base, t8, "problem", "투표 낀 방", ev, sig, ev["kind"] == "genesis")
+        v = body.get("verdict", {}) if isinstance(body, dict) else {}
+        print("  %-16s -> %s %-11s %s" % (ev["kind"], code, v.get("reducer"), v.get("reason") or ""))
+    results.append(("세트5 vote 포함", t8, b8))
+
     # ── 3자 대조 ──────────────────────────────────────────────────────────
     print("\n== 3자 대조(파이썬 리듀서 == 서버 파생) ==")
     all_ok = True
@@ -480,9 +497,23 @@ def main():
     _tamper[10:14] = (0x7fffff00).to_bytes(4, "big")
     inflated = ("-----BEGIN SSH SIGNATURE-----\n"
                 + _b64.b64encode(bytes(_tamper)).decode() + "\n-----END SSH SIGNATURE-----\n")
-    code, body = send(args.base, tA, "knowhow", "길이 조작", evA, inflated, True)
+    # ★제목은 서명된 값 그대로 보낸다 — 안 그러면 **제목 결박이 먼저 걸려** 이 축이 아니라
+    #   다른 검사를 재게 된다(2026-09-05 실제로 그렇게 400 이 났다).
+    code, body = send(args.base, tA, "knowhow", "잘린 서명", evA, inflated, True)
     record("길이 필드 조작 = 401(500 아님)", 401, code,
+           "code=%s msg=%s" % (body.get("code") if isinstance(body, dict) else "?",
+                               (body.get("message") if isinstance(body, dict) else "")))
+
+    # (C) 래퍼 title 이 서명된 제목과 다르면 거부하는가(서명 밖 변조 차단)
+    tC = new_id()
+    bC = Builder(tC, args.workdir, allowed, revoked, [op["id"]], now)
+    evC, sigC = bC.make(alice, "genesis", {"type": "knowhow", "title": "진짜 제목",
+                                           "body": "본문", "envelope": env})
+    code, body = send(args.base, tC, "knowhow", "바꿔치기한 제목", evC, sigC, True)
+    record("래퍼 제목 변조 = 400", 400, code,
            "code=%s" % (body.get("code") if isinstance(body, dict) else "?"))
+    code, body = send(args.base, tC, "knowhow", "진짜 제목", evC, sigC, True)
+    record("같은 이벤트 + 올바른 제목 = 201", 201, code)
 
     # (B) 멱등 재시도가 발언 예산을 깎지 않는가 — 깎으면 정상 발언이 429 로 막힌다.
     tB = new_id()
@@ -503,7 +534,7 @@ def main():
 
     print("\n== 페이지·경계 축 ==")
     # 이벤트 페이지 — 나눠 받아도 전건이고 겹치지 않는다
-    t_full = results[3][1]      # 세트4(debate) = 이벤트가 가장 많다
+    t_full = results[3][1]      # 세트4(debate) = 이벤트가 가장 많다(세트5 추가 후에도 인덱스 3)
     code, one = http("GET", args.base + "/rooms/" + t_full + "/events?limit=200")
     total = len(one["items"]) if code == 200 else -1
     seen_ids, pages, cursor = [], 0, None

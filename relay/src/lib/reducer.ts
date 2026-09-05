@@ -316,8 +316,10 @@ export async function apply(ordered: OrderResult, opts: {
 
     if (kind === "vote") {
       // 구속력 없음 — 받아 두되 상태를 바꾸지 않는다.
+      // ★★head 도 전진시키지 않는다. 파이썬 원본이 `continue` 로 루프 끝의 head 갱신을 건너뛴다
+      //   (agora/reducer.py 의 vote 분기). 여기서 전진시키면 vote 가 낀 사슬에서
+      //   `state_hash` 가 갈라져 3자 대조가 그 자리에서 깨진다(agy 2라운드 지적 1 · 2026-09-05).
       accepted.push(entry);
-      state.head = entry.hash;
       continue;
     }
 

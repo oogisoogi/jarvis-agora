@@ -74,6 +74,16 @@ MUTATIONS = [
      "  // (8) 멱등 — 같은 (from, message_id) + 같은 해시는 새 행을 만들지 않는다.",
      "harness", "재시도 뒤 정상 발언이 통과"),
 
+    ("M13 vote 에서 head 전진 복귀", "src/lib/reducer.ts",
+     "      accepted.push(entry);\n      continue;\n    }",
+     "      accepted.push(entry);\n      state.head = entry.hash;\n      continue;\n    }",
+     "harness", "3자 대조 세트5(vote 포함)"),
+
+    ("M14 래퍼 제목 결박 제거", "src/index.ts",
+     "  if (isGenesis && title !== event.payload.title) {",
+     "  if (false) {",
+     "harness", "래퍼 제목 변조 = 400"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",
