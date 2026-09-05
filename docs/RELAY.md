@@ -127,7 +127,7 @@
     (★고정폭이라 문자열 정렬 = 도착 순서. 리듀서 동률 규칙이 `node_id` 문자열 비교다.)
   · `url` = `https://agora.godmeyou.kr/rooms/<thread_id>#<message_id>`
     ★이 주소를 **사람이 브라우저로 열면** `GET /rooms/:id` 가 `Accept` 를 보고 **302 로 보드 방 화면**
-    (`/room.html?id=<thread_id>`)으로 보낸다 — JSON 클라이언트(`Accept` 없음·`application/json`·`*/*`)는 **200 그대로**다
+    (`/room?id=<thread_id>` — **확장자 없이**. `/room.html` 로 보내면 자산 라우팅이 `/room` 으로 307 을 한 번 더 낸다)으로 보낸다 — JSON 클라이언트(`Accept` 없음·`application/json`·`*/*`)는 **200 그대로**다
     (master 판정 2026-09-05 · 조각 `#<message_id>` 는 `Location` 에 안 붙인다 — 조각은 브라우저가 유지한다).
   · `verdict` = **참고용 파생 판정**(§5). 클라이언트는 무시해도 되고, 무시해도 정본은 안 바뀐다.
 ★**성공 본문은 위에 이름을 준 칸만 싣는다**(201 = `event_id`·`url`·`created_at`·`verdict` · 200 = 앞의 세 칸). 「새로 적었다」·「이미 있다」는 **HTTP 코드가 말한다**(master 판정 2026-09-05 · §3-1 과 같은 규칙).
@@ -223,6 +223,32 @@
   "signature": "-----BEGIN SSH SIGNATURE-----\n…\n-----END SSH SIGNATURE-----\n",
   "current": "<지금 명부의 해시>", "stale": false }
 ```
+
+**`POST /participants/checkpoint` 요청**
+
+```json
+{ "checkpoint": "<sha256 — roster.checkpoint 와 같은 산식>", "signer": "<운영자 participant_id>",
+  "signed_at": "2026-09-06T01:00:00.000Z",
+  "signature": "-----BEGIN SSH SIGNATURE-----\n…\n-----END SSH SIGNATURE-----\n" }
+```
+
+- `signature` = 아래 canonical JSON 바이트에 대한 서명 · ✅**master 판정 2026-09-06(643 상신 RL-6)**.
+  서명 대상은 `event.canonical_bytes`·§3-1 등록과 **같은 규칙**(NFC · 키 이름 오름차순 · 개행 정규화 · 실수 거부)이고,
+  **SSHSIG namespace 도 같은 `jarvis-agora@godmeyou.kr`** 이다(이 저장소에 namespace 는 하나뿐이다):
+  `{"checkpoint":…,"purpose":"agora-roster-checkpoint-v1","signed_at":…,"signer":…}`
+- ★**`signed_at` 은 서명 대상에 들어간다(결박)**. 서버 시계가 아니라 **운영자가 정해 서명한 값**이고,
+  서버는 그 값을 그대로 보관한다. 넣지 않으면 「언제의 명부인가」를 서버가 마음대로 적을 수 있고,
+  그러면 이 칸이 옮기려던 신뢰가 릴레이에게 되돌아온다(아래 ⛔와 같은 이유다).
+  서식은 응답 시각과 같은 **밀리초 고정폭 ISO**(`YYYY-MM-DDTHH:MM:SS.sssZ`)다.
+- 결과
+
+  | 상황 | HTTP | code | 뜻 |
+  |---|---|---|---|
+  | 보관됨 | 201 | — | `{"checkpoint","signer","signed_at"}` |
+  | 운영자가 아닌 서명자 | 403 | 5 | 명부 `operators` 에 없다 |
+  | 서명한 해시 ≠ 지금 명부 | 409 | 9 | 낡은 값을 새 값처럼 두지 않는다(`detail.current` 동반) |
+  | 서명 없음·무효·남의 키 | 401 | 4 | `detail.why`(`principal_mismatch` 등)로 가른다 |
+  | `signed_at` 서식 오류·칸 누락 | 400 | 10 | |
 
 ★**서버는 이 값을 만들지 않는다. 받아서 보관만 한다.**
 운영자가 자기 기계에서 명부 3종을 받아 해시를 내고 **자기 키로 서명**해
