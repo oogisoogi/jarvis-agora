@@ -325,8 +325,31 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
         #   두 번째 계약이 되고, 언젠가 표와 갈라진다(그때 갈라진 쪽이 조용히 이긴다).
         from agora import tools
         rest = list(args.rest) if hasattr(args, "rest") else []
-        return tools.call(name, tools.context_from_config(), _kv(rest))
+        return tools.call(name, tools.context_from_config(), _kv(_positional(name, rest)))
     raise AgoraError(errors.PRECONDITION, "실행기 배선 누락", {"command": name})
+
+
+# 문서가 **자리 인자**로 적어 놓은 명령들(`agora join <room-id>`) — 표는 한 곳에만 둔다.
+# ★2026-09-06 실물 릴레이 리허설에서 터진 자리: `agora join <room-id>` 가 code 10 으로 거부됐다.
+#   케이스는 `tools.join(ctx, room_id=…)` 를 **직접** 불러 재고 있어 전건 초록이었다 —
+#   **등록됐다 ≠ 동작한다**의 세 번째 판(앞의 둘 = M322 · argparse 진입점).
+#   ⇒ 문서가 약속한 서식은 **진입점에서** 받아야 한다.
+POSITIONAL_ARG = {"join": "room_id"}
+
+
+def _positional(name: str, rest: list[str]) -> list[str]:
+    """맨 앞의 **맨몸 토큰** 하나를 그 명령의 자리 인자로 바꿔 준다.
+
+    ★`key=value`·`--key value` 규율은 그대로 둔다 — 바꾸는 것은 **첫 토큰 하나**뿐이고,
+      그것도 표(`POSITIONAL_ARG`)에 적힌 명령에서만이다. 규칙을 넓히면 오타가 값이 된다.
+    """
+    key = POSITIONAL_ARG.get(name)
+    if not key or not rest:
+        return rest
+    head = rest[0]
+    if head.startswith("--") or "=" in head:
+        return rest
+    return [f"{key}={head}", *rest[1:]]
 
 
 def main(argv: list[str] | None = None) -> int:

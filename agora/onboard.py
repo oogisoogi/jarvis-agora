@@ -206,15 +206,14 @@ def sync_roster(*, directory: str | None = None, relay_url: str | None = None,
 def _fetch_checkpoint(store: Any, directory: str) -> dict[str, Any]:
     """운영자 서명 체크포인트(릴레이 계약 §3-6b) — **받아서 남기되 아직 검증하지 않는다.**
 
-    ★검증을 흉내내지 않는다: 확정본 `docs/RELAY.md@b2ca815` 는 **누가 서명하는가**(운영자 ·
-      §3-6b)와 **무엇을 서명하는가의 뜻**(명부 3종 렌더의 해시)까지만 적었고, 실제로 검증에
-      필요한 세 가지가 없다 — ⑴서명 대상 **바이트**의 정의(해시 문자열 그대로인가, 문서를
-      canonical 로 만든 바이트인가) ⑵SSHSIG **namespace**(등록은 §3-1 이 명시했는데 여기는 없다)
-      ⑶`signed_at` 결박(없으면 옛 서명을 다시 올리는 것을 못 가른다).
-      확정 전에 `verified: true` 를 적으면 **검증하지 않은 것을 검증했다고 적는 것**이 된다.
+    ★**이제 진짜로 검증한다**(RL-6 해소 · 계약 §3-6b `@main 993053e`): 서명 대상 네 칸 ·
+      SSHSIG namespace · `signed_at` 결박이 계약에 확정됐다. 판정은 `roster.verify_checkpoint` 가
+      하고(칸·서식 → 운영자인가 → 서명), 여기서는 **받고 남기고 그 판정을 싣는** 일만 한다.
     ★**부재는 200 + `checkpoint: null` 이다**(§3-6b · `revoked_keys` 와 같은 규율). 그때도
       `current`·`stale` 은 온다 — 그 두 칸이 부재의 내용이므로 버리지 않고 함께 적는다.
       404 는 엔드포인트 자체가 아직 없는 상대에서만 나오고, 그 경우는 어댑터가 `None` 을 준다.
+    ★**검증 실패해도 파일로 남긴다.** 남기지 않으면 「무엇이 왔길래 실패했는지」를 나중에 못 본다 —
+      다만 결과에는 `verified: false` 와 사유가 그대로 나간다(조용히 버리지 않는다).
     """
     try:
         doc = store.roster_checkpoint()
@@ -227,9 +226,19 @@ def _fetch_checkpoint(store: Any, directory: str) -> dict[str, Any]:
         return {"present": False, "verified": False, "why": "relay_has_no_checkpoint",
                 "current": doc.get("current"), "stale": doc.get("stale")}
     _write_json(os.path.join(directory, CHECKPOINT_FILENAME), doc)
-    return {"present": True, "verified": False,
-            "why": ("검증 계약 미확정(RL-6 · 서명 대상 바이트·namespace·signed_at 결박 없음)"
-                    " — 받은 것을 파일로 남기기만 했다"),
+    verdict = roster.verify_checkpoint(
+        doc,
+        allowed_signers_path=os.path.join(directory, "allowed_signers"),
+        operators_path=os.path.join(directory, "operators"),
+        revoked_path=os.path.join(directory, "revoked_keys"),
+        local_checkpoint=roster.checkpoint(paths={
+            "participants/allowed_signers": os.path.join(directory, "allowed_signers"),
+            "participants/revoked_keys": os.path.join(directory, "revoked_keys"),
+            "participants/operators": os.path.join(directory, "operators")}))
+    return {"present": True, "verified": verdict["verified"], "why": verdict["why"],
+            "signer": verdict.get("signer"), "signed_at": verdict.get("signed_at"),
+            # ★서명이 유효해도 **지금 명부와 같다는 뜻이 아니다** — 새 등록으로 명부는 자란다.
+            "matches_local": verdict.get("matches_local"),
             "file": CHECKPOINT_FILENAME,
             "stale": doc.get("stale"), "checkpoint": doc.get("checkpoint"),
             "current": doc.get("current")}

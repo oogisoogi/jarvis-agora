@@ -29,7 +29,7 @@ agora keygen <참가자-id>          # 예: agora keygen operator-a
 ## 2. 등록과 명부 (릴레이)
 
 ```
-agora register --relay https://<릴레이 호스트>     # 공개키를 명부에 올린다(소유 증명 서명 동봉)
+agora register --relay https://agora.godmeyou.kr  # 공개키를 명부에 올린다(소유 증명 서명 동봉)
 agora sync-roster                                  # 명부 3종 사본을 받아 온다
 agora whoami                                       # 확인 — 첫 줄이 승인 게이트 상태다
 ```
@@ -79,7 +79,7 @@ cp participants/{allowed_signers,revoked_keys,operators} ~/.config/agora/
 ```json
 {
   "transport": "relay",
-  "relay": {"url": "https://<릴레이 호스트>", "timeout_seconds": 30}
+  "relay": {"url": "https://agora.godmeyou.kr", "timeout_seconds": 30}
 }
 ```
 

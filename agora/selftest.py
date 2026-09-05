@@ -4383,7 +4383,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
-                 "M328-relay-limit-unclamped", "M332-relay-filters-server-invalid"),
+                 "M328-relay-limit-unclamped", "M332-relay-filters-server-invalid",
+                 "M341-relay-transport-is-anonymous"),
     "실패분류": ("M306-relay-retries-404", "M319-relay-retries-everything",
                  "M307-relay-write-timeout-is-seven", "M325-relay-ignores-body-code",
                  "M326-relay-forbidden-is-signature", "M329-relay-ignores-retry-after",
@@ -4393,6 +4394,9 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     "명부신뢰": ("M309-relay-roster-swallows-404", "M310-sync-roster-skips-confirmation",
                  "M311-sync-roster-keeps-no-previous",
                  "M330-relay-checkpoint-null-is-present"),
+    # ★r3 신설 — 명부의 정본이 운반층으로 간 뒤 **유일하게 되돌려 오는 장치**가 이 서명이다.
+    "체크포인트": ("M337-checkpoint-verifies-nothing", "M338-checkpoint-ignores-operators",
+                   "M339-checkpoint-signed-at-unbound", "M340-checkpoint-verdict-not-wired"),
     "소유증명": ("M312-register-drops-proof", "M313-register-door-accepts-extra-fields",
                  "M323-register-signs-four-fields", "M324-register-purpose-not-pinned",
                  "M333-relay-register-without-proof"),
@@ -4401,7 +4405,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M317-join-enters-closed-rooms"),
     "운반선택": ("M318-transport-precedence-flipped",),
     # ★도구 층이 아니라 **진입점**을 재는 축. 여기가 비어 있어서 CLI 가 플래그를 거부하는 채로 초록이었다.
-    "진입점": ("M322-cli-entry-rejects-flags",),
+    "진입점": ("M322-cli-entry-rejects-flags", "M342-cli-drops-positional"),
     # ★서버가 계산해 준 판정을 **대조 축으로만** 쓰는 자리(계약 §3-2·§3-5). 여기가 비면
     #   「참고값」이 슬며시 근거가 되어도 아무도 모른다.
     "파생대조": ("M331-relay-drops-verdict",),
@@ -9415,15 +9419,17 @@ def _case_relay_checkpoint_absence_is_a_two_hundred() -> None:
         absent = onboard._fetch_checkpoint(onboard._relay(url), d)
     if absent["present"] is not False or not absent.get("current"):
         raise AssertionError(f"부재를 못 읽었다: {absent}")
-    signed = {"checkpoint": "a" * 64, "signed_at": "2026-09-06T01:00:00.000Z",
-              "signer": "operator-a", "signature": "-----BEGIN SSH SIGNATURE-----\n",
-              "stale": False}
-    with _fake_relay().serving(checkpoint=signed) as (url, relay):
+    bogus = {"checkpoint": "a" * 64, "signed_at": "2026-09-06T01:00:00.000Z",
+             "signer": "operator-a", "signature": "-----BEGIN SSH SIGNATURE-----\n",
+             "stale": False}
+    with _fake_relay().serving(checkpoint=bogus) as (url, relay):
         present = onboard._fetch_checkpoint(onboard._relay(url), d)
     if present["present"] is not True or present["verified"] is not False:
         raise AssertionError(f"체크포인트 판정이 다르다: {present}")
-    if "RL-6" not in present["why"]:
-        raise AssertionError(f"미확정 사유가 사라졌다: {present['why']}")
+    if not present["why"] or present["why"].startswith("검증 계약 미확정"):
+        raise AssertionError(f"검증 사유가 아니다: {present['why']}")
+    if present.get("file") != onboard.CHECKPOINT_FILENAME:
+        raise AssertionError("검증 실패인데 받은 것을 안 남겼다")
     with _fake_relay().serving(checkpoint_404=True) as (url, relay):   # 엔드포인트 자체가 없는 상대
         old = onboard._fetch_checkpoint(onboard._relay(url), d)
     if old["present"] is not False or old.get("current"):
@@ -9638,6 +9644,173 @@ def _case_relay_idempotent_two_hundred_and_reuse_conflict() -> None:
                 raise AssertionError(f"422 상태 매핑이 3 이 아니다: {e.code}") from None
         else:
             raise AssertionError("422 를 성공으로 읽었다")
+
+
+def _signed_checkpoint(key_path: str, *, checkpoint: str, signer: str = "operator-a",
+                       signed_at: str = "2026-09-06T01:00:00.000Z") -> dict[str, Any]:
+    """운영자가 자기 기계에서 만드는 체크포인트 — **시험이 서명자 역할을 한다**(계약 §3-6b)."""
+    from agora import roster as roster_mod
+    from agora import signer as signer_mod
+    doc = {"checkpoint": checkpoint, "signed_at": signed_at, "signer": signer}
+    doc["signature"] = signer_mod.sign_bytes(roster_mod.checkpoint_canonical(doc), key_path)
+    return doc
+
+
+def _case_checkpoint_signature_is_verified() -> None:
+    """운영자 서명 체크포인트를 **실제로 검증한다**(RL-6 해소 · 계약 §3-6b `@main 993053e`).
+
+    ★r2 에서는 계약에 서명 대상 바이트·namespace·`signed_at` 결박이 없어 `verified:false` 로 뒀다.
+      셋이 확정됐으므로 이제 검증한다 — 그리고 **위조는 반례로 못박는다**:
+      ⑴`signed_at` 만 바꾼 문서(서명은 그대로) ⑵남의 키로 만든 서명 ⑶운영자가 아닌 서명자.
+    ★`matches_local` 은 **판정에 안 들어간다**: 명부는 새 등록으로 자라므로 체크포인트는
+      대부분 stale 이고, 그것은 정상이지 위조가 아니다.
+    """
+    import os as _os
+    import tempfile
+    from agora import roster as roster_mod
+    f = _fixtures()
+    d = tempfile.mkdtemp(prefix="agora-checkpoint-")
+    _shutil_copy = __import__("shutil").copyfile
+    _shutil_copy(f["roster_ab"], _os.path.join(d, "allowed_signers"))
+    with open(_os.path.join(d, "revoked_keys"), "w", encoding="utf-8") as fh:
+        fh.write("# 없음\n")
+    with open(_os.path.join(d, "operators"), "w", encoding="utf-8") as fh:
+        fh.write("operator-a\n")
+    paths = {"participants/allowed_signers": _os.path.join(d, "allowed_signers"),
+             "participants/revoked_keys": _os.path.join(d, "revoked_keys"),
+             "participants/operators": _os.path.join(d, "operators")}
+    local = roster_mod.checkpoint(paths=paths)
+
+    def check(doc: dict[str, Any]) -> dict[str, Any]:
+        return roster_mod.verify_checkpoint(
+            doc, allowed_signers_path=paths["participants/allowed_signers"],
+            operators_path=paths["participants/operators"],
+            revoked_path=paths["participants/revoked_keys"], local_checkpoint=local)
+
+    good = _signed_checkpoint(f["key_a"], checkpoint=local)
+    out = check(good)
+    if not out["verified"] or out["why"] != "verified":
+        raise AssertionError(f"정상 체크포인트를 못 믿었다: {out}")
+    if out.get("matches_local") is not True:
+        raise AssertionError(f"내 사본과 같은데 다르다고 한다: {out}")
+    # ⑴ signed_at 만 바꾼다 — 서명 대상 **안**이므로 서명이 깨져야 한다(결박의 실측).
+    forged_time = dict(good, signed_at="2026-09-06T02:00:00.000Z")
+    out = check(forged_time)
+    if out["verified"] or out["why"] != "signature_does_not_match_bytes":
+        raise AssertionError(f"signed_at 결박이 없다: {out}")
+    # ⑵ 남의 키로 서명하고 이름만 운영자로 적는다.
+    other = _signed_checkpoint(f["key_b"], checkpoint=local)
+    out = check(other)
+    if out["verified"] or out["why"] != "not_in_roster":
+        raise AssertionError(f"남의 키 서명을 받아들였다: {out}")
+    # ⑶ 서명은 유효하지만 **운영자가 아니다** — 권한과 유효성은 다른 질문이다.
+    outsider = _signed_checkpoint(f["key_b"], checkpoint=local, signer="operator-b")
+    out = check(outsider)
+    if out["verified"] or out["why"] != "signer_not_operator":
+        raise AssertionError(f"운영자가 아닌 서명자를 통과시켰다: {out}")
+    # ⑷ 서식이 어긋난 signed_at(밀리초 고정폭이 아니다 · 계약 §3-0).
+    out = check(dict(good, signed_at="2026-09-06T01:00:00Z"))
+    if out["verified"] or out["why"] != "signed_at_format":
+        raise AssertionError(f"서식 검사가 없다: {out}")
+    # ⑸ 명부가 자란 뒤 — **서명은 여전히 유효**하고 `matches_local` 만 거짓이다.
+    with open(paths["participants/allowed_signers"], "a", encoding="utf-8") as fh:
+        fh.write("낯선-참가자 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZha2U=\n")
+    grown = roster_mod.checkpoint(paths=paths)
+    out = roster_mod.verify_checkpoint(
+        good, allowed_signers_path=paths["participants/allowed_signers"],
+        operators_path=paths["participants/operators"],
+        revoked_path=paths["participants/revoked_keys"], local_checkpoint=grown)
+    if not out["verified"] or out.get("matches_local") is not False:
+        raise AssertionError(f"stale 을 위조로 읽었다: {out}")
+
+
+def _case_checkpoint_verdict_reaches_the_user() -> None:
+    """`sync-roster` 결과의 체크포인트 칸이 **판정을 그대로 싣는다**(RL-6 · 계약 §3-6b).
+
+    ★검증기를 만들어 두고 부르지 않으면 아무것도 안 바뀐다 — 그 배선을 여기서 못박는다.
+      부재(200 + null)와 검증 실패를 **다른 사유**로 말하는지도 같이 본다.
+    """
+    from agora import onboard
+    f = _fixtures()
+    d = _onboard_dir()
+    with _fake_relay().serving() as (url, relay):
+        relay.roster_text["allowed_signers"] = open(f["roster_ab"], encoding="utf-8").read()
+        relay.roster_text["operators"] = "operator-a\n"
+        first = onboard.sync_roster(directory=d, relay_url=url)
+        if first["checkpoint"]["present"] is not False:
+            raise AssertionError(f"부재를 present 로 읽었다: {first['checkpoint']}")
+        local = onboard.roster.checkpoint(paths={
+            "participants/allowed_signers": os.path.join(d, "allowed_signers"),
+            "participants/revoked_keys": os.path.join(d, "revoked_keys"),
+            "participants/operators": os.path.join(d, "operators")})
+        relay.checkpoint = _signed_checkpoint(f["key_a"], checkpoint=local)
+        again = onboard.sync_roster(directory=d, relay_url=url, yes=True)
+        got = again["checkpoint"]
+        if got["present"] is not True or got["verified"] is not True:
+            raise AssertionError(f"서명 체크포인트를 검증 못 했다: {got}")
+        if got.get("signer") != "operator-a":
+            raise AssertionError(f"서명자를 안 실었다: {got}")
+        relay.checkpoint = dict(relay.checkpoint, signed_at="2026-09-06T09:09:09.999Z")
+        forged = onboard.sync_roster(directory=d, relay_url=url, yes=True)["checkpoint"]
+        if forged["verified"] is not False or forged["present"] is not True:
+            raise AssertionError(f"위조를 통과시켰다: {forged}")
+
+
+def _case_relay_transport_names_itself() -> None:
+    """운반층은 **이름을 대고 말한다** — 기본 UA 로는 실물 릴레이가 403 을 준다(2026-09-06 실측).
+
+    ★실측 근거: 라이브 `https://agora.godmeyou.kr` 에 표준 라이브러리 기본 UA(`Python-urllib/3.x`)로
+      `GET /rooms` 하면 **Cloudflare 1010(browser_signature_banned) 403**, 같은 요청에
+      `agora-client/…` UA 를 달면 **200**. 이름을 안 대는 클라이언트는 한 마디도 못 나눈다.
+    ⛔브라우저를 사칭하지 않는다 — 우리가 무엇인지 그대로 적는다.
+    """
+    import urllib.request
+    from agora import store_relay
+    seen: dict[str, Any] = {}
+    real = urllib.request.urlopen
+
+    def capture(req: Any, *_a: Any, **_kw: Any):
+        seen["ua"] = req.get_header("User-agent")
+        raise TimeoutError("여기서 멈춘다 — 요청 머리만 본다")
+
+    urllib.request.urlopen = capture
+    try:
+        try:
+            store_relay.relay_transport("GET", "https://relay.example/rooms")
+        except AgoraError:
+            pass
+    finally:
+        urllib.request.urlopen = real
+    ua = seen.get("ua") or ""
+    if not ua.startswith("agora-client/"):
+        raise AssertionError(f"이름을 안 대고 말한다: {ua!r}")
+    if "Mozilla" in ua or "Chrome" in ua:
+        raise AssertionError(f"브라우저를 사칭한다: {ua!r}")
+
+
+def _case_cli_takes_documented_positional() -> None:
+    """문서가 **자리 인자**로 적은 서식은 진입점이 받는다 — `agora join <room-id>`(2026-09-06 실물에서 터짐).
+
+    ★실사격에서 code 10(`인자는 key=value 형식이다`)으로 거부됐다. 케이스는 `tools.join(ctx, room_id=…)` 를
+      **직접** 불러 재고 있어 전건 초록이었다 — **등록됐다 ≠ 동작한다**의 세 번째 판(M322·argparse 다음).
+    ★그리고 규칙을 넓히지 않았다: 표(`POSITIONAL_ARG`)에 적힌 명령의 **첫 토큰 하나**만 바꾼다.
+      넓히면 오타가 값이 된다 — 그 경계도 여기서 잰다.
+    """
+    from agora import cli
+    if cli._positional("join", ["aa" * 16]) != ["room_id=" + "aa" * 16]:
+        raise AssertionError("자리 인자를 안 받는다")
+    if cli._positional("join", ["room_id=x"]) != ["room_id=x"]:
+        raise AssertionError("key=value 를 건드렸다")
+    if cli._positional("join", ["--room-id", "x"]) != ["--room-id", "x"]:
+        raise AssertionError("플래그를 건드렸다")
+    if cli._positional("say", ["aa" * 16]) != ["aa" * 16]:
+        raise AssertionError("표에 없는 명령까지 넓혔다")
+    # 문서 3곳이 이 서식을 약속한다 — 약속과 표가 갈리면 여기서 적색.
+    for path in ("docs/ONBOARDING.md", "docs/TRANSPORT-RELAY.md",
+                 ".appbuild/06-fair-v1-user-journey-prd-addendum.md"):
+        with open(os.path.join(_ROOT, path), encoding="utf-8") as fh:
+            if "agora join <room" not in fh.read():
+                raise AssertionError(f"문서가 자리 인자 서식을 안 적었다: {path}")
 
 
 def _case_register_carries_proof_of_possession() -> None:
@@ -10243,6 +10416,10 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("릴레이: 쓰기 소진은 8",         _case_relay_exhausted_write_is_unknown, None),
     ("릴레이: 표식은 위조 불가",      _case_relay_retry_marker_cannot_be_forged, None),
     ("릴레이: 멱등 200·재사용 422",   _case_relay_idempotent_two_hundred_and_reuse_conflict, None),
+    ("명부: 체크포인트 서명 검증",    _case_checkpoint_signature_is_verified, None),
+    ("명부: 체크포인트 판정 배선",    _case_checkpoint_verdict_reaches_the_user, None),
+    ("릴레이: 이름을 대고 말한다",    _case_relay_transport_names_itself, None),
+    ("CLI: 문서의 자리 인자를 받는다", _case_cli_takes_documented_positional, None),
     ("S8: 8축이 그물을 갖는다",       _case_s8_axes_have_nets, None),
 )
 
@@ -10252,6 +10429,31 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     # ── S8 릴레이 운반층(2026-09-05) ────────────────────────────────────────
     # ── r2 릴레이 계약 확정본 대조(2026-09-05 · docs/RELAY.md@b2ca815) ──────
+    ("M342-cli-drops-positional", "agora/cli.py",
+     '    return [f"{key}={head}", *rest[1:]]',
+     '    return rest',
+     "CLI: 문서의 자리 인자를 받는다"),
+    ("M341-relay-transport-is-anonymous", "agora/store_relay.py",
+     '    headers = {"Accept": "application/json" if accept == "json" else "text/plain",\n               "User-Agent": USER_AGENT}',
+     '    headers = {"Accept": "application/json" if accept == "json" else "text/plain"}',
+     "릴레이: 이름을 대고 말한다"),
+    # ── r3 RL-6 체크포인트 검증(2026-09-06 · 계약 §3-6b @main 993053e) ──────
+    ("M337-checkpoint-verifies-nothing", "agora/roster.py",
+     '    detail = sign.verify_detail(checkpoint_canonical(doc), signature, signer,\n                                allowed_signers_path, revoked_path)',
+     '    detail = {"verdict": sign.OK, "reason": "verified"}',
+     "명부: 체크포인트 서명 검증"),
+    ("M338-checkpoint-ignores-operators", "agora/roster.py",
+     '    if signer not in operators(path=operators_path):',
+     '    if False:',
+     "명부: 체크포인트 서명 검증"),
+    ("M339-checkpoint-signed-at-unbound", "agora/roster.py",
+     '        "signed_at": doc.get("signed_at"), "signer": doc.get("signer")})',
+     '        "signed_at": "", "signer": doc.get("signer")})',
+     "명부: 체크포인트 서명 검증"),
+    ("M340-checkpoint-verdict-not-wired", "agora/onboard.py",
+     '    return {"present": True, "verified": verdict["verified"], "why": verdict["why"],',
+     '    return {"present": True, "verified": True, "why": verdict["why"],',
+     "명부: 체크포인트 판정 배선"),
     # ★agy 적대검증 1R 봉합(2026-09-05) — 셋 다 「조용히 틀리는」 자리다.
     ("M334-relay-exhausted-write-is-seven", "agora/store_relay.py",
      '    may_have_landed = bool(write and type(status) is int and status >= 500)',
