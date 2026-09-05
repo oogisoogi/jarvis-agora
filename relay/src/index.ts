@@ -9,6 +9,7 @@
  */
 import { AgoraError, ARGUMENT, GATE_REJECT, PERMISSION, SIGNATURE, STATE_CONFLICT, STORE, fail } from "./lib/errors.ts";
 import { canonicalBytes, isId } from "./lib/canonical.ts";
+import { prefersHtml } from "./lib/accept.ts";
 import { parsePost, renderPost } from "./lib/post.ts";
 import * as schema from "./lib/schema.ts";
 import * as scrub from "./lib/scrub.ts";
@@ -155,7 +156,10 @@ async function handleRegister(req: Request, env: Env): Promise<Response> {
     if (byId.revoked_at) fail(PERMISSION, "폐기된 참가자다", { participant_id: participantId }, { status: 403 });
     if (byId.fingerprint === fingerprint) {
       // 멱등 — 설치를 두 번 돌리는 것이 사고가 되지 않게.
-      return json({ participant_id: participantId, fingerprint, created_at: byId.created_at, status: "already" }, 200);
+      // ★본문은 201 과 **같은 세 칸**이다. 「이미 있음」은 **코드 200 이 말한다**(master 판정 2026-09-05).
+      //   계약(§3-1)이 이름을 준 성공 본문이 그 셋뿐이라, 칸을 하나 더 실으면 계약을 읽고 대조하는
+      //   설치기 쪽이 「계약 밖 칸」으로 적색을 낸다 — 실제로 라이브에서 그렇게 났다.
+      return json({ participant_id: participantId, fingerprint, created_at: byId.created_at }, 200);
     }
     fail(GATE_REJECT, "이미 등록된 이름이다(다른 키)", { participant_id: participantId }, { status: 409 });
   }
@@ -556,7 +560,18 @@ export default {
         let m = /^\/participants\/([a-z_]+)$/.exec(path);
         if (m) return await participantsFile(req, env, m[1]);
         m = /^\/rooms\/([0-9a-f]{32})$/.exec(path);
-        if (m) return await roomStatus(req, env, m[1]);
+        if (m) {
+          // ★사람이 이 주소를 브라우저로 열면 JSON 이 보였다 — 계약 §3-2 의 `url` 이 바로 이 경로다.
+          //   Accept 로 갈라 브라우저만 보드 화면으로 보낸다(master 판정 2026-09-05).
+          //   ⚠조각(#<message_id>)은 Location 에 안 붙인다. 조각은 브라우저가 서버에 보내지도 않고,
+          //     넘겨받은 주소에 그대로 남긴다 — 여기서 붙이면 원래 조각을 덮어쓴다.
+          //   ⚠D1 을 건드리기 전에 답한다: 화면으로 보낼 것에 질의를 쓰지 않는다(호출당 50개 예산).
+          if (prefersHtml(req.headers.get("Accept"))) {
+            return new Response(null, { status: 302,
+              headers: { location: "/room.html?id=" + m[1], ...corsHeaders(req, env) } });
+          }
+          return await roomStatus(req, env, m[1]);
+        }
         m = /^\/rooms\/([0-9a-f]{32})\/events$/.exec(path);
         if (m) return await roomEvents(req, env, m[1]);
         if (path === "/health") {

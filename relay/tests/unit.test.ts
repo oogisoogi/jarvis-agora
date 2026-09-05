@@ -18,6 +18,7 @@ import { apply, order, stateHash, type ValidEntry } from "../src/lib/reducer.ts"
 import { checkpointOf } from "../src/lib/roster.ts";
 import { loadBundle, check as scrubCheck } from "../src/lib/scrub.ts";
 import { bumpRate, eventIdOf, nowIso } from "../src/lib/store.ts";
+import { prefersHtml } from "../src/lib/accept.ts";
 
 const REPO = new URL("../../", import.meta.url).pathname;
 const GOLDEN = JSON.parse(readFileSync(REPO + "tests/golden/canonical-vectors.json", "utf8"));
@@ -340,5 +341,23 @@ describe("식별자 — 정렬이 곧 계약이다", () => {
   it("created_at 은 밀리초 고정폭 ISO 다", () => {
     expect(nowIso(new Date(0))).toBe("1970-01-01T00:00:00.000Z");
     expect(nowIso()).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+});
+
+describe("Accept 갈림 — 사람의 브라우저만 화면으로 보낸다", () => {
+  it("브라우저의 Accept 는 화면을 원한 것이다", () => {
+    expect(prefersHtml("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")).toBe(true);
+  });
+
+  // ★음성 대조 — 이 셋이 참이 되면 **모든 스크립트가 302 로 튄다**.
+  it("Accept 가 없거나 */* 뿐이면 JSON 이다(curl·기본 클라이언트)", () => {
+    expect(prefersHtml(null)).toBe(false);
+    expect(prefersHtml("*/*")).toBe(false);
+    expect(prefersHtml("application/json")).toBe(false);
+  });
+
+  it("html 이 있어도 json 을 더 원하면 JSON 이다(q 비교)", () => {
+    expect(prefersHtml("text/html;q=0.5,application/json;q=0.9")).toBe(false);
+    expect(prefersHtml("application/json;q=0.5,text/html;q=0.9")).toBe(true);
   });
 });

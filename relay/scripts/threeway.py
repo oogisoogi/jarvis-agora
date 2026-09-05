@@ -107,6 +107,23 @@ def http(method: str, url: str, payload=None):
             return e.code, body
 
 
+def http_get_raw(url: str, accept=None):
+    """리다이렉트를 **따라가지 않는** GET. (기존 http() 는 302 를 조용히 삼켜 200 처럼 보인다.)"""
+    headers = {"accept": accept} if accept else {}
+    req = urllib.request.Request(url, method="GET", headers=headers)
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=30) as r:
+            return r.status, r.headers.get("location"), r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers.get("location"), e.read().decode()
+
+
 # ── 이벤트 조립 ──────────────────────────────────────────────────────────────
 class Builder:
     """이벤트를 하나씩 쌓으면서 prev·expected_state 를 **파이썬 리듀서로** 계산한다.
@@ -233,9 +250,16 @@ def main():
     for s in (alice, bob, op):
         code, body = register(args.base, s, args.workdir)
         print("  %-9s -> %s %s" % (s["id"], code, body.get("status") if isinstance(body, dict) else body))
-    # 멱등 확인
+    # 멱등 확인 — ★본문 **키 집합**이 계약(§3-1 · 201 과 같은 세 칸)과 일치하는지 잰다.
+    #   값이 아니라 **칸 목록**이 계약이다: 칸을 하나 더 실으면 계약을 읽고 대조하는 쪽이 적색을 낸다
+    #   (라이브 실사건 2026-09-05 · master 판정 = 칸 제거).
     code, body = register(args.base, alice, args.workdir)
-    print("  재등록(멱등)   -> %s %s" % (code, body.get("status") if isinstance(body, dict) else body))
+    reg_keys = sorted(body.keys()) if isinstance(body, dict) else [str(body)]
+    print("  재등록(멱등)   -> %s %s" % (code, reg_keys))
+    idem_checks = [
+        ("재등록 멱등 = 200", 200, code, ""),
+        ("재등록 200 본문 = 계약 세 칸", ["created_at", "fingerprint", "participant_id"], reg_keys, ""),
+    ]
 
     results = []
 
@@ -379,6 +403,9 @@ def main():
         checks.append(ok)
         print("  %-34s 기대 %-3s 실제 %-3s %s %s"
               % (name, want, got, "OK" if ok else "★불일치", extra))
+
+    for _name, _want, _got, _extra in idem_checks:
+        record(_name, _want, _got, _extra)
 
     # (1) 성공 — 위 세트1 genesis 가 201 이었다. 여기서는 새 방으로 한 번 더.
     t4 = new_id()
@@ -599,6 +626,21 @@ def main():
         "body": raw_body, "is_genesis": True})
     record("64KB 초과: 서버가 막는다", 413, code,
            "code=%s" % (body.get("code") if isinstance(body, dict) else "?"))
+
+    # Accept 갈림(master 후속 판정 2026-09-05) — 계약 §3-2 의 url 을 사람이 누르면 화면으로 간다.
+    # ★측정 전제: 이 방은 실재한다(없는 방으로 재면 302 든 404 든 「무엇을 쟀는지」가 흐려진다).
+    room_live = results[0][1]
+    code_pre, _pre = http("GET", args.base + "/rooms/" + room_live)
+    record("측정 전제: 그 방이 실재한다", 200, code_pre)
+    st, loc, _b = http_get_raw(args.base + "/rooms/" + room_live,
+                               "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    record("브라우저형 Accept = 302", 302, st, "location=%s" % loc)
+    record("302 목적지 = 보드 방 화면", "/room.html?id=" + room_live, loc)
+    st2, _l2, body2 = http_get_raw(args.base + "/rooms/" + room_live, "application/json")
+    record("JSON형 Accept = 200(불변)", 200, st2,
+           "room_id=%s" % (json.loads(body2).get("room_id") if body2.strip().startswith("{") else "?"))
+    st3, _l3, _b3 = http_get_raw(args.base + "/rooms/" + room_live)
+    record("Accept 없음 = 200(스크립트 불변)", 200, st3)
 
     # 파생 캐시 자가치유(R-7) — 캐시를 지워도 조회가 다시 채운다
     subprocess.run([os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

@@ -124,6 +124,9 @@
   · `event_id` = 서버가 매기는 **고정폭 단조 증가** 식별자 `ev_0000000000000123`
     (★고정폭이라 문자열 정렬 = 도착 순서. 리듀서 동률 규칙이 `node_id` 문자열 비교다.)
   · `url` = `https://agora.godmeyou.kr/rooms/<thread_id>#<message_id>`
+    ★이 주소를 **사람이 브라우저로 열면** `GET /rooms/:id` 가 `Accept` 를 보고 **302 로 보드 방 화면**
+    (`/room.html?id=<thread_id>`)으로 보낸다 — JSON 클라이언트(`Accept` 없음·`application/json`·`*/*`)는 **200 그대로**다
+    (master 판정 2026-09-05 · 조각 `#<message_id>` 는 `Location` 에 안 붙인다 — 조각은 브라우저가 유지한다).
   · `verdict` = **참고용 파생 판정**(§5). 클라이언트는 무시해도 되고, 무시해도 정본은 안 바뀐다.
 - **멱등(계약 1)**: 같은 `(from, message_id)` 가 **같은 canonical 해시**로 다시 오면 새 행을 만들지 않고
   **200** 으로 기존 `{"event_id","url","created_at"}` 을 돌려준다.

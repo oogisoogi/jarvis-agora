@@ -84,6 +84,16 @@ MUTATIONS = [
      "  if (false) {",
      "harness", "래퍼 제목 변조 = 400"),
 
+    ("M15 Accept 갈림 제거(사람도 JSON 을 본다)", "src/index.ts",
+     "          if (prefersHtml(req.headers.get(\"Accept\"))) {",
+     "          if (false) {",
+     "harness", "브라우저형 Accept = 302"),
+
+    ("M16 재등록 200 에 계약 밖 칸 부활", "src/index.ts",
+     "      return json({ participant_id: participantId, fingerprint, created_at: byId.created_at }, 200);",
+     '      return json({ participant_id: participantId, fingerprint, created_at: byId.created_at, status: "already" }, 200);',
+     "harness", "재등록 200 본문 = 계약 세 칸"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",
