@@ -29,7 +29,7 @@
   },
 
   // 커스텀 도메인 — master 가 붙인다. 배포 전까지 주석으로 둔다(잘못 배포되면 라이브 도메인을 빼앗는다).
-  // "routes": [{ "pattern": "agora.godmeyou.kr", "custom_domain": true }],
+  "routes": [{ "pattern": "agora.godmeyou.kr", "custom_domain": true }],
 
   "observability": { "enabled": true }
 }
