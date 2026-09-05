@@ -237,13 +237,27 @@ def _checkpoint_canonical(payload: dict[str, Any]) -> bytes:
                       separators=(",", ":")).encode("utf-8")
 
 
-def _event_gate(payload: dict[str, Any]) -> tuple[int, str, dict[str, Any]] | None:
-    """서명 앞에 오는 값싼 검사들 — 계약 §3-2 의 **1(크기) · 4(결박) · 5(genesis 정합)**.
+# 계약 §2-1 의 **공통 필수 칸** — ★우리 모듈에서 import 하지 않고 **여기 손으로 적는다.**
+#   `agora.schema.COMMON_REQUIRED` 를 불러 오면 「우리 계산으로 우리 계산을 재는」 대조가 되어
+#   **조립 결함을 정확히 못 잡는다**(더블의 존재 이유가 그것이다). 계약이 바뀌면 이 줄도 바뀌어야
+#   하고, 안 바꾸면 시험이 붉어진다 — 그 붉음이 곧 「계약이 움직였다」는 신호다.
+_EVENT_SKELETON = ("v", "kind", "thread_id", "message_id", "prev", "expected_state",
+                   "from", "roster", "scrub", "ts", "payload")
 
-    ★순서가 곧 방어다: 크기·결박은 한 건만 보고 답할 수 있고, 서명 검증보다 훨씬 싸다.
-    ⚠**여기 없는 것(정직)**: 스키마 9종 닫힌 검증(3)과 스크럽 백스톱(7)은 더블에 안 넣었다 —
-      그 둘은 **클라이언트가 서명 전에 이미 강제**하고, 더블에서 다시 하려면 우리 모듈을 그대로
-      불러야 해서 「우리 계산으로 우리 계산을 재는」 대조가 된다. 그 한계를 여기 적어 둔다.
+
+def _event_gate(payload: dict[str, Any],
+                rooms: dict[str, dict[str, Any]] | None = None,
+                ) -> tuple[int, str, dict[str, Any]] | None:
+    """서명 앞에 오는 값싼 검사들 — 계약 §3-2 의 **1(크기) · 3 일부(뼈대) · 4(결박) · 5(genesis 정합)**.
+
+    ★순서가 곧 방어다: 크기·뼈대·결박은 한 건만 보고 답할 수 있고, 서명 검증보다 훨씬 싸다.
+    ⚠**여기 없는 것(정직)**: 스키마 **9종 닫힌** 검증(3의 나머지)과 스크럽 백스톱(7)은 여전히 없다.
+      그 둘을 더블에서 하려면 우리 모듈(`agora.schema`·`agora.scrub`)을 그대로 불러야 해서
+      자기 대조가 된다. 대신 **계약이 이름을 준 뼈대 11칸**은 위처럼 손으로 적어 독립적으로 본다
+      (agy 2R 2026-09-06 지적 · 부분 수용). 남는 구멍의 모양도 정직하게 적어 둔다:
+      **9종별 payload 칸·봉투 정책(`execution` 표식 등)이 빠진 이벤트는 이 더블을 통과하고
+      실물에서만 422 로 터진다.** 그 자리는 클라이언트 쪽 `schema.validate` 가 막고 있고,
+      더블은 그것을 **재지 않는다**(= 클라이언트 조립 버그는 리허설·실물에서 잡힌다).
     """
     from agora.event import parse_post
     body = payload.get("body", "")
@@ -253,12 +267,26 @@ def _event_gate(payload: dict[str, Any]) -> tuple[int, str, dict[str, Any]] | No
         event = parse_post(body)["event"]
     except Exception:            # noqa: BLE001 — 서식은 다음 관문이 본다
         return None
-    for field in ("thread_id", "category"):
-        sent, signed = payload.get(field), (event.get(field) if field != "category" else None)
-        if field == "thread_id" and sent != event.get("thread_id"):
-            return (400, "요청 인자가 서명된 값과 다르다",
-                    {"field": field, "sent": sent, "signed": event.get("thread_id")})
+    missing = [k for k in _EVENT_SKELETON if k not in event]
+    if missing:
+        return (400, "계약 뼈대 칸이 없다", {"missing": missing})
     is_genesis = bool(payload.get("is_genesis"))
+    signed_payload = event.get("payload") if type(event.get("payload")) is dict else {}
+    room = (rooms or {}).get(payload.get("thread_id")) or {}
+    # 계약 §3-2 검사 4 — 요청 인자 == **서명된** 값. ★`title` 은 서명 대상 밖이라(계약이 그렇게
+    #   적어 뒀다) 대조하지 않으면 **보드에 뜨는 방 제목만 서명 밖에서 바꿔치기**할 수 있다.
+    #   genesis 가 아닌 글은 서명 안에 유형·제목이 없으므로, **방에 이미 적힌 값**과 댄다.
+    bindings: list[tuple[str, Any, Any]] = [
+        ("thread_id", payload.get("thread_id"), event.get("thread_id"))]
+    if is_genesis:
+        bindings.append(("category", payload.get("category"), signed_payload.get("type")))
+        bindings.append(("title", payload.get("title"), signed_payload.get("title")))
+    elif room.get("category"):
+        bindings.append(("category", payload.get("category"), room.get("category")))
+    for field, sent, signed in bindings:
+        if signed is not None and sent != signed:
+            return (400, "요청 인자가 서명된 값과 다르다",
+                    {"field": field, "sent": sent, "signed": signed})
     if is_genesis != (event.get("kind") == "genesis"):
         return (400, "is_genesis 가 서명된 kind 와 안 맞는다",
                 {"is_genesis": is_genesis, "kind": event.get("kind")})
@@ -513,7 +541,8 @@ class _Handler(BaseHTTPRequestHandler):
             #   통째로 빼먹었고, 그래서 「`from` 은 의장인데 서명은 남의 키」인 글이 초록으로
             #   지나갔다 — **실물은 401(principal_mismatch)로 거부한다**(2026-09-06 라이브 실측).
             #   ⇒ 더블이 계약을 덜 지키면 그만큼 시험이 공허해진다. 같은 병의 세 번째 판이다.
-            gate = _event_gate(payload)      # 계약 §3-2 검사 1·4·5(크기·결박·genesis 정합)
+            # 계약 §3-2 검사 1(크기)·3 일부(뼈대)·4(결박)·5(genesis 정합)
+            gate = _event_gate(payload, self.relay.rooms)
             if gate:
                 self._fail(gate[0], gate[1], **gate[2])
                 return

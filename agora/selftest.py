@@ -4416,11 +4416,15 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     # ★서버가 계산해 준 판정을 **대조 축으로만** 쓰는 자리(계약 §3-2·§3-5). 여기가 비면
     #   「참고값」이 슬며시 근거가 되어도 아무도 모른다.
     "파생대조": ("M331-relay-drops-verdict",),
+    # ★r5(agy 2R) — **더블이 계약을 얼마나 지키는가**. 더블이 무르면 그만큼 시험이 공허해지고,
+    #   그 공백은 실물에서만 드러난다(같은 병을 이 저장소에서 네 번 겪었다).
+    "더블충실도": ("M353-double-skips-category-binding", "M354-double-skips-title-binding",
+                   "M355-double-skips-skeleton"),
 }
 
 
 def _case_s8_axes_have_nets() -> None:
-    """S8 의 10축(운반교체·실패분류·투영없음·명부신뢰·소유증명·가시성·여정경계·운반선택·진입점·파생대조)도 같은 방식으로 덮인다."""
+    """S8 의 12축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도)도 같은 방식으로 덮인다."""
     _axes_have_nets(S8_AXES, "S8")
 
 
@@ -10093,6 +10097,68 @@ def _case_double_binds_proof_to_its_key() -> None:
         raise AssertionError("남의 공개키를 실었는데 통과시켰다")
 
 
+def _case_double_binds_request_args_to_signature() -> None:
+    """더블이 **요청 인자와 서명된 값의 결박**을 실제로 댄다(계약 §3-2 검사 4 · 3 일부).
+
+    ★agy 2R 2026-09-06 지적(수용): 구판 `_event_gate` 는 `("thread_id", "category")` 를 돌면서
+      **thread_id 일 때만** 비교했다 — 루프에 이름은 있는데 검사가 없었다. 그래서 「서명은
+      debate 인데 요청은 problem」이 더블에서 조용히 201 이 됐다(실물은 400/code 10).
+      ★**이름이 목록에 있다는 것과 그 이름을 잰다는 것은 다르다** — 여기 케이스가 그 차이다.
+    """
+    from agora import sign, tools
+    from agora.event import parse_post, render_post
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)               # debate 방(genesis 가 유형을 서명해 뒀다)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 마디"))
+        body = relay.rooms[room]["events"][-1]["body"]
+        before = len(relay.rooms[room]["events"])
+        # ⑴ 유형 바꿔치기 — 방은 debate 인데 요청만 problem 이라고 우긴다.
+        try:
+            ctx.store.append(thread_id=room, category="problem", title="",
+                             body=body, is_genesis=False)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"결박 위반이 10 이 아니다: {e.code}") from None
+        else:
+            raise AssertionError("요청 유형이 방과 달라도 받아들였다")
+        # ⑵ genesis 유형 바꿔치기 — genesis 는 **서명 안에 유형(payload.type)** 이 있다.
+        genesis_body = relay.rooms[room]["events"][0]["body"]
+        parsed = parse_post(genesis_body)
+        signed_title = parsed["event"]["payload"].get("title", "")
+        try:
+            ctx.store.append(thread_id=room, category="knowhow", title=signed_title,
+                             body=genesis_body, is_genesis=True)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"genesis 유형 결박 위반이 10 이 아니다: {e.code}") from None
+        else:
+            raise AssertionError("서명된 유형과 다른 유형으로 방을 열었는데 받아들였다")
+        # ⑶ 제목 바꿔치기 — 제목도 **서명 안**에 있다. 요청만 다른 제목을 싣는다.
+        try:
+            ctx.store.append(thread_id=room, category="debate", title="보드에 뜰 다른 제목",
+                             body=genesis_body, is_genesis=True)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"제목 결박 위반이 10 이 아니다: {e.code}") from None
+        else:
+            raise AssertionError("서명 밖에서 제목을 바꿔치기했는데 받아들였다")
+        # ⑷ 뼈대 결손 — 계약 §2-1 이 이름을 준 칸 하나를 빼고 **다시 서명해** 올린다.
+        #    ★서명은 멀쩡하다. 그래서 서명 검사(6)로는 절대 안 잡히고, 뼈대(3)만 잡는다.
+        broken = {k: v for k, v in parsed["event"].items() if k != "scrub"}
+        signed = _with_key(f["key_a"], lambda: sign.sign_event(broken))
+        try:
+            ctx.store.append(thread_id=room, category="debate", title=signed_title,
+                             body=render_post(broken, signed["signature"]), is_genesis=True)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"뼈대 결손이 10 이 아니다: {e.code}") from None
+        else:
+            raise AssertionError("계약 뼈대 칸이 빠졌는데 받아들였다")
+        if len(relay.rooms[room]["events"]) != before:
+            raise AssertionError("거부한 글이 방에 적혔다")
+
+
 def _case_register_carries_proof_of_possession() -> None:
     """등록은 **소유 증명 서명**을 동봉한다(릴레이 계약 3-1).
 
@@ -10706,6 +10772,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("계약: RELAY.md 와 대조",        _case_contract_parity_with_relay_doc, None),
     ("리허설: 영수증을 안 건너뛴다",  _case_rehearsal_does_not_skip_the_receipt, None),
     ("더블: 증명은 그 키의 것인가",   _case_double_binds_proof_to_its_key, None),
+    ("더블: 결박을 실제로 댄다",     _case_double_binds_request_args_to_signature, None),
     ("S8: 8축이 그물을 갖는다",       _case_s8_axes_have_nets, None),
 )
 
@@ -10741,6 +10808,19 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if now and doc["signed_at"] > _plus_hours(now, FUTURE_GRACE_HOURS):',
      '    if False:',
      "명부: 체크포인트 서명 검증"),
+    # ★agy 2R 봉합(2026-09-06) — 더블의 결박·뼈대.
+    ("M353-double-skips-category-binding", "tests/fake_relay.py",
+     '        bindings.append(("category", payload.get("category"), signed_payload.get("type")))',
+     '        pass',
+     "더블: 결박을 실제로 댄다"),
+    ("M354-double-skips-title-binding", "tests/fake_relay.py",
+     '        bindings.append(("title", payload.get("title"), signed_payload.get("title")))',
+     '        pass',
+     "더블: 결박을 실제로 댄다"),
+    ("M355-double-skips-skeleton", "tests/fake_relay.py",
+     '    missing = [k for k in _EVENT_SKELETON if k not in event]',
+     '    missing = []',
+     "더블: 결박을 실제로 댄다"),
     ("M351-rehearsal-skips-missing-post", "tools/rehearsal.py",
      '    if not message_id:',
      '    if False:',
