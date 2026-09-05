@@ -13,6 +13,16 @@ from __future__ import annotations
 # 설계 §D2 · §2-1a — 서명 namespace. 다른 namespace 로 만든 서명은 무효다.
 SIGN_NAMESPACE = "jarvis-agora@godmeyou.kr"
 
+# 릴레이 계약 §3-6b(`docs/RELAY.md@main 993053e`) — 명부 체크포인트 서명 문서의 `purpose` 값.
+# ★서명 대상은 네 칸 `{checkpoint, purpose, signed_at, signer}` 이고 규칙은 등록·이벤트와 같다
+#   (NFC · 키 이름 오름차순 · 개행 정규화). namespace 도 같은 하나(`SIGN_NAMESPACE`)다.
+# ★`signed_at` 이 **서명 대상 안**이라는 것이 이 칸의 핵심이다 — 밖에 두면 「언제의 명부인가」를
+#   릴레이가 마음대로 적을 수 있고, 그러면 이 칸이 옮기려던 신뢰가 릴레이에게 되돌아온다.
+CHECKPOINT_PURPOSE = "agora-roster-checkpoint-v1"
+
+# 밀리초 고정폭 ISO(계약 §3-0) — 문자열 정렬 = 시간 정렬이 되게 하는 서식이다.
+CHECKPOINT_TIME_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
+
 # 릴레이 계약 §3-1(`docs/RELAY.md@b2ca815`) — 등록 소유 증명이 서명하는 문서의 `purpose` 값.
 # ★이 칸이 **서명 대상 안에** 있어야 등록 서명을 다른 자리(이벤트·다른 목적)에 재사용할 수 없다.
 #   값이 한 글자라도 다르면 서버의 canonical 바이트와 안 맞아 401 이 난다 — 그래서 상수로 둔다.

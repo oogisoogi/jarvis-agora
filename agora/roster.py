@@ -19,6 +19,7 @@ from typing import Any
 
 from agora import errors
 from agora.contract_open import (
+    CHECKPOINT_PURPOSE, CHECKPOINT_TIME_PATTERN,
     ROSTER_ALLOWED_SIGNERS, ROSTER_OPERATORS, ROSTER_REVOKED_KEYS,
 )
 from agora.errors import AgoraError
@@ -143,3 +144,80 @@ def principals(root: str | None = None, *, path: str | None = None) -> frozenset
 def allowed_signers_path(root: str | None = None) -> str:
     return _path(root or _ROOT, ROSTER_ALLOWED_SIGNERS)
 
+
+
+# ── 명부 체크포인트 검증 (릴레이 계약 §3-6b · RL-6 · 2026-09-06 확정) ────────
+
+CHECKPOINT_FIELDS = ("checkpoint", "purpose", "signed_at", "signer")
+
+
+def checkpoint_canonical(doc: Any) -> bytes:
+    """체크포인트 서명 대상 바이트 — **네 칸을 우리가 다시 만든다**(계약 §3-6b).
+
+    ★서버가 준 문서를 그대로 서명 대상으로 쓰지 않는다: 받은 것에는 `current`·`stale` 처럼
+      **서버가 지어낸 칸**이 섞여 있고, 그것까지 서명 대상에 넣으면 서명이 릴레이의 말에
+      의존하게 된다. 서명이 덮는 범위는 **계약이 정한 네 칸**뿐이다.
+    ★`purpose` 를 안에 박는 이유는 등록(§3-1)과 같다 — 이 서명을 다른 자리에 재사용할 수 없게.
+    """
+    from agora.event import canonical_bytes
+    return canonical_bytes({
+        "checkpoint": doc.get("checkpoint"), "purpose": CHECKPOINT_PURPOSE,
+        "signed_at": doc.get("signed_at"), "signer": doc.get("signer")})
+
+
+def verify_checkpoint(doc: Any, *, allowed_signers_path: str, operators_path: str,
+                      revoked_path: str | None = None,
+                      local_checkpoint: str | None = None,
+                      last_signed_at: str | None = None) -> dict[str, Any]:
+    """운영자 서명 체크포인트를 **실제로 검증한다**(계약 §3-6b · RL-6 해소).
+
+    판정은 세 관문을 **순서대로** 지난다. 순서가 곧 사유의 정확도다:
+      ⑴칸·서식 — 네 칸이 문자열이고 `signed_at` 이 밀리초 고정폭 ISO 인가(계약 §3-0).
+      ⑵**principal** — 서명자가 `operators` 명부에 있는가. 없으면 서명이 유효해도 **권한이 없다**
+        (참가자 아무나 명부 사진을 찍어 「이게 지금 명부다」라고 말할 수 있으면 이 칸은 무의미하다).
+      ⑶서명 — 네 칸 canonical 바이트에 대한 서명이고, 그 키가 `allowed_signers` 의 **그 이름**의
+        키이며 폐기되지 않았는가(`ssh-keygen -Y verify -I <signer>`).
+    ★**되돌리기(rollback)는 잡는다**(agy 적대검증 2026-09-06 지적 · 부분 수용): 서명이 유효해도
+      `signed_at` 이 **내가 이미 본 것보다 과거**면 거부한다(`signed_at_regressed`). 서명은 과거의
+      사실이라 옛 문서를 다시 내놓는 것만으로 명부를 되돌릴 수 있고, 그때 `matches_local:false` 는
+      「명부가 자랐다」와 구별되지 않는다 — **단조 증가**가 그 둘을 가르는 유일한 축이다.
+      ⚠**절대 시각 유예(「최근이어야 한다」)는 두지 않았다**(같은 지적의 나머지 절반 · 반박):
+      체크포인트는 운영자가 **가끔** 서명하는 값이라 계약이 「대부분의 시간 stale」이라고 못박았다.
+      「며칠 지났으면 무효」 규칙은 정상 운영을 상시 경보로 만들고, 경보는 그날로 무시되기 시작한다.
+      되돌리기는 **우리가 본 것과의 비교**로 잡히므로 시계에 기대지 않는다.
+    ★`checkpoint` 값이 **내 사본과 다른 것은 실패가 아니다**(`matches_local: false`).
+      명부는 새 등록으로 계속 자라므로 체크포인트는 **대부분의 시간 stale 이다**(계약 §3-6b).
+      「서명이 유효한가」와 「지금 명부와 같은가」는 다른 질문이고, 섞으면 정상 상태가 경보가 된다.
+    """
+    import re
+
+    from agora import sign
+    if type(doc) is not dict:
+        return {"verified": False, "why": "not_a_document", "signer": None}
+    signer = doc.get("signer")
+    signature = doc.get("signature")
+    # ★`signature` 도 **타입부터** 본다(agy 적대검증 2026-09-06 지적 · 수용): 숫자가 오면
+    #   `verify_detail` 안의 `in` 검사가 TypeError 로 터진다 — 못 믿을 문서는 **우아하게 거부**해야지
+    #   프로그램이 죽는 것으로 답하면 안 된다(죽음은 판정이 아니다).
+    for key in ("checkpoint", "signed_at", "signer", "signature"):
+        if type(doc.get(key)) is not str or not doc[key].strip():
+            return {"verified": False, "why": f"missing_field:{key}", "signer": signer}
+    if not re.match(CHECKPOINT_TIME_PATTERN, doc["signed_at"]):
+        # ★서식을 여기서 막는 이유: 서명 대상 **안에** 있는 값이라, 서식이 흔들리면
+        #   같은 시각이 두 문자열로 서명될 수 있다(대조가 그때부터 운에 맡겨진다).
+        return {"verified": False, "why": "signed_at_format", "signer": signer}
+    if signer not in operators(path=operators_path):
+        return {"verified": False, "why": "signer_not_operator", "signer": signer}
+    if last_signed_at and doc["signed_at"] < last_signed_at:
+        # ★고정폭 ISO 라 문자열 비교가 곧 시간 비교다(계약 §3-0 이 그 서식을 고른 이유).
+        return {"verified": False, "why": "signed_at_regressed", "signer": signer,
+                "signed_at": doc["signed_at"], "last_signed_at": last_signed_at}
+    detail = sign.verify_detail(checkpoint_canonical(doc), signature, signer,
+                                allowed_signers_path, revoked_path)
+    out: dict[str, Any] = {"verified": detail["verdict"] == sign.OK,
+                           "why": detail["reason"], "verdict": detail["verdict"],
+                           "signer": signer, "signed_at": doc["signed_at"]}
+    if local_checkpoint is not None:
+        # 대조는 하되 **판정에 넣지 않는다** — 다르면 「그 뒤에 명부가 자랐다」가 정상 해석이다.
+        out["matches_local"] = doc["checkpoint"] == local_checkpoint
+    return out

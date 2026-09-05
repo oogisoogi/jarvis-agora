@@ -48,6 +48,17 @@ def _write_json(path: str, doc: Any, *, mode: int = 0o600) -> None:
     os.replace(tmp, path)
 
 
+def _read_json(path: str) -> dict[str, Any] | None:
+    """있으면 읽고, 없거나 깨졌으면 **None**. 「없다」와 「못 읽었다」를 여기서는 같게 다룬다 —
+    둘 다 「비교할 지난 것이 없다」는 뜻이고, 그 경우 단조 검사는 그냥 건너뛴다."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if type(doc) is dict else None
+
+
 def _load_config(directory: str) -> dict[str, Any]:
     from agora.tools import load_config
     return load_config(directory)
@@ -206,15 +217,14 @@ def sync_roster(*, directory: str | None = None, relay_url: str | None = None,
 def _fetch_checkpoint(store: Any, directory: str) -> dict[str, Any]:
     """운영자 서명 체크포인트(릴레이 계약 §3-6b) — **받아서 남기되 아직 검증하지 않는다.**
 
-    ★검증을 흉내내지 않는다: 확정본 `docs/RELAY.md@b2ca815` 는 **누가 서명하는가**(운영자 ·
-      §3-6b)와 **무엇을 서명하는가의 뜻**(명부 3종 렌더의 해시)까지만 적었고, 실제로 검증에
-      필요한 세 가지가 없다 — ⑴서명 대상 **바이트**의 정의(해시 문자열 그대로인가, 문서를
-      canonical 로 만든 바이트인가) ⑵SSHSIG **namespace**(등록은 §3-1 이 명시했는데 여기는 없다)
-      ⑶`signed_at` 결박(없으면 옛 서명을 다시 올리는 것을 못 가른다).
-      확정 전에 `verified: true` 를 적으면 **검증하지 않은 것을 검증했다고 적는 것**이 된다.
+    ★**이제 진짜로 검증한다**(RL-6 해소 · 계약 §3-6b `@main 993053e`): 서명 대상 네 칸 ·
+      SSHSIG namespace · `signed_at` 결박이 계약에 확정됐다. 판정은 `roster.verify_checkpoint` 가
+      하고(칸·서식 → 운영자인가 → 서명), 여기서는 **받고 남기고 그 판정을 싣는** 일만 한다.
     ★**부재는 200 + `checkpoint: null` 이다**(§3-6b · `revoked_keys` 와 같은 규율). 그때도
       `current`·`stale` 은 온다 — 그 두 칸이 부재의 내용이므로 버리지 않고 함께 적는다.
       404 는 엔드포인트 자체가 아직 없는 상대에서만 나오고, 그 경우는 어댑터가 `None` 을 준다.
+    ★**검증 실패해도 파일로 남긴다.** 남기지 않으면 「무엇이 왔길래 실패했는지」를 나중에 못 본다 —
+      다만 결과에는 `verified: false` 와 사유가 그대로 나간다(조용히 버리지 않는다).
     """
     try:
         doc = store.roster_checkpoint()
@@ -226,11 +236,29 @@ def _fetch_checkpoint(store: Any, directory: str) -> dict[str, Any]:
         # 서버는 답했고, 답의 내용이 「아직 없다」다. 「못 읽었다」와 같은 칸에 적지 않는다.
         return {"present": False, "verified": False, "why": "relay_has_no_checkpoint",
                 "current": doc.get("current"), "stale": doc.get("stale")}
-    _write_json(os.path.join(directory, CHECKPOINT_FILENAME), doc)
-    return {"present": True, "verified": False,
-            "why": ("검증 계약 미확정(RL-6 · 서명 대상 바이트·namespace·signed_at 결박 없음)"
-                    " — 받은 것을 파일로 남기기만 했다"),
-            "file": CHECKPOINT_FILENAME,
+    # ★★**검증 전에 덮어쓰지 않는다**(agy 적대검증 2026-09-06 지적 · 수용): 먼저 쓰면 서명이 틀린
+    #   문서가 **직전의 성한 체크포인트를 파괴**한다. 못 믿을 것은 옆(`.rejected.json`)에 두고,
+    #   정본 자리는 **검증을 지난 것만** 차지한다 — 그래야 「무엇이 왔길래 실패했나」도 남고
+    #   마지막으로 믿을 수 있었던 것도 남는다.
+    previous = _read_json(os.path.join(directory, CHECKPOINT_FILENAME))
+    verdict = roster.verify_checkpoint(
+        doc,
+        allowed_signers_path=os.path.join(directory, "allowed_signers"),
+        operators_path=os.path.join(directory, "operators"),
+        revoked_path=os.path.join(directory, "revoked_keys"),
+        last_signed_at=(previous or {}).get("signed_at"),
+        local_checkpoint=roster.checkpoint(paths={
+            "participants/allowed_signers": os.path.join(directory, "allowed_signers"),
+            "participants/revoked_keys": os.path.join(directory, "revoked_keys"),
+            "participants/operators": os.path.join(directory, "operators")}))
+    name = (CHECKPOINT_FILENAME if verdict["verified"]
+            else CHECKPOINT_FILENAME.replace(".json", ".rejected.json"))
+    _write_json(os.path.join(directory, name), doc)
+    return {"present": True, "verified": verdict["verified"], "why": verdict["why"],
+            "file": name,
+            "signer": verdict.get("signer"), "signed_at": verdict.get("signed_at"),
+            # ★서명이 유효해도 **지금 명부와 같다는 뜻이 아니다** — 새 등록으로 명부는 자란다.
+            "matches_local": verdict.get("matches_local"),
             "stale": doc.get("stale"), "checkpoint": doc.get("checkpoint"),
             "current": doc.get("current")}
 

@@ -131,7 +131,7 @@ GET {relay}/rooms/{room_id} → {"closed": false, "answered": false, "closed_at"
 ```json
 {
   "transport": "relay",
-  "relay": {"url": "https://<릴레이 호스트>", "timeout_seconds": 30},
+  "relay": {"url": "https://agora.godmeyou.kr", "timeout_seconds": 30},
   "human_approval": true,
   "budget": {"posts_per_round": 2, "max_chars_per_round": 6000},
   "watch": {"interval_seconds": 60, "reconcile_every": 20}
@@ -286,6 +286,18 @@ GitHub 에서는 우리 `thread_id` 와 Discussion **번호**가 다른 값이�
 - ⚠**못 재는 것**: 「진짜 릴레이가 그렇게 답한다」는 것. 가짜 상대의 초록은 **논리가 맞다**는 뜻이지
   계약이 맞다는 뜻이 아니다(store_github 이 이미 아는 한계 · 실물 대조는 A 의 릴레이가 서면 그때).
 
+## 11-1. 실물 릴레이에서 배운 것 (2026-09-06 r3 리허설)
+
+| 발견 | 실측 | 봉합 |
+|---|---|---|
+| **이름을 안 대면 403** | 기본 UA(`Python-urllib/3.x`) → Cloudflare 1010(`browser_signature_banned`) · `agora-client/…` → 200 | `store_relay.USER_AGENT` 상시 동봉(⛔브라우저 사칭 아님 — 우리가 무엇인지 그대로 적는다) · 그물 M341 |
+| **`agora join <room-id>` 가 거부됐다** | 문서 3곳(ONBOARDING §명령표·06 §4·이 문서 §8)이 자리 인자로 적었는데 진입점이 `code 10` | `cli.POSITIONAL_ARG` 표 + `_positional` — **문서가 약속한 서식은 진입점에서 받는다** · 그물 M342 |
+| 체크포인트 부재의 실제 모양 | 라이브 = `{"checkpoint":null,"current":"6985…","stale":true}` 200 | 계약 §3-6b 그대로 — 우리 부재 처리(`present:false` + `current` 보존)가 **실물과 맞았다** |
+| 서버 파생 상태 | `GET /rooms/:id` = `{closed:false,answered:false}` · 우리 reducer 와 일치 | 3자 대조 축이 실물에서도 산다 |
+| 소유 증명(다섯 칸) | 실물 `POST /register` **201** | r2 교정이 실물에서 검증됐다(네 칸이었으면 401) |
+
+⚠**여전히 못 잰 것**: 상한 근처 거동(429) · 데이터가 쌓인 뒤의 응답 시간 · 다중 참가자 경합 · 윈도우 실행.
+
 ## 12. 윈도우(K-1) — 확대하지 않는다
 
 어댑터는 **표준 라이브러리만** 쓴다(`urllib.request`·`json`·`ssl` 기본값). 새 외부 의존을 들이지 않으므로
@@ -317,8 +329,8 @@ GitHub 어댑터를 쓰는 설정에서는 그대로 남는다 — 「의존이 
 | ~~RL-2~~ | ~~릴레이 실제 엔드포인트·응답 칸 이름~~ | **해소(2026-09-05 r2)** — `RELAY.md@b2ca815` 전수 대조 · 교정 8건 = §15 | — |
 | ~~RL-3~~ | ~~릴레이 rate limit 수치~~ | **부분 해소** — 계약 §7 이 **선언값**을 줬다(등록 300/시간 · 참가자 30/분 · 방 120/분 · 이벤트 64KB). COST-MODEL §7 에 인용으로 적었다 | ⚠**실사용 실측은 배포 후**다(선언값 ≠ 실측값) · 읽기 축 상한은 계약 표에 **적히지 않았다**(무제한이라는 뜻이 아니다) |
 | ~~RL-4~~ | ~~서버가 `thread_status` 를 파생하는가~~ | **해소** — 파생한다(§3-4 `closed`·`answered`·`closed_at`·`state_hash`) | 대조 축 살아 있음 · `null` 경로는 계약 안 지키는 상대용으로 존치 |
-| RL-5 | 릴레이 URL 정본(도메인) | 발주자 게이트(06 §9) | 예시 설정의 URL 자리(현재 placeholder). ⚠계약 §3-0 은 기저 URL 을 `agora.godmeyou.kr` 로 적었으나 **예시 설정을 그 값으로 바꾸는 것은 발주자 게이트 사안**이라 이 라운드에서 안 바꿨다 |
-| RL-6 | 체크포인트 **검증** 계약(서명 대상 바이트·namespace·`signed_at` 결박) | 워커 A | ⛔**미확정** — 확정본 §3-6b 는 「누가·무엇의 해시」까지만 적었다. 그래서 `verified: false` + 사유를 유지한다(검증하지 않은 것을 검증했다고 적지 않는다) |
+| ~~RL-5~~ | ~~릴레이 URL 정본(도메인)~~ | **해소(2026-09-06 r3)** — master 승인([master#7d694eb2])으로 예시 설정·ONBOARDING 을 `https://agora.godmeyou.kr` 로 바꿨다 | — |
+| ~~RL-6~~ | ~~체크포인트 **검증** 계약~~ | **해소(2026-09-06 r3)** — 계약 §3-6b(`@main 993053e`)가 세 칸을 확정했다: 서명 대상 = `{checkpoint,purpose:"agora-roster-checkpoint-v1",signed_at,signer}` canonical · namespace = `jarvis-agora@godmeyou.kr` · `signed_at` **결박** | ⇒ `roster.verify_checkpoint` 로 **실제 검증**(운영자 대조 → 서명) · `matches_local` 은 판정에 안 넣는다(명부가 자라면 stale 이 정상) |
 
 ## 15. 계약 확정본 전수 대조 (RL-2 · `docs/RELAY.md@b2ca815` · 2026-09-05 r2)
 

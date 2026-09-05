@@ -211,6 +211,42 @@ NFR-1·2·3·5·6 은 05 전체에서 **id 로 한 번도 안 나왔다** — **
       (등록 300/시간 · 참가자 30/분 · 방 120/분 · 이벤트 64KB = 우리 `MAX_EVENT_BYTES` 와 같은 값).
       ⚠**실사용 실측은 배포 후**이고, **읽기 축 상한은 계약 표에 적히지 않았다**(무제한이라는 뜻이 아니다).
 
+**r3 — RL-6 검증·RL-5·실물 릴레이 실사격(2026-09-06 · `https://agora.godmeyou.kr`)**
+
+- [x] **F-S8-19** RL-6 = **verified:true 경로 실장** — `roster.verify_checkpoint` 가 계약 §3-6b 대로
+      ⑴칸·`signed_at` 서식(밀리초 고정폭) ⑵서명자가 `operators` 인가 ⑶네 칸 canonical 바이트 서명을
+      **이 순서로** 본다. 위조 반례 4종(`signed_at` 만 변경 · 남의 키 · 비운영자 · 서식 위반) + 명부 성장 시
+      `verified:true` + `matches_local:false`. 증거 = `명부: 체크포인트 서명 검증` · `명부: 체크포인트 판정 배선` ·
+      M337~M340.
+- [x] **F-S8-20** RL-5 = 예시 설정·ONBOARDING·설계 문서의 URL → `https://agora.godmeyou.kr`(master 승인분).
+- [x] **F-S8-21** ⚠**실물 J1·J2 완주**(시험 신원 `jarvis-test-643` · 방 1개) — register **201**(다섯 칸 소유
+      증명이 실물에서 통과 = r2 교정의 실물 검증) → sync-roster(명부 36줄) → whoami → enter → browse →
+      join(자리 인자·`key=value` 둘 다) → say → threads → read **전건 rc 0** · 우리 검증 `sig=ok` ·
+      서버 파생 상태가 우리 reducer 와 일치.
+      ⛔**단, 실물에서 `verified:true` 는 아직 못 봤다**: 라이브 `operators` 가 **0줄**이고 체크포인트가
+      **부재**(200 + `checkpoint:null` + `current` + `stale:true`)다 — 운영자 등재·발행은 운영자 손이다.
+      해소 판정 = 운영자 등재 + 체크포인트 발행 뒤 `sync-roster` 결과의 `checkpoint.verified` 가 참이면 해소.
+- [x] **F-S8-22** ★**실물이 드러낸 결함 2건**(가짜 릴레이로는 원리적으로 못 보던 것) —
+      ⑴기본 UA(`Python-urllib/3.x`)로는 **Cloudflare 1010 · 403**, `agora-client/…` 는 200 ⇒ `USER_AGENT`
+      상시 동봉(⛔브라우저 사칭 아님) · M341 ⑵문서 3곳이 약속한 `agora join <room-id>` 를 진입점이
+      **code 10** 으로 거부 ⇒ `POSITIONAL_ARG` 표 + `_positional` · M342. ⑵는 「등록됐다 ≠ 동작한다」의
+      **세 번째 판**이라, 그물을 함수뿐 아니라 **문서 3곳의 서식 문구**에도 걸었다.
+- [x] **F-S8-23** COST-MODEL §8 = **실측 표**(인용이 아니다): `GET /rooms` 201ms(1요청) · 전건 264ms(1) ·
+      `rooms/:id` 321ms(1) · 명부 3종 575ms(3) · register 543ms · enter 801ms · say 1264ms(CAS 재조회 포함) ·
+      whoami 0요청. ⚠**정상 응답에 한도 머리가 없다**(`X-RateLimit-*` 부재) ⇒ 남은 예산을 미리 알 수 없고
+      **429 는 한 번도 안 났다**(총 약 30요청 · 쓰기 3건 · 상한은 일부러 안 두드렸다).
+- [x] **F-S8-25** agy 적대검증 r3 = **BLOCK 2 · REVISE 2 · ACCEPT 3** → **셋 수용 · 하나 부분 수용 · 하나 반박**
+      (결과 `scratchpad/agy-r3.txt` · 5979 바이트 · sha256 `f6552016…9dfec85d`).
+      ⑴`signature` 타입 미검사로 **터지던** 경로 → 칸 검사에 포함(우아한 거부) ⑵`signed_at` **되돌리기**
+      (옛 서명 재사용) → 단조 검사 `signed_at_regressed`(⛔절대 시각 유예는 **반박** — 계약이 「대부분 stale」이라
+      못박은 값에 유예를 걸면 정상 운영이 상시 경보가 된다) ⑶**검증 전 디스크 덮어쓰기** → 검증 뒤 기록 +
+      실패분은 `roster-checkpoint.rejected.json` **옆자리**에 ⑷`_positional` 의 `=` 규칙 넓히기는 **반박**
+      (지금 도는 `join room_id=<id>` 가 오독된다 · 표의 값 문법은 32자 hex). 증거 = M343 · M344 · 반례 케이스 ⑸⑹.
+      최종 실측 = 케이스 **389/389** · 뮤테이션 **344/344 KILLED** · NOT-APPLIED **0**.
+- [x] **F-S8-24** 라이브 시험 산출물(**purge 대상 · master**): 참가자 `jarvis-test-643`
+      (지문 `SHA256:RoCBU+JqmNyHyLDGLmX2wIiOTCpbsPNK92+MvKpROPc`) · 방 `aa8c31ac1f97b197e6eee148632a1a87`
+      (genesis 1 + post 1). ★append-only 라 **우리가 지울 수 없다**(D1 = master 게이트).
+
 **R2 봉합 잔여 전수(브리프 §3 · 2026-09-05 실측)**
 
 | 항목 | 상태 | 근거 |

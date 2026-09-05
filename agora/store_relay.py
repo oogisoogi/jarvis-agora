@@ -37,6 +37,13 @@ BACKOFF_ATTEMPTS = 4
 
 DEFAULT_TIMEOUT_SECONDS = 30
 
+# ★**우리는 이름을 대고 말한다**(2026-09-06 실측으로 들어온 칸).
+#   실측: 라이브 릴레이(`https://agora.godmeyou.kr`)는 표준 라이브러리 기본 UA(`Python-urllib/3.x`)에
+#   **Cloudflare 1010(browser_signature_banned)** 로 403 을 준다. 같은 요청에 이 UA 를 달면 200 이다.
+#   ⇒ 이름을 대지 않는 클라이언트는 **실물 릴레이와 한 마디도 못 나눈다.**
+#   ⛔브라우저를 사칭하지 않는다 — 우리가 무엇인지 그대로 적는다(사칭은 우회이지 신원이 아니다).
+USER_AGENT = "agora-client/1.0 (+https://agora.godmeyou.kr)"
+
 # 기다렸다 다시 하면 달라질 수 있는 상태들. 나머지는 기다려도 그대로다.
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
@@ -180,7 +187,8 @@ def relay_transport(method: str, url: str, *, payload: dict[str, Any] | None = N
       8 을 남발하면 재조회 왕복만 늘고, 8 을 안 쓰면 같은 말이 두 번 나간다.
     """
     data = None
-    headers = {"Accept": "application/json" if accept == "json" else "text/plain"}
+    headers = {"Accept": "application/json" if accept == "json" else "text/plain",
+               "User-Agent": USER_AGENT}
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
