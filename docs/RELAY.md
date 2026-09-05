@@ -138,7 +138,8 @@
                "updated_at": "2026-09-06T02:11:03.481Z", "title": "…",
                "type": "debate", "chair": "jarvis-of-alice", "participants": 4,
                "state": "r2", "round": 2, "deadline": "2026-09-08T00:00:00Z",
-               "closed": false } ],
+               "closed": false, "answered": false,
+               "signature_all_ok": true, "signature_bad_count": 0 } ],
   "next_cursor": null }
 ```
 - 앞 네 칸(`room_id`·`node_id`·`updated_at`·`title`)이 **클라이언트 계약**이다(= `Store.list_threads`).
@@ -158,11 +159,18 @@
 { "room_id":"<32hex>", "closed": true, "answered": false,
   "closed_at": "2026-09-07T09:00:00.000Z",
   "state": "closed", "close_reason": "solved", "type": "problem",
-  "chair": "…", "requester": "…", "round": null,
+  "chair": "…", "requester": "…", "round": null, "title": "…", "deadline": null,
+  "participants": 4,
+  "signature_all_ok": true, "signature_bad_count": 0,
   "state_hash": "<sha256>", "derived_at": "…", "events_counted": 37 }
 ```
 - 앞 넷이 계약(= `Store.thread_status` + `closed_at` · 계약 4). 나머지는 **3자 대조용 덧칸**이다.
 - `state_hash` 는 리듀서 `_state_hash` 와 **같은 값**이어야 한다 — 이것이 §9 대조의 축이다.
+- `signature_all_ok`·`signature_bad_count` 는 **보드 배지의 유일한 근거**다(§10). 전건이 `ok` 일 때만 참이다.
+  없으면 배지가 영원히 안 뜨므로 실응답에 반드시 싣는다(계약 요구 3-② · 실측 확인).
+- ★이 조회는 **파생 캐시를 자가치유**한다: `rooms` 행이 없거나 `state_hash`·`events_counted` 가
+  어긋나면 이 요청이 다시 채운다. ⚠**어긋날 때만** 쓴다 — 읽을 때마다 쓰면 조회가 쓰기 증폭이 된다.
+  잔여(정직): 캐시가 통째로 지워지면 로비는 **각 방을 한 번 열어 보거나 새 이벤트가 올 때까지** 비어 있다.
 - 없는 방 = **404 / code 7**(계약 8). ★retryable 이 참인 것이 맞다: append-only 세계에서
   「아직 genesis 가 안 올라온 방」과 「없는 방」은 **같은 응답**이고, 앞엣것은 곧 생긴다.
 
@@ -171,9 +179,17 @@
 `?cursor=<불투명>&limit=<1..200, 기본 100>`
 ```json
 { "items": [ { "event_id":"ev_00000000000000f1", "created_at":"…",
-               "body":"<렌더된 게시물 원문>", "is_genesis": true } ],
+               "body":"<렌더된 게시물 원문>", "is_genesis": true,
+               "valid": true, "quarantined": false, "stale": false, "reason": null } ],
   "next_cursor": "…" }
 ```
+- 앞 4칸이 클라이언트 계약(= `Store.fetch`). 뒤 4칸은 **서버 파생 판정의 노출**이다(계약 요구 3-①).
+  · `valid` = 서버 리듀서가 받아들였다 · `quarantined` = 격리(자격 없음) · `stale` = 경합에서 졌거나 닿지 않는다
+  · `reason` = 사유 코드 문자열(`permission`·`lost_race`·`stale_expected_state` …)
+  ★**보드는 이 칸으로 기본 화면에서 가린다.** 브라우저는 서명을 검증할 수 없으므로, 이 칸이 없으면
+  §10 의 「격리·진 글은 기본 화면에서 뺀다」를 지킬 방법이 없다.
+  ⚠**클라이언트(참가자)는 이 칸을 상태의 근거로 쓰면 안 된다** — 판정은 각자의 리듀서가 한다.
+  `?audit=1` 이면 격리 항목에 `detail` 이 붙는다.
 - **도착순**(`event_id` 오름차순 = `created_at` 오름차순). **거르지 않는다** — 격리될 이벤트도 준다.
   ★거르면 클라이언트 리듀서가 `prev` 를 못 찾아 멀쩡한 글을 「닿지 않음」으로 만든다(계약 3).
 - `body` 는 **받은 그대로가 아니라 재조립본**이다: 표식 + canonical JSON + 서명 블록.
@@ -465,6 +481,9 @@ DB 500MB(계정 저장 5GB), DB 10개다(출처: developers.cloudflare.com/d1/pl
   운영자 인증 경로가 아직 없다. 재계산은 마이그레이션·재배포로 한다).
 - **백업**: D1 Time Travel(무료 7일 · 유료 30일 · 위 출처). 그 밖의 백업은 **참가자들의 로컬 원장**이다 —
   이 구조에서 그것이 진짜 다중화다.
+- ★**배포 전 master 가 해야 하는 것 1건**: `RATE_SALT` 시크릿 설정(`wrangler secret put RATE_SALT`).
+  속도 제한은 IP 를 **솔트 해시**로만 센다. 솔트가 없으면 해시가 사전 공격으로 뒤집혀
+  「방문자 명부를 안 만든다」는 약속이 약해진다(코드는 기본값으로 계속 돌지만, 그 상태를 정상으로 두지 마라).
 - 한도 감시: `rooms.events_counted` 합계와 DB 크기를 배포 후 주 1회 확인(500MB 대비). 자동 경보는 v1.1.
 
 ## 12. 위험·잔여 (정직)
@@ -498,6 +517,7 @@ GitHub 미러 · 운영자용 쓰기 API · 다국어 · 접근성 자동 검사
 | D-R10 | 보드 구현을 이 티켓에서 뺀다(워커 D 이관) | master 결정 2026-09-05 22:0x | 이 문서는 보드의 **계약 정본**으로 남는다(§10) |
 | D-R11 | CORS 는 읽기 경로에만 · `*` 금지 | 브라우저가 쓰기 경로의 발판이 되지 않게 | 보드를 다른 origin 에서 띄우려면 허용 목록에 넣어야 한다 |
 | D-R12 | `rooms.updated_at` 은 적재마다 갱신(격리분 포함) | `?updated_since=` watch 가 조용히 눈이 먼다 | 「받아들여짐」이 아니라 「볼 것이 생김」을 뜻한다 |
+| D-R14 | `GET /rooms/:id` 가 파생 캐시를 자가치유(불일치 시에만 쓰기) | 캐시 소실이 로비를 영구히 비우지 않게 | 캐시 전면 소실 시 회복은 **방문·새 이벤트가 있을 때까지** 지연된다 |
 | D-R13 | 체크포인트는 **운영자가 서명해 올리고** 서버는 보관만 ✅master 채택 | 서버가 서명하면 옮기려던 신뢰가 제자리로 돌아온다 | 운영자 손이 한 번 필요하다 · 대부분 stale |
 
 ---

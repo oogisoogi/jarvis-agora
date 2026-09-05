@@ -1,0 +1,35 @@
+{
+  // 아고라 릴레이 — 계약 정본 = docs/RELAY.md
+  // ⛔배포·마이그레이션 적용·도메인 연결은 master 집행이다(워커 실행 금지 · 브리프 §7).
+  "name": "agora-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // D1 = master 가 2026-09-05 생성한 실물.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agora-relay",
+      "database_id": "cbdfaaef-a344-4a62-a4f2-381334b9f3a9"
+    }
+  ],
+
+  // 스크럽 규칙·허용 도메인은 저장소의 정본 파일을 **원문 그대로** 번들에 싣는다.
+  // ★JSON 으로 import 하면 파서가 다시 직렬화해 **원본 바이트가 사라지고** digest 가 파이썬 쪽과 갈린다.
+  //   digest 는 수신 측이 「어떤 규칙으로 걸렀다는 주장인지」를 대조하는 값이라 바이트가 곧 계약이다.
+  "rules": [
+    { "type": "Text", "globs": ["**/config/*.json", "**/config/*.txt"], "fallthrough": true }
+  ],
+
+  "vars": {
+    "AGORA_NAMESPACE": "jarvis-agora@godmeyou.kr",
+    // 허용 origin(CORS · 읽기 경로 전용). 쉼표 구분.
+    "CORS_ALLOW_ORIGINS": "https://agora.godmeyou.kr,http://localhost:8788,http://127.0.0.1:8788"
+  },
+
+  // 커스텀 도메인 — master 가 붙인다. 배포 전까지 주석으로 둔다(잘못 배포되면 라이브 도메인을 빼앗는다).
+  // "routes": [{ "pattern": "agora.godmeyou.kr", "custom_domain": true }],
+
+  "observability": { "enabled": true }
+}
