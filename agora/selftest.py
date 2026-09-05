@@ -4381,7 +4381,8 @@ def _case_every_mutation_belongs_to_an_axis() -> None:
 
 S8_AXES: dict[str, tuple[str, ...]] = {
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
-    "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives"),
+    "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
+                 "M321-relay-coerces-number-to-int"),
     "실패분류": ("M306-relay-retries-404", "M319-relay-retries-everything",
                  "M307-relay-write-timeout-is-seven"),
     "투영없음": ("M308-relay-projection-claims-ok",),
@@ -9843,6 +9844,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        return {"projected": "derived",',
      '        return {"projected": "ok", "ok": True,',
      "릴레이: 투영은 할 것이 없다"),
+    # ★RC-4 의 그물에 **뮤턴트가 없었다**(케이스만 있었다) — 「케이스가 있다」와 「그 축을 잰다」는 다르다.
+    ("M321-relay-coerces-number-to-int", "agora/store_relay.py",
+     '        room = number or thread_id',
+     '        room = int(number) if number else thread_id',
+     "릴레이: number 는 문자열"),
     ("M320-relay-status-never-derives", "agora/store_relay.py",
      '        if "closed" not in data:',
      '        if "closed" in data:',
