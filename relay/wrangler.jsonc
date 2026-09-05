@@ -1,0 +1,51 @@
+{
+  // 아고라 릴레이 — 계약 정본 = docs/RELAY.md
+  // ⛔배포·마이그레이션 적용·도메인 연결은 master 집행이다(워커 실행 금지 · 브리프 §7).
+  "name": "agora-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // D1 = master 가 2026-09-05 생성한 실물.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agora-relay",
+      "database_id": "cbdfaaef-a344-4a62-a4f2-381334b9f3a9"
+    }
+  ],
+
+  // 스크럽 규칙·허용 도메인은 저장소의 정본 파일을 **원문 그대로** 번들에 싣는다.
+  // ★JSON 으로 import 하면 파서가 다시 직렬화해 **원본 바이트가 사라지고** digest 가 파이썬 쪽과 갈린다.
+  //   digest 는 수신 측이 「어떤 규칙으로 걸렀다는 주장인지」를 대조하는 값이라 바이트가 곧 계약이다.
+  "rules": [
+    { "type": "Text", "globs": ["**/config/*.json", "**/config/*.txt"], "fallthrough": true }
+  ],
+
+  "vars": {
+    "AGORA_NAMESPACE": "jarvis-agora@godmeyou.kr",
+    // 허용 origin(CORS · 읽기 경로 전용). 쉼표 구분.
+    "CORS_ALLOW_ORIGINS": "https://agora.godmeyou.kr,http://localhost:8788,http://127.0.0.1:8788"
+  },
+
+  // 박람회장 보드(정적 화면 · 워커 D 소유 = fair/board 의 relay/board/) 를 같은 Worker 에서 서빙하는 블록.
+  // ⛔지금은 **주석이다.** 켜는 시점 = master 가 fair/board 를 병합해 relay/board/ 실물이 들어오는 그 커밋.
+  //   "assets": { "directory": "./board" },
+  //
+  // ★실측(2026-09-05 · 이 기계):
+  //   ⑴ 디렉터리가 **비어 있으면** wrangler dev 는 **정상 기동**한다 — /health 200 · /rooms 200(Worker 가 받는다)
+  //      · 자산에 없는 / 는 404(우리 라우터의 404).
+  //   ⑵ 디렉터리가 **없으면 기동 자체가 실패**한다:
+  //      ERROR The directory specified by the "assets.directory" field ... does not exist
+  //   ⇒ ⑵ 가 이 블록을 지금 켜면 안 되는 이유다. **git 은 빈 디렉터리를 추적하지 못하므로**
+  //      이 브랜치를 새로 받은 트리에는 relay/board/ 가 아예 없고, 그러면 dev·deploy 가 그 자리에서 죽는다.
+  //      보드 파일과 **같은 커밋에서** 켜야 브랜치가 모든 시점에 배포 가능하다.
+  // ★기본값 근거(developers.cloudflare.com/workers/wrangler/configuration/#assets · 2026-09-05 확인):
+  //   not_found_handling 기본 "none" · html_handling 기본 "auto-trailing-slash".
+  //   ⇒ 자산에 없는 주소는 Worker 로 넘어온다(위 ⑴ 로 실측 확인) — /rooms·/events·/participants/* 는 우리 코드가 그대로 받는다.
+
+  // 커스텀 도메인 — master 가 붙인다. 배포 전까지 주석으로 둔다(잘못 배포되면 라이브 도메인을 빼앗는다).
+  "routes": [{ "pattern": "agora.godmeyou.kr", "custom_domain": true }],
+
+  "observability": { "enabled": true }
+}
