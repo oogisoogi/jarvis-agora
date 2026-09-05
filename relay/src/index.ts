@@ -176,7 +176,9 @@ async function handleRegister(req: Request, env: Env): Promise<Response> {
     `INSERT INTO participants (participant_id, display_name, key_type, key_b64, fingerprint, is_operator, revoked_at, created_at)
      VALUES (?1,?2,?3,?4,?5,0,NULL,?6)`
   ).bind(participantId, displayName, parts[0], parts[1], fingerprint, createdAt).run();
-  return json({ participant_id: participantId, fingerprint, created_at: createdAt, status: "created" }, 201);
+  // ★성공 본문은 계약(§3-1)이 명명한 칸만 싣는다 — 「새로 만들었다」는 **코드 201 이 말한다**.
+  //   200 만 고치고 여기를 남겨 두어 설치기 대조가 계속 적색이었다(2026-09-05 master 적발 · 스윕 누락).
+  return json({ participant_id: participantId, fingerprint, created_at: createdAt }, 201);
 }
 
 // ── POST /events ───────────────────────────────────────────────────────────
@@ -259,7 +261,7 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
       return json({
         event_id: eventIdOf(existing.seq),
         url: roomUrl(req, threadId, event.message_id),
-        created_at: existing.created_at, status: "already",
+        created_at: existing.created_at,
       }, 200);
     }
     // 재시도가 아니라 **다른 글**이다. 새 message_id 로 써야 한다.
@@ -301,7 +303,7 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
       return json({
         event_id: eventIdOf(again.seq),
         url: roomUrl(req, threadId, event.message_id),
-        created_at: again.created_at, status: "already",
+        created_at: again.created_at,
       }, 200);
     }
     throw e;

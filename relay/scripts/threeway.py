@@ -247,9 +247,14 @@ def main():
     now = "2026-09-06T01:00:00Z"
 
     print("== 0. 등록(소유 증명 서명 포함) ==")
+    REG_KEYS = ["created_at", "fingerprint", "participant_id"]
+    first_code, first_keys = None, None
     for s in (alice, bob, op):
         code, body = register(args.base, s, args.workdir)
-        print("  %-9s -> %s %s" % (s["id"], code, body.get("status") if isinstance(body, dict) else body))
+        keys = sorted(body.keys()) if isinstance(body, dict) else [str(body)]
+        if first_code is None:
+            first_code, first_keys = code, keys      # ★첫 등재(201) 를 붙잡는다 — 설치기가 재는 것이 이 응답이다.
+        print("  %-9s -> %s %s" % (s["id"], code, keys))
     # 멱등 확인 — ★본문 **키 집합**이 계약(§3-1 · 201 과 같은 세 칸)과 일치하는지 잰다.
     #   값이 아니라 **칸 목록**이 계약이다: 칸을 하나 더 실으면 계약을 읽고 대조하는 쪽이 적색을 낸다
     #   (라이브 실사건 2026-09-05 · master 판정 = 칸 제거).
@@ -257,8 +262,10 @@ def main():
     reg_keys = sorted(body.keys()) if isinstance(body, dict) else [str(body)]
     print("  재등록(멱등)   -> %s %s" % (code, reg_keys))
     idem_checks = [
+        ("첫 등재 = 201", 201, first_code, ""),
+        ("등록 201 본문 = 계약 세 칸", REG_KEYS, first_keys, ""),
         ("재등록 멱등 = 200", 200, code, ""),
-        ("재등록 200 본문 = 계약 세 칸", ["created_at", "fingerprint", "participant_id"], reg_keys, ""),
+        ("재등록 200 본문 = 계약 세 칸", REG_KEYS, reg_keys, ""),
     ]
 
     results = []
@@ -472,10 +479,24 @@ def main():
            "rules=%s" % ((body.get("detail", {}) or {}).get("rules") if isinstance(body, dict) else "?"))
 
     print("\n== 방어 축 ==")
+    # ★성공 본문의 **키 집합**을 잰다 — 계약(§3-2)이 이름을 준 칸만 실려야 한다.
+    #   201 은 verdict 까지 계약이 명명했고(참고용 파생 판정), 200 은 세 칸이다.
+    #   ⚠값이 아니라 칸 목록을 재는 이유: 값 대조는 **칸이 하나 더 붙은 것**을 통과시킨다
+    #     (2026-09-05 라이브 실사건 — 설치기 대조가 그 자리에서 적색을 냈다).
+    t_keys = new_id()
+    b_keys = Builder(t_keys, args.workdir, allowed, revoked, [op["id"]], now)
+    gk, gks = b_keys.add(alice, "genesis", {"type": "knowhow", "title": "본문 칸",
+                                            "body": "본문", "envelope": env})
+    code_k, body_k = send(args.base, t_keys, "knowhow", "본문 칸", gk, gks, True)
+    record("이벤트 201 본문 = 계약 네 칸", ["created_at", "event_id", "url", "verdict"],
+           sorted(body_k.keys()) if isinstance(body_k, dict) else [str(body_k)], "code=%s" % code_k)
+
     # 멱등 — 같은 것을 두 번 보내면 행이 안 는다
     code_a, body_a = send(args.base, t4, "knowhow", "성공 경로", g4, g4s, True)
     record("멱등 재전송(같은 내용)", 200, code_a,
-           "status=%s" % (body_a.get("status") if isinstance(body_a, dict) else "?"))
+           "keys=%s" % (sorted(body_a.keys()) if isinstance(body_a, dict) else "?"))
+    record("이벤트 200 본문 = 계약 세 칸", ["created_at", "event_id", "url"],
+           sorted(body_a.keys()) if isinstance(body_a, dict) else [str(body_a)])
     code_b, _ = http("GET", args.base + "/rooms/" + t4 + "/events?limit=50")
     n_after = len(_["items"]) if code_b == 200 else -1
     record("멱등 후 행 수 = 1", 1, n_after)

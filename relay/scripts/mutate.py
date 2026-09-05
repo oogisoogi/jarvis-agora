@@ -94,6 +94,16 @@ MUTATIONS = [
      '      return json({ participant_id: participantId, fingerprint, created_at: byId.created_at, status: "already" }, 200);',
      "harness", "재등록 200 본문 = 계약 세 칸"),
 
+    ("M17 등록 201 에 계약 밖 칸 부활", "src/index.ts",
+     "  return json({ participant_id: participantId, fingerprint, created_at: createdAt }, 201);",
+     '  return json({ participant_id: participantId, fingerprint, created_at: createdAt, status: "created" }, 201);',
+     "harness", "등록 201 본문 = 계약 세 칸"),
+
+    ("M18 이벤트 200 에 계약 밖 칸 부활", "src/index.ts",
+     "        created_at: existing.created_at,\n",
+     '        created_at: existing.created_at, status: "already",\n',
+     "harness", "이벤트 200 본문 = 계약 세 칸"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",
