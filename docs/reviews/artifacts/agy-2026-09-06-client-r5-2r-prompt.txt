@@ -1,0 +1,71 @@
+[리뷰 의뢰 — 엄격 제약 준수 · 지정 범위만]
+검토 범위(이 파일/범위만 · 무관 파일·repo 배회 금지):
+  ~/axdev/jarvis-agora 의 agora/onboard.py(issue_checkpoint·_now_ms_iso·_fetch_checkpoint) ·
+  agora/signer.py(self_check_checkpoint·CHECKPOINT_FIELDS) · agora/sign.py(sign_checkpoint) ·
+  agora/store_relay.py(post_checkpoint) · agora/cli.py(checkpoint 배선·_run_onboard action) ·
+  agora/roster.py(verify_checkpoint) · tools/rehearsal.py · tests/fake_relay.py(_event_verdict·체크포인트 POST) ·
+  docs/rehearsal/CHECKLIST.md · docs/rehearsal/2026-09-06-live.md
+  대조 기준(읽기 전용): 같은 저장소 docs/RELAY.md §3-6b(체크포인트 계약) · §3-2(이벤트 검사 순서)
+
+과업: 현재 작업트리(= r4 봉합 반영본) 의 적대 검증. 핵심 = **운영자 체크포인트 발행이 계약과 같은가** ·
+**리허설 하네스가 실물에서 안전한가** · **더블이 계약을 덜 지켜 생기는 거짓 초록이 또 있는가**.
+
+엄격 제약(REVIEWER_DIRECTIVE §2):
+  - 지정 파일과 task 만 검토 · 무관 repo/파일 배회 금지 · 서버 기동·상태 변경 명령 금지
+  - ★도구는 **파일 읽기·검색만** 써라. **셸 명령 실행 금지**(git·pytest·ssh-keygen·서버 기동 일체).
+    필요한 실측값은 아래에 전제로 다 준다 — 직접 재려 하지 마라.
+  - 어떤 파일도 쓰지 마라(수정·생성·삭제 0). 리뷰는 표준 출력에만.
+  - ⛔라이브 릴레이(https://agora.godmeyou.kr)에 요청을 보내지 마라(남의 운영 자원 · 쓰기는 원장에 영구히 남는다).
+리뷰 형식: [문제점] [논쟁점] [다음 단계 조언] · 각 지적에 파일:라인. 판정 = verdict enum + evidence.
+
+[맥락]
+- 정본은 서명된 append-only 이벤트 · 상태는 각자 재계산 · 운반층(릴레이)은 믿지 않는다.
+- 오류 계약: 0 · 2 전제 · 3 게이트 · 4 서명 · 5 권한 · 7 저장층 · 8 성공 불명 · 9 상태 충돌 · 10 인자.
+- 체크포인트 서명 대상 = {"checkpoint","purpose":"agora-roster-checkpoint-v1","signed_at","signer"} canonical ·
+  namespace = jarvis-agora@godmeyou.kr · signed_at 결박 · 밀리초 고정폭 ISO.
+- 실측: 케이스 393/393 · 뮤테이션 349/349 KILLED · NOT-APPLIED 0 · commit_gate PASS.
+- 라이브 실측: checkpoint issue = code 5(운영자 미등재) · 서버 POST = 403/code 5 · 우리 해시 산식 = 서버 current 일치.
+
+[특히 봐 달라는 것]
+1) issue_checkpoint 가 **릴레이의 지금 명부**에 서명하는 것이 옳은가. 서명과 POST 사이에 명부가 바뀌면?
+   (409 를 받은 뒤 재시도 루프가 필요한가, 아니면 지금처럼 그대로 올리는 것이 옳은가)
+2) 운영자 사전 대조(code 5)가 **권한 판정을 클라이언트로 옮긴 것**은 아닌가. 우회·오판 시나리오.
+3) self_check_checkpoint 의 닫힌 4칸이 이벤트·등록 문서를 못 들이는가. 서명 신탁이 되는 경로.
+4) _now_ms_iso 의 시각이 서명 대상 안이다 — 시계 왜곡·시간대·윤초에서 생기는 문제.
+5) tools/rehearsal.py: --live 가 아닐 때 **절대로** 실물을 만지지 않는가(경로 전수).
+   참가자 전환(_as)이 빠질 수 있는 자리가 더 있는가(오늘 그 결함으로 라이브 401 이 났다).
+   실패해도 계속 진행하는 구조가 잘못된 초록을 만들 수 있는가.
+6) tests/fake_relay.py 의 _event_verdict 가 계약 §3-2 검사 순서(서명 6 → 스크럽 7 → 멱등 8)와 맞는가.
+   더블이 여전히 계약보다 무른 자리가 남았는가(거짓 초록 후보를 이름으로 대라).
+7) CHECKLIST.md 가 리허설에서 실제로 쓸 수 있는 문서인가(빈칸·합격 기준·실패 시 행동이 판단 가능한가).
+
+[2R — 재검증 · 봉합 4건이 실제로 지적을 해소했는가]
+1R(2026-09-06 06:0x)에서 네가 낸 지적 넷을 지금 파일들에 봉합해 두었다. 이번 라운드의 과업은
+**봉합이 진짜인가**다: 지적한 실패가 지금도 재현되는가 · 봉합이 새 결함을 만들지 않았는가 ·
+「의도적 공백」이라고 적어 둔 자리가 정당한가.
+
+봉합 4건(파일:심볼로 대라):
+  (1) MAJOR 4 시계 왜곡·영구 잠금 → `agora/roster.py` `FUTURE_GRACE_HOURS=24` · `_plus_hours()` ·
+      `verify_checkpoint(now=...)` 에 `signed_at_in_future` 관문 추가(운영자 확인 뒤 · 역행 검사 앞).
+      `agora/onboard.py:_fetch_checkpoint` 가 `now=_now_ms_iso()` 를 넘긴다.
+      ★부분 수용이다: **미래 쪽에만 창을 뒀고 과거 쪽에는 안 뒀다**(체크포인트는 계약상 대부분
+      stale 이라 「오래됐으면 무효」는 정상 운영을 상시 경보로 만든다 — r3 에서 이미 반박한 규칙).
+      비대칭이 옳은지, 24시간이라는 수가 방어에 의미가 있는지, 창을 우회하는 시나리오가 있는지 봐라.
+      ⛔서버 시각 결박(네 조언의 두 번째 갈래)은 **채택 안 했다** — 계약 §3-6b 에 서버 시각 반환이
+      없어서 클라이언트가 지어낼 수 없다. 이 판단이 틀렸으면 근거를 대라.
+  (2) MAJOR 5 리허설 ack 조용한 생략 → `tools/rehearsal.py:_ack_or_explain()` 신설 ·
+      조건부 `rec.step` 을 **무조건 실행**으로 바꿨고, 못 하는 상황이면 PRECONDITION 오류를 올린다
+      (`no_post_to_ack` / `nothing_delivered`). 다른 단계에도 같은 「조용한 생략」이 남았는지 봐라.
+  (3) CRITICAL 6 더블이 계약보다 무름 → `tests/fake_relay.py:_signature_matches(principal=, allowed_signers=)`
+      에 `ssh-keygen -Y verify -I <principal>` 결박 추가(등록 소유 증명 · 체크포인트 운영자 서명 둘 다) ·
+      `_event_gate()` 신설로 계약 §3-2 검사 **1(크기 64KiB) · 4(결박 thread_id) · 5(genesis 정합)** 구현.
+      ★**의도적 공백 2**: 스키마 9종 닫힌 검증(3)과 스크럽 백스톱(7)은 **안 넣었고 주석에 이유를 적었다** —
+      그 둘을 더블에서 하려면 우리 모듈(agora.event·agora.scrub)을 그대로 불러야 해서
+      「우리 계산으로 우리 계산을 재는」 대조가 된다. 이 공백이 정당한가, 아니면 그래도 넣는 편이
+      거짓 초록을 더 줄이는가 — 어느 쪽이든 **구체적 거짓 초록 시나리오**로 답하라.
+      `_event_gate` 의 결박 검사가 실제로 무엇을 잡고 무엇을 못 잡는지도 봐라(category 는 안 본다).
+  (4) MINOR 7 CHECKLIST → §3(성능·한도)·§5(관찰자)에 「실패 시」 칸 추가 · §5 합격 기준 기입.
+
+판정 형식은 1R 과 같다. 봉합별로 **해소/미해소/새 결함** 중 하나를 명시하고 파일:라인 근거를 붙여라.
+전제 정정: 현재 실측은 케이스 395/395 · 뮤테이션 352/352 KILLED · NOT-APPLIED 0 · commit_gate PASS 다
+(1R 프롬프트의 393/349 는 봉합 전 값이다).

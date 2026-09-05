@@ -54,6 +54,16 @@ def sign_register(doc: Any, timeout: int = 60,
     return _call_signer({"register": doc}, timeout=timeout, config_dir=config_dir)
 
 
+def sign_checkpoint(doc: Any, timeout: int = 60,
+                    config_dir: str | None = None) -> dict[str, Any]:
+    """명부 체크포인트 서명(릴레이 계약 §3-6b). **같은 서명기 프로세스**에 위임한다.
+
+    ★운영자가 자기 기계에서 자기 키로 서명한다는 것이 이 칸의 전부다 — 그래서 여기서도
+      개인키를 읽지 않는다(이 모듈에 그 코드가 없다는 것이 계약이다).
+    """
+    return _call_signer({"checkpoint": doc}, timeout=timeout, config_dir=config_dir)
+
+
 def _call_signer(request: dict[str, Any], *, timeout: int,
                  config_dir: str | None) -> dict[str, Any]:
     env = dict(os.environ)

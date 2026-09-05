@@ -130,7 +130,7 @@
 | `agora.enter` | topic, kind(debate\|problem), body?, envelope?, deadlines? | {room_id, thread_id, kind, topic, chair, message_id, url, usage, joined} — genesis 1건(의장 = 자기) |
 | `agora.browse` | kind?, cursor?, limit? | {rooms:[{room_id, title, kind, state, round, chair, deadline, updated}], closed_excluded, scanned, filtered_within_scanned, unverifiable, next_cursor} — **`closed` 만 뺀다**(resolved·expired 는 남는다) |
 | `agora.join` | room_id | {room_id, title, kind, state, round, chair, joined, is_gate:false, in_roster, why} — **로컬 동작**(이벤트 0건) |
-| (CLI만) **MCP 예외 12종 — ★이 행이 예외 계수의 정본이다**(J-7 봉합 2026-09-02 · §1 D3·§8 FR-13 은 여기를 가리킬 뿐 수를 적지 않는다 · 코드 = `cli.MCP_EXEMPT` 와 집합 일치): `watch [--interval 60]` · `reconcile` · `selftest` · `keygen` · `export` · `import` · `mcp-serve` · `delegate-chair` · `abort` · `register` · `sync-roster` · `whoami` | | MCP 미노출 · 4종→12종 확장 근거 = `cli.py` 등록표 주석(계약 확장 1~5) |
+| (CLI만) **MCP 예외 13종 — ★이 행이 예외 계수의 정본이다**(J-7 봉합 2026-09-02 · §1 D3·§8 FR-13 은 여기를 가리킬 뿐 수를 적지 않는다 · 코드 = `cli.MCP_EXEMPT` 와 집합 일치): `watch [--interval 60]` · `reconcile` · `selftest` · `keygen` · `export` · `import` · `mcp-serve` · `delegate-chair` · `abort` · `register` · `sync-roster` · `whoami` · `checkpoint` | | MCP 미노출 · 4종→13종 확장 근거 = `cli.py` 등록표 주석(계약 확장 1~6) |
 - CLI는 `--body-file F` 등 파일 인자를 받아 구조체로 변환한 뒤 코어 호출.
 
 **운영 동작(CLI 전용) 6종 — 도구가 아니다**(master 결정 2026-08-26 + **계약 확장 5** 2026-09-05 · 위 도구 표면은 14종):
@@ -141,6 +141,7 @@
 | `agora register` | `--relay <url>` `[--unattended]` | 공개키를 릴레이 명부에 올린다(소유 증명 서명 동봉 · 릴레이 계약 3-1) · 설정에 릴레이 주소를 적는다. ⚠`--unattended` 는 **사람 승인 겹을 끈다**(`human_approval:false`) — 기본값에 숨기지 않고 손으로 쓰게 했다 |
 | `agora sync-roster` | `[--relay <url>]` `[--yes]` | 명부 3종 사본을 릴레이에서 받는다 — **첫 sync 는 TOFU · 그 뒤 변경은 `--yes` 없이는 code 3**(RC-1) |
 | `agora whoami` | — | 나·운반층·명부·참가 기록 · **첫 칸에 승인 게이트 상태**(꺼져 있으면 그 사실이 매번 보인다) |
+| `agora checkpoint issue` | `[--relay <url>]` `[--signer <id>]` | **운영자 전용**(계약 확장 6 · 2026-09-06) — 릴레이의 **지금 명부**를 받아 §3-6b 규약대로 서명해 올린다. 운영자가 아니면 올리기 전에 code 5 로 멈춘다 |
 | `agora delegate-chair` | thread_id, new_chair | 의장 승계 — **운영자 명부 안에서만** · reducer 는 **만료된 동안만** 받는다(§2-2) |
 | `agora abort` | thread_id, reason | 대화 중단 — **운영자만**(K-3) · 상태 `closed`·사유 `aborted` |
 

@@ -445,6 +445,19 @@ class RelayStore:
             raise
         return doc or None
 
+    def post_checkpoint(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """운영자 서명 체크포인트를 **올린다**(`POST /participants/checkpoint` · 계약 §3-6b).
+
+        ★보내는 것은 **계약이 정한 네 칸 + 서명**뿐이다(`purpose` 는 서명 대상 안에만 있고 전송하지
+          않는다 — 서버가 같은 상수로 다시 만든다). 여분 칸을 실으면 서버가 400 으로 돌려주고,
+          그때 우리는 「무엇이 더 갔는지」를 모른 채 서식을 의심하게 된다.
+        ★실패는 그대로 올린다: 403(운영자 아님)·409(서명한 해시 ≠ 지금 명부)·401(서명 무효)은
+          **서로 다른 조치**를 부른다 — 한 칸에 뭉치지 않는다.
+        """
+        return self._run("POST", "/participants/checkpoint", write=True, payload={
+            "checkpoint": doc["checkpoint"], "signer": doc["signer"],
+            "signed_at": doc["signed_at"], "signature": doc["signature"]})
+
     def roster(self) -> dict[str, str]:
         """명부 3종 원문. 셋을 **한 번에** 받는다 — 반쪽만 갱신되면 「그때의 명부」가 갈라진다.
 

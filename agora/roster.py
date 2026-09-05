@@ -150,6 +150,18 @@ def allowed_signers_path(root: str | None = None) -> str:
 
 CHECKPOINT_FIELDS = ("checkpoint", "purpose", "signed_at", "signer")
 
+# 미래 쪽 허용 창(시간). 시계 오차·시간대 실수는 이 안에서 흡수하고, 그보다 먼 미래는 사고로 본다.
+FUTURE_GRACE_HOURS = 24
+
+
+def _plus_hours(stamp: str, hours: int) -> str:
+    """고정폭 ISO 시각에 시간을 더한다 — 문자열 비교가 시간 비교가 되는 서식을 유지한다."""
+    import datetime
+    base = datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+        tzinfo=datetime.timezone.utc)
+    later = base + datetime.timedelta(hours=hours)
+    return later.strftime("%Y-%m-%dT%H:%M:%S.") + f"{later.microsecond // 1000:03d}Z"
+
 
 def checkpoint_canonical(doc: Any) -> bytes:
     """체크포인트 서명 대상 바이트 — **네 칸을 우리가 다시 만든다**(계약 §3-6b).
@@ -168,7 +180,8 @@ def checkpoint_canonical(doc: Any) -> bytes:
 def verify_checkpoint(doc: Any, *, allowed_signers_path: str, operators_path: str,
                       revoked_path: str | None = None,
                       local_checkpoint: str | None = None,
-                      last_signed_at: str | None = None) -> dict[str, Any]:
+                      last_signed_at: str | None = None,
+                      now: str | None = None) -> dict[str, Any]:
     """운영자 서명 체크포인트를 **실제로 검증한다**(계약 §3-6b · RL-6 해소).
 
     판정은 세 관문을 **순서대로** 지난다. 순서가 곧 사유의 정확도다:
@@ -208,6 +221,15 @@ def verify_checkpoint(doc: Any, *, allowed_signers_path: str, operators_path: st
         return {"verified": False, "why": "signed_at_format", "signer": signer}
     if signer not in operators(path=operators_path):
         return {"verified": False, "why": "signer_not_operator", "signer": signer}
+    if now and doc["signed_at"] > _plus_hours(now, FUTURE_GRACE_HOURS):
+        # ★★**미래로 너무 멀리 간 값은 기준으로 삼지 않는다**(agy 적대검증 2026-09-06 지적 · 수용).
+        #   시계가 틀어진 기계가 「1년 뒤」를 서명해 올리면, 단조 규칙이 그 값을 기준선으로 삼아
+        #   **그 뒤의 정상 발행을 영원히 거부**한다(영구 잠금). 그래서 미래 쪽에만 창을 둔다.
+        #   ⚠과거 쪽에는 창을 두지 않는다(agy r3 에서 반박한 그 규칙이다): 체크포인트는 계약상
+        #   「대부분 stale」이라 「오래됐으면 무효」는 정상 운영을 상시 경보로 만든다.
+        #   **두 규칙이 비대칭인 것이 맞다** — 과거는 정상이고, 먼 미래는 시계 사고다.
+        return {"verified": False, "why": "signed_at_in_future", "signer": signer,
+                "signed_at": doc["signed_at"], "now": now}
     if last_signed_at and doc["signed_at"] < last_signed_at:
         # ★고정폭 ISO 라 문자열 비교가 곧 시간 비교다(계약 §3-0 이 그 서식을 고른 이유).
         return {"verified": False, "why": "signed_at_regressed", "signer": signer,
