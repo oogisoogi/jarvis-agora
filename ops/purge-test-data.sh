@@ -21,6 +21,13 @@
 #   ops/purge-test-data.sh --execute      # ⛔실제 삭제 — 운영 담당 전용
 #   ops/purge-test-data.sh --include-operators   # ⚠운영자까지 대상에 넣는다(기본은 뺀다)
 #   ops/purge-test-data.sh --execute --confirm agora-relay   # 대화형이 아닐 때의 확인 방법
+#   ops/purge-test-data.sh --before 2026-09-06T00:00:00+09:00 --no-events
+#                                          # 패턴에 더해 「그 시각 앞 등록 ∧ 글 0건 ∧ 운영자 아님」도 대상에 넣는다
+#
+# ★두 번째 대상 무리가 있는 이유(운영 판정 2026-09-06): 설치기 왕복 시험이 만든 등재는
+#   **실 참가자와 id 모양이 같다**(jarvis-<무작위>). 이름으로는 못 가르므로 **행동으로** 가른다 —
+#   「글을 한 줄도 안 썼고, 그 시각 이전에 등록했고, 운영자가 아니다.」
+#   ⚠--before 와 --no-events 는 **함께** 써야 한다. 하나만 주면 대상이 조용히 넓어진다(그래서 거부한다).
 set -u
 cd "$(dirname "$0")/.." || exit 2
 
@@ -31,6 +38,8 @@ TARGET="--remote"
 EXECUTE=0
 INCLUDE_OPS=0
 CONFIRM=""
+BEFORE_RAW=""
+NO_EVENTS=0
 LOG="ops/purge-log.md"
 
 usage() { sed -n '2,26p' "$0"; exit 0; }
@@ -43,6 +52,8 @@ while [ $# -gt 0 ]; do
     --pattern) shift; PATTERN="${1:-}" ;;
     --include-operators) INCLUDE_OPS=1 ;;
     --confirm) shift; CONFIRM="${1:-}" ;;
+    --before) shift; BEFORE_RAW="${1:-}" ;;
+    --no-events) NO_EVENTS=1 ;;
     -h|--help) usage ;;
     *) echo "모르는 인자: $1 (--help)"; exit 2 ;;
   esac
@@ -101,7 +112,35 @@ LIKE="LIKE '$P' ESCAPE '\\'"
 #   운영자를 지우면 체크포인트를 올릴 사람이 사라지고, 그 복구는 등록·표시·재발행 전 과정이다.
 OP_GUARD="AND is_operator = 0"
 [ "$INCLUDE_OPS" -eq 1 ] && OP_GUARD=""
-TEST_PIDS="SELECT participant_id FROM participants WHERE participant_id $LIKE $OP_GUARD"
+# ── 두 번째 대상 무리(행동으로 가른다) ──────────────────────────────────────
+EXTRA_WHERE=""
+if [ -n "$BEFORE_RAW" ] || [ "$NO_EVENTS" -eq 1 ]; then
+  if [ -z "$BEFORE_RAW" ] || [ "$NO_EVENTS" -ne 1 ]; then
+    echo "  ✗ --before 와 --no-events 는 함께 써야 한다(하나만 주면 대상이 넓어진다). 멈춘다."; exit 2
+  fi
+  # ★경계 시각을 **우리가 저장하는 서식**(UTC 밀리초 고정폭)으로 정규화한다.
+  #   created_at 비교는 문자열 비교라, +09:00 을 그대로 넣으면 9시간 어긋난 채로 조용히 돈다.
+  BEFORE=$(python3 -c '
+import datetime, sys
+raw = sys.argv[1].strip()
+if raw.endswith("Z"):
+    raw = raw[:-1] + "+00:00"
+try:
+    dt = datetime.datetime.fromisoformat(raw)
+except ValueError:
+    print("ERR"); sys.exit(0)
+if dt.tzinfo is None:
+    print("ERR"); sys.exit(0)     # 무엇 기준인지 모르는 시각은 받지 않는다
+dt = dt.astimezone(datetime.timezone.utc)
+print(dt.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (dt.microsecond // 1000))
+' "$BEFORE_RAW")
+  [ "$BEFORE" = "ERR" ] && { echo "  ✗ --before 를 못 읽었다('$BEFORE_RAW'). 예: 2026-09-06T00:00:00+09:00"; exit 2; }
+  EXTRA_WHERE="OR (created_at < '$BEFORE' AND is_operator = 0
+                   AND participant_id NOT IN (SELECT DISTINCT from_id FROM events))"
+fi
+
+TEST_PIDS="SELECT participant_id FROM participants
+           WHERE ((participant_id $LIKE $OP_GUARD) $EXTRA_WHERE)"
 PURE_ROOMS="SELECT thread_id FROM events GROUP BY thread_id
             HAVING SUM(CASE WHEN from_id IN ($TEST_PIDS) THEN 0 ELSE 1 END) = 0"
 MIXED_ROOMS="SELECT thread_id FROM events GROUP BY thread_id
@@ -110,13 +149,14 @@ MIXED_ROOMS="SELECT thread_id FROM events GROUP BY thread_id
 
 echo "== 대상 =="
 echo "  D1 $DB $TARGET · 패턴 '$PATTERN' · 모드 $([ "$EXECUTE" -eq 1 ] && echo '실행(--execute)' || echo 'dry-run(세기만)')"
+[ -n "$EXTRA_WHERE" ] && echo "  + 행동 기준: $BEFORE 이전 등록 ∧ 글 0건 ∧ 운영자 아님"
 
 before_p=$(q1 "SELECT COUNT(*) FROM participants;")
 before_e=$(q1 "SELECT COUNT(*) FROM events;")
 before_r=$(q1 "SELECT COUNT(*) FROM rooms;")
 die_on_err "$before_p" "$before_e" "$before_r"
 
-hit_p=$(q1 "SELECT COUNT(*) FROM participants WHERE participant_id $LIKE $OP_GUARD;")
+hit_p=$(q1 "SELECT COUNT(*) FROM ($TEST_PIDS);")
 hit_e=$(q1 "SELECT COUNT(*) FROM events WHERE from_id IN ($TEST_PIDS) AND thread_id IN ($PURE_ROOMS);")
 hit_r=$(q1 "SELECT COUNT(*) FROM rooms WHERE thread_id IN ($PURE_ROOMS);")
 mixed=$(q1 "SELECT COUNT(*) FROM ($MIXED_ROOMS);")
