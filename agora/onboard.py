@@ -19,7 +19,7 @@ import os
 from typing import Any
 
 from agora import errors, roster
-from agora.contract_open import REGISTER_PURPOSE
+from agora.contract_open import CHECKPOINT_PURPOSE, REGISTER_PURPOSE
 from agora.errors import AgoraError
 from agora.keygen import KEY_NAME
 from agora.participant import FILENAME as PARTICIPANT_FILENAME
@@ -125,6 +125,67 @@ def register(*, directory: str | None = None, relay_url: str,
             "config_file": CONFIG_FILENAME,
             "다음": ["agora sync-roster 로 명부 3종 사본을 받는다",
                    "agora whoami 로 확인한다"]}
+
+
+# ── checkpoint issue (운영자 · 릴레이 계약 §3-6b) ────────────────────────────
+
+def _now_ms_iso() -> str:
+    """밀리초 고정폭 ISO(계약 §3-0) — **문자열 정렬 = 시간 정렬**이 되는 서식.
+
+    ★`ledger.now_iso` 는 초 단위라 여기 못 쓴다. 서식이 갈리면 서명 대상 바이트가 갈리고,
+      그러면 서버가 400 을 준다(그때는 이미 그 바이트에 대한 서명이 나가 있다).
+    """
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def issue_checkpoint(*, directory: str | None = None, relay_url: str | None = None,
+                     signer: str | None = None) -> dict[str, Any]:
+    """운영자가 **지금 릴레이의 명부**에 체크포인트를 서명해 올린다(`agora checkpoint issue`).
+
+    ★**릴레이에서 받은 명부에 서명한다 — 내 사본이 아니라.** 서버는 「서명한 해시가 지금 자기
+      명부 렌더와 같은지」를 보고 아니면 409 를 준다(계약 §3-6b). 내 사본은 낡았을 수 있으므로
+      사본에 서명하면 그 자리에서 409 가 나고, 사람은 「왜 내 명부가 틀렸지」를 먼저 의심한다.
+    ★서명은 **서명기 프로세스**가 한다(여기에 개인키를 읽는 코드가 없다는 계약은 그대로다).
+    ★올리기 전에 **실패할 수 있는 것을 먼저 확인**한다: 내 id 가 운영자 명부에 있는가.
+      없으면 서버가 403 을 줄 것이고, 그 왕복 대신 **빠진 조건의 이름**을 먼저 말한다(code 5).
+      ⚠단 이것은 **편의**이지 권한 판정이 아니다 — 진짜 판정은 서버가 한다(명부는 서버 것이다).
+    """
+    from agora import sign
+    directory = os.path.abspath(directory or config_dir())
+    cfg = _load_config(directory)
+    url = relay_url or (cfg.get("relay") or {}).get("url")
+    if not url:
+        raise AgoraError(errors.PRECONDITION, "릴레이 주소를 모른다",
+                         {"missing": ["relay.url"], "how": "agora register --relay <url>"})
+    doc_id = signer or load(directory)["id"]
+    store = _relay(url)
+    fetched = store.roster()          # ★서버의 지금 명부(내 사본이 아니다)
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = {}
+        for name in ROSTER_FILES:
+            path = os.path.join(tmp, name)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(fetched[name])
+            paths[f"participants/{name}"] = path
+        digest = roster.checkpoint(paths=paths)
+        operators = roster.operators(path=paths["participants/operators"])
+    if doc_id not in operators:
+        raise AgoraError(errors.PERMISSION,
+                         "이 참가자는 릴레이 운영자 명부에 없다 — 체크포인트를 발행할 수 없다",
+                         {"signer": doc_id, "operators": sorted(operators),
+                          "how": "운영자 등재는 릴레이 운영자(master)가 한다"})
+    doc = {"checkpoint": digest, "purpose": CHECKPOINT_PURPOSE,
+           "signed_at": _now_ms_iso(), "signer": doc_id}
+    signed = sign.sign_checkpoint(doc, config_dir=directory)
+    posted = store.post_checkpoint({**doc, "signature": signed["signature"]})
+    return {"relay": url, "signer": doc_id, "checkpoint": digest,
+            "signed_at": doc["signed_at"], "posted": posted,
+            "roster_lines": {name: len(_lines(fetched[name])) for name in ROSTER_FILES},
+            "다음": ["agora sync-roster 로 checkpoint.verified 를 확인한다"]}
 
 
 # ── sync-roster ─────────────────────────────────────────────────────────────

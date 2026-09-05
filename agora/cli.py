@@ -62,6 +62,10 @@ COMMANDS: dict[str, dict[str, Any]] = {
     "register":       {"core": False, "built": True,  "slice": "S8-2"},
     "sync-roster":    {"core": False, "built": True,  "slice": "S8-2"},
     "whoami":         {"core": False, "built": True,  "slice": "S8-2"},
+    # ★계약 확장 6(master 발주 2026-09-06 r4) — **운영자 체크포인트 발행**.
+    #   도구가 아니다: 명부의 정본이 운반층으로 간 뒤 그것을 되돌려 오는 **운영자의 손**이고,
+    #   MCP 표면에 올리면 대리인 세션이 「지금 명부가 정본이다」라고 서명해 버린다.
+    "checkpoint":     {"core": False, "built": True,  "slice": "S8-3"},
     # ★계약 확장 3(master 결정 2026-08-26 (b)안) — **절차 개입** 2종.
     #   계약 kind 9종 중 `delegate_chair`·`abort` 는 **내보낼 자리가 없었다**(발신자 0).
     #   그래서 만료된 스레드를 되살릴 수도, 운영자가 중단할 수도 없었다 — 받을 준비만 돼 있었다.
@@ -75,7 +79,9 @@ COMMANDS: dict[str, dict[str, Any]] = {
 MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
                         "reconcile", "mcp-serve", "delegate-chair", "abort",
                         # 계약 확장 5(2026-09-05) — 가입·명부 운영. 설치가 부르고 대리인은 못 부른다.
-                        "register", "sync-roster", "whoami"})
+                        "register", "sync-roster", "whoami",
+                        # 계약 확장 6(2026-09-06) — 운영자 체크포인트 발행.
+                        "checkpoint"})
 
 # ── 역할별 노출표(설계 §5 「수신 격리」 H-3 · NFR-2) ─────────────────────────
 # ★**여기가 「도구 목록」의 단일 출처다.** 대리인 브리프(S6-3 `brief-reader.md`)는 이 표를
@@ -154,6 +160,12 @@ def _run_onboard(name: str, rest: list[str]) -> Any:
       「설정이 없어서 설정을 못 적는」 닭·달걀이 된다(첫 설치가 정확히 그 상태다).
     """
     from agora import onboard
+    # ★맨 앞의 맨몸 토큰을 **동작 이름**으로 읽는 것은 `checkpoint` 에서만이다
+    #   (`agora checkpoint issue`). 다른 명령에서 그런 토큰이 오면 예전처럼 `_kv` 가 code 10 을
+    #   낸다 — 규칙을 넓히면 `agora whoami 오타` 가 조용히 통과한다.
+    action = ""
+    if name == "checkpoint" and rest and not rest[0].startswith("--") and "=" not in rest[0]:
+        action, rest = rest[0], rest[1:]
     kw = _kv(rest)
     directory = kw.get("dir")
     if name == "register":
@@ -167,6 +179,15 @@ def _run_onboard(name: str, rest: list[str]) -> Any:
         return onboard.sync_roster(directory=directory,
                                    relay_url=kw.get("relay") or kw.get("relay_url"),
                                    yes=bool(kw.get("yes", False)))
+    if name == "checkpoint":
+        # ★동작을 **하나만** 둔다(`issue`). 「발행」과 「조회」를 한 명령에 넣으면 조회하려다
+        #   서명이 나가는 오타가 생긴다 — 조회는 `sync-roster`·`whoami` 가 이미 한다.
+        if action != "issue":
+            raise AgoraError(errors.ARGUMENT, "checkpoint 의 동작은 issue 하나다",
+                             {"got": action, "usage": "agora checkpoint issue [--relay <url>]"})
+        return onboard.issue_checkpoint(directory=directory,
+                                        relay_url=kw.get("relay") or kw.get("relay_url"),
+                                        signer=kw.get("signer"))
     return onboard.whoami(directory=directory)
 
 
@@ -314,7 +335,7 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
         from agora import mcp_server
         mcp_server.serve()
         return None
-    if name in ("register", "sync-roster", "whoami"):
+    if name in ("register", "sync-roster", "whoami", "checkpoint"):
         return _run_onboard(name, list(args.rest) if hasattr(args, "rest") else [])
     if name in ("delegate-chair", "abort"):
         return _run_operator(name, list(args.rest) if hasattr(args, "rest") else [])

@@ -332,7 +332,30 @@ GitHub 어댑터를 쓰는 설정에서는 그대로 남는다 — 「의존이 
 | ~~RL-5~~ | ~~릴레이 URL 정본(도메인)~~ | **해소(2026-09-06 r3)** — master 승인([master#7d694eb2])으로 예시 설정·ONBOARDING 을 `https://agora.godmeyou.kr` 로 바꿨다 | — |
 | ~~RL-6~~ | ~~체크포인트 **검증** 계약~~ | **해소(2026-09-06 r3)** — 계약 §3-6b(`@main 993053e`)가 세 칸을 확정했다: 서명 대상 = `{checkpoint,purpose:"agora-roster-checkpoint-v1",signed_at,signer}` canonical · namespace = `jarvis-agora@godmeyou.kr` · `signed_at` **결박** | ⇒ `roster.verify_checkpoint` 로 **실제 검증**(운영자 대조 → 서명) · `matches_local` 은 판정에 안 넣는다(명부가 자라면 stale 이 정상) |
 
-## 15. 계약 확정본 전수 대조 (RL-2 · `docs/RELAY.md@b2ca815` · 2026-09-05 r2)
+## 15. 계약 대조 (RL-2·RL-6 · 재실행 = `계약: RELAY.md 와 대조` 케이스)
+
+★**대조 대상 = 저장소 안의 `docs/RELAY.md`**(릴레이 워커의 산출물이 main 병합으로 들어와 있다).
+그 파일의 sha256 을 **여기 적어 두고 케이스가 대조한다** — 계약이 바뀌면 스위트가 적색이 되고,
+그때 해야 할 일은 「해시를 고치는 것」이 아니라 **계약을 다시 읽고 이 표를 다시 채우는 것**이다.
+
+| 항목 | 값 |
+|---|---|
+| 대조 시각 | 2026-09-06 (r4) |
+| `docs/RELAY.md` sha256 | `2eb781b1b979e16a865639ca172f3b7efccb330df03995219213dc858a9c83c5` |
+| 대조 축 | 칸 이름 · 응답 코드(§3-7 표) · 서명 대상 바이트(§3-1 등록 · §3-6b 체크포인트) · 목록 상한 · namespace |
+| 결과 | **일치**(아래 r2 표 17항 + r4 체크포인트 4항) · 어긋남 0 |
+
+**r4 추가 대조 — 체크포인트(RL-6)**
+
+| # | 계약 조항 | 우리 구현 | 판정 |
+|---|---|---|---|
+| C18 | §3-6b 서명 대상 = `{checkpoint, purpose:"agora-roster-checkpoint-v1", signed_at, signer}` canonical | `roster.checkpoint_canonical` · `signer.CHECKPOINT_FIELDS`(닫힌 4칸) | ✅ |
+| C19 | SSHSIG namespace = `jarvis-agora@godmeyou.kr`(하나뿐) | `contract_open.SIGN_NAMESPACE` 그대로 | ✅ |
+| C20 | `signed_at` = 밀리초 고정폭 ISO · **서명 대상 안** | `_now_ms_iso` 생성 · 서명기·검증기 양쪽에서 서식 검사 | ✅ |
+| C21 | 체크포인트 해시 = 「`roster.checkpoint` 와 같은 산식」 | ★**실물 대조 성공**: 우리 계산 = 라이브 `current`(`69859343…`, 2026-09-06) | ✅ 실측 |
+| C22 | `POST` 결과표(201·403/5·409/9·401/4·400/10) | 어댑터가 상태·본문 code 로 매핑 · 라이브 **403/code 5 실측** | ✅ 실측 |
+
+## 15-1. 계약 확정본 전수 대조 (RL-2 · `docs/RELAY.md@b2ca815` · 2026-09-05 r2)
 
 대조 축 셋 = **칸 이름 · 응답 코드 · 서명 대상 바이트**(브리프 §3-1). 아래 표가 전수다.
 

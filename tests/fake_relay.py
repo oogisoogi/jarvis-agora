@@ -17,6 +17,7 @@
   ⑽`lie_valid=True`        — 격리돼야 할 이벤트에 `valid:true` 를 적는다(거짓말하는 파생).
   ⑾`checkpoint=…`          — 운영자 서명 체크포인트(없으면 200 + `checkpoint:null` · §3-6b).
   ⑿`forge_retry=True`      — 실패 본문에 우리 재시도 표식(`retry`)을 **위조해** 적는다.
+  ⒀`operators_text`        — 운영자 명부(체크포인트 발행 권한). 비면 `POST …/checkpoint` 는 403 이다.
 
 ★**계약 확정본(`docs/RELAY.md@b2ca815`)에 맞춘다**: 실패 본문 `code` 는 PROTOCOL 코드 ·
   등록 소유 증명은 **다섯 칸**(`purpose` 포함) 서명 · 체크포인트 부재는 404 가 아니라 200 + null ·
@@ -56,7 +57,7 @@ class FakeRelay:
                  checkpoint_404: bool = False, verdict: dict[str, Any] | None = None,
                  retry_after: str | None = None,
                  body_code_override: int | None = None,
-                 forge_retry: bool = False) -> None:
+                 forge_retry: bool = False, verify_events: bool = True) -> None:
         self.idempotent = idempotent
         self.refresh_updated_at = refresh_updated_at
         self.revoked_404 = revoked_404
@@ -76,6 +77,9 @@ class FakeRelay:
         self.body_code_override = body_code_override
         # ★남의 서버가 **우리 내부 표식**을 흉내내는 상황. 표식이 우리 것이 아니면 판정도 우리 것이 아니다.
         self.forge_retry = forge_retry
+        # ★서명 검증을 끄는 스위치 — 「검증을 안 하는 서버」를 재는 자리(우리 reducer 가 정본임을
+        #   보이는 케이스가 그것을 쓴다). 기본은 **계약대로 검증한다**.
+        self.verify_events = verify_events
         self.seen_queries: list[str] = []    # 서버가 실제로 읽은 질의 — 인코딩 시험이 본다
         self.rooms: dict[str, dict[str, Any]] = {}
         self.registered: dict[str, dict[str, str]] = {}
@@ -175,6 +179,24 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _roster_digest(roster_text: dict[str, str]) -> str:
+    """명부 3종의 체크포인트 해시 — 계약 §3-6b 의 「`roster.checkpoint` 와 같은 산식」.
+
+    ★**여기서 다시 만든다**(클라 `agora.roster.checkpoint` 를 부르지 않는다): 같은 함수를 쓰면
+      우리 계산으로 우리 계산을 재게 된다. 규칙은 문서가 정한 것을 옮겨 적는다 —
+      논리 이름표 + 길이(8바이트 빅엔디언) + 내용, 순서는 allowed_signers → revoked_keys → operators.
+    ★실측(2026-09-06): 이 산식이 **실물 릴레이의 `current` 와 일치**한다(우리 계산 = 서버 계산).
+    """
+    import hashlib
+    h = hashlib.sha256()
+    for name in ("allowed_signers", "revoked_keys", "operators"):
+        blob = roster_text.get(name, "").encode("utf-8")
+        h.update(f"participants/{name}".encode("utf-8"))
+        h.update(len(blob).to_bytes(8, "big"))
+        h.update(blob)
+    return h.hexdigest()
+
+
 def _compact(body: str) -> str:
     return "".join(body.split())
 
@@ -199,6 +221,60 @@ def _register_canonical(payload: dict[str, Any]) -> bytes:
            "purpose": "agora-register-v1"}
     return json.dumps(doc, ensure_ascii=False, sort_keys=True,
                       separators=(",", ":")).encode("utf-8")
+
+
+def _checkpoint_canonical(payload: dict[str, Any]) -> bytes:
+    """체크포인트 서명 대상 바이트(계약 §3-6b) — **서버가 스스로 다시 만든다.**
+
+    ★네 칸이다: 전송에는 `purpose` 가 없고 **서버가 같은 상수를 넣어** 계산한다.
+      클라가 다른 목적으로 서명한 것을 여기서 받아 줄 길이 없어야 하기 때문이다.
+    """
+    doc = {"checkpoint": payload.get("checkpoint"),
+           "purpose": "agora-roster-checkpoint-v1",
+           "signed_at": payload.get("signed_at"),
+           "signer": payload.get("signer")}
+    return json.dumps(doc, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def _event_verdict(body: str, allowed_signers: str) -> tuple[str, str]:
+    """이벤트 한 건의 서명 판정 — `ok` / `BAD` / `unsigned`(계약 §4 의 3값 그대로).
+
+    ★서버가 하는 일을 그대로 옮긴다: 펜스 안 글자를 믿지 않고 **canonical 로 다시 만들어**
+      그 바이트에 서명을 보고, 그 키가 `from` **그 이름의** 키인지까지 본다
+      (`ssh-keygen -Y verify -I <principal>` 이 하는 일).
+    """
+    import subprocess
+    import tempfile
+    from agora.event import canonical_bytes, parse_post
+    try:
+        parsed = parse_post(body)
+    except Exception:            # noqa: BLE001 — 우리 서식이 아니면 서명 이전의 문제다
+        return "unsigned", "not_our_format"
+    event, signature = parsed["event"], parsed["signature"]
+    principal = event.get("from")
+    if not signature or "BEGIN SSH SIGNATURE" not in (signature or ""):
+        return "unsigned", "no_signature"
+    with tempfile.TemporaryDirectory() as tmp:
+        sig_path = os.path.join(tmp, "e.sig")
+        with open(sig_path, "w", encoding="utf-8") as fh:
+            fh.write(signature)
+        raw = canonical_bytes(event)
+        checked = subprocess.run(
+            ["ssh-keygen", "-Y", "check-novalidate", "-n", "jarvis-agora@godmeyou.kr",
+             "-s", sig_path], input=raw, capture_output=True, timeout=30)
+        if checked.returncode != 0:
+            return "BAD", "signature_does_not_match_bytes"
+        roster_path = os.path.join(tmp, "allowed_signers")
+        with open(roster_path, "w", encoding="utf-8") as fh:
+            fh.write(allowed_signers)
+        verified = subprocess.run(
+            ["ssh-keygen", "-Y", "verify", "-n", "jarvis-agora@godmeyou.kr",
+             "-f", roster_path, "-I", principal or "", "-s", sig_path],
+            input=raw, capture_output=True, timeout=30)
+        if verified.returncode != 0:
+            return "unsigned", "principal_mismatch"
+    return "ok", "verified"
 
 
 def _signature_matches(raw: bytes, signature: str) -> bool:
@@ -311,8 +387,7 @@ class _Handler(BaseHTTPRequestHandler):
             if self.relay.checkpoint_404:
                 self._fail(404, "그런 경로가 없다")       # 엔드포인트가 아직 없는 상대
                 return
-            current = _sha256_text("".join(self.relay.roster_text[n] for n in
-                                           ("allowed_signers", "revoked_keys", "operators")))
+            current = _roster_digest(self.relay.roster_text)
             if self.relay.checkpoint is None:
                 self._send(200, {"checkpoint": None, "current": current, "stale": True})
                 return
@@ -388,6 +463,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._fail(400, "JSON 이 아니다")
             return
         if url.path == "/events":
+            # ★**서명·명부·폐기를 본다**(계약 §3-2 검사 6 → 401/code 4). 구판 더블은 이 검사를
+            #   통째로 빼먹었고, 그래서 「`from` 은 의장인데 서명은 남의 키」인 글이 초록으로
+            #   지나갔다 — **실물은 401(principal_mismatch)로 거부한다**(2026-09-06 라이브 실측).
+            #   ⇒ 더블이 계약을 덜 지키면 그만큼 시험이 공허해진다. 같은 병의 세 번째 판이다.
+            if self.relay.verify_events:
+                verdict, why = _event_verdict(payload.get("body", ""),
+                                              self.relay.roster_text["allowed_signers"])
+                if verdict != "ok":
+                    self._fail(401, "서명이 이 참가자의 것이 아니다",
+                               verdict=verdict, why=why)
+                    return
             try:
                 row = self.relay.append_event(
                     thread_id=payload["thread_id"], category=payload.get("category", ""),
@@ -403,6 +489,33 @@ class _Handler(BaseHTTPRequestHandler):
             if self.relay.verdict is not None:
                 out["verdict"] = self.relay.verdict     # 참고용 파생 판정(계약 §3-2·§5)
             self._send(200 if row.get("existing") else 201, out)   # 멱등은 200 이다
+            return
+        if url.path == "/participants/checkpoint":
+            # 계약 §3-6b — ⑴운영자인가(403/5) ⑵서명이 네 칸 바이트에 맞는가(401/4)
+            #             ⑶서명한 해시가 **지금 내 명부**와 같은가(409/9) ⑷서식(400/10)
+            signer = payload.get("signer")
+            operators = {ln.strip() for ln in self.relay.roster_text.get("operators", "").splitlines()
+                         if ln.strip() and not ln.lstrip().startswith("#")}
+            if not payload.get("signed_at") or not payload.get("checkpoint"):
+                self._fail(400, "칸이 빠졌다")
+                return
+            if signer not in operators:
+                self._fail(403, "운영자 명부에 없다", why="not_an_operator")
+                return
+            if not _signature_matches(_checkpoint_canonical(payload),
+                                      payload.get("signature", "")):
+                self._fail(401, "서명이 계약 바이트와 안 맞는다", why="principal_mismatch")
+                return
+            current = _roster_digest(self.relay.roster_text)
+            if payload["checkpoint"] != current:
+                # ★낡은 값을 새 값처럼 두지 않는다 — `current` 를 동봉해 무엇과 다른지 말한다.
+                self._fail(409, "서명한 해시가 지금 명부와 다르다", current=current)
+                return
+            self.relay.checkpoint = {"checkpoint": payload["checkpoint"],
+                                     "signer": signer, "signed_at": payload["signed_at"],
+                                     "signature": payload["signature"], "stale": False}
+            self._send(201, {"checkpoint": payload["checkpoint"], "signer": signer,
+                             "signed_at": payload["signed_at"]})
             return
         if url.path == "/register":
             pid = payload.get("participant_id")

@@ -25,7 +25,10 @@ import tempfile
 from typing import Any
 
 from agora import errors, scrub
-from agora.contract_open import KINDS, MAX_EVENT_BYTES, REGISTER_PURPOSE, SIGN_NAMESPACE
+from agora.contract_open import (
+    CHECKPOINT_PURPOSE, CHECKPOINT_TIME_PATTERN, KINDS, MAX_EVENT_BYTES,
+    REGISTER_PURPOSE, SIGN_NAMESPACE,
+)
 from agora.errors import AgoraError
 from agora.event import canonical_bytes
 
@@ -127,6 +130,39 @@ def self_check_register(doc: Any) -> tuple[bytes, dict[str, Any]]:
     return raw, report
 
 
+# 명부 체크포인트가 서명하는 **정확한 네 칸**(릴레이 계약 §3-6b · `docs/RELAY.md@main`).
+# ★등록과 같은 이유로 **닫아 둔다**: 문이 열려 있으면 이 경로가 「아무 문서나 서명해 주는 신탁」이 된다.
+CHECKPOINT_FIELDS = ("checkpoint", "purpose", "signed_at", "signer")
+
+
+def self_check_checkpoint(doc: Any) -> tuple[bytes, dict[str, Any]]:
+    """체크포인트 발행 요청 자기 검사 — 네 칸 정확히 · `purpose` 값 고정 · `signed_at` 서식.
+
+    ★`signed_at` 서식을 **서명기에서도** 본다(검증 쪽에도 같은 검사가 있다). 서명은 한 번 나가면
+      되돌릴 수 없고, 서식이 어긋난 값을 서명해 보내면 서버가 400 으로 돌려주는데 그때는 이미
+      **그 바이트에 대한 유효한 서명이 세상에 존재한다.** 나가기 전에 막는 편이 싸다.
+    """
+    import re
+    if type(doc) is not dict:
+        raise AgoraError(errors.ARGUMENT, "체크포인트 요청은 객체여야 한다", None)
+    if tuple(sorted(doc)) != CHECKPOINT_FIELDS:
+        raise AgoraError(errors.ARGUMENT, "체크포인트 요청은 계약된 네 칸만 가진다",
+                         {"got": sorted(doc), "want": list(CHECKPOINT_FIELDS)})
+    if doc.get("purpose") != CHECKPOINT_PURPOSE:
+        raise AgoraError(errors.ARGUMENT, "체크포인트의 purpose 가 계약값이 아니다",
+                         {"got": doc.get("purpose"), "want": CHECKPOINT_PURPOSE})
+    for key in CHECKPOINT_FIELDS:
+        if type(doc[key]) is not str or not doc[key].strip():
+            raise AgoraError(errors.ARGUMENT, "체크포인트 칸은 비지 않은 문자열이어야 한다",
+                             {"key": key})
+    if not re.match(CHECKPOINT_TIME_PATTERN, doc["signed_at"]):
+        raise AgoraError(errors.ARGUMENT, "signed_at 은 밀리초 고정폭 ISO 여야 한다",
+                         {"got": doc["signed_at"]})
+    report = scrub.enforce(doc)
+    raw = canonical_bytes(doc)
+    return raw, report
+
+
 def handle(request: dict[str, Any]) -> dict[str, Any]:
     if "key" in request or "key_path" in request:
         # 호출자가 키를 지목하려 하면 그 자체가 계약 위반이다.
@@ -141,6 +177,15 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
         signature = sign_bytes(raw, _signing_key_path())
         return {"hash": _hashlib.sha256(raw).hexdigest(), "signature": signature,
                 "scrub": report, "namespace": SIGN_NAMESPACE, "kind_of_request": "register"}
+    if "checkpoint" in request:
+        # ★명부 체크포인트(릴레이 계약 §3-6b) — 이벤트가 아니므로 kind 검사가 없다.
+        #   같은 처방: **칸 집합을 닫는다**(이벤트도 등록도 이 문으로 못 샌다).
+        import hashlib as _hashlib
+        raw, report = self_check_checkpoint(request.get("checkpoint"))
+        signature = sign_bytes(raw, _signing_key_path())
+        return {"hash": _hashlib.sha256(raw).hexdigest(), "signature": signature,
+                "scrub": report, "namespace": SIGN_NAMESPACE,
+                "kind_of_request": "checkpoint"}
     event = request.get("event")
     raw, report = self_check(event)
     signature = sign_bytes(raw, _signing_key_path())
