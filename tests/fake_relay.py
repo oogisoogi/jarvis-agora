@@ -16,6 +16,7 @@
   ⑼`protocol_codes=False`  — 실패 본문의 `code` 를 계약값이 아닌 HTTP 숫자로 적는다(구 서버).
   ⑽`lie_valid=True`        — 격리돼야 할 이벤트에 `valid:true` 를 적는다(거짓말하는 파생).
   ⑾`checkpoint=…`          — 운영자 서명 체크포인트(없으면 200 + `checkpoint:null` · §3-6b).
+  ⑿`forge_retry=True`      — 실패 본문에 우리 재시도 표식(`retry`)을 **위조해** 적는다.
 
 ★**계약 확정본(`docs/RELAY.md@b2ca815`)에 맞춘다**: 실패 본문 `code` 는 PROTOCOL 코드 ·
   등록 소유 증명은 **다섯 칸**(`purpose` 포함) 서명 · 체크포인트 부재는 404 가 아니라 200 + null ·
@@ -54,7 +55,8 @@ class FakeRelay:
                  checkpoint: dict[str, Any] | None = None,
                  checkpoint_404: bool = False, verdict: dict[str, Any] | None = None,
                  retry_after: str | None = None,
-                 body_code_override: int | None = None) -> None:
+                 body_code_override: int | None = None,
+                 forge_retry: bool = False) -> None:
         self.idempotent = idempotent
         self.refresh_updated_at = refresh_updated_at
         self.revoked_404 = revoked_404
@@ -72,6 +74,8 @@ class FakeRelay:
         # ★상태와 **다른** 코드를 본문에 적는다 — 계약 §3-0 이 「둘이 갈리면 code 가 이긴다」고
         #   한 그 갈림을 실제로 만들어 본다. 갈리지 않으면 그 규칙은 시험되지 않는다.
         self.body_code_override = body_code_override
+        # ★남의 서버가 **우리 내부 표식**을 흉내내는 상황. 표식이 우리 것이 아니면 판정도 우리 것이 아니다.
+        self.forge_retry = forge_retry
         self.seen_queries: list[str] = []    # 서버가 실제로 읽은 질의 — 인코딩 시험이 본다
         self.rooms: dict[str, dict[str, Any]] = {}
         self.registered: dict[str, dict[str, str]] = {}
@@ -92,21 +96,33 @@ class FakeRelay:
 
     def append_event(self, *, thread_id: str, category: str, title: str,
                      body: str, is_genesis: bool) -> dict[str, Any]:
+        """계약 §3-2 의 세 갈래를 그대로 흉내낸다 — **새 행(201) · 멱등(200) · 재사용 충돌(422)**.
+
+        ★agy 적대검증 2026-09-05 지적(수용): 구판은 무엇이 오든 201 을 줬고 내용(해시)을 안 봤다.
+          그래서 ⑴어댑터의 **200 경로가 한 번도 안 돌았고** ⑵`message_id` 재사용 방어가
+          더블 쪽에 아예 없어 **거짓 초록**이었다.
+        ★`idempotent=False` 스위치는 이 세 갈래 전체를 끈다 — 「약속을 안 지키는 서버」가
+          그 스위치의 뜻이기 때문이다(충돌 검사도 그 약속의 일부다).
+        """
         room = self._room(thread_id, category=category, title=title)
         if is_genesis and title:
             room["title"] = title
         message_id = _message_id_of(body)
         if self.idempotent and message_id:
             for row in room["events"]:
-                if row.get("message_id") == message_id:
-                    return row              # ★멱등 — 새 행을 만들지 않는다
+                if row.get("message_id") != message_id:
+                    continue
+                if row.get("hash") != _event_hash_of(body):
+                    raise _Conflict(message_id)   # 같은 id·다른 내용 = 다른 글이다(422/3)
+                return dict(row, existing=True)   # ★멱등 — 새 행을 만들지 않는다(200)
         self.counter += 1
         row = {"event_id": f"EV_{self.counter}", "created_at": now_iso(),
-               "body": body, "is_genesis": bool(is_genesis), "message_id": message_id}
+               "body": body, "is_genesis": bool(is_genesis), "message_id": message_id,
+               "hash": _event_hash_of(body)}
         room["events"].append(row)
         if self.refresh_updated_at:
             room["updated_at"] = row["created_at"]
-        return row
+        return dict(row, existing=False)
 
     def inject_raw(self, *, room_id: str, body: str) -> dict[str, Any]:
         """우리 서식이 아닌 글을 심는다(웹에서 손으로 쓴 댓글에 해당)."""
@@ -129,6 +145,29 @@ class FakeRelay:
             if '"kind":"answer_selected"' in _compact(body):
                 answered = True
         return {"closed": closed, "answered": answered, "closed_at": closed_at}
+
+
+class _Conflict(Exception):
+    """같은 `message_id` 에 다른 내용 — 계약 §3-2 의 `message_id_reused`."""
+
+    def __init__(self, message_id: str) -> None:
+        super().__init__(message_id)
+        self.message_id = message_id
+
+
+def _event_hash_of(body: str) -> str:
+    """이벤트의 내용 해시 — **서버가 스스로 다시 만든다**(클라 canonical 을 부르지 않는다).
+
+    ★부르면 「우리 계산으로 우리 계산을 재는」 대조가 된다. 규칙(정렬·구분자)은 계약이 정한 것을
+      여기 옮겨 적는다.
+    """
+    from agora.event import parse_post
+    try:
+        event = parse_post(body)["event"]
+    except Exception:            # noqa: BLE001 — 우리 서식이 아니면 원문 그대로 잰다
+        return _sha256_text(body)
+    return _sha256_text(json.dumps(event, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":")))
 
 
 def _sha256_text(text: str) -> str:
@@ -218,8 +257,10 @@ class _Handler(BaseHTTPRequestHandler):
         headers = {}
         if status == 429 and self.relay.retry_after:
             headers["Retry-After"] = self.relay.retry_after
-        self._send(status, {"code": code, "message": message, "detail": detail or {}},
-                   headers=headers)
+        body = {"code": code, "message": message, "detail": detail or {}}
+        if self.relay.forge_retry:
+            body["retry"] = True          # 위조 — 클라가 이것을 믿으면 400 도 네 번 두드린다
+        self._send(status, body, headers=headers)
 
     def _override(self, path: str) -> bool:
         for prefix, status in self.relay.status_override.items():
@@ -319,7 +360,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             rows = []
             for row in room["events"]:
-                item = {k: v for k, v in row.items() if k != "message_id"}
+                item = {k: v for k, v in row.items()
+                        if k not in ("message_id", "hash", "existing")}
                 # 파생 판정 덧칸(계약 §3-5) — `lie_valid` 면 격리감에도 참을 적는다.
                 item.update({"valid": True, "quarantined": False,
                              "stale": False, "reason": None}
@@ -346,15 +388,21 @@ class _Handler(BaseHTTPRequestHandler):
             self._fail(400, "JSON 이 아니다")
             return
         if url.path == "/events":
-            row = self.relay.append_event(
-                thread_id=payload["thread_id"], category=payload.get("category", ""),
-                title=payload.get("title", ""), body=payload.get("body", ""),
-                is_genesis=bool(payload.get("is_genesis")))
+            try:
+                row = self.relay.append_event(
+                    thread_id=payload["thread_id"], category=payload.get("category", ""),
+                    title=payload.get("title", ""), body=payload.get("body", ""),
+                    is_genesis=bool(payload.get("is_genesis")))
+            except _Conflict as e:
+                # 같은 id·다른 내용 = 재시도가 아니라 **다른 글**이다(계약 §3-2 · 422/code 3).
+                self._fail(422, "message_id 를 다른 내용으로 다시 썼다",
+                           conflict="message_id_reused", message_id=e.message_id)
+                return
             out = {"event_id": row["event_id"], "url": None,
                    "created_at": row["created_at"]}
             if self.relay.verdict is not None:
                 out["verdict"] = self.relay.verdict     # 참고용 파생 판정(계약 §3-2·§5)
-            self._send(201, out)
+            self._send(200 if row.get("existing") else 201, out)   # 멱등은 200 이다
             return
         if url.path == "/register":
             pid = payload.get("participant_id")

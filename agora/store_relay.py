@@ -85,25 +85,27 @@ def _map_status(status: int, detail: Any) -> AgoraError:
       갈라 놓았다 — 「모르면 좁은 쪽」은 계약이 말이 없을 때의 규율이지 계약을 덮는 규율이 아니다.
     """
     code = _body_code(detail)
+    # ★★서버가 준 본문은 **언제나 한 겹 아래**(`detail.detail`)에 둔다 — 위층은 우리 것이다.
+    #   ⚠agy 적대검증 2026-09-05 지적: 본문을 그대로 detail 로 쓰면 서버가 `retry: true` 를 적어
+    #     **우리 재시도 표식을 위조**할 수 있었다(400 을 네 번 두드리게 만든다). 표식과 남의 말이
+    #     같은 칸에 살면, 그 칸을 읽는 판정은 남의 것이 된다.
+    #   ★`status` 를 늘 싣는 부수 효과도 있다 — 부재 판정(`roster_checkpoint`)이 그 값을 본다.
+    def wrap(default: int, message: str) -> AgoraError:
+        return AgoraError(code or default, message, {"status": status, "detail": detail})
     if status == 400:
-        return AgoraError(code or errors.ARGUMENT, "릴레이가 요청을 거부했다", detail)
+        return wrap(errors.ARGUMENT, "릴레이가 요청을 거부했다")
     if status in (401, 403):
-        default = errors.PERMISSION if status == 403 else errors.SIGNATURE
-        return AgoraError(code or default, "릴레이가 신원·권한을 거부했다", detail)
+        return wrap(errors.PERMISSION if status == 403 else errors.SIGNATURE,
+                    "릴레이가 신원·권한을 거부했다")
     if status == 404:
-        # ★`status` 를 detail 에 **반드시** 싣는다 — 부재를 「없어도 되는 것」과 「있어야 하는 것」으로
-        #   가르는 호출자(`roster_checkpoint`)가 그 값으로 판정한다. 없으면 다른 저장층 실패가
-        #   404 로 오인된다.
-        return AgoraError(code or errors.STORE, "릴레이에 그것이 없다",
-                          {"status": 404, "detail": detail})
+        return wrap(errors.STORE, "릴레이에 그것이 없다")
     if status == 409:
         # ★계약에서 409 는 **신원 선점(등록)** 전용이다 — CAS 경합은 여기서 안 난다(RELAY.md §3-7·§5).
         #   구판 문구(「사슬이 갈렸다 — read 후 다시」)는 릴레이에서 일어나지 않는 일을 설명했다.
-        return AgoraError(code or errors.STATE_CONFLICT,
-                          "릴레이가 충돌로 거부했다 — 등록 신원 선점(계약 §3-7)", detail)
+        return wrap(errors.STATE_CONFLICT, "릴레이가 충돌로 거부했다 — 등록 신원 선점(계약 §3-7)")
     if status in (413, 422):
-        return AgoraError(code or errors.GATE_REJECT, "릴레이 게이트가 거부했다", detail)
-    return AgoraError(code or errors.STORE, "릴레이 오류", {"status": status, "detail": detail})
+        return wrap(errors.GATE_REJECT, "릴레이 게이트가 거부했다")
+    return wrap(errors.STORE, "릴레이 오류")
 
 
 def _query(**params: Any) -> str:
@@ -124,6 +126,28 @@ def _clamp(value: Any, high: int) -> int:
     except (TypeError, ValueError):
         return high
     return max(1, min(wanted, high))
+
+
+def _exhausted(last: AgoraError | None, *, write: bool, attempts: int,
+               waited: list[float]) -> AgoraError:
+    """재시도를 다 썼다 — 그런데 **쓰기의 5xx 는 실패가 아니라 「모른다」**이다.
+
+    ★agy 적대검증 2026-09-05 지적(수용): 프록시 504·워커 500 은 **서버가 이미 적재한 뒤**일 수 있다.
+      그것을 code 7(저장층 실패)로 올리면 호출자가 `_settle_unknown`(재조회 판정)을 **안 탄다** —
+      사용자는 실패로 읽고 새 `message_id` 로 다시 쓴다. 그 결과가 **조용한 중복**이다.
+      (GitHub 시절 code 8 재시도가 게시물 4건을 만든 그 사고의 다른 입구다.)
+    ★**429 는 8 이 아니다.** 계약 §3-2 의 검사 순서에서 멱등이 속도 제한보다 **앞**이므로,
+      429 로 거절된 요청은 원장에 아무것도 안 남긴다 — 서버가 「안 받았다」를 명시한 것이다.
+    """
+    status = (last.detail or {}).get("status") if last else None
+    may_have_landed = bool(write and type(status) is int and status >= 500)
+    detail = {"attempts": attempts, "waited": waited, "last_status": status,
+              "last": (last.detail if last else None)}
+    if may_have_landed:
+        return AgoraError(errors.UNKNOWN_COMMIT,
+                          "릴레이가 계속 받지 않는다 — 이미 받았을 수 있다(재조회로 판정하라)",
+                          detail)
+    return AgoraError(errors.STORE, "릴레이가 계속 받지 않는다", detail)
 
 
 def _retry_delay(err: AgoraError, fallback: float) -> float:
@@ -255,9 +279,8 @@ class RelayStore:
                 self.waits.append(wait)
                 self._sleep(wait)
                 delay *= BACKOFF_FACTOR
-        raise AgoraError(errors.STORE, "릴레이가 계속 받지 않는다",
-                         {"attempts": self._attempts, "waited": list(self.waits),
-                          "last": (last.detail if last else None)})
+        raise _exhausted(last, write=write, attempts=self._attempts,
+                         waited=list(self.waits))
 
     # ── Store 계약 ──────────────────────────────────────────────────────────
     def append(self, *, thread_id: str, category: str, title: str,

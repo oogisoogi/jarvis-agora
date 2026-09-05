@@ -4386,7 +4386,9 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M328-relay-limit-unclamped", "M332-relay-filters-server-invalid"),
     "실패분류": ("M306-relay-retries-404", "M319-relay-retries-everything",
                  "M307-relay-write-timeout-is-seven", "M325-relay-ignores-body-code",
-                 "M326-relay-forbidden-is-signature", "M329-relay-ignores-retry-after"),
+                 "M326-relay-forbidden-is-signature", "M329-relay-ignores-retry-after",
+                 "M334-relay-exhausted-write-is-seven", "M335-relay-lets-server-forge-retry",
+                 "M336-relay-unprocessable-is-not-a-gate"),
     "투영없음": ("M308-relay-projection-claims-ok",),
     "명부신뢰": ("M309-relay-roster-swallows-404", "M310-sync-roster-skips-confirmation",
                  "M311-sync-roster-keeps-no-previous",
@@ -9534,6 +9536,110 @@ def _case_register_purpose_value_is_pinned() -> None:
         raise AssertionError("계약 밖 purpose 를 서명해 줬다")
 
 
+def _case_relay_exhausted_write_is_unknown() -> None:
+    """쓰기가 **5xx 로 소진**되면 실패(7)가 아니라 **성공 불명(8)** 이다(agy 적대검증 2026-09-05 봉합).
+
+    ★프록시 504·워커 500 은 **서버가 이미 적재한 뒤**일 수 있다. 7 로 올리면 호출자가
+      재조회 판정(`_settle_unknown`)을 **안 탄다** — 사용자는 실패로 읽고 새 글을 다시 쓴다.
+      그것이 조용한 중복이다(GitHub 시절 게시물 4건 사고의 다른 입구).
+    ★**429 는 8 이 아니다.** 계약 §3-2 의 검사 순서에서 멱등이 속도 제한보다 앞이므로,
+      429 로 거절된 요청은 원장에 아무것도 안 남긴다 — 서버가 「안 받았다」를 명시한 것이다.
+    """
+    for status, want in ((500, errors.UNKNOWN_COMMIT), (429, errors.STORE)):
+        with _relay_env() as (ctx, relay, _url):
+            relay.status_override = {"/events": status}
+            try:
+                ctx.store.append(thread_id="a" * 32, category="debate", title="t",
+                                 body="본문", is_genesis=True)
+            except AgoraError as e:
+                if e.code != want:
+                    raise AssertionError(f"{status} 쓰기 소진이 {want} 가 아니다: {e.code}") from None
+            else:
+                raise AssertionError(f"{status} 인데 성공으로 읽었다")
+    # 읽기는 그대로 7 이다 — 읽기는 다시 물으면 되고, 남긴 것이 없다.
+    with _relay_env() as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 500}
+        try:
+            ctx.store.list_threads()
+        except AgoraError as e:
+            if e.code != errors.STORE:
+                raise AssertionError(f"읽기 소진이 7 이 아니다: {e.code}") from None
+        else:
+            raise AssertionError("500 을 성공으로 읽었다")
+
+
+def _case_relay_retry_marker_cannot_be_forged() -> None:
+    """서버는 **우리 재시도 표식을 위조할 수 없다**(agy 적대검증 2026-09-05 봉합).
+
+    ★표식(`detail.retry`)은 transport 가 다는 우리 것이다. 서버 본문을 그대로 `detail` 로 쓰면
+      서버가 `retry: true` 를 적어 **400 을 네 번 두드리게** 만들 수 있었다.
+      ⇒ 남의 말은 언제나 한 겹 아래(`detail.detail`)에 둔다.
+    ★일반형: **표식과 남의 말이 같은 칸에 살면, 그 칸을 읽는 판정은 남의 것이 된다.**
+    """
+    with _relay_env(forge_retry=True) as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 400}
+        try:
+            ctx.store.list_threads()
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"400 이 10 이 아니다: {e.code}") from None
+            if (e.detail or {}).get("retry") is True:
+                raise AssertionError("서버가 우리 표식을 차지했다")
+        else:
+            raise AssertionError("400 을 성공으로 읽었다")
+        if ctx.store.waits:
+            raise AssertionError(f"위조 표식을 믿고 재시도했다: {ctx.store.waits}")
+
+
+def _case_relay_idempotent_two_hundred_and_reuse_conflict() -> None:
+    """계약 §3-2 의 세 갈래 — 새 행 **201** · 멱등 **200** · 같은 id 다른 내용 **422/3**.
+
+    ★agy 적대검증 2026-09-05 지적(수용): 더블이 무엇이 오든 201 을 주고 내용을 안 봐서
+      ⑴어댑터의 200 경로가 한 번도 안 돌았고 ⑵재사용 방어가 더블에 아예 없었다.
+      **더블이 계약을 덜 지키면 그만큼 시험이 공허해진다.**
+    """
+    from agora import tools
+    from agora.event import parse_post, render_post
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 마디"))
+        body = relay.rooms[room]["events"][-1]["body"]
+        again = ctx.store.append(thread_id=room, category="debate", title="",
+                                 body=body, is_genesis=False)
+        if len(relay.rooms[room]["events"]) != 2:
+            raise AssertionError("멱등 재전송이 새 행을 만들었다")
+        if again["node_id"] != relay.rooms[room]["events"][-1]["event_id"]:
+            raise AssertionError(f"멱등 응답이 기존 행을 가리키지 않는다: {again}")
+        # 같은 message_id · 다른 내용 = 재시도가 아니라 다른 글이다.
+        parsed = parse_post(body)
+        other = dict(parsed["event"])
+        other["payload"] = {**other["payload"], "body": "내용만 바꿨다"}
+        try:
+            ctx.store.append(thread_id=room, category="debate", title="",
+                             body=render_post(other, parsed["signature"]),
+                             is_genesis=False)
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT:
+                raise AssertionError(f"재사용 충돌이 3 이 아니다: {e.code}") from None
+            if ((e.detail or {}).get("detail") or {}).get("detail", {}).get("conflict") \
+                    != "message_id_reused":
+                raise AssertionError(f"충돌 표식이 안 왔다: {e.detail}")
+        else:
+            raise AssertionError("같은 id 로 다른 글을 썼는데 받아들였다")
+    # 계약 밖 코드를 적는 상대에서도 422 는 게이트 거부다(상태 매핑 축).
+    with _relay_env(protocol_codes=False) as (ctx, relay, _url):
+        relay.status_override = {"/events": 422}
+        try:
+            ctx.store.append(thread_id="b" * 32, category="debate", title="t",
+                             body="본문", is_genesis=True)
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT:
+                raise AssertionError(f"422 상태 매핑이 3 이 아니다: {e.code}") from None
+        else:
+            raise AssertionError("422 를 성공으로 읽었다")
+
+
 def _case_register_carries_proof_of_possession() -> None:
     """등록은 **소유 증명 서명**을 동봉한다(릴레이 계약 3-1).
 
@@ -10134,6 +10240,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("릴레이: 서버 valid 에 안 기댄다", _case_relay_does_not_lean_on_server_validity, None),
     ("등록: 증명 없이 안 보낸다",     _case_register_refuses_to_send_without_proof, None),
     ("등록: purpose 값이 고정",       _case_register_purpose_value_is_pinned, None),
+    ("릴레이: 쓰기 소진은 8",         _case_relay_exhausted_write_is_unknown, None),
+    ("릴레이: 표식은 위조 불가",      _case_relay_retry_marker_cannot_be_forged, None),
+    ("릴레이: 멱등 200·재사용 422",   _case_relay_idempotent_two_hundred_and_reuse_conflict, None),
     ("S8: 8축이 그물을 갖는다",       _case_s8_axes_have_nets, None),
 )
 
@@ -10143,6 +10252,19 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     # ── S8 릴레이 운반층(2026-09-05) ────────────────────────────────────────
     # ── r2 릴레이 계약 확정본 대조(2026-09-05 · docs/RELAY.md@b2ca815) ──────
+    # ★agy 적대검증 1R 봉합(2026-09-05) — 셋 다 「조용히 틀리는」 자리다.
+    ("M334-relay-exhausted-write-is-seven", "agora/store_relay.py",
+     '    may_have_landed = bool(write and type(status) is int and status >= 500)',
+     '    may_have_landed = False',
+     "릴레이: 쓰기 소진은 8"),
+    ("M335-relay-lets-server-forge-retry", "agora/store_relay.py",
+     '        return AgoraError(code or default, message, {"status": status, "detail": detail})',
+     '        return AgoraError(code or default, message, detail)',
+     "릴레이: 표식은 위조 불가"),
+    ("M336-relay-unprocessable-is-not-a-gate", "agora/store_relay.py",
+     '    if status in (413, 422):',
+     '    if status == 413:',
+     "릴레이: 멱등 200·재사용 422"),
     ("M323-register-signs-four-fields", "agora/onboard.py",
      '             "participant_id": doc["id"], "public_key": public_key,\n             "purpose": REGISTER_PURPOSE}',
      '             "participant_id": doc["id"], "public_key": public_key}',
@@ -10152,12 +10274,12 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if False:',
      "등록: purpose 값이 고정"),
     ("M325-relay-ignores-body-code", "agora/store_relay.py",
-     '    code = _body_code(detail)\n    if status == 400:',
-     '    code = None\n    if status == 400:',
+     '    code = _body_code(detail)\n',
+     '    code = None\n',
      "릴레이: 본문 code 가 정본"),
     ("M326-relay-forbidden-is-signature", "agora/store_relay.py",
-     '        default = errors.PERMISSION if status == 403 else errors.SIGNATURE',
-     '        default = errors.SIGNATURE',
+     '        return wrap(errors.PERMISSION if status == 403 else errors.SIGNATURE,',
+     '        return wrap(errors.SIGNATURE,',
      "릴레이: 403 은 권한 5"),
     ("M327-relay-cursor-not-encoded", "agora/store_relay.py",
      '    items = [(k, str(v)) for k, v in params.items() if v not in (None, "")]\n    return ("?" + urlencode(items)) if items else ""',
@@ -10191,9 +10313,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            page_cursor = data.get("next_cursor")\n            if not page_cursor:\n                break',
      '            page_cursor = data.get("next_cursor")\n            if True:\n                break',
      "릴레이: 페이지를 끝까지 받는다"),
+    # ★2026-09-05 r2 재조준 3건(M306·M325·M326) — agy 봉합으로 `_map_status` 가 `wrap` 을 쓰게 되며
+    #   조준 문자열이 사라졌다. 옮기지 않으면 그 축이 **NOT-APPLIED 로 조용히 꺼진다**(같은 형태 4번째).
     ("M306-relay-retries-404", "agora/store_relay.py",
-     '                          {"status": 404, "detail": detail})',
-     '                          {"status": 404, "retry": True, "detail": detail})',
+     '        return wrap(errors.STORE, "릴레이에 그것이 없다")',
+     '        return AgoraError(errors.STORE, "릴레이에 그것이 없다",\n                          {"status": 404, "retry": True, "detail": detail})',
      "릴레이: 상태 매핑 404·429"),
     ("M319-relay-retries-everything", "agora/store_relay.py",
      '                if not is_retryable_store(e):\n                    raise',
