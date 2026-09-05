@@ -95,7 +95,7 @@ else
     R2=b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
     R3=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3
     for w in 1440 390; do
-      for spec in "/index.html|lobby" "/room.html?id=$R3|room-resolved" "/room.html?id=$R2|room-r2" "/archive.html|archive"; do
+      for spec in "/|lobby" "/room?id=$R3|room-resolved" "/room?id=$R2|room-r2" "/archive|archive"; do
         p="${spec%%|*}"; nm="${spec##*|}"
         NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "$p" "$w" "$SHOTS/$nm-$w.png" > "$OUT/$nm-$w.json" 2>"$OUT/$nm-$w.err" \
           || echo "    probe 실패: $nm-$w ($(head -1 "$OUT/$nm-$w.err"))"
@@ -111,7 +111,7 @@ if [ -x "$CHROME" ]; then
   PORT=$(free_port)
   SRV=$(start_relay "$PORT" --omit-signature-fields) || fail "가짜 릴레이(서명 칸 제외)가 안 떴다"
   if [ -n "${SRV:-}" ]; then
-    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room.html?id=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3" 1440 "$SHOTS/room-nosig-1440.png" > "$OUT/nosig.json" 2>/dev/null
+    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room?id=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3" 1440 "$SHOTS/room-nosig-1440.png" > "$OUT/nosig.json" 2>/dev/null
     kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
     b=$(python3 -c "import json;print(len(json.load(open('$OUT/nosig.json'))['badges']))" 2>/dev/null || echo ERR)
     [ "$b" = "0" ] && pass "서명 파생값이 없으면 배지 0개" || fail "배지가 ${b}개 그려졌다 — 없는 칸으로 신뢰를 말하면 안 된다"
@@ -120,7 +120,7 @@ if [ -x "$CHROME" ]; then
   PORT=$(free_port)
   SRV=$(start_relay "$PORT" --fail-second-page) || fail "가짜 릴레이(2쪽 실패)가 안 떴다"
   if [ -n "${SRV:-}" ]; then
-    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room.html?id=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3" 1440 "$SHOTS/room-partial-1440.png" > "$OUT/partial.json" 2>/dev/null
+    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room?id=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3" 1440 "$SHOTS/room-partial-1440.png" > "$OUT/partial.json" 2>/dev/null
     kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
     if python3 -c "
 import json,sys
@@ -137,7 +137,7 @@ fi
   PORT=$(free_port)
   SRV=$(start_relay "$PORT" --omit-chair) || fail "가짜 릴레이(의장 칸 제외)가 안 떴다"
   if [ -n "${SRV:-}" ]; then
-    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room.html?id=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3" 1440 "" > "$OUT/nochair.json" 2>/dev/null
+    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room?id=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3" 1440 "" > "$OUT/nochair.json" 2>/dev/null
     kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
     # ★음성 단언(없는 칸을 안 그린다)만 두면 **렌더가 통째로 죽어도** 초록이다.
     #   그래서 같은 화면에서 **서버가 준 칸은 여전히 그려진다**를 함께 못박는다(양성 구조 단언).

@@ -56,6 +56,11 @@ MUTATIONS = [
      "  if (typeof chair !== 'string' || chair === '') return false;\n  return event.kind === 'resolution' && event.from === chair;",
      "  return event.kind === 'resolution';",
      "남의 글을 방의 결론으로 올리면 적색이 나는가"),
+    ("확장자 링크로 되돌림(307 한 홉 낭비)",
+     "relay/board/assets/urls.js",
+     "    : `/room?id=${encodeURIComponent(roomId)}`;",
+     "    : `room.html?id=${encodeURIComponent(roomId)}`;",
+     "배포가 되돌리는 확장자 주소로 링크하면 적색이 나는가"),
 ]
 
 # 두 파일을 함께 고쳐야 성립하는 변이(집계는 같고 배치만 어긋난다)

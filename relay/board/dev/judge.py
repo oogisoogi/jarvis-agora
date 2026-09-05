@@ -7,6 +7,8 @@ import sys
 MIN_FONT_PX = 18.0      # 브리프 규율: 글자 바닥 18
 MIN_CONTRAST = 4.5      # WCAG 2.1 AA 본문
 ALLOWED_EXTERNAL = {"https://jarvis-install.godmeyou.kr/"}
+# 배포는 확장자를 뗀 주소로 서빙한다 — 링크 전수 검사는 그 주소를 실제 파일로 되돌려 확인한다.
+EXTENSIONLESS = {"/": "index.html", "/room": "room.html", "/archive": "archive.html"}
 PLACEHOLDER_WORDS = ("알 수 없음", "미상", "undefined", "null", "[object Object]")
 # ★양성 구조 단언 — 「없는 것을 안 그린다」만 재면, 렌더가 통째로 죽어도 그 검사는 초록이다.
 #   서버가 준 값이 **실제로 그려지는지**를 함께 못박아야 그물이 생긴다.
@@ -54,6 +56,7 @@ for f in files:
             if href not in ALLOWED_EXTERNAL: bad.append(f"허용 밖 바깥 링크 {href}")
         else:
             target = href.split("?")[0].split("#")[0]
+            target = EXTENSIONLESS.get(target, target.lstrip("/"))
             if target and not (board / target).exists(): bad.append(f"깨진 링크 {href}")
     mark = "OK " if not bad else "FAIL"
     print(f"  {f.stem:22s} {str(d.get('settled')):5s} {str(font):>8s} {str(over):>6s} {str(con):>8s} {str(foot):>4s}  {mark}")

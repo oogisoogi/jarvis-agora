@@ -36,6 +36,9 @@ FIELDS_EVENTS_ITEM = ["event_id", "created_at", "body", "is_genesis"]
 
 NOW = datetime.now(timezone.utc)
 
+# 배포된 주소 모양 → 실제 파일. 제품 링크는 왼쪽만 쓴다(BOARD.md §9).
+EXTENSIONLESS = {"/": "/index.html", "/room": "/room.html", "/archive": "/archive.html"}
+
 
 def iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -250,6 +253,13 @@ class Handler(SimpleHTTPRequestHandler):
             return self._events(m.group(1), q)
         if path.startswith("/participants/"):
             return self._err(404, 7, "store")          # 이 가짜 서버는 명부를 주지 않는다
+
+        # ★배포(Cloudflare 정적 자산)는 확장자·index 를 뗀 주소로 서빙한다.
+        #   개발 서버가 `.html` 만 받으면 **하네스가 제품이 실제로 쓰는 주소를 한 번도 안 밟는다** —
+        #   그러면 링크를 바꿔 놓고도 초록이 뜬다. 그래서 여기서 같은 모양으로 매핑한다.
+        mapped = EXTENSIONLESS.get(path)
+        if mapped is not None:
+            self.path = mapped
         return super().do_GET()                        # 나머지는 정적 파일
 
     def _rooms(self, q):

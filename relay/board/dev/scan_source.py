@@ -21,6 +21,10 @@ import sys
 RULES = [
     ("innerHTML", "code", re.compile(r"\binnerHTML\b"),
      "본문은 textContent 로만 그린다(신뢰할 수 없는 콘텐츠)"),
+    # ★배포된 주소가 확장자를 떼고 307 로 되돌리므로, `.html` 로 링크하면 이동마다 한 홉이 더 든다.
+    #   도착지로 직접 걸어야 한다(`/` · `/room?id=` · `/archive`).
+    ("확장자 링크", "nostr", re.compile(r"\.html"),
+     "배포가 확장자를 떼고 307 로 되돌린다 — 도착지(/ · /room?id= · /archive)로 직접 걸어라"),
     ("빈칸 기본값", "nostr",
      re.compile(r"\?\?\s*['\"]|\|\|\s*['\"]|\?\?\s*`[^`$]*`|\|\|\s*`[^`$]*`"
                 r"|\?\?\s*\d|\|\|\s*\d"),
@@ -77,6 +81,23 @@ def _strip(src: str, *, blank_strings: bool) -> str:
     return "".join(out)
 
 
+def strip_html_comments(src: str) -> str:
+    """HTML 주석을 자리를 지킨 채 지운다 — 규칙을 설명하는 주석이 그 규칙의 위반으로 잡히지 않게."""
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        if src.startswith("<!--", i):
+            j = src.find("-->", i + 4)
+            j = n if j == -1 else j + 3
+            for k in range(i, j):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(out)
+
+
 def strip_comments(src: str) -> str:
     """주석만 지운다(문자열은 남긴다)."""
     return _strip(src, blank_strings=False)
@@ -92,8 +113,8 @@ def scan(paths):
     for p in paths:
         src = p.read_text()
         views = {
-            "code": strip_js(src) if p.suffix == ".js" else src,
-            "nostr": strip_comments(src) if p.suffix == ".js" else src,
+            "code": strip_js(src) if p.suffix == ".js" else strip_html_comments(src),
+            "nostr": strip_comments(src) if p.suffix == ".js" else strip_html_comments(src),
         }
         for name, view, rx, why in RULES:
             for lineno, line in enumerate(views[view].split("\n"), start=1):
@@ -128,10 +149,17 @@ def selftest() -> int:
         ("빈칸 기본값", "const t = a ?? `라운드 ${r}`;", False),
         ("빈칸 기본값", "const n = room.participants ?? 0;", True),
         ("빈칸 기본값", "const n = room.participants || 0;", True),
+        ("확장자 링크", 'href="index.html"', True),
+        ("확장자 링크", "`room.html?id=${x}`", True),
+        ("확장자 링크", "// /room.html 은 307 로 되돌린다", False),
+        ("확장자 링크", "<!-- room.html 은 307 -->", False),
+        ("확장자 링크", 'href="/room?id=x"', False),
     ]
     bad = 0
     for name, snippet, should_hit in cases:
-        views = {"code": strip_js(snippet), "nostr": strip_comments(snippet)}
+        is_html = "<!--" in snippet or snippet.lstrip().startswith("<")
+        views = ({"code": strip_html_comments(snippet), "nostr": strip_html_comments(snippet)}
+                 if is_html else {"code": strip_js(snippet), "nostr": strip_comments(snippet)})
         got = any(rx.search(views[view]) for _, view, rx, _ in RULES)
         ok = got is should_hit
         print(f"  {'OK  ' if ok else 'FAIL'} [{name}] {'적발 기대' if should_hit else '통과 기대'}: {snippet}")
