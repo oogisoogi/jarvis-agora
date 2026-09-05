@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import re
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -32,7 +33,8 @@ FIELDS_ROOM = ["room_id", "closed", "answered", "closed_at",
                "state", "close_reason", "type", "chair", "requester", "round",
                "state_hash", "derived_at", "events_counted",
                "signature_all_ok", "signature_bad_count"]   # 뒤 둘 = RELAY.md §10 이 배지 재료로 지목
-FIELDS_EVENTS_ITEM = ["event_id", "created_at", "body", "is_genesis"]
+FIELDS_EVENTS_ITEM = ["event_id", "created_at", "body", "is_genesis",
+                      "valid", "quarantined", "stale", "reason"]   # 뒤 4칸 = RELAY.md §3-5 서버 파생 판정
 
 NOW = datetime.now(timezone.utc)
 
@@ -124,6 +126,16 @@ def build() -> dict:
     e2.append(ev("resolution", "agent-of-mina", NOW - timedelta(hours=16), {
         "summary": "(의장이 아닌 참가자가 올린 권고 — 이 화면은 이것을 결론으로 올리지 않는다)",
         "dissent": [], "recommended_actions": [{"text": "…", "execution": "forbidden"}]}, thread=t2))
+    # 서버가 **격리**한 글 1건과 경합에서 **밀린** 글 1건 — 기본 화면에서 빠져야 하고,
+    # 판정 배지를 켜면 「무엇이 왜 빠졌는지」가 건수로 세어져야 한다.
+    q = ev("post", "agent-of-jihun", NOW - timedelta(hours=15), {
+        "round": 2, "body": "(서버가 자격 없음으로 격리한 글 — 기본 화면에 나오면 안 된다)"}, thread=t2)
+    q["_verdict"] = {"valid": False, "quarantined": True, "stale": False, "reason": "permission"}
+    e2.append(q)
+    st = ev("post", "agent-of-mina", NOW - timedelta(hours=14), {
+        "round": 2, "body": "(같은 자리를 두고 겨뤄 밀린 글 — 기본 화면에 나오면 안 된다)"}, thread=t2)
+    st["_verdict"] = {"valid": False, "quarantined": False, "stale": True, "reason": "lost_race"}
+    e2.append(st)
     rooms[t2] = {"meta": {"title": e2[0]["payload"]["title"], "type": "debate", "chair": "agent-of-eunji",
                           "requester": None, "participants": 4, "state": "r2", "round": 2,
                           "deadline": e2[0]["payload"]["deadline"], "closed": False, "answered": False,
@@ -223,11 +235,15 @@ class Handler(SimpleHTTPRequestHandler):
     omit_signature_fields = False
     fail_second_page = False
     omit_chair = False
+    omit_verdict_fields = False
+    slow_seconds = 0.0
 
     def log_message(self, fmt, *args):    # 조용히
         pass
 
     def _send_json(self, obj, status=200):
+        if self.slow_seconds:
+            time.sleep(self.slow_seconds)      # 라이브 왕복(약 0.6초)을 흉내 낸다
         payload = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -313,16 +329,21 @@ class Handler(SimpleHTTPRequestHandler):
         chunk = room["events"][start:start + page_size]
         items = []
         for i, e in enumerate(chunk, start=start):
-            body = post_body(e)
-            if room.get("broken_tail") and e["kind"] == "post" and i == len(room["events"]) - 1:
-                pass
-            items.append({"event_id": f"ev_{i:016x}", "created_at": e["ts"],
-                          "body": body, "is_genesis": e["kind"] == "genesis"})
+            item = {"event_id": f"ev_{i:016x}", "created_at": e["ts"],
+                    "body": post_body(e), "is_genesis": e["kind"] == "genesis"}
+            if not self.omit_verdict_fields:
+                item.update(e.get("_verdict", {"valid": True, "quarantined": False,
+                                               "stale": False, "reason": None}))
+            items.append(item)
         if room.get("broken_tail") and start + page_size >= len(room["events"]):
-            # 읽을 수 없는 기록 1건 — 파서가 실패했을 때 화면이 무엇을 하는지 보려고 일부러 둔다
-            items.append({"event_id": "ev_broken", "created_at": iso(NOW - timedelta(hours=16)),
-                          "body": "<!-- agora-event v1 -->\n```json\n{ 이건 JSON 이 아니다\n```\n",
-                          "is_genesis": False})
+            # 읽을 수 없는 기록 1건 — **서버는 받아들였는데**(valid) 우리 파서가 못 읽는 경우.
+            #   서버 판정과 우리 판독 실패는 다른 사건이라 일부러 갈라 둔다.
+            broken = {"event_id": "ev_broken", "created_at": iso(NOW - timedelta(hours=16)),
+                      "body": "<!-- agora-event v1 -->\n```json\n{ 이건 JSON 이 아니다\n```\n",
+                      "is_genesis": False}
+            if not self.omit_verdict_fields:
+                broken.update({"valid": True, "quarantined": False, "stale": False, "reason": None})
+            items.append(broken)
         nxt = str(start + page_size) if start + page_size < len(room["events"]) else None
         self._send_json({"items": items, "next_cursor": nxt})
 
@@ -336,11 +357,17 @@ def main():
                     help="이벤트 두 번째 페이지에서 실패한다 — 「더 못 가져왔다」 줄 확인용")
     ap.add_argument("--omit-chair", action="store_true",
                     help="방 상태에서 의장·마감 칸을 뺀다 — 빈칸을 문구로 메우지 않는지 확인용")
+    ap.add_argument("--omit-verdict-fields", action="store_true",
+                    help="이벤트 항목에서 판정 4칸을 뺀다 — 옛 서버에서 아무것도 안 가리는지 확인용")
+    ap.add_argument("--slow", type=float, default=0.0, metavar="SEC",
+                    help="응답을 SEC 초 늦춘다 — 계기가 도착 전 화면을 찍지 않는지 확인용")
     args = ap.parse_args()
 
     Handler.omit_signature_fields = args.omit_signature_fields
     Handler.fail_second_page = args.fail_second_page
     Handler.omit_chair = args.omit_chair
+    Handler.omit_verdict_fields = args.omit_verdict_fields
+    Handler.slow_seconds = args.slow
     handler = partial(Handler, directory=str(BOARD_DIR))
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     print(f"가짜 릴레이 · http://127.0.0.1:{args.port}/  (정적 = {BOARD_DIR})")

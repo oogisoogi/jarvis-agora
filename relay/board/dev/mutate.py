@@ -61,6 +61,21 @@ MUTATIONS = [
      "    : `/room?id=${encodeURIComponent(roomId)}`;",
      "    : `room.html?id=${encodeURIComponent(roomId)}`;",
      "배포가 되돌리는 확장자 주소로 링크하면 적색이 나는가"),
+    ("판정 배지 기본값이 켜짐으로 샘",
+     "relay/board/assets/flags.js",
+     "export const VERDICT_BADGES_DEFAULT = false;",
+     "export const VERDICT_BADGES_DEFAULT = true;",
+     "플래그 기본값이 켜지면 적색이 나는가"),
+    ("경합에 밀린 글을 기본 화면에 노출",
+     "relay/board/assets/render.js",
+     "  else if (item.stale === true) state = 'stale';",
+     "  else if (item.stale === true) state = 'valid';",
+     "가려야 할 글의 본문이 화면에 나오면 적색이 나는가"),
+    ("가린 것을 세지도 않음",
+     "relay/board/assets/render.js",
+     "export function hiddenSummaryLine(hiddenReasons) {\n  if (!hiddenReasons || hiddenReasons.size === 0) return null;",
+     "export function hiddenSummaryLine(hiddenReasons) {\n  if (hiddenReasons) return null;\n  if (!hiddenReasons || hiddenReasons.size === 0) return null;",
+     "켠 화면에서 「무엇을 왜 가렸는지」가 사라지면 적색이 나는가"),
 ]
 
 # 두 파일을 함께 고쳐야 성립하는 변이(집계는 같고 배치만 어긋난다)

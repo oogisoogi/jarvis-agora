@@ -5,7 +5,7 @@
 //  ② 신뢰 표시의 재료는 **서버 파생값뿐**이다 — 본문·서명 블록에서 신뢰를 읽지 않는다.
 //  ③ 「비었다」·「못 가져왔다」·「일부러 안 가져왔다」는 **서로 다른 문장**이다.
 
-import { TYPE, STATE, CLOSE_REASON, KIND, labelOf, toneOf, euro } from './vocab.js';
+import { TYPE, STATE, CLOSE_REASON, KIND, VERDICT, VERDICT_REASON, labelOf, toneOf, euro } from './vocab.js';
 import { parsePost, humanBody, roundOf } from './parse.js';
 import { roomUrl } from './urls.js';
 
@@ -106,14 +106,42 @@ export function stateChip(state) {
 /* ── 어느 이벤트를 화면에서 빼고 어느 것을 접나 ───────────────────── */
 
 /**
- * ★릴레이가 항목별 유효 칸을 주기 시작하면 **여기 한 곳**이 켜진다
- *   (master 판정 2026-09-05 = A 채택 · 그때까지는 이 두 줄이 언제나 거짓이라 아무것도 안 뺀다).
+ * 기본 화면에서 **빼는** 항목. 재료는 서버 파생 판정뿐이다(브라우저는 서명을 검증하지 못한다).
+ * 계약 = RELAY.md §3-5 — `valid`(받아들였다) · `quarantined`(자격 없음) · `stale`(경합에 밀렸거나 안 닿는다).
+ * ★셋을 다 본다: §10 이 「격리·진 글은 기본 화면에서 뺀다」이므로 **밀린 글도 뺀다.**
+ *   칸이 하나도 없으면(옛 서버) 아무것도 빼지 않는다 — 없는 값으로 글을 지우지 않는다.
  */
 export function isHidden(item) {
-  if (!item || typeof item !== 'object') return false;
-  if (item.valid === false) return true;
-  if (item.quarantined === true) return true;
-  return false;
+  const v = verdictOf(item);
+  return v !== null && v.state !== 'valid';
+}
+
+/**
+ * 서버가 이 항목을 어떻게 판정했나. 서버가 말하지 않았으면 **null**(배지를 그리지 않는다).
+ * ★`isHidden` 이 이 함수에서 파생된다 ⇒ 「가려졌는데 판정이 없다」는 **구조적으로 생길 수 없다.**
+ *   (두 곳에 따로 조건을 적으면 둘이 갈리고, 그 틈을 메우려고 자리 메움 문구를 넣게 된다.)
+ * @returns {{state:'valid'|'quarantined'|'stale', label:string, tone:string, reason:string|null}|null}
+ */
+export function verdictOf(item) {
+  if (!item || typeof item !== 'object') return null;
+  const reason = typeof item.reason === 'string' && item.reason !== '' ? item.reason : null;
+  let state = null;
+  if (item.quarantined === true) state = 'quarantined';
+  else if (item.stale === true) state = 'stale';
+  else if (item.valid === true) state = 'valid';
+  else if (item.valid === false) state = 'quarantined';
+  if (state === null) return null;
+  return { state, label: VERDICT[state].label, tone: VERDICT[state].tone, reason };
+}
+
+/** 판정 배지 — 사유는 아는 것만 사람 말로, 모르는 사유는 **그대로** 적는다. */
+export function verdictBadge(item) {
+  const v = verdictOf(item);
+  if (v === null) return null;
+  const why = v.reason === null ? null : labelOf(VERDICT_REASON, v.reason);
+  const text = why === null ? v.label : `${v.label} — ${why}`;
+  return el('span', { className: `badge badge-${v.tone}`, text,
+                      attrs: { title: v.reason === null ? null : `사유 코드 ${v.reason}` } });
 }
 
 /** 우리가 모르는 종류 · v1 범위 밖 종류(투표)는 지우지 않고 **접는다**. */
@@ -154,7 +182,7 @@ export function roomCard(room) {
   return card;
 }
 
-export function archiveRow(room, resolutionFirstLine) {
+export function archiveRow(room, resolutionFirstLine, verdictItem = null) {
   const card = roomCard(room);
   const reason = labelOf(CLOSE_REASON, room.close_reason);
   const extra = el('div', { className: 'fields' });
@@ -163,7 +191,10 @@ export function archiveRow(room, resolutionFirstLine) {
   if (closedAt !== null) extra.appendChild(field('종결 시각', closedAt, { attrs: { title: room.closed_at } }));
   if (extra.childNodes.length) card.appendChild(extra);
   if (resolutionFirstLine) {
-    card.appendChild(el('p', { className: 'archive-resolution', text: resolutionFirstLine }));
+    const line = el('p', { className: 'archive-resolution', text: resolutionFirstLine });
+    const badge = verdictItem ? verdictBadge(verdictItem) : null;
+    if (badge) { line.appendChild(document.createTextNode(' ')); line.appendChild(badge); }
+    card.appendChild(line);
   }
   return card;
 }
@@ -177,7 +208,7 @@ export function rawDetails(raw) {
   return d;
 }
 
-function speechCard(event, raw) {
+function speechCard(event, raw, badge = null) {
   const card = el('article', { className: 'speech' });
   const head = el('div', { className: 'speech-head' });
   head.appendChild(el('span', { className: 'speech-who', text: event.from || NAMELESS_WHO }));
@@ -187,6 +218,7 @@ function speechCard(event, raw) {
   if (kindLabel !== null && event.kind !== 'post') {
     head.appendChild(el('span', { className: 'chip chip-kind', text: kindLabel }));
   }
+  if (badge) head.appendChild(badge);
   card.appendChild(head);
 
   const body = humanBody(event);
@@ -228,14 +260,24 @@ function isChairResolution(event, chair) {
  * @param {string|null} chair 방의 의장(서버 파생값) — 없으면 권고 상자를 올리지 않는다
  * @returns {{node: DocumentFragment, resolution: {event:object, raw:string}|null}}
  */
-export function flow(items, chair = null) {
+export function flow(items, chair = null, opts = {}) {
+  const showVerdict = opts.showVerdict === true;
   const frag = document.createDocumentFragment();
+  const hiddenReasons = new Map();                      // 사유 → 건수(내용은 세지 않는다)
   let resolution = null;
   let lastRound = null;
 
   for (const item of items) {
-    if (isHidden(item)) continue;                       // ← 릴레이가 유효 칸을 주면 여기서 빠진다
+    if (isHidden(item)) {
+      // ★가린 것은 **세기만** 한다 — 사유와 건수는 알려 주되 본문은 여기서 꺼내지 않는다.
+      const v = verdictOf(item);   // isHidden 이 참이면 v 는 반드시 있다(위 파생 관계)
+      const key = v.reason === null ? v.label : `${v.label}(${labelOf(VERDICT_REASON, v.reason)})`;
+      const seen = hiddenReasons.get(key);
+      hiddenReasons.set(key, (seen === undefined ? 0 : seen) + 1);
+      continue;
+    }
     const raw = typeof item.body === 'string' ? item.body : '';
+    const badge = showVerdict ? verdictBadge(item) : null;
     const { event } = parsePost(raw);
 
     if (event === null) {
@@ -278,9 +320,9 @@ export function flow(items, chair = null) {
       if (event.kind === 'advance' && r !== null) lastRound = r;
       continue;
     }
-    frag.appendChild(speechCard(event, raw));
+    frag.appendChild(speechCard(event, raw, badge));
   }
-  return { node: frag, resolution };
+  return { node: frag, resolution, hiddenReasons };
 }
 
 /** 권고 상자 — 언제나 「권고」라고 적는다(집행이 아니다 · 06 §2 불가침). */
@@ -325,6 +367,11 @@ export function resolutionBox(resolution) {
 
 /** 권고 첫 줄(아카이브용). 의장이 낸 것만. 없거나 의장을 모르면 null. */
 export function resolutionFirstLine(items, chair = null) {
+  return (resolutionEntry(items, chair) || {}).line || null;
+}
+
+/** 권고 첫 줄 + 그 글의 서버 판정을 함께 돌려준다(같은 항목을 두 번 찾지 않는다). */
+export function resolutionEntry(items, chair = null) {
   for (const item of items) {
     if (isHidden(item)) continue;
     const { event } = parsePost(typeof item.body === 'string' ? item.body : '');
@@ -332,13 +379,27 @@ export function resolutionFirstLine(items, chair = null) {
       const s = humanBody(event);
       if (s === null) return null;
       const line = s.split('\n')[0].trim();
-      return line === '' ? null : line;
+      return line === '' ? null : { line, item };
     }
   }
   return null;
 }
 
 /* ── 세 가지 「없음」을 서로 다른 문장으로 ────────────────────────── */
+
+/**
+ * 판정 배지를 켰을 때만 나오는 줄 — **가린 기록이 몇 건이고 왜인지**를 알려 준다.
+ * ⛔가린 글의 **본문은 여기서 펼치지 않는다**: 켜는 방법이 주소 한 줄이라 누구나 켤 수 있고,
+ *   그러면 「기본 화면에서 뺀다」가 주소 한 줄로 우회된다. 세는 것과 보여 주는 것은 다른 일이다.
+ */
+export function hiddenSummaryLine(hiddenReasons) {
+  if (!hiddenReasons || hiddenReasons.size === 0) return null;
+  let total = 0;
+  const parts = [];
+  for (const [why, n] of hiddenReasons) { total += n; parts.push(`${why} ${n}건`); }
+  return el('p', { className: 'note note-partial',
+                   text: `이 화면에서 가린 기록 ${total}건 — ${parts.join(' · ')}(내용은 보여 주지 않습니다)` });
+}
 
 export function emptyLine(text)  { return el('p', { className: 'note note-empty', text }); }
 export function errorLine(text)  { return el('p', { className: 'note note-error', text, attrs: { role: 'alert' } }); }

@@ -5,7 +5,8 @@
 //   그리고 **읽지 않았다는 사실을 한 줄로 말한다.** 행마다 빈칸을 두면
 //   「권고가 없는 방」과 「아직 안 읽은 방」이 구별되지 않는다(BOARD.md §6-2).
 import { listRooms, listEvents, getRoom, ApiError } from './api.js';
-import { archiveRow, resolutionFirstLine, emptyLine, errorLine, el, clear } from './render.js';
+import { archiveRow, resolutionEntry, emptyLine, errorLine, el, clear } from './render.js';
+import { verdictBadgesOn } from './flags.js';
 
 const PREVIEW_ROOMS = 8;
 const mount = document.getElementById('board');
@@ -20,10 +21,10 @@ async function openRoom(roomId) {
   // ★권고 첫 줄 판정에는 **의장**이 필요하다(의장이 낸 권고만 결론으로 친다) ⇒ 방 상태를 먼저 읽는다.
   const status = await getRoom(roomId).catch(() => null);
   const chair = status && typeof status.chair === 'string' ? status.chair : null;
-  const line = await listEvents(roomId)
-    .then((r) => resolutionFirstLine(r.items, chair))
+  const found = await listEvents(roomId)
+    .then((r) => resolutionEntry(r.items, chair))
     .catch(() => null);
-  return { line, status };
+  return { line: found ? found.line : null, verdict: found ? found.item : null, status };
 }
 
 async function main() {
@@ -43,6 +44,7 @@ async function main() {
     return;
   }
 
+  const showVerdict = verdictBadgesOn();
   const previewCount = Math.min(PREVIEW_ROOMS, result.items.length);
   const opened = await Promise.all(
     result.items.slice(0, previewCount).map((r) => openRoom(r.room_id)),
@@ -53,7 +55,7 @@ async function main() {
     const got = i < previewCount ? opened[i] : null;
     // 열어서 읽은 칸만 덧붙인다 — 못 읽었으면 덧붙이지 않는다(빈 값을 지어내지 않는다).
     const merged = got && got.status ? { ...room, ...got.status } : room;
-    ul.appendChild(el('li', {}, [archiveRow(merged, got ? got.line : null)]));
+    ul.appendChild(el('li', {}, [archiveRow(merged, got ? got.line : null, showVerdict ? (got ? got.verdict : null) : null)]));
   });
   mount.appendChild(ul);
 

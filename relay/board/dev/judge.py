@@ -17,15 +17,25 @@ MUST_HAVE_FIELD = {"room-resolved": "의장", "room-r2": "의장", "lobby": "의
 #   그 화면에 상자가 뜨면 이 화면이 남의 글을 방의 결론이라고 말한 것이다.
 MUST_HAVE_RESOLUTION = {"room-resolved"}
 MUST_NOT_HAVE_RESOLUTION = {"room-r2"}
+# ★판정 배지는 플래그 뒤에 있고 **기본은 꺼짐**이다 — 기본 측정 화면에 하나라도 있으면 기본값이 샌 것이다.
+#   (켠 화면은 파일 이름이 -on- 이라 이 표에 안 들어온다.)
 
 out = pathlib.Path(sys.argv[1])
 board = out.parent.parent          # relay/board
-files = sorted(p for p in out.glob("*.json") if p.stem not in {"nosig", "partial", "nochair"})
+# ★**담는 목록**으로 고른다 — 빼는 목록은 폴백 측정을 하나 늘릴 때마다 조용히 진다
+#   (그 파일이 본표에 섞여 들어와 엉뚱한 축으로 판정된다).
+PAGES = ("lobby", "room-resolved", "room-r2", "archive")
+WIDTHS = ("1440", "390")
+wanted = {f"{p}-{w}" for p in PAGES for w in WIDTHS}
+files = sorted(p for p in out.glob("*.json") if p.stem in wanted)
+missing = sorted(wanted - {p.stem for p in files})
+if missing:
+    print(f"  FAIL — 재야 할 화면 {len(missing)}건이 측정되지 않았다: {', '.join(missing)}")
 if not files:
     print("  FAIL — 측정 파일이 없다(probe 가 하나도 안 돌았다)")
     sys.exit(1)
 
-rc = 0
+rc = 1 if missing else 0
 print(f"  {'화면':22s} {'정착':5s} {'최소글자':>8s} {'넘침':>6s} {'최저대비':>8s} {'푸터':>4s}")
 for f in files:
     d = json.loads(f.read_text())
@@ -43,6 +53,8 @@ for f in files:
     for w in PLACEHOLDER_WORDS:
         if w in text: bad.append(f"자리 메움 문구 「{w}」가 화면에 있다")
     stem = f.stem.rsplit("-", 1)[0]
+    vb = d.get("verdictBadges") or []
+    if vb: bad.append(f"판정 배지가 기본 화면에 {len(vb)}개 떠 있다(기본값 off 가 새고 있다)")
     box = d.get("hasResolutionBox")
     if stem in MUST_HAVE_RESOLUTION and box is not True:
         bad.append("의장이 낸 권고가 있는데 권고 상자가 없다")

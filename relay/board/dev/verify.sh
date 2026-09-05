@@ -159,5 +159,87 @@ print('      칸:', d['fields'])" 2>/dev/null
     fi
   fi
 
+echo "== 7. 판정 배지(플래그) =="
+if [ -x "$CHROME" ]; then
+  PORT=$(free_port)
+  SRV=$(start_relay "$PORT") || fail "가짜 릴레이가 안 떴다"
+  if [ -n "${SRV:-}" ]; then
+    R2=b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
+    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room?id=$R2" 1440 "$SHOTS/room-verdict-off-1440.png" > "$OUT/verdict-off.json" 2>/dev/null
+    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room?id=$R2&verdict=1" 1440 "$SHOTS/room-verdict-on-1440.png" > "$OUT/verdict-on.json" 2>/dev/null
+    kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+    if python3 - <<PY
+import json, sys
+off = json.load(open("$OUT/verdict-off.json"))
+on  = json.load(open("$OUT/verdict-on.json"))
+ok = True
+if off["verdictBadges"]:
+    print("      끈 화면에 판정 배지", len(off["verdictBadges"]), "개"); ok = False
+if not on["verdictBadges"]:
+    print("      켠 화면에 판정 배지 0개 — 플래그가 안 먹는다"); ok = False
+# 가린 것 요약은 켠 화면에만
+def has(d, frag): return any(frag in n for n in d["notes"])
+if has(off, "가린 기록"):
+    print("      끈 화면에 가린 기록 요약이 있다"); ok = False
+if not has(on, "가린 기록"):
+    print("      켠 화면에 가린 기록 요약이 없다"); ok = False
+# ⛔가린 글의 **본문**은 어느 쪽에도 없어야 한다(세는 것과 보여 주는 것은 다른 일이다)
+for name, d in (("끈", off), ("켠", on)):
+    if "기본 화면에 나오면 안 된다" in (d.get("allText") or ""):
+        print(f"      {name} 화면에 가린 글의 본문이 새어 나왔다"); ok = False
+print("      끈 화면 배지", len(off["verdictBadges"]), "· 켠 화면 배지", len(on["verdictBadges"]))
+sys.exit(0 if ok else 1)
+PY
+    then
+      pass "기본 off · ?verdict=1 에서만 배지 · 가린 글 본문은 양쪽 다 0"
+    else
+      fail "판정 배지 플래그가 계약대로 돌지 않는다"
+    fi
+  fi
+fi
+
+echo "== 8. 판정 칸이 없는 옛 서버 =="
+if [ -x "$CHROME" ]; then
+  PORT=$(free_port)
+  SRV=$(start_relay "$PORT" --omit-verdict-fields) || fail "가짜 릴레이(판정 칸 제외)가 안 떴다"
+  if [ -n "${SRV:-}" ]; then
+    R2=b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
+    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room?id=$R2&verdict=1" 1440 "" > "$OUT/noverdict.json" 2>/dev/null
+    kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+    # 칸이 없으면 ⑴배지 0 ⑵아무것도 가리지 않는다(없는 값으로 글을 지우지 않는다)
+    if python3 -c "
+import json,sys
+d=json.load(open('$OUT/noverdict.json'))
+ok = not d['verdictBadges'] and not any('가린 기록' in n for n in d['notes']) and d['speeches'] >= 5
+print('      배지', len(d['verdictBadges']), '· 발언', d['speeches'])
+sys.exit(0 if ok else 1)"; then
+      pass "판정 칸이 없으면 배지 0 · 아무것도 가리지 않는다"
+    else
+      fail "판정 칸이 없는데 배지를 그렸거나 글을 지웠다"
+    fi
+  fi
+fi
+
+echo "== 9. 느린 서버에서 도착 전 화면을 찍지 않는가 =="
+if [ -x "$CHROME" ]; then
+  PORT=$(free_port)
+  SRV=$(start_relay "$PORT" --slow 0.7) || fail "가짜 릴레이(지연)가 안 떴다"
+  if [ -n "${SRV:-}" ]; then
+    R3=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3
+    NODE_OPTIONS= node "$DEV/probe.mjs" "http://127.0.0.1:$PORT" "/room?id=$R3" 1440 "" > "$OUT/slow.json" 2>/dev/null
+    kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+    if python3 -c "
+import json,sys
+d=json.load(open('$OUT/slow.json'))
+ok = d['settled'] is True and d['speeches'] >= 3 and d['title'] != '아고라 — 방'
+print('      정착', d['settled'], '· 발언', d['speeches'], '· 제목', d['title'])
+sys.exit(0 if ok else 1)"; then
+      pass "왕복이 늦어도 다 그려진 뒤에 찍는다"
+    else
+      fail "도착 전 화면을 찍었다 — 스크린샷이 거짓 결함을 만든다"
+    fi
+  fi
+fi
+
 echo "== 결과: $([ $rc -eq 0 ] && echo PASS || echo FAIL) =="
 exit $rc
