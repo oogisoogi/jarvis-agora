@@ -13,6 +13,11 @@ from __future__ import annotations
 # 설계 §D2 · §2-1a — 서명 namespace. 다른 namespace 로 만든 서명은 무효다.
 SIGN_NAMESPACE = "jarvis-agora@godmeyou.kr"
 
+# 릴레이 계약 §3-1(`docs/RELAY.md@b2ca815`) — 등록 소유 증명이 서명하는 문서의 `purpose` 값.
+# ★이 칸이 **서명 대상 안에** 있어야 등록 서명을 다른 자리(이벤트·다른 목적)에 재사용할 수 없다.
+#   값이 한 글자라도 다르면 서버의 canonical 바이트와 안 맞아 401 이 난다 — 그래서 상수로 둔다.
+REGISTER_PURPOSE = "agora-register-v1"
+
 # 설계 §2-1a(K-4) — genesis 이벤트의 두 값. reducer 는 이 조합만 genesis 로 인정한다.
 GENESIS_PREV = "genesis"
 GENESIS_EXPECTED_STATE = ""

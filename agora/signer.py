@@ -25,7 +25,7 @@ import tempfile
 from typing import Any
 
 from agora import errors, scrub
-from agora.contract_open import KINDS, MAX_EVENT_BYTES, SIGN_NAMESPACE
+from agora.contract_open import KINDS, MAX_EVENT_BYTES, REGISTER_PURPOSE, SIGN_NAMESPACE
 from agora.errors import AgoraError
 from agora.event import canonical_bytes
 
@@ -90,23 +90,31 @@ def sign_bytes(raw: bytes, key_path: str) -> str:
             return fh.read()
 
 
-# 등록 소유 증명이 서명하는 **정확한 네 칸**(릴레이 계약 3-1 · master 통지 2026-09-05 `[master#283b2c7e]`).
+# 등록 소유 증명이 서명하는 **정확한 다섯 칸**(릴레이 계약 §3-1 확정본 `docs/RELAY.md@b2ca815`).
+# ★★`purpose` 가 **서명 대상 안에** 있다 — 확정본이 canonical 바이트를 다섯 칸으로 못박았다.
+#   구판(master 통지 2026-09-05 `[master#283b2c7e]`)은 네 칸이었고, 그대로 두면 우리가 만든
+#   서명이 서버 계산과 **다른 바이트**에 대한 것이 되어 등록이 전건 401 로 거부된다.
 # ★집합을 **닫아 둔다.** 열어 두면 이 경로가 「kind 검사를 안 지나는 서명 신탁」이 된다 —
 #   이벤트를 이 문으로 들이밀면 계약 밖 kind 도 서명되어 나간다.
-REGISTER_FIELDS = ("display_name", "fingerprint", "participant_id", "public_key")
+REGISTER_FIELDS = ("display_name", "fingerprint", "participant_id", "public_key", "purpose")
 
 
 def self_check_register(doc: Any) -> tuple[bytes, dict[str, Any]]:
-    """등록 요청 자기 검사 — 네 칸 정확히 · 전부 비지 않은 문자열 · 스크럽 · canonical·상한.
+    """등록 요청 자기 검사 — 다섯 칸 정확히 · 전부 비지 않은 문자열 · 스크럽 · canonical·상한.
 
     ★`self_check`(이벤트용)와 **함수를 나눈 이유**: 이벤트 검사는 kind 를 요구하고 등록 요청에는
       kind 가 없다. 같은 함수에 「kind 가 없으면 통과」를 더하면 **그 조건이 곧 우회로**가 된다.
+    ★`purpose` 는 **값까지 고정**한다. 칸만 열어 두면 이 문이 「아무 목적이나 서명해 주는 곳」이 되고,
+      그러면 여기서 나온 서명을 다른 자리에 재사용할 수 있다 — 목적을 서명 안에 박는 뜻이 사라진다.
     """
     if type(doc) is not dict:
         raise AgoraError(errors.ARGUMENT, "등록 요청은 객체여야 한다", None)
     if tuple(sorted(doc)) != REGISTER_FIELDS:
-        raise AgoraError(errors.ARGUMENT, "등록 요청은 계약된 네 칸만 가진다",
+        raise AgoraError(errors.ARGUMENT, "등록 요청은 계약된 다섯 칸만 가진다",
                          {"got": sorted(doc), "want": list(REGISTER_FIELDS)})
+    if doc.get("purpose") != REGISTER_PURPOSE:
+        raise AgoraError(errors.ARGUMENT, "등록 소유 증명의 purpose 가 계약값이 아니다",
+                         {"got": doc.get("purpose"), "want": REGISTER_PURPOSE})
     for key in REGISTER_FIELDS:
         if type(doc[key]) is not str or not doc[key].strip():
             raise AgoraError(errors.ARGUMENT, "등록 요청 칸은 비지 않은 문자열이어야 한다",

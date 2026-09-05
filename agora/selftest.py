@@ -4382,24 +4382,32 @@ def _case_every_mutation_belongs_to_an_axis() -> None:
 S8_AXES: dict[str, tuple[str, ...]] = {
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
-                 "M321-relay-coerces-number-to-int"),
+                 "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
+                 "M328-relay-limit-unclamped", "M332-relay-filters-server-invalid"),
     "실패분류": ("M306-relay-retries-404", "M319-relay-retries-everything",
-                 "M307-relay-write-timeout-is-seven"),
+                 "M307-relay-write-timeout-is-seven", "M325-relay-ignores-body-code",
+                 "M326-relay-forbidden-is-signature", "M329-relay-ignores-retry-after"),
     "투영없음": ("M308-relay-projection-claims-ok",),
     "명부신뢰": ("M309-relay-roster-swallows-404", "M310-sync-roster-skips-confirmation",
-                 "M311-sync-roster-keeps-no-previous"),
-    "소유증명": ("M312-register-drops-proof", "M313-register-door-accepts-extra-fields"),
+                 "M311-sync-roster-keeps-no-previous",
+                 "M330-relay-checkpoint-null-is-present"),
+    "소유증명": ("M312-register-drops-proof", "M313-register-door-accepts-extra-fields",
+                 "M323-register-signs-four-fields", "M324-register-purpose-not-pinned",
+                 "M333-relay-register-without-proof"),
     "가시성": ("M314-whoami-buries-the-gate",),
     "여정경계": ("M315-enter-opens-its-own-write-path", "M316-browse-shows-closed-rooms",
                  "M317-join-enters-closed-rooms"),
     "운반선택": ("M318-transport-precedence-flipped",),
     # ★도구 층이 아니라 **진입점**을 재는 축. 여기가 비어 있어서 CLI 가 플래그를 거부하는 채로 초록이었다.
     "진입점": ("M322-cli-entry-rejects-flags",),
+    # ★서버가 계산해 준 판정을 **대조 축으로만** 쓰는 자리(계약 §3-2·§3-5). 여기가 비면
+    #   「참고값」이 슬며시 근거가 되어도 아무도 모른다.
+    "파생대조": ("M331-relay-drops-verdict",),
 }
 
 
 def _case_s8_axes_have_nets() -> None:
-    """S8 의 8축(운반교체·실패분류·투영없음·명부신뢰·소유증명·가시성·여정경계·운반선택)도 같은 방식으로 덮인다."""
+    """S8 의 10축(운반교체·실패분류·투영없음·명부신뢰·소유증명·가시성·여정경계·운반선택·진입점·파생대조)도 같은 방식으로 덮인다."""
     _axes_have_nets(S8_AXES, "S8")
 
 
@@ -9281,6 +9289,251 @@ def _onboard_dir() -> str:
     return d
 
 
+def _case_relay_body_code_wins_over_status() -> None:
+    """실패 **본문의 `code` 가 정본이다** — HTTP 상태와 갈리면 code 가 이긴다(계약 §3-0).
+
+    ★구판은 상태만 보고 우리 코드를 정했다(「서버가 우리 코드를 정하게 두지 않는다」).
+      그 규율의 뜻은 지금도 옳지만, 계약 확정본이 **판정의 정본을 본문 code 로 못박았다** —
+      같은 코드가 여러 상태로 나갈 수 있다는 것이 서버 쪽 설계(§3-7)라서 상태만 보면 갈린다.
+    ★대신 **닫힌 집합**으로만 받는다: 계약 밖 숫자(구 서버가 적는 HTTP 숫자)는 없는 것으로 치고
+      상태 매핑으로 내려간다 — 계약을 안 지키는 상대에게도 답을 내야 하기 때문이다.
+    """
+    # ⑴ 상태 400(인자) ↔ 본문 code 7(저장층) — 계약대로면 7 이 이긴다.
+    with _relay_env(body_code_override=errors.STORE) as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 400}
+        try:
+            ctx.store.list_threads()
+        except AgoraError as e:
+            if e.code != errors.STORE:
+                raise AssertionError(f"본문 code 가 안 이겼다: {e.code}") from None
+        else:
+            raise AssertionError("실패를 성공으로 읽었다")
+    # ⑵ 계약 밖 code(구 서버) — 상태 매핑으로 내려간다.
+    with _relay_env(protocol_codes=False) as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 400}
+        try:
+            ctx.store.list_threads()
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"계약 밖 code 를 그대로 썼다: {e.code}") from None
+        else:
+            raise AssertionError("실패를 성공으로 읽었다")
+
+
+def _case_relay_forbidden_is_permission() -> None:
+    """**403 = 5(권한) · 401 = 4(서명)** — 계약 §3-7 표 그대로.
+
+    ★구판은 둘 다 4 로 두고 `detail.reason` 이 있을 때만 5 로 갔다. 「모르면 좁은 쪽」은
+      계약이 말이 없을 때의 규율이지 **계약을 덮는 규율이 아니다** — 확정본이 상태로 갈라 놓았다.
+    ★여기서는 본문 code 를 안 주는 상대(`protocol_codes=False`)로 잰다. code 가 오면 그것이
+      이기므로(위 케이스), 이 축은 **code 가 없을 때의 기본값**을 재는 것이 목적이다.
+    """
+    for status, want in ((403, errors.PERMISSION), (401, errors.SIGNATURE)):
+        with _relay_env(protocol_codes=False) as (ctx, relay, _url):
+            relay.status_override = {"/rooms": status}
+            try:
+                ctx.store.list_threads()
+            except AgoraError as e:
+                if e.code != want:
+                    raise AssertionError(f"{status} 가 {want} 가 아니다: {e.code}") from None
+            else:
+                raise AssertionError(f"{status} 를 성공으로 읽었다")
+
+
+def _case_relay_cursor_is_opaque() -> None:
+    """커서는 **불투명하다** — `=`·`&` 가 들어와도 왕복이 성립한다(계약 §3-3·§3-5).
+
+    ★f-문자열로 이어 붙이면 그런 커서는 다음 요청에서 **두 칸으로 쪼개져** 서버에 닿지 않는다.
+      서버는 오류를 내지 않는다 — 첫 페이지를 다시 주거나 커서를 무시할 뿐이다. **그 실패는 조용하다.**
+    ★그래서 재는 것이 둘이다: ⑴전건이 다 왔는가 ⑵서버가 받은 질의에 **인코딩된** 커서가 있었는가.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env(page_size=1, opaque_cursor=True) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="둘째 글"))
+        got = ctx.store.fetch(thread_id=room)
+        if len(got["items"]) != len(relay.rooms[room]["events"]):
+            raise AssertionError(f"불투명 커서로 전건을 못 받았다: {len(got['items'])}")
+        if not any("cursor=c%26k%3Dv%3D" in q for q in relay.seen_queries):
+            raise AssertionError(f"커서가 인코딩되지 않았다: {relay.seen_queries}")
+
+
+def _case_relay_limit_stays_inside_the_contract() -> None:
+    """`limit` 은 **계약 범위 안**으로 접어 보낸다(방 1..100 · 이벤트 1..200).
+
+    ★넘겨 보내면 서버가 400 을 준다. 부르는 쪽(도구·사람)의 큰 숫자를 그대로 실어 보내면
+      「목록이 안 나온다」가 되고, 원인은 우리 요청에 있다.
+    """
+    with _relay_env() as (ctx, relay, _url):
+        _relay_room(ctx)
+        ctx.store.list_threads(limit=500)
+        if not any("limit=100" in q for q in relay.seen_queries):
+            raise AssertionError(f"방 목록 상한을 안 접었다: {relay.seen_queries}")
+        ctx.store.fetch(thread_id=next(iter(relay.rooms)), limit=1000)
+        if not any("limit=200" in q for q in relay.seen_queries):
+            raise AssertionError(f"이벤트 상한을 안 접었다: {relay.seen_queries}")
+
+
+def _case_relay_honors_retry_after() -> None:
+    """429 의 `Retry-After` 를 **존중한다** — 그러나 우리 상한 안에서(계약 §3-7).
+
+    ★한도는 벽이 아니라 신호다. 서버가 말한 시간을 무시하고 우리 backoff 로 두드리면
+      그 신호를 안 듣는 것이다. ★반대로 값을 무한정 믿으면 서버가 한 시간을 재울 수 있다.
+    """
+    with _relay_env(retry_after="2") as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 429}
+        try:
+            ctx.store.list_threads()
+        except AgoraError:
+            pass
+        if ctx.store.waits[:1] != [2.0]:
+            raise AssertionError(f"Retry-After 를 안 들었다: {ctx.store.waits}")
+    with _relay_env(retry_after="9999") as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 429}
+        try:
+            ctx.store.list_threads()
+        except AgoraError:
+            pass
+        if ctx.store.waits[:1] != [60.0]:
+            raise AssertionError(f"상한이 없다: {ctx.store.waits}")
+
+
+def _case_relay_checkpoint_absence_is_a_two_hundred() -> None:
+    """체크포인트 **부재는 200 + `checkpoint: null`** 이다(계약 §3-6b) — 404 가 아니다.
+
+    ★`revoked_keys` 와 같은 규율이다: 「없음」과 「못 읽음」을 가른다. 그래서 부재일 때도
+      `current`(지금 명부 해시)가 함께 오고, 그 값은 버리지 않고 적는다.
+    ★있어도 **`verified: false`** 다 — 서명 대상 바이트·namespace·`signed_at` 결박이 계약에
+      아직 없다(RL-6). 검증하지 않은 것을 검증했다고 적지 않는다.
+    """
+    from agora import onboard
+    d = _onboard_dir()
+    with _fake_relay().serving() as (url, relay):          # checkpoint=None(부재)
+        absent = onboard._fetch_checkpoint(onboard._relay(url), d)
+    if absent["present"] is not False or not absent.get("current"):
+        raise AssertionError(f"부재를 못 읽었다: {absent}")
+    signed = {"checkpoint": "a" * 64, "signed_at": "2026-09-06T01:00:00.000Z",
+              "signer": "operator-a", "signature": "-----BEGIN SSH SIGNATURE-----\n",
+              "stale": False}
+    with _fake_relay().serving(checkpoint=signed) as (url, relay):
+        present = onboard._fetch_checkpoint(onboard._relay(url), d)
+    if present["present"] is not True or present["verified"] is not False:
+        raise AssertionError(f"체크포인트 판정이 다르다: {present}")
+    if "RL-6" not in present["why"]:
+        raise AssertionError(f"미확정 사유가 사라졌다: {present['why']}")
+    with _fake_relay().serving(checkpoint_404=True) as (url, relay):   # 엔드포인트 자체가 없는 상대
+        old = onboard._fetch_checkpoint(onboard._relay(url), d)
+    if old["present"] is not False or old.get("current"):
+        raise AssertionError(f"404 폴백이 다르다: {old}")
+
+
+def _case_relay_verdict_is_reported_not_obeyed() -> None:
+    """서버 `verdict` 는 **실어 올리되 따르지 않는다**(계약 §3-2·§5 · 설계 §3).
+
+    ★GitHub 시절에는 글쓴이가 `rc 0` 과 URL 을 받고도 자기 글이 반영 안 된 것을 몰랐다.
+      릴레이는 그 자리에서 말해 준다 — 그 말을 **버리지 않고** 결과에 싣는다.
+    ★그러나 이름을 `relay_verdict` 로 가른다: 우리 판정과 같은 칸에 두면 다음 사람이
+      **서버의 판정을 상태로 읽는다.** 정본은 우리 reducer 다 — 그래서 서버가 「격리했다」고
+      말해도 우리 쪽 상태는 그대로 유효해야 한다.
+    """
+    from agora import tools
+    f = _fixtures()
+    verdict = {"accepted_to_ledger": True, "reducer": "quarantined",
+               "reason": "stale_expected_state"}
+    with _relay_env(verdict=verdict, idempotent=False) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 마디"))
+        # ★어댑터 층에서 잰다. 도구 반환은 칸을 **추리므로**(`say` 는 message_id·url·usage 만)
+        #   여기서 도구를 재면 「어댑터가 버렸다」와 「도구가 안 실었다」가 구별되지 않는다.
+        #   ⚠도구 표면에 이 칸을 노출할지는 별개 결정이다 — 계약이 무시를 허용한다(§3-2).
+        before = tools._reduce(ctx, room)
+        body = relay.rooms[room]["events"][-1]["body"]
+        echoed = ctx.store.append(thread_id=room, category="debate", title="",
+                                  body=body, is_genesis=False)
+        if (echoed.get("relay_verdict") or {}).get("reason") != "stale_expected_state":
+            raise AssertionError(f"서버 판정을 버렸다: {echoed}")
+        after = tools._reduce(ctx, room)
+        if after["state"] != before["state"] or len(after["events"]) != len(before["events"]):
+            raise AssertionError(f"서버 판정을 우리 상태로 삼았다: {before['state']}→{after['state']}")
+        if len(after["events"]) != 2:
+            raise AssertionError(f"유효 이벤트 수가 다르다: {len(after['events'])}")
+
+
+def _case_relay_does_not_lean_on_server_validity() -> None:
+    """서버의 `valid`·`quarantined` 칸은 **대조 축이지 근거가 아니다**(계약 §3-5 · 설계 §3).
+
+    ★두 방향으로 잰다: ⑴서버가 「무효」라고 표시한 글도 **거르지 않고 받는다**(거르면 우리
+      reducer 가 `prev` 를 못 찾아 멀쩡한 글을 「닿지 않음」으로 만든다) ⑵서버가 위조 글에
+      「유효」라고 적어도 우리 reducer 는 **자기 눈으로** 격리한다.
+    """
+    from agora import tools
+    from agora.event import parse_post, render_post
+    f = _fixtures()
+    # ⑴ 서버가 **무효로 표시한** 글도 그대로 받는다(계약 §3-5 「거르지 않는다」).
+    with _relay_env(idempotent=False) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        relay.inject_raw(room_id=room, body="사람이 웹에서 쓴 댓글 — 우리 서식이 아니다")
+        marked = ctx.store.fetch(thread_id=room)
+        if len(marked["items"]) != 2:
+            raise AssertionError(f"서버 판정으로 걸러 냈다: {len(marked['items'])}")
+        reduced = tools._reduce(ctx, room)
+        if not reduced["quarantined"]:
+            raise AssertionError("우리 눈으로 격리한 것이 없다")
+    # ⑵ 서버가 위조 글에 **유효**라고 적어도 우리 reducer 는 격리한다.
+    with _relay_env(lie_valid=True, idempotent=False) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        row = relay.rooms[room]["events"][0]
+        parsed = parse_post(row["body"])
+        forged = dict(parsed["event"])
+        forged["payload"] = {**forged["payload"], "body": "본문만 바꿔치기"}
+        relay.inject_raw(room_id=room, body=render_post(forged, parsed["signature"]))
+        reduced = tools._reduce(ctx, room)
+        reasons = {q.get("reason") for q in reduced["quarantined"]}
+        if "signature" not in reasons:
+            raise AssertionError(f"서버가 유효라고 하자 우리도 유효로 읽었다: {reasons}")
+
+
+def _case_register_refuses_to_send_without_proof() -> None:
+    """소유 증명 없이는 **보내지 않는다** — 계약 §3-1 의 필수 칸이다.
+
+    ★빼고 보내면 서버가 401 을 주고, 사용자는 「키가 잘못됐나」부터 의심한다.
+      빠진 칸의 이름을 우리가 대는 것이 그 왕복을 없앤다(S7-1 계보).
+    """
+    from agora.store_relay import RelayStore
+    store = RelayStore("https://relay.example", sleep=lambda _s: None)
+    try:
+        store.register(participant_id="p", display_name="d",
+                       public_key="ssh-ed25519 AAA", fingerprint="SHA256:x")
+    except AgoraError as e:
+        if e.code != errors.PRECONDITION:
+            raise AssertionError(f"다른 코드: {e.code}") from None
+        if (e.detail or {}).get("missing") != ["signature"]:
+            raise AssertionError(f"빠진 칸 이름을 안 댔다: {e.detail}")
+    else:
+        raise AssertionError("증명 없이 등록을 보냈다")
+
+
+def _case_register_purpose_value_is_pinned() -> None:
+    """등록 소유 증명의 `purpose` 는 **값까지 고정**이다(계약 §3-1 · `agora-register-v1`).
+
+    ★칸만 열어 두면 이 문이 「아무 목적이나 서명해 주는 곳」이 된다 — 그러면 여기서 나온 서명을
+      다른 자리에 재사용할 수 있고, 목적을 서명 안에 박은 뜻이 사라진다.
+    """
+    from agora import signer
+    from agora.contract_open import REGISTER_PURPOSE
+    base = {"display_name": "d", "fingerprint": "SHA256:x", "participant_id": "p",
+            "public_key": "ssh-ed25519 AAA"}
+    signer.self_check_register({**base, "purpose": REGISTER_PURPOSE})    # 계약값은 지나간다
+    try:
+        signer.self_check_register({**base, "purpose": "무언가-다른-목적"})
+    except AgoraError as e:
+        if e.code != errors.ARGUMENT:
+            raise AssertionError(f"다른 코드: {e.code}") from None
+    else:
+        raise AssertionError("계약 밖 purpose 를 서명해 줬다")
+
+
 def _case_register_carries_proof_of_possession() -> None:
     """등록은 **소유 증명 서명**을 동봉한다(릴레이 계약 3-1).
 
@@ -9309,12 +9562,19 @@ def _case_register_door_is_not_a_signing_oracle() -> None:
     """등록 문으로 **이벤트를 서명받을 수 없다**.
 
     ★등록 요청에는 kind 검사가 없다(이벤트가 아니니까). 칸 집합을 열어 두면 그 문이 곧
-      「계약 밖 kind 도 서명해 주는 신탁」이 된다 — 그래서 네 칸 **정확히**로 닫아 뒀다.
+      「계약 밖 kind 도 서명해 주는 신탁」이 된다 — 그래서 다섯 칸 **정확히**로 닫아 뒀다
+      (계약 확정본 §3-1 · `purpose` 포함).
     """
     from agora import signer
+    # ★셋째 문서가 이 그물의 조준점이다: **계약 다섯 칸을 다 갖춘 뒤 덧칸을 붙였다.**
+    #   「필요한 칸이 있는가」로만 검사하면 이것이 통과한다 — 닫힌 집합이라야 막힌다.
+    #   (2026-09-05 r2 실측: purpose 가 늘면서 둘째 문서만으로는 M313 이 살아남았다.)
     for doc in ({"v": 1, "kind": "genesis", "thread_id": "a" * 32},
                 {"display_name": "d", "fingerprint": "SHA256:x", "participant_id": "p",
-                 "public_key": "ssh-ed25519 AAA", "kind": "genesis"}):
+                 "public_key": "ssh-ed25519 AAA", "kind": "genesis"},
+                {"display_name": "d", "fingerprint": "SHA256:x", "participant_id": "p",
+                 "public_key": "ssh-ed25519 AAA", "purpose": "agora-register-v1",
+                 "kind": "genesis"}):
         try:
             signer.self_check_register(doc)
         except AgoraError as e:
@@ -9864,6 +10124,16 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("whoami: 첫 칸이 승인 게이트",   _case_whoami_puts_the_approval_gate_first, None),
     ("여정: 기존 도구를 부른다",      _case_journey_tools_call_the_existing_ones, None),
     ("CLI: 진입점이 플래그를 받는다", _case_cli_surface_accepts_flag_arguments, None),
+    ("릴레이: 본문 code 가 정본",     _case_relay_body_code_wins_over_status, None),
+    ("릴레이: 403 은 권한 5",         _case_relay_forbidden_is_permission, None),
+    ("릴레이: 커서는 불투명하다",     _case_relay_cursor_is_opaque, None),
+    ("릴레이: limit 은 계약 안",      _case_relay_limit_stays_inside_the_contract, None),
+    ("릴레이: Retry-After 존중",      _case_relay_honors_retry_after, None),
+    ("릴레이: 체크포인트 부재는 200", _case_relay_checkpoint_absence_is_a_two_hundred, None),
+    ("릴레이: verdict 는 참고값",     _case_relay_verdict_is_reported_not_obeyed, None),
+    ("릴레이: 서버 valid 에 안 기댄다", _case_relay_does_not_lean_on_server_validity, None),
+    ("등록: 증명 없이 안 보낸다",     _case_register_refuses_to_send_without_proof, None),
+    ("등록: purpose 값이 고정",       _case_register_purpose_value_is_pinned, None),
     ("S8: 8축이 그물을 갖는다",       _case_s8_axes_have_nets, None),
 )
 
@@ -9872,6 +10142,51 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
 # (id, 파일, 찾을 문자열, 바꿀 문자열, 이 변이를 잡아야 하는 케이스 이름)
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     # ── S8 릴레이 운반층(2026-09-05) ────────────────────────────────────────
+    # ── r2 릴레이 계약 확정본 대조(2026-09-05 · docs/RELAY.md@b2ca815) ──────
+    ("M323-register-signs-four-fields", "agora/onboard.py",
+     '             "participant_id": doc["id"], "public_key": public_key,\n             "purpose": REGISTER_PURPOSE}',
+     '             "participant_id": doc["id"], "public_key": public_key}',
+     "등록: 소유 증명 동봉"),
+    ("M324-register-purpose-not-pinned", "agora/signer.py",
+     '    if doc.get("purpose") != REGISTER_PURPOSE:',
+     '    if False:',
+     "등록: purpose 값이 고정"),
+    ("M325-relay-ignores-body-code", "agora/store_relay.py",
+     '    code = _body_code(detail)\n    if status == 400:',
+     '    code = None\n    if status == 400:',
+     "릴레이: 본문 code 가 정본"),
+    ("M326-relay-forbidden-is-signature", "agora/store_relay.py",
+     '        default = errors.PERMISSION if status == 403 else errors.SIGNATURE',
+     '        default = errors.SIGNATURE',
+     "릴레이: 403 은 권한 5"),
+    ("M327-relay-cursor-not-encoded", "agora/store_relay.py",
+     '    items = [(k, str(v)) for k, v in params.items() if v not in (None, "")]\n    return ("?" + urlencode(items)) if items else ""',
+     '    items = [(k, str(v)) for k, v in params.items() if v not in (None, "")]\n    return ("?" + "&".join(f"{k}={v}" for k, v in items)) if items else ""',
+     "릴레이: 커서는 불투명하다"),
+    ("M328-relay-limit-unclamped", "agora/store_relay.py",
+     '    return max(1, min(wanted, high))',
+     '    return wanted',
+     "릴레이: limit 은 계약 안"),
+    ("M329-relay-ignores-retry-after", "agora/store_relay.py",
+     '                wait = _retry_delay(e, delay)      # ★서버가 말한 값이 우리 곱보다 앞선다',
+     '                wait = delay      # ★서버가 말한 값이 우리 곱보다 앞선다',
+     "릴레이: Retry-After 존중"),
+    ("M330-relay-checkpoint-null-is-present", "agora/onboard.py",
+     '    if doc.get("checkpoint") is None:',
+     '    if False:',
+     "릴레이: 체크포인트 부재는 200"),
+    ("M331-relay-drops-verdict", "agora/store_relay.py",
+     '        if out.get("verdict") is not None:\n            row["relay_verdict"] = out["verdict"]',
+     '        if False:\n            row["relay_verdict"] = out["verdict"]',
+     "릴레이: verdict 는 참고값"),
+    ("M332-relay-filters-server-invalid", "agora/store_relay.py",
+     '            for item in data.get("items") or []:\n                rows.append({',
+     '            for item in data.get("items") or []:\n                if item.get("valid") is False:\n                    continue\n                rows.append({',
+     "릴레이: 서버 valid 에 안 기댄다"),
+    ("M333-relay-register-without-proof", "agora/store_relay.py",
+     '        if not signature:\n            raise AgoraError(errors.PRECONDITION,',
+     '        if False:\n            raise AgoraError(errors.PRECONDITION,',
+     "등록: 증명 없이 안 보낸다"),
     ("M305-relay-fetch-stops-at-first-page", "agora/store_relay.py",
      '            page_cursor = data.get("next_cursor")\n            if not page_cursor:\n                break',
      '            page_cursor = data.get("next_cursor")\n            if True:\n                break',

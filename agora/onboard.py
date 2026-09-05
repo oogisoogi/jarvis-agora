@@ -19,6 +19,7 @@ import os
 from typing import Any
 
 from agora import errors, roster
+from agora.contract_open import REGISTER_PURPOSE
 from agora.errors import AgoraError
 from agora.keygen import KEY_NAME
 from agora.participant import FILENAME as PARTICIPANT_FILENAME
@@ -85,8 +86,12 @@ def register(*, directory: str | None = None, relay_url: str,
                          {"file": KEY_NAME + ".pub"})
     with open(pub_path, encoding="utf-8") as fh:
         public_key = fh.read().strip()
+    # ★다섯 칸 — `purpose` 가 **서명 대상 안**이다(릴레이 계약 §3-1 확정본 @b2ca815).
+    #   서버는 이 문서를 canonical 로 다시 만들어 그 바이트에 서명을 본다: 칸이 하나 모자라면
+    #   서명은 유효한데 **다른 문서의 서명**이 되어 401 이 난다.
     claim = {"display_name": doc["display_name"], "fingerprint": doc["key_fingerprint"],
-             "participant_id": doc["id"], "public_key": public_key}
+             "participant_id": doc["id"], "public_key": public_key,
+             "purpose": REGISTER_PURPOSE}
     signed = sign.sign_register(claim, config_dir=directory)
     out = _relay(relay_url).register(
         participant_id=claim["participant_id"], display_name=claim["display_name"],
@@ -199,12 +204,17 @@ def sync_roster(*, directory: str | None = None, relay_url: str | None = None,
 
 
 def _fetch_checkpoint(store: Any, directory: str) -> dict[str, Any]:
-    """운영자 서명 체크포인트(master 통지 2026-09-05 ②) — **받아서 남기되 아직 검증하지 않는다.**
+    """운영자 서명 체크포인트(릴레이 계약 §3-6b) — **받아서 남기되 아직 검증하지 않는다.**
 
-    ★검증을 흉내내지 않는다: 무엇을 서명했는지(바이트)와 누구 이름으로 검증하는지(principal)가
-      릴레이 계약에서 아직 확정되지 않았다(RL-6). 확정 전에 `verified: true` 를 적으면
-      **검증하지 않은 것을 검증했다고 적는 것**이 된다.
-    ★없으면 없는 것이 정상이다(v1 여유 시 포함 · 404 를 실패로 세지 않는다).
+    ★검증을 흉내내지 않는다: 확정본 `docs/RELAY.md@b2ca815` 는 **누가 서명하는가**(운영자 ·
+      §3-6b)와 **무엇을 서명하는가의 뜻**(명부 3종 렌더의 해시)까지만 적었고, 실제로 검증에
+      필요한 세 가지가 없다 — ⑴서명 대상 **바이트**의 정의(해시 문자열 그대로인가, 문서를
+      canonical 로 만든 바이트인가) ⑵SSHSIG **namespace**(등록은 §3-1 이 명시했는데 여기는 없다)
+      ⑶`signed_at` 결박(없으면 옛 서명을 다시 올리는 것을 못 가른다).
+      확정 전에 `verified: true` 를 적으면 **검증하지 않은 것을 검증했다고 적는 것**이 된다.
+    ★**부재는 200 + `checkpoint: null` 이다**(§3-6b · `revoked_keys` 와 같은 규율). 그때도
+      `current`·`stale` 은 온다 — 그 두 칸이 부재의 내용이므로 버리지 않고 함께 적는다.
+      404 는 엔드포인트 자체가 아직 없는 상대에서만 나오고, 그 경우는 어댑터가 `None` 을 준다.
     """
     try:
         doc = store.roster_checkpoint()
@@ -212,11 +222,17 @@ def _fetch_checkpoint(store: Any, directory: str) -> dict[str, Any]:
         return {"present": False, "verified": False, "why": f"fetch_failed:{e.code}"}
     if doc is None:
         return {"present": False, "verified": False, "why": "relay_has_no_checkpoint"}
+    if doc.get("checkpoint") is None:
+        # 서버는 답했고, 답의 내용이 「아직 없다」다. 「못 읽었다」와 같은 칸에 적지 않는다.
+        return {"present": False, "verified": False, "why": "relay_has_no_checkpoint",
+                "current": doc.get("current"), "stale": doc.get("stale")}
     _write_json(os.path.join(directory, CHECKPOINT_FILENAME), doc)
     return {"present": True, "verified": False,
-            "why": "검증 계약 미확정(RL-6) — 받은 것을 파일로 남기기만 했다",
+            "why": ("검증 계약 미확정(RL-6 · 서명 대상 바이트·namespace·signed_at 결박 없음)"
+                    " — 받은 것을 파일로 남기기만 했다"),
             "file": CHECKPOINT_FILENAME,
-            "stale": doc.get("stale"), "checkpoint": doc.get("checkpoint")}
+            "stale": doc.get("stale"), "checkpoint": doc.get("checkpoint"),
+            "current": doc.get("current")}
 
 
 # ── whoami ──────────────────────────────────────────────────────────────────

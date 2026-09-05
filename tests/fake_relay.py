@@ -12,9 +12,19 @@
   ⑸`page_size>0`           — 이벤트를 쪼개 준다(어댑터가 끝까지 이어 받는지).
   ⑹`inject_raw`            — 우리 서식이 아닌 본문을 심는다.
   ⑺`require_proof=False`   — 소유 증명 서명 없이도 등록을 받아 준다(계약을 안 지키는 서버).
+  ⑻`opaque_cursor=True`    — 커서에 `=`·`&` 를 넣는다(계약이 「불투명」이라 부르는 것의 실물).
+  ⑼`protocol_codes=False`  — 실패 본문의 `code` 를 계약값이 아닌 HTTP 숫자로 적는다(구 서버).
+  ⑽`lie_valid=True`        — 격리돼야 할 이벤트에 `valid:true` 를 적는다(거짓말하는 파생).
+  ⑾`checkpoint=…`          — 운영자 서명 체크포인트(없으면 200 + `checkpoint:null` · §3-6b).
+
+★**계약 확정본(`docs/RELAY.md@b2ca815`)에 맞춘다**: 실패 본문 `code` 는 PROTOCOL 코드 ·
+  등록 소유 증명은 **다섯 칸**(`purpose` 포함) 서명 · 체크포인트 부재는 404 가 아니라 200 + null ·
+  429 에는 `Retry-After` · 목록 상한 밖 `limit` 은 400 · 이벤트·방에 파생 덧칸을 싣는다.
 
 ⚠**이 서버 상대의 초록은 「논리가 맞다」는 뜻이지 「진짜 릴레이가 그렇게 답한다」는 뜻이 아니다.**
   그 대조는 워커 A 의 릴레이가 설 때 한다(설계 §11).
+⚠★그리고 **더블이 계약을 잘 지킬수록 어떤 시험은 공허해진다** — 그래서 위 스위치들이 있다.
+  계약을 지키는 쪽만 재면 「우리가 서버를 믿는 자리」가 초록 뒤에 숨는다.
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -39,7 +49,12 @@ class FakeRelay:
     def __init__(self, *, idempotent: bool = True, refresh_updated_at: bool = True,
                  revoked_404: bool = False, derive_status: bool = True,
                  page_size: int = 0, preempt_identity: bool = True,
-                 require_proof: bool = True) -> None:
+                 require_proof: bool = True, opaque_cursor: bool = False,
+                 protocol_codes: bool = True, lie_valid: bool = False,
+                 checkpoint: dict[str, Any] | None = None,
+                 checkpoint_404: bool = False, verdict: dict[str, Any] | None = None,
+                 retry_after: str | None = None,
+                 body_code_override: int | None = None) -> None:
         self.idempotent = idempotent
         self.refresh_updated_at = refresh_updated_at
         self.revoked_404 = revoked_404
@@ -47,6 +62,17 @@ class FakeRelay:
         self.page_size = page_size
         self.preempt_identity = preempt_identity
         self.require_proof = require_proof
+        self.opaque_cursor = opaque_cursor
+        self.protocol_codes = protocol_codes
+        self.lie_valid = lie_valid
+        self.checkpoint = checkpoint
+        self.checkpoint_404 = checkpoint_404
+        self.verdict = verdict
+        self.retry_after = retry_after
+        # ★상태와 **다른** 코드를 본문에 적는다 — 계약 §3-0 이 「둘이 갈리면 code 가 이긴다」고
+        #   한 그 갈림을 실제로 만들어 본다. 갈리지 않으면 그 규칙은 시험되지 않는다.
+        self.body_code_override = body_code_override
+        self.seen_queries: list[str] = []    # 서버가 실제로 읽은 질의 — 인코딩 시험이 본다
         self.rooms: dict[str, dict[str, Any]] = {}
         self.registered: dict[str, dict[str, str]] = {}
         self.roster_text: dict[str, str] = {"allowed_signers": "", "revoked_keys": "",
@@ -105,8 +131,52 @@ class FakeRelay:
         return {"closed": closed, "answered": answered, "closed_at": closed_at}
 
 
+def _sha256_text(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _compact(body: str) -> str:
     return "".join(body.split())
+
+
+# 릴레이 계약 §3-7 표 — HTTP 상태 → PROTOCOL 코드. **서버 쪽 표를 여기 그대로 옮긴다**
+# (클라 코드를 부르지 않는다 — 부르면 우리 매핑으로 우리 매핑을 재게 된다).
+CONTRACT_CODES: dict[int, int] = {400: 10, 401: 4, 403: 5, 404: 7, 409: 9,
+                                  413: 3, 422: 3, 429: 7, 500: 7, 502: 7, 503: 7}
+
+
+def _register_canonical(payload: dict[str, Any]) -> bytes:
+    """등록 소유 증명의 **서명 대상 바이트**(계약 §3-1) — 서버가 스스로 다시 만든다.
+
+    ★다섯 칸이다(`purpose` 포함). 클라가 네 칸만 서명했으면 이 바이트와 안 맞아 검증이 깨진다 —
+      그것이 이 더블이 잡아야 하는 사건이다. 그래서 `agora.event.canonical_bytes` 를 부르지 않고
+      **여기서 다시 만든다**: 클라와 같은 함수를 쓰면 둘이 함께 틀려도 초록이 난다.
+    """
+    doc = {"display_name": payload.get("display_name"),
+           "fingerprint": payload.get("fingerprint"),
+           "participant_id": payload.get("participant_id"),
+           "public_key": payload.get("public_key"),
+           "purpose": "agora-register-v1"}
+    return json.dumps(doc, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def _signature_matches(raw: bytes, signature: str) -> bool:
+    """서명이 **그 바이트**에 대한 것인가 — 명부와 무관한 질문(`-Y check-novalidate`)."""
+    import subprocess
+    import tempfile
+    if not signature or "BEGIN SSH SIGNATURE" not in signature:
+        return False
+    with tempfile.TemporaryDirectory() as tmp:
+        sig_path = os.path.join(tmp, "proof.sig")
+        with open(sig_path, "w", encoding="utf-8") as fh:
+            fh.write(signature)
+        proc = subprocess.run(
+            ["ssh-keygen", "-Y", "check-novalidate", "-n", "jarvis-agora@godmeyou.kr",
+             "-s", sig_path],
+            input=raw, capture_output=True, timeout=30)
+    return proc.returncode == 0
 
 
 def _message_id_of(body: str) -> str | None:
@@ -124,37 +194,96 @@ class _Handler(BaseHTTPRequestHandler):
         return
 
     # ── 응답 도우미 ─────────────────────────────────────────────────────────
-    def _send(self, status: int, payload: Any, *, text: bool = False) -> None:
+    def _send(self, status: int, payload: Any, *, text: bool = False,
+              headers: dict[str, str] | None = None) -> None:
         raw = (payload if text else json.dumps(payload, ensure_ascii=False)).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type",
                          "text/plain; charset=utf-8" if text else "application/json")
         self.send_header("Content-Length", str(len(raw)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
+
+    def _fail(self, status: int, message: str, **detail: Any) -> None:
+        """실패 본문 = `{code, message, detail}`(계약 §3-0). **code 는 PROTOCOL 코드**다.
+
+        ★`protocol_codes=False` 면 구 서버처럼 HTTP 숫자를 적는다 — 그때 클라는 계약 밖 값을
+          버리고 상태 매핑으로 내려가야 한다(그 폴백이 살아 있는지를 재는 스위치다).
+        """
+        code = CONTRACT_CODES.get(status, 7) if self.relay.protocol_codes else status
+        if self.relay.body_code_override is not None:
+            code = self.relay.body_code_override
+        headers = {}
+        if status == 429 and self.relay.retry_after:
+            headers["Retry-After"] = self.relay.retry_after
+        self._send(status, {"code": code, "message": message, "detail": detail or {}},
+                   headers=headers)
 
     def _override(self, path: str) -> bool:
         for prefix, status in self.relay.status_override.items():
             if path.startswith(prefix):
-                self._send(status, {"code": status, "message": "강제 상태"})
+                self._fail(status, "강제 상태")
                 return True
         return False
+
+    def _page(self, rows: list[Any], query: dict[str, list[str]],
+              *, high: int, default: int) -> Any:
+        """커서 페이지 — **커서는 불투명하다**(계약 §3-3·§3-5).
+
+        ★`opaque_cursor` 면 `=`·`&` 가 든 값을 준다. 클라가 인코딩 없이 이어 붙이면 그 커서는
+          다음 요청에서 **두 칸으로 쪼개져** 서버에 닿지 않는다 — 그 실패는 조용하다.
+        """
+        raw_limit = (query.get("limit") or [str(default)])[0]
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            limit = -1
+        if limit < 1 or limit > high:
+            self._fail(400, "limit 이 계약 범위 밖이다", limit=raw_limit, max=high)
+            return None
+        token = (query.get("cursor") or [""])[0]
+        start = 0
+        if token:
+            digits = token.split("=")[-1] if self.relay.opaque_cursor else token
+            start = int(digits) if digits.isdigit() else 0
+        size = self.relay.page_size or limit
+        page = rows[start:start + size]
+        nxt = None
+        if start + size < len(rows):
+            nxt = (f"c&k=v={start + size}" if self.relay.opaque_cursor
+                   else str(start + size))
+        return {"items": page, "next_cursor": nxt}
 
     # ── GET ─────────────────────────────────────────────────────────────────
     def do_GET(self) -> None:                       # noqa: N802 — http.server 계약
         url = urlparse(self.path)
         query = parse_qs(url.query)
         self.relay.calls.append(url.path)
+        self.relay.seen_queries.append(url.query)
         if self._override(url.path):
             return
-        parts = [p for p in url.path.split("/") if p]
+        parts = [unquote(p) for p in url.path.split("/") if p]
+        if parts == ["participants", "checkpoint"]:
+            # ★부재는 404 가 아니라 **200 + checkpoint:null** 이다(계약 §3-6b).
+            if self.relay.checkpoint_404:
+                self._fail(404, "그런 경로가 없다")       # 엔드포인트가 아직 없는 상대
+                return
+            current = _sha256_text("".join(self.relay.roster_text[n] for n in
+                                           ("allowed_signers", "revoked_keys", "operators")))
+            if self.relay.checkpoint is None:
+                self._send(200, {"checkpoint": None, "current": current, "stale": True})
+                return
+            self._send(200, {**self.relay.checkpoint, "current": current})
+            return
         if parts[:1] == ["participants"] and len(parts) == 2:
             name = parts[1]
             if name == "revoked_keys" and self.relay.revoked_404:
-                self._send(404, {"code": 404, "message": "없다"})
+                self._fail(404, "없다")
                 return
             if name not in self.relay.roster_text:
-                self._send(404, {"code": 404, "message": "없다"})
+                self._fail(404, "없다")
                 return
             self._send(200, self.relay.roster_text[name], text=True)
             return
@@ -162,37 +291,47 @@ class _Handler(BaseHTTPRequestHandler):
             since = (query.get("updated_since") or [None])[0]
             rows = [{"room_id": r["room_id"],
                      "node_id": (r["events"][0]["event_id"] if r["events"] else None),
-                     "updated_at": r["updated_at"], "title": r["title"]}
+                     "updated_at": r["updated_at"], "title": r["title"],
+                     # 파생 덧칸(계약 §3-3) — 보드용이다. 클라는 무시해야 한다.
+                     "signature_all_ok": True, "signature_bad_count": 0}
                     for r in sorted(self.relay.rooms.values(),
                                     key=lambda r: r["updated_at"], reverse=True)
                     if not since or r["updated_at"] >= since]
-            self._send(200, {"items": rows, "next_cursor": None})
+            page = self._page(rows, query, high=100, default=50)
+            if page is not None:
+                self._send(200, page)
             return
         if parts[:1] == ["rooms"] and len(parts) == 2:
             room_id = parts[1]
             if room_id not in self.relay.rooms:
-                self._send(404, {"code": 404, "message": "그런 방이 없다"})
+                self._fail(404, "그런 방이 없다")
                 return
             if not self.relay.derive_status:
                 self._send(200, {"room_id": room_id})       # 파생 안 함 — 칸 자체가 없다
                 return
-            self._send(200, {"room_id": room_id, **self.relay.derived(room_id)})
+            self._send(200, {"room_id": room_id, **self.relay.derived(room_id),
+                             "signature_all_ok": True, "signature_bad_count": 0})
             return
         if parts[:1] == ["rooms"] and parts[2:] == ["events"]:
             room = self.relay.rooms.get(parts[1])
             if room is None:
-                self._send(404, {"code": 404, "message": "그런 방이 없다"})
+                self._fail(404, "그런 방이 없다")
                 return
-            rows = [{k: v for k, v in row.items() if k != "message_id"}
-                    for row in room["events"]]
-            cursor = (query.get("cursor") or ["0"])[0]
-            start = int(cursor) if cursor.isdigit() else 0
-            size = self.relay.page_size or len(rows) or 1
-            page = rows[start:start + size]
-            nxt = str(start + size) if start + size < len(rows) else None
-            self._send(200, {"items": page, "next_cursor": nxt})
+            rows = []
+            for row in room["events"]:
+                item = {k: v for k, v in row.items() if k != "message_id"}
+                # 파생 판정 덧칸(계약 §3-5) — `lie_valid` 면 격리감에도 참을 적는다.
+                item.update({"valid": True, "quarantined": False,
+                             "stale": False, "reason": None}
+                            if (row.get("message_id") or self.relay.lie_valid)
+                            else {"valid": False, "quarantined": True,
+                                  "stale": False, "reason": "permission"})
+                rows.append(item)
+            page = self._page(rows, query, high=200, default=100)
+            if page is not None:
+                self._send(200, page)
             return
-        self._send(404, {"code": 404, "message": "그런 경로가 없다"})
+        self._fail(404, "그런 경로가 없다")
 
     # ── POST ────────────────────────────────────────────────────────────────
     def do_POST(self) -> None:                      # noqa: N802 — http.server 계약
@@ -204,29 +343,37 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
-            self._send(400, {"code": 400, "message": "JSON 이 아니다"})
+            self._fail(400, "JSON 이 아니다")
             return
         if url.path == "/events":
             row = self.relay.append_event(
                 thread_id=payload["thread_id"], category=payload.get("category", ""),
                 title=payload.get("title", ""), body=payload.get("body", ""),
                 is_genesis=bool(payload.get("is_genesis")))
-            self._send(201, {"event_id": row["event_id"], "url": None,
-                             "created_at": row["created_at"]})
+            out = {"event_id": row["event_id"], "url": None,
+                   "created_at": row["created_at"]}
+            if self.relay.verdict is not None:
+                out["verdict"] = self.relay.verdict     # 참고용 파생 판정(계약 §3-2·§5)
+            self._send(201, out)
             return
         if url.path == "/register":
             pid = payload.get("participant_id")
             if self.relay.require_proof and not payload.get("signature"):
-                # ★소유 증명(릴레이 계약 3-1) — 없으면 「남의 공개키를 주워다 등록」이 열린다.
-                self._send(401, {"code": 401, "message": "소유 증명 서명이 없다",
-                                 "reason": "proof_required"})
+                # ★소유 증명(릴레이 계약 §3-1) — 없으면 「남의 공개키를 주워다 등록」이 열린다.
+                self._fail(401, "소유 증명 서명이 없다", reason="proof_required")
+                return
+            if self.relay.require_proof and not _signature_matches(
+                    _register_canonical(payload), payload.get("signature", "")):
+                # ★★**다섯 칸 바이트에 대한 서명인가**(계약 §3-1). 네 칸만 서명한 클라는 여기서 걸린다 —
+                #   서명 자체는 유효한데 **다른 문서의 서명**이다.
+                self._fail(401, "소유 증명이 계약 바이트와 안 맞는다",
+                           reason="proof_mismatch")
                 return
             known = self.relay.registered.get(pid)
             if (known and self.relay.preempt_identity
                     and known.get("fingerprint") != payload.get("fingerprint")):
-                # ★신원 선점 — 이미 등록된 id 에 다른 키를 붙이지 못한다.
-                self._send(409, {"code": 409, "message": "이미 다른 키로 등록된 id 다",
-                                 "reason": "identity_taken"})
+                # ★신원 선점 — 이미 등록된 id 에 다른 키를 붙이지 못한다(계약 §3-1 · 409/code 9).
+                self._fail(409, "이미 다른 키로 등록된 id 다", reason="identity_taken")
                 return
             self.relay.registered[pid] = {"public_key": payload.get("public_key", ""),
                                           "fingerprint": payload.get("fingerprint", ""),
@@ -235,9 +382,11 @@ class _Handler(BaseHTTPRequestHandler):
             key_line = payload.get("public_key", "").strip()
             if key_line and key_line not in self.relay.roster_text["allowed_signers"]:
                 self.relay.roster_text["allowed_signers"] += f"{pid} {key_line}\n"
-            self._send(201, {"participant_id": pid, "registered": True})
+            self._send(201, {"participant_id": pid, "registered": True,
+                             "fingerprint": payload.get("fingerprint", ""),
+                             "created_at": now_iso()})
             return
-        self._send(404, {"code": 404, "message": "그런 경로가 없다"})
+        self._fail(404, "그런 경로가 없다")
 
 
 @contextlib.contextmanager
