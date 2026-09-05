@@ -14,6 +14,9 @@
 - `agora.vote`
 - `agora.envelope_check`
 - `agora.ack`
+- `agora.enter`
+- `agora.browse`
+- `agora.join`
 
 ## 글이 나가기까지 지나는 문 (순서가 규칙의 절반이다)
 1. **계약(스키마)** — 칸과 타입. 모양이 아니면 여기서 code 10.

@@ -659,6 +659,122 @@ def propose(ctx: Context, *, type: str, title: str, body: str,
             "usage": out["usage"]}
 
 
+# ── 박람회 여정 3종(06 증보 §4 · master 결정 2026-09-05 「계약 확장 4」) ────────
+# ★셋 다 **새 규칙이 없다.** 여정의 어휘(방·로비·참가)를 손에 쥐여 줄 뿐이고, 하는 일은
+#   기존 도구를 부르는 것이다 — 새 발행 경로·새 목록을 만들면 두 곳이 갈라지고,
+#   갈라진 날 **한쪽만 고쳐진다**(이 저장소가 이미 아는 병 · F-07 「한 사건에 이름 셋」).
+ROOM_KINDS = ("debate", "problem")
+JOINED_FILENAME = "joined.json"
+
+
+def enter(ctx: Context, *, topic: str, kind: str, body: str = "",
+          envelope: dict[str, Any] | None = None,
+          deadlines: dict[str, Any] | None = None) -> dict[str, Any]:
+    """방을 연다(J1) — genesis 이벤트 1건 · **의장은 자기 자신**이 된다.
+
+    ★`propose` 를 부른다. 여기서 `_publish` 를 직접 부르면 계약→스크럽→승인→서명→쓰기→원장
+      다섯 중 몇이 조용히 빠질 수 있다 — 새 문을 내지 않는 것이 이 함수의 계약이다.
+    ★본문을 안 주면 **주제 문장이 본문**이 된다(방을 여는 손이 한 줄로 끝나야 하므로).
+      지어내는 것이 아니라 같은 문장을 두 자리에 쓰는 것이고, 그 사실을 여기 적어 둔다.
+    """
+    if kind not in ROOM_KINDS:
+        raise AgoraError(errors.ARGUMENT, "방은 debate 나 problem 이다",
+                         {"kind": kind, "allowed": list(ROOM_KINDS)})
+    out = propose(ctx, type=kind, title=topic, body=body or topic,
+                  envelope=envelope, deadlines=deadlines)
+    record = _remember_room(ctx, out["thread_id"], role="chair")
+    return {"room_id": out["thread_id"], "thread_id": out["thread_id"],
+            "kind": kind, "topic": topic, "chair": ctx.participant_id,
+            "message_id": out["message_id"], "url": out.get("url"),
+            "usage": out["usage"], "joined": record}
+
+
+def browse(ctx: Context, *, kind: str | None = None, cursor: str | None = None,
+           limit: int = DEFAULT_THREADS_LIMIT) -> dict[str, Any]:
+    """로비 — **열린 방** 목록(J2).
+
+    ★`threads` 를 부른다. 목록 로직을 새로 짜면 필터가 두 곳이 되고, 그중 하나만 고쳐지는 날이 온다.
+    ★「열린」의 뜻을 **여기 한 줄로 못박는다**: `closed` 가 아닌 것. `resolved`·`expired` 는
+      **들어 있다** — 권고안이 나왔거나 마감이 지난 방도 아직 닫히지 않았고, 로비에서 사라지면
+      「없는 방」과 구별되지 않는다. 대신 각 행이 자기 `state` 를 들고 간다.
+    ★`threads` 의 정직 칸(`scanned`·`unverifiable`)을 **그대로 들고 나온다** — 「결과 0건」이
+      「그런 방이 없다」로 읽히지 않게 하는 것이 그 칸들의 존재 이유다.
+    """
+    listed = threads(ctx, type=kind, cursor=cursor, limit=limit)
+    rooms = []
+    closed = 0
+    for item in listed["items"]:
+        if item["state"] == "closed":
+            closed += 1
+            continue
+        rooms.append({"room_id": item["thread_id"], "title": item["title"],
+                      "kind": item["type"], "state": item["state"],
+                      "round": item["round"], "chair": item["chair"],
+                      "deadline": item["deadline"], "updated": item["updated"]})
+    return {"rooms": rooms, "closed_excluded": closed,
+            "next_cursor": listed.get("next_cursor"),
+            "scanned": listed["scanned"],
+            "filtered_within_scanned": listed["filtered_within_scanned"],
+            "unverifiable": listed["unverifiable"]}
+
+
+def join(ctx: Context, *, room_id: str) -> dict[str, Any]:
+    """방에 참가한다(J2) — **로컬 동작이다**(master 결정 2026-09-05 `[master#6657207e]`).
+
+    ★**새 이벤트 kind 를 만들지 않는다.** kind 9종은 동결이고 PROTOCOL v1 의미 변경은
+      발주자 게이트다. 「참가」를 이벤트로 만들면 상태기계에 전이가 하나 생기고, 그것이 곧 규약 변경이다.
+    ★⚠**`say` 의 전제 조건이 아니다.** 참가하지 않아도 발언은 된다(명부에 있으면).
+      이 함수는 **확인이지 관문이 아니다** — 관문으로 만들면 기존 상태기계 의미가 바뀐다.
+      그래서 결과에 `is_gate: False` 를 실어 보낸다(읽는 쪽이 관문으로 오해하지 않게).
+    """
+    reduced = _require_open(_reduce(ctx, room_id))
+    if reduced["state"] == "closed":
+        raise AgoraError(errors.PRECONDITION, "닫힌 방에는 참가할 수 없다",
+                         {"room_id": room_id, "state": reduced["state"],
+                          "reason": reduced.get("close_reason")})
+    genesis = _genesis_payload(reduced)
+    known = ctx.participant_id in roster.principals(path=ctx.allowed_signers_path)
+    record = _remember_room(ctx, room_id, role="participant")
+    return {"room_id": room_id, "title": genesis.get("title", ""),
+            "kind": reduced["type"], "state": reduced["state"],
+            "round": reduced["round"], "chair": reduced["chair"],
+            "joined": record, "is_gate": False,
+            # ★「지금 발언할 수 있나」와 「참가했나」는 다른 사실이다. 명부에 없으면 글은
+            #   나가더라도 남들의 검증에서 격리된다 — 그 사실을 참가 시점에 알려 준다.
+            "in_roster": known,
+            "why": None if known else "명부에 이 참가자 id 가 없다 — 발언이 격리될 수 있다"}
+
+
+def _remember_room(ctx: Context, room_id: str, *, role: str) -> dict[str, Any]:
+    """참가 기록 — 설정 폴더의 `joined.json`. **원장이 아니라 메모다.**
+
+    ★이 파일은 판정에 쓰이지 않는다(쓰이면 그 순간 관문이 된다). 「내가 어느 방에 들어갔더라」를
+      다음 세션이 기억하는 자리일 뿐이고, 없어져도 프로토콜은 그대로다.
+    ★쓰기는 **임시 파일 → `os.replace`** 다. 중간에 죽어 반쪽 JSON 이 남으면 다음 실행이
+      그 파일을 못 읽고, 메모 하나 때문에 참가가 막힌다.
+    """
+    import json as _json
+    import os as _os
+    if not ctx.config_dir:
+        return {"recorded": False, "why": "설정 폴더를 모른다"}
+    path = _os.path.join(ctx.config_dir, JOINED_FILENAME)
+    doc: dict[str, Any] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            loaded = _json.load(fh)
+        if type(loaded) is dict:
+            doc = loaded
+    except (OSError, ValueError):
+        doc = {}                     # 못 읽으면 메모가 없는 것이다 — 참가를 막지 않는다
+    entry = {"role": role, "at": now_iso()}
+    doc[room_id] = entry
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        _json.dump(doc, fh, ensure_ascii=False, sort_keys=True, indent=2)
+    _os.replace(tmp, path)
+    return {"recorded": True, **entry}
+
+
 def say(ctx: Context, *, thread_id: str, body: str, round: int | None = None,
         counter: list[dict[str, Any]] | None = None,
         refs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -967,8 +1083,38 @@ def context_from_config(directory: str | None = None, *,
                    participant_id=doc["id"], config=cfg, config_dir=d)
 
 
+# 운반층 이름 — 설정 `transport` 칸이 고를 수 있는 값의 전수(설계 TRANSPORT-RELAY §4).
+TRANSPORTS = ("relay", "github")
+
+
+def transport_of(cfg: dict[str, Any]) -> str:
+    """이 설정이 **어느 운반층**을 뜻하는가 — 해석 순서를 한 곳에 못박는다.
+
+    ⑴ `transport` 가 명시돼 있으면 그것이 이긴다(모르는 값은 code 2 · 아는 값 목록을 함께 준다).
+    ⑵ 없고 `relay.url` 이 있으면 릴레이.
+    ⑶ 없고 `repo` 가 있으면 GitHub(v0 설정 그대로 계속 돈다 — 어댑터를 지우지 않는다).
+    ⑷ 둘 다 없으면 **릴레이가 기본**이므로 `relay.url` 이 빠진 것으로 보고한다.
+
+    ★「기본값 = 릴레이」의 정확한 뜻: 주소를 모르는 채로 릴레이에 말을 걸 수는 없다.
+      기본이란 ⑴문서·예시의 기본이 릴레이이고 ⑵**둘 다 있으면 릴레이가 이긴다**는 뜻이다.
+      「아무것도 없으면 릴레이로 간다」가 아니다 — 그건 성립하지 않는다.
+    """
+    named = cfg.get("transport")
+    if named is not None:
+        if named not in TRANSPORTS:
+            raise AgoraError(errors.PRECONDITION, "모르는 운반층이다",
+                             {"transport": named, "known": list(TRANSPORTS),
+                              "file": "config.json"})
+        return named
+    if (cfg.get("relay") or {}).get("url"):
+        return "relay"
+    if cfg.get("repo"):
+        return "github"
+    return "relay"
+
+
 def _store_from_config(cfg: dict[str, Any], directory: str | None = None) -> Any:
-    """설정에서 운반층을 세운다 — **어느 저장소인지는 설정에서만 온다.**
+    """설정에서 운반층을 세운다 — **어느 운반층인지는 설정에서만 온다.**
 
     ★S7-1 에서 드러난 공백이다: 도구·CLI·문서는 다 있었는데 **「어느 저장소에 올리는가」를
       적는 칸이 계약에 없었다.** 그래서 CLI 로 실제 도구를 부르면 저장층 생성에서
@@ -976,6 +1122,28 @@ def _store_from_config(cfg: dict[str, Any], directory: str | None = None) -> Any
     ★없으면 **무엇이 없는지 이름을 대고** code 2 로 멈춘다. 「설정이 잘못됐다」로만 말하면
       사용자는 무엇을 고쳐야 하는지 모른다.
     """
+    if transport_of(cfg) == "relay":
+        return _relay_store(cfg)
+    return _github_store(cfg, directory)
+
+
+def _relay_store(cfg: dict[str, Any]) -> Any:
+    """릴레이 어댑터. 필요한 칸은 **주소 하나**다(카테고리 id 는 릴레이에 없는 개념이다)."""
+    from agora.store_relay import DEFAULT_TIMEOUT_SECONDS, RelayStore
+    relay = cfg.get("relay") or {}
+    if not relay.get("url"):
+        raise AgoraError(errors.PRECONDITION, "config.json 에 릴레이 주소가 없다",
+                         {"missing": ["relay.url"], "file": "config.json",
+                          "legacy": "구 설정(GitHub)은 repo.owner·repo.name 이다"})
+    timeout = relay.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS
+    if type(timeout) is not int:
+        raise AgoraError(errors.PRECONDITION, "relay.timeout_seconds 는 정수여야 한다",
+                         {"file": "config.json"})
+    return RelayStore(relay["url"], timeout=timeout)
+
+
+def _github_store(cfg: dict[str, Any], directory: str | None = None) -> Any:
+    """v0 어댑터 — 지우지 않는다. 옛 설정을 그대로 들고 있는 참가자가 계속 돌 수 있어야 한다."""
     from agora.store_github import GitHubStore
     repo = cfg.get("repo") or {}
     missing = [k for k in ("owner", "name") if not repo.get(k)]
@@ -1042,4 +1210,8 @@ CORE_TOOLS: dict[str, Any] = {
     "threads": threads, "read": read, "propose": propose, "say": say,
     "advance": advance, "resolve": resolve, "mark-solved": mark_solved,
     "close": close, "vote": vote, "envelope-check": envelope_check, "ack": ack,
+    # ★계약 확장 4(master 결정 2026-09-05 22:0x · `[master#6657207e]`) — 박람회 여정 3종.
+    #   03 §4 의 「도구 11종」이 **14종**이 된다. 06 증보 §6 의 「무변경」은 master 문면 과실로
+    #   판정됐고 06 에 정오표가 남았다. 조용히 늘리지 않고 여기 근거를 적는다.
+    "enter": enter, "browse": browse, "join": join,
 }

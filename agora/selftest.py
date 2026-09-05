@@ -4370,13 +4370,47 @@ def _case_every_mutation_belongs_to_an_axis() -> None:
       그래서 반대 방향으로도 잰다: 표가 뮤테이션을 덮는가가 아니라, **뮤테이션이 표에 있는가.**
     """
     covered: set[str] = set()
-    for table in (S2_AXES, S3_AXES, S4_AXES, S5_AXES, S6_AXES, S7_AXES):
+    for table in (S2_AXES, S3_AXES, S4_AXES, S5_AXES, S6_AXES, S7_AXES, S8_AXES):
         for want in table.values():
             covered |= set(want)
     late = {m[0] for m in MUTATIONS if int(m[0].split("-")[0][1:]) >= 109}
     orphan = sorted(late - covered)
     if orphan:
         raise AssertionError(f"어느 축에도 안 실린 뮤테이션: {orphan}")
+
+
+S8_AXES: dict[str, tuple[str, ...]] = {
+    # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
+    "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
+                 "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
+                 "M328-relay-limit-unclamped", "M332-relay-filters-server-invalid"),
+    "실패분류": ("M306-relay-retries-404", "M319-relay-retries-everything",
+                 "M307-relay-write-timeout-is-seven", "M325-relay-ignores-body-code",
+                 "M326-relay-forbidden-is-signature", "M329-relay-ignores-retry-after",
+                 "M334-relay-exhausted-write-is-seven", "M335-relay-lets-server-forge-retry",
+                 "M336-relay-unprocessable-is-not-a-gate"),
+    "투영없음": ("M308-relay-projection-claims-ok",),
+    "명부신뢰": ("M309-relay-roster-swallows-404", "M310-sync-roster-skips-confirmation",
+                 "M311-sync-roster-keeps-no-previous",
+                 "M330-relay-checkpoint-null-is-present"),
+    "소유증명": ("M312-register-drops-proof", "M313-register-door-accepts-extra-fields",
+                 "M323-register-signs-four-fields", "M324-register-purpose-not-pinned",
+                 "M333-relay-register-without-proof"),
+    "가시성": ("M314-whoami-buries-the-gate",),
+    "여정경계": ("M315-enter-opens-its-own-write-path", "M316-browse-shows-closed-rooms",
+                 "M317-join-enters-closed-rooms"),
+    "운반선택": ("M318-transport-precedence-flipped",),
+    # ★도구 층이 아니라 **진입점**을 재는 축. 여기가 비어 있어서 CLI 가 플래그를 거부하는 채로 초록이었다.
+    "진입점": ("M322-cli-entry-rejects-flags",),
+    # ★서버가 계산해 준 판정을 **대조 축으로만** 쓰는 자리(계약 §3-2·§3-5). 여기가 비면
+    #   「참고값」이 슬며시 근거가 되어도 아무도 모른다.
+    "파생대조": ("M331-relay-drops-verdict",),
+}
+
+
+def _case_s8_axes_have_nets() -> None:
+    """S8 의 10축(운반교체·실패분류·투영없음·명부신뢰·소유증명·가시성·여정경계·운반선택·진입점·파생대조)도 같은 방식으로 덮인다."""
+    _axes_have_nets(S8_AXES, "S8")
 
 
 def _case_s7_axes_have_nets() -> None:
@@ -4986,8 +5020,12 @@ def _case_local_count_comes_from_stored_events() -> None:
 # 설계 §4 표의 코어 도구 이름 — **동결된 계약**이므로 여기 적어 두고 대조한다.
 # ★코드에서 파생시키지 않는다. 파생시키면 「코드가 곧 계약」이 되어, 도구를 하나 지워도
 #   대조가 초록으로 남는다(양쪽이 같이 움직이니까).
+# ★계약 확장 4(master 결정 2026-09-05 22:0x · `[master#6657207e]`) — 11종 → **14종**.
+#   ★이 튜플은 **선언이지 파생이 아니다.** `tools.CORE_TOOLS` 에서 뽑아 오면 그 순간 이 그물이
+#     자기 자신을 재게 되어(도구를 늘리면 기대값도 같이 늘어난다) 「몰래 늘어난 도구」를 못 잡는다.
 FROZEN_CORE_TOOLS = ("threads", "read", "propose", "say", "advance", "resolve",
-                     "mark-solved", "close", "vote", "envelope-check", "ack")
+                     "mark-solved", "close", "vote", "envelope-check", "ack",
+                     "enter", "browse", "join")
 
 
 def _tools_ctx(**kw: Any) -> Any:
@@ -5036,8 +5074,8 @@ def _case_tool_table_matches_contract() -> None:
     registered = set(cli.core_command_names())
     if registered != frozen:
         raise AssertionError(f"CLI 등록표가 계약과 다르다: {sorted(registered ^ frozen)}")
-    if len(frozen) != 11:
-        raise AssertionError(f"코어 도구는 11종이다: {len(frozen)}")
+    if len(frozen) != 14:
+        raise AssertionError(f"코어 도구는 14종이다: {len(frozen)}")
     for name in frozen:
         if cli.mcp_tool_name(name) != "agora." + name.replace("-", "_"):
             raise AssertionError(f"MCP 이름 규칙이 깨졌다: {name}")
@@ -5627,7 +5665,9 @@ def _case_local_commands_are_not_tools() -> None:
     """CLI 전용 명령은 **도구 표에 없다** — 대리인 세션의 손에 운영 동작을 쥐어 주지 않는다."""
     from agora import cli, tools
     local = {"watch", "reconcile", "selftest", "keygen", "export", "import",
-             "mcp-serve", "delegate-chair", "abort"}
+             "mcp-serve", "delegate-chair", "abort",
+             # 계약 확장 5(2026-09-05) — 가입·명부 운영. 설치가 부르고 **대리인은 못 부른다.**
+             "register", "sync-roster", "whoami"}
     if cli.MCP_EXEMPT != frozenset(local):
         raise AssertionError(f"예외 목록: {sorted(cli.MCP_EXEMPT)}")
     if local & set(tools.CORE_TOOLS):
@@ -6207,15 +6247,17 @@ def _case_promoted_knowhow_points_at_problem() -> None:
 
 
 def _case_promotion_is_not_a_new_tool() -> None:
-    """승격은 **새 도구가 아니다** — 도구 11종은 §4 에서 동결이다.
+    """승격은 **새 도구가 아니다** — 도구 수는 §4 가 정한 값(현재 14)이어야 한다.
 
-    ★새 코어 도구를 하나 만들면 계약이 12종이 되고, **문서·MCP·대리인 브리프가 전부 갈라진다.**
+    ★새 코어 도구를 **몰래** 하나 만들면 문서·MCP·대리인 브리프가 전부 갈라진다.
       승격은 `propose` 로 할 수 있는 일(`parent` 를 단 genesis)이므로 편의 함수로만 둔다.
+    ★계수가 11 → 14 가 된 것은 **계약 확장 4**(master 결정 2026-09-05)로 문서·코드·이 그물을
+      함께 옮긴 것이다. 조용히 늘어난 것과 결정으로 늘어난 것은 다르고, 그 차이를 여기 적어 둔다.
     """
     from agora import cli, tools
     if "promote_knowhow" in tools.CORE_TOOLS or "promote-knowhow" in cli.COMMANDS:
-        raise AssertionError("승격이 도구 표에 들어갔다 — 계약이 12종이 됐다")
-    if len(tools.CORE_TOOLS) != 11:
+        raise AssertionError("승격이 도구 표에 들어갔다 — 계약 밖 도구다")
+    if len(tools.CORE_TOOLS) != 14:
         raise AssertionError(f"도구 수가 바뀌었다: {len(tools.CORE_TOOLS)}")
 
 
@@ -6273,10 +6315,10 @@ def _case_link_to_unopened_thread_is_allowed() -> None:
 #   **덜 한 것을 완주로 적지 않는다.**
 
 def _case_mcp_exposes_eleven_tools() -> None:
-    """MCP 표면이 **도구 11종 전건**이고, 이름 규칙이 등록표와 같다."""
+    """MCP 표면이 **도구 14종 전건**이고, 이름 규칙이 등록표와 같다(계약 확장 4)."""
     from agora import cli, mcp_server, tools
     schemas = mcp_server.tool_schemas()
-    if len(schemas) != 11:
+    if len(schemas) != 14:
         raise AssertionError(f"MCP 도구 수: {len(schemas)}")
     names = {s["name"] for s in schemas}
     want = {cli.mcp_tool_name(n) for n in tools.CORE_TOOLS}
@@ -6397,10 +6439,13 @@ def _case_mcp_call_reaches_the_tool() -> None:
 #   곧 결함이고, 멈춘 자리마다 그물을 남긴다(04-tasks S7-1 AC ②).
 
 def _case_config_names_missing_repo_fields() -> None:
-    """저장소 설정이 없으면 **빠진 칸 이름을 대고** 멈춘다(code 2).
+    """운반층 설정이 없으면 **빠진 칸 이름을 대고** 멈춘다(code 2) · 해석 순서가 계약대로다.
 
-    ★S7-1 에서 여기가 **날 예외(TypeError)** 로 터졌다 — 설정 계약에 저장소 칸이 아예 없었다.
+    ★S7-1 에서 여기가 **날 예외(TypeError)** 로 터졌다 — 설정 계약에 운반층 칸이 아예 없었다.
       「설정이 잘못됐다」로만 말하면 사용자는 무엇을 고쳐야 하는지 모른다.
+    ★2026-09-05(릴레이 전환) — 기본 운반층이 릴레이가 됐으므로 **빈 설정이 대는 이름이 바뀐다**.
+      네 갈래를 전부 연다: 빈 설정 · 명시 github · 반쪽 github · **둘 다 있을 때 누가 이기나**.
+      마지막 갈래가 이 케이스의 새 축이다 — 「기본값이 릴레이」라는 문장은 **그 상황에서만** 검증된다.
     """
     from agora import tools
     try:
@@ -6409,11 +6454,20 @@ def _case_config_names_missing_repo_fields() -> None:
         missing = (e.detail or {}).get("missing") or []
         if e.code != errors.PRECONDITION:
             raise AssertionError(f"다른 코드: {e.code}") from None
+        if missing != ["relay.url"]:
+            raise AssertionError(f"빈 설정에서 빠진 칸을 안 댄다: {missing}")
+    else:
+        raise AssertionError("운반층 설정 없이 운반층을 세웠다")
+    # 명시 github — v0 설정 계약은 그대로다.
+    try:
+        tools._store_from_config({"transport": "github"})
+    except AgoraError as e:
+        missing = (e.detail or {}).get("missing") or []
         for want in ("repo.owner", "repo.name", "categories.problem"):
             if want not in missing:
-                raise AssertionError(f"빠진 칸을 안 댄다: {missing}")
+                raise AssertionError(f"github 에서 빠진 칸을 안 댄다: {missing}")
     else:
-        raise AssertionError("저장소 설정 없이 운반층을 세웠다")
+        raise AssertionError("저장소 설정 없이 github 운반층을 세웠다")
     # 반쪽만 있어도 그 반쪽을 지목해야 한다.
     try:
         tools._store_from_config({"repo": {"owner": "누군가"},
@@ -6424,6 +6478,24 @@ def _case_config_names_missing_repo_fields() -> None:
             raise AssertionError(f"반쪽 설정의 지목이 틀렸다: {e.detail}")
     else:
         raise AssertionError("이름 없는 저장소를 통과시켰다")
+    # ★둘 다 있으면 **릴레이가 이긴다**(설계 TRANSPORT-RELAY §4 · 「기본값 = 릴레이」의 실제 뜻).
+    both = {"relay": {"url": "https://relay.example"},
+            "repo": {"owner": "누군가", "name": "저장소"},
+            "categories": {"problem": "x", "knowhow": "y", "debate": "z"}}
+    if tools.transport_of(both) != "relay":
+        raise AssertionError("둘 다 있는데 릴레이가 이기지 않는다")
+    if type(tools._store_from_config(both)).__name__ != "RelayStore":
+        raise AssertionError("해석은 릴레이인데 다른 어댑터를 세웠다")
+    # 그리고 **명시가 해석을 이긴다** — 명시했는데 무시되면 설정이 거짓말을 하게 된다.
+    if type(tools._store_from_config({**both, "transport": "github"})).__name__ != "GitHubStore":
+        raise AssertionError("transport 명시가 무시됐다")
+    try:
+        tools.transport_of({"transport": "우편"})
+    except AgoraError as e:
+        if e.code != errors.PRECONDITION or "known" not in (e.detail or {}):
+            raise AssertionError(f"모르는 운반층 처리가 계약과 다르다: {e.detail}") from None
+    else:
+        raise AssertionError("모르는 운반층을 통과시켰다")
 
 
 def _case_cli_title_may_start_with_bracket() -> None:
@@ -6496,15 +6568,19 @@ def _case_onboarding_matches_real_procedure() -> None:
     if "AGORA_SIGNING_KEY" not in text:
         raise AssertionError("서명 키 환경변수가 안 적혀 있다")
     if '"repo"' not in text or '"categories"' not in text:
-        raise AssertionError("저장소·카테고리 설정이 안 적혀 있다")
+        raise AssertionError("구 설정(저장소·카테고리)이 안 적혀 있다 — 옛 참가자가 막힌다")
+    if '"relay"' not in text or "sync-roster" not in text:
+        raise AssertionError("릴레이 설정·명부 동기화가 안 적혀 있다")
     if "participant.json` 까지 **만들어 준다**" not in text:
         raise AssertionError("participant.json 이 자동 생성된다는 사실이 안 적혀 있다")
     import json as _json
     with open(os.path.join(_ROOT, "config", "config.json.example"), encoding="utf-8") as fh:
         example = _json.load(fh)
-    for key in ("repo", "categories"):
-        if key not in example:
-            raise AssertionError(f"설정 예시에 {key} 가 없다 — 예시를 따라가면 또 막힌다")
+    # ★2026-09-05 — **기본 운반층이 릴레이가 됐으므로 예시가 갖춰야 하는 칸이 바뀐다.**
+    #   예시는 「따라가면 되는 것」이라야 한다: 지금 따라가서 되는 것은 릴레이 쪽이다.
+    #   구 설정(repo·categories)은 문서 본문이 계속 안내하고(위 검사), 예시는 기본을 보여 준다.
+    if example.get("transport") != "relay" or not (example.get("relay") or {}).get("url"):
+        raise AssertionError("설정 예시가 기본 운반층(릴레이)을 안 보여 준다 — 따라가면 또 막힌다")
 
 
 def _case_read_hides_procedure_rejects_from_valid() -> None:
@@ -8793,6 +8869,992 @@ def _case_no_unwired_production_definitions() -> None:
         raise AssertionError(f"허용목록이 낡았다 — 이제 배선된 이름: {stale}")
 
 
+
+# ── S8 릴레이 운반층(설계 docs/TRANSPORT-RELAY.md · 06 증보) ─────────────────
+# ★여기서 재는 것은 **어댑터의 논리**다. 상대는 가짜 릴레이(`tests/fake_relay.py`)이고,
+#   그 초록은 「우리 논리가 맞다」는 뜻이지 **「진짜 릴레이가 그렇게 답한다」는 뜻이 아니다**
+#   (설계 §11 · 실물 대조는 릴레이가 설 때). 이 한계를 케이스 이름이 아니라 여기 적어 둔다.
+
+def _fake_relay():
+    """가짜 릴레이 모듈 — `tests/` 에 있다(제품 패키지에 서버를 넣지 않는다)."""
+    import sys as _sys
+    tests_dir = os.path.join(_ROOT, "tests")
+    if tests_dir not in _sys.path:
+        _sys.path.insert(0, tests_dir)
+    import fake_relay
+    return fake_relay
+
+
+def _relay_env(**relay_kw: Any):
+    """가짜 릴레이 + 그것을 향한 도구 한 벌. **컨텍스트 매니저**라 나가면 서버가 반드시 죽는다."""
+    import contextlib
+    import tempfile
+    from agora import tools
+    from agora.ledger import Ledger
+    from agora.spool import Spool
+    from agora.store_relay import RelayStore
+
+    @contextlib.contextmanager
+    def _open():
+        f = _fixtures()
+        d = tempfile.mkdtemp(prefix="agora-relay-")
+        with _fake_relay().serving(**relay_kw) as (url, relay):
+            store = RelayStore(url, sleep=lambda _s: None)
+            ctx = tools.Context(store=store, ledger=Ledger(d), spool=Spool(d),
+                                allowed_signers_path=f["roster_ab"],
+                                participant_id="operator-a",
+                                config={"human_approval": False}, config_dir=d)
+            yield ctx, relay, url
+    return _open()
+
+
+def _relay_room(ctx: Any, *, kind: str = "debate") -> str:
+    from agora import tools
+    f = _fixtures()
+    out = _with_key(f["key_a"], lambda: tools.enter(ctx, topic="가짜 주제", kind=kind,
+                                                    body="가짜 발제"))
+    return out["room_id"]
+
+
+def _case_relay_journey_one() -> None:
+    """J1 완주 — 방 개설 → 발언 → 라운드 3회 → 권고안(06 §4).
+
+    ★한 걸음씩 따로 재면 **왕복이 깨진 것을 못 본다**(합성 루트가 갈리면 단계별 시험은 전부 초록이다).
+      그래서 여정 하나를 통째로 태우고, 마지막에 **서버가 파생한 상태**와도 대조한다.
+    """
+    from agora import reducer, tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="첫 발언"))
+        for target in (1, 2, 3):
+            _with_key(f["key_a"], lambda t=target: tools.advance(ctx, thread_id=room, to_round=t))
+        _with_key(f["key_a"], lambda: tools.resolve(
+            ctx, thread_id=room, summary="가짜 수렴",
+            dissent=[{"from": "operator-b", "quote": "다른 의견"}],
+            recommended_actions=[{"text": "가짜 권고", "execution": "forbidden"}]))
+        reduced = tools._reduce(ctx, room)
+        if reduced["state"] != "resolved":
+            raise AssertionError(f"여정 끝 상태가 다르다: {reduced['state']}")
+        if len(relay.rooms[room]["events"]) != 6:
+            raise AssertionError(f"이벤트 수가 다르다: {len(relay.rooms[room]['events'])}")
+        # ★서버가 **독립적으로** 파생한 상태와 대조한다(3자 대조의 한 축 · 설계 §2-4).
+        status = ctx.store.thread_status(thread_id=room)
+        if status["closed"] is not False:
+            raise AssertionError(f"서버 파생이 우리와 다르다: {status}")
+        if reducer.procedure_snapshot(reduced)["chair"] != "operator-a":
+            raise AssertionError("방을 연 사람이 의장이 아니다")
+
+
+def _case_relay_journey_two() -> None:
+    """J2 — 로비를 돌아 방을 고르고 참가한 뒤 발언한다(06 §4).
+
+    ★`browse` 는 `threads` 의 화면이고, `join` 은 **이벤트를 만들지 않는다.**
+      그 둘을 한 여정 안에서 함께 잰다 — 따로 재면 「참가했는데 발언이 안 되는」 조합이 안 보인다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        before = len(relay.rooms[room]["events"])
+        lobby = tools.browse(ctx)
+        ids = [r["room_id"] for r in lobby["rooms"]]
+        if room not in ids:
+            raise AssertionError(f"로비에 방이 없다: {ids}")
+        joined = tools.join(ctx, room_id=room)
+        if joined["is_gate"] is not False:
+            raise AssertionError("join 이 관문이라고 답한다")
+        if len(relay.rooms[room]["events"]) != before:
+            raise AssertionError("join 이 이벤트를 만들었다 — 로컬 동작이어야 한다")
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="참가자 발언"))
+        if len(relay.rooms[room]["events"]) != before + 1:
+            raise AssertionError("발언이 안 올라갔다")
+        # 닫힌 방은 로비에서 빠진다 — 그리고 **몇 개를 뺐는지 말한다**.
+        _with_key(f["key_a"], lambda: tools.close(ctx, thread_id=room, reason="archived"))
+        after = tools.browse(ctx)
+        if any(r["room_id"] == room for r in after["rooms"]):
+            raise AssertionError("닫힌 방이 로비에 남았다")
+        if after["closed_excluded"] < 1:
+            raise AssertionError("뺀 개수를 안 말한다 — 보이지 않는 억제다")
+        try:
+            tools.join(ctx, room_id=room)
+        except AgoraError as e:
+            if e.code != errors.PRECONDITION:
+                raise AssertionError(f"닫힌 방 참가의 코드가 다르다: {e.code}") from None
+        else:
+            raise AssertionError("닫힌 방에 참가시켰다")
+
+
+def _case_relay_join_is_not_a_gate() -> None:
+    """`join` 은 **`say` 의 전제 조건이 아니다**(master 결정 2026-09-05).
+
+    ★관문으로 만들면 기존 상태기계 의미가 바뀐다(브리프 「기존 명령·상태기계 무변경」).
+      그래서 **참가하지 않은 채 발언이 되는지**를 일부러 잰다 — 이 케이스가 초록인 것이
+      「join 을 관문으로 승격시키지 않았다」의 증거다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        joined_file = os.path.join(ctx.config_dir, tools.JOINED_FILENAME)
+        if os.path.exists(joined_file):
+            os.remove(joined_file)              # 참가 기록을 지운다 = 참가한 적 없는 상태
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="참가 없이 발언"))
+        reduced = tools._reduce(ctx, room)
+        bodies = [e["event"]["payload"].get("body") for e in reduced["events"]]
+        if "참가 없이 발언" not in bodies:
+            raise AssertionError("참가 기록이 없다고 발언이 막혔다 — join 이 관문이 됐다")
+
+
+def _case_relay_forged_signature_is_quarantined() -> None:
+    """서명 위조 — 본문을 고친 글은 **격리**된다(거부 3경로 ①)."""
+    from agora import reducer, tools
+    from agora.event import parse_post, render_post
+    f = _fixtures()
+    # ★멱등 서버는 같은 `message_id` 의 재전송을 **되돌려 주기만** 해서 위조본을 심을 수 없다.
+    #   그래서 비멱등 서버로 잰다 — 클라의 방어가 **서버의 선의에 기대지 않는다**는 것이 요점이다.
+    with _relay_env(idempotent=False) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="원래 발언"))
+        row = relay.rooms[room]["events"][-1]
+        parsed = parse_post(row["body"])
+        forged = dict(parsed["event"])
+        forged["payload"] = {**forged["payload"], "body": "몰래 바꾼 발언"}
+        relay.inject_raw(room_id=room, body=render_post(forged, parsed["signature"]))
+        reduced = tools._reduce(ctx, room)
+        reasons = [q.get("reason") for q in reduced["quarantined"]]
+        if reducer.SIGNATURE not in reasons:
+            raise AssertionError(f"위조가 서명 사유로 격리되지 않았다: {reasons}")
+        bodies = [e["event"]["payload"].get("body") for e in reduced["events"]]
+        if "몰래 바꾼 발언" in bodies:
+            raise AssertionError("위조된 본문이 유효 이벤트로 들어갔다")
+
+
+def _case_relay_chain_fork_is_stale() -> None:
+    """사슬 경합 — 같은 `prev` 를 본 두 글 중 진 쪽은 **stale**(거부 3경로 ②).
+
+    ★격리가 아니라 stale 이다: 자격은 있는데 졌다(PROTOCOL §3). 둘을 한 칸에 넣으면
+      「내 글이 왜 안 보이나」에 답할 수 없다.
+    """
+    from agora import sign, tools
+    from agora.event import new_id, render_post
+    from agora.ledger import now_iso
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        reduced = tools._reduce(ctx, room)
+        head, state_hash = reduced["head"], reduced["state_hash"]
+        for text in ("갈래 하나", "갈래 둘"):
+            event = {"v": 1, "kind": "post", "thread_id": room, "message_id": new_id(),
+                     "prev": head, "expected_state": state_hash, "from": "operator-a",
+                     "roster": tools._roster_digest(ctx), "ts": now_iso(),
+                     "payload": {"round": 0, "body": text}}
+            from agora import core
+            core.declare_scrub(event, config_dir=ctx.config_dir)
+            signed = _with_key(f["key_a"], lambda e=event: sign.sign_event(e))
+            relay.append_event(thread_id=room, category="debate", title="",
+                               body=render_post(event, signed["signature"]),
+                               is_genesis=False)
+        again = tools._reduce(ctx, room)
+        if len(again["stale"]) != 1:
+            raise AssertionError(f"경합에서 진 글이 stale 이 아니다: {again['stale']}")
+        if len(again["events"]) != 2:
+            raise AssertionError(f"유효 이벤트 수가 다르다: {len(again['events'])}")
+
+
+def _case_relay_envelope_violation_never_writes() -> None:
+    """봉투 없는 problem 은 **쓰기 전에** 막힌다(거부 3경로 ③ · code 3 · 쓰기 0회)."""
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        try:
+            _with_key(f["key_a"], lambda: tools.enter(ctx, topic="봉투 없는 문제",
+                                                      kind="problem", body="본문"))
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT:
+                raise AssertionError(f"다른 코드: {e.code}") from None
+        else:
+            raise AssertionError("봉투 없는 problem 이 통과했다")
+        if [c for c in relay.calls if c == "/events"]:
+            raise AssertionError("차단됐는데 쓰기가 나갔다")
+
+
+def _case_relay_fetch_follows_every_page() -> None:
+    """페이지를 나눠 주는 서버에서도 **전건**을 받는다.
+
+    ★일부만 받으면 `prev` 사슬이 끊겨 reducer 가 「닿지 않는 것」으로 읽는다 —
+      화면은 멀쩡하고 상태만 틀린다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env(page_size=1) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        # 라운드당 발언 예산이 2건이다(§5) — 그 안에서 잰다. 예산을 늘려 잡으면
+        # 이 케이스가 재는 것이 페이지가 아니라 예산이 된다.
+        for i in range(2):
+            _with_key(f["key_a"], lambda i=i: tools.say(ctx, thread_id=room, body=f"발언 {i}"))
+        got = ctx.store.fetch(thread_id=room)
+        if len(got["items"]) != 3:
+            raise AssertionError(f"전건을 못 받았다: {len(got['items'])}")
+        if got["next_cursor"] is not None:
+            raise AssertionError("전건인데 다음 커서가 남았다")
+
+
+def _case_relay_idempotent_resend_makes_no_row() -> None:
+    """같은 `message_id` 재전송은 **새 행을 만들지 않는다**(서버 약속) — 그리고 그 약속에 의존하지 않는다.
+
+    ★두 서버를 다 태운다: 멱등 서버(1행)와 **약속을 안 지키는 서버**(2행).
+      뒤쪽을 재는 이유는 우리 코드가 그 상황에서도 **거짓말을 하지 않는지** 보기 위해서다 —
+      우리는 재조회로 판정하지 서버의 선의로 판정하지 않는다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 번만"))
+        body = relay.rooms[room]["events"][-1]["body"]
+        ctx.store.append(thread_id=room, category="debate", title="", body=body,
+                         is_genesis=False)
+        if len(relay.rooms[room]["events"]) != 2:
+            raise AssertionError("멱등 서버가 같은 글로 행을 늘렸다")
+    with _relay_env(idempotent=False) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 번만"))
+        body = relay.rooms[room]["events"][-1]["body"]
+        ctx.store.append(thread_id=room, category="debate", title="", body=body,
+                         is_genesis=False)
+        if len(relay.rooms[room]["events"]) != 3:
+            raise AssertionError("비멱등 서버 가정이 깨졌다 — 이 케이스가 재는 대상이 사라졌다")
+        reduced = tools._reduce(ctx, room)
+        ids = [e["message_id"] for e in reduced["events"]]
+        if len(ids) != len(set(ids)):
+            raise AssertionError("중복 message_id 가 유효 이벤트로 두 번 들어갔다")
+
+
+def _case_relay_stale_updated_at_blinds_watch() -> None:
+    """★**서버가 방의 `updated_at` 을 안 올리면 watch 는 조용히 눈이 먼다**(RC-3).
+
+    ★이것은 우리 코드의 결함이 아니라 **가정의 문서화**다. 가짜 릴레이로는 절대 안 드러나는
+      종류의 의존이라(가짜는 우리가 짜니까 당연히 갱신한다) 그 가정을 **일부러 깨서** 잰다.
+      진짜 릴레이가 이 약속을 어기면 여기 적힌 그대로 된다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env(refresh_updated_at=False) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        mark = relay.rooms[room]["updated_at"]
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="새 글"))
+        rows = ctx.store.list_threads(updated_since=mark)["items"]
+        after = [r for r in rows if r["updated_at"] > mark]
+        if after:
+            raise AssertionError("갱신 안 하는 서버인데 목록이 새것을 보여 준다 — 픽스처가 고장났다")
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        mark = relay.rooms[room]["updated_at"]
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="새 글"))
+        rows = ctx.store.list_threads(updated_since=mark)["items"]
+        if not rows:
+            raise AssertionError("갱신하는 서버인데도 목록이 비었다")
+
+
+def _case_relay_maps_http_status_to_our_codes() -> None:
+    """HTTP 상태 → 우리 오류 계약(설계 §5) · **404 는 재시도하지 않고 429 는 한다.**
+
+    ★404 를 재시도하면 ⑴없는 것을 네 번 묻고 ⑵마지막에 「계속 받지 않는다」로 감싸 **status 가 사라진다**.
+      그 값을 보고 판정하는 곳(체크포인트 부재)이 있으므로, 사라지면 그쪽이 조용히 틀린다.
+    """
+    with _relay_env() as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 429}
+        try:
+            ctx.store.list_threads()
+        except AgoraError as e:
+            if e.code != errors.STORE:
+                raise AssertionError(f"429 가 7 이 아니다: {e.code}") from None
+            if len(ctx.store.waits) != 3:
+                raise AssertionError(f"429 를 곱 backoff 로 안 기다렸다: {ctx.store.waits}")
+        else:
+            raise AssertionError("429 를 성공으로 읽었다")
+        relay.status_override = {}
+        waits_before = len(ctx.store.waits)
+        try:
+            ctx.store.fetch(thread_id="f" * 32)          # 없는 방 = 404
+        except AgoraError as e:
+            if e.code != errors.STORE or (e.detail or {}).get("status") != 404:
+                raise AssertionError(f"404 매핑이 다르다: {e.code} {e.detail}") from None
+        else:
+            raise AssertionError("없는 방을 읽었다")
+        if len(ctx.store.waits) != waits_before:
+            raise AssertionError("404 를 재시도했다")
+
+
+def _case_relay_no_answer_is_eight_on_write_seven_on_read() -> None:
+    """**보냈는데 답이 없다** = 쓰기는 8(성공 불명) · 읽기는 7(재시도).
+
+    ★같은 사건에 두 뜻이 있다: 읽기는 다시 물으면 되고, 쓰기는 **이미 들어갔을 수 있다.**
+      한 코드로 뭉치면 ⑴안 올라간 글을 올라갔다고 믿거나 ⑵같은 말이 두 번 나간다.
+    """
+    import urllib.request
+    from agora import store_relay
+
+    def classify(write: bool) -> int:
+        """**실제 매핑 코드**(`relay_transport`)를 태운다 — 가짜 transport 로 재면 내 시험을 잰다."""
+        real = urllib.request.urlopen
+
+        def never_answers(*_a: Any, **_kw: Any):
+            raise TimeoutError("느리다")
+
+        urllib.request.urlopen = never_answers
+        try:
+            store_relay.relay_transport("GET", "https://relay.example/rooms",
+                                        write=write)
+        except AgoraError as e:
+            return e.code
+        finally:
+            urllib.request.urlopen = real
+        raise AssertionError("무응답인데 성공했다")
+
+    if classify(True) != errors.UNKNOWN_COMMIT:
+        raise AssertionError(f"쓰기 무응답이 8 이 아니다: {classify(True)}")
+    if classify(False) != errors.STORE:
+        raise AssertionError(f"읽기 무응답이 7 이 아니다: {classify(False)}")
+
+
+def _case_relay_number_is_a_string_and_round_trips() -> None:
+    """`number` 칸은 릴레이에서 **문자열**이다 — 목록에서 받은 값이 그대로 `fetch` 에 통한다(RC-4).
+
+    ★계약이 그 이름을 쓰기 때문에 이름은 그대로 두고 값만 운반층이 정한다. `int(number)` 를
+      쓰는 코드가 생기면 릴레이 경로가 죽는다 — 그 왕복을 여기서 못박는다.
+    """
+    from agora import tools
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        listed = ctx.store.list_threads()["items"]
+        number = listed[0]["number"]
+        if type(number) is not str:
+            raise AssertionError(f"number 가 문자열이 아니다: {type(number).__name__}")
+        got = ctx.store.fetch(number=number)
+        if not got["items"] or got["items"][0]["thread_id"] != room:
+            raise AssertionError("목록에서 받은 number 로 그 방을 못 읽었다")
+        listed_ids = {r["thread_id"] for r in tools.threads(ctx)["items"]}
+        if room not in listed_ids:
+            raise AssertionError("도구 층 목록에서 방이 사라졌다")
+
+
+def _case_relay_projection_says_nothing_to_do() -> None:
+    """투영은 **할 것이 없다**고 말한다 — `ok` 라고 답하지 않는다(설계 §2-5).
+
+    ★이 문자열이 곧 `close`·`mark_solved` 결과의 `projection` 칸이고, 사용자가 읽는 설명이다.
+      「했다」로 적으면 아무도 안 한 일이 한 일로 남는다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)                     # debate — problem 은 봉투가 있어야 한다
+        out = _with_key(f["key_a"], lambda: tools.close(ctx, thread_id=room, reason="archived"))
+        projection = out.get("projection") or {}
+        result = projection.get("result") or {}
+        if result.get("projected") != "derived":
+            raise AssertionError(f"투영이 다른 말을 한다: {projection}")
+        if result.get("ok") is True:
+            raise AssertionError("안 한 일을 했다고 답한다")
+        # ★그리고 **되물은 결과**가 우리 상태와 맞는지까지 본다 — 릴레이는 화면을 안 바꾸지만
+        #   상태를 이벤트에서 파생하므로, 이 축은 「서버가 우리와 같게 읽는가」를 재는 자리가 된다.
+        if projection.get("verified") is not True:
+            raise AssertionError(f"서버 파생과 우리 상태가 어긋난다: {projection}")
+
+
+def _onboard_dir() -> str:
+    """참가자 설정 폴더 한 벌 — 키·`participant.json`·권한까지 실물 그대로.
+
+    ★권한(폴더 700 · 파일 600)을 맞춰 두는 이유: `participant.load` 가 그것을 검사한다.
+      느슨하게 만들어 두면 여기 케이스는 초록인데 실제 설치에서 code 2 가 난다.
+    """
+    import json as _json
+    import shutil
+    import subprocess as sp
+    import tempfile
+    f = _fixtures()
+    d = tempfile.mkdtemp(prefix="agora-onboard-")
+    os.chmod(d, 0o700)
+    key = os.path.join(d, "id_ed25519")
+    shutil.copy(f["key_a"], key)
+    shutil.copy(f["key_a"] + ".pub", key + ".pub")
+    os.chmod(key, 0o600)
+    proc = sp.run(["ssh-keygen", "-l", "-f", key + ".pub"], capture_output=True, text=True)
+    fingerprint = [t for t in proc.stdout.split() if t.startswith("SHA256:")][0]
+    path = os.path.join(d, "participant.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump({"id": "operator-a", "display_name": "operator-a",
+                    "key_fingerprint": fingerprint,
+                    "namespace": contract_open.SIGN_NAMESPACE, "operator": False}, fh)
+    os.chmod(path, 0o600)
+    return d
+
+
+def _case_relay_body_code_wins_over_status() -> None:
+    """실패 **본문의 `code` 가 정본이다** — HTTP 상태와 갈리면 code 가 이긴다(계약 §3-0).
+
+    ★구판은 상태만 보고 우리 코드를 정했다(「서버가 우리 코드를 정하게 두지 않는다」).
+      그 규율의 뜻은 지금도 옳지만, 계약 확정본이 **판정의 정본을 본문 code 로 못박았다** —
+      같은 코드가 여러 상태로 나갈 수 있다는 것이 서버 쪽 설계(§3-7)라서 상태만 보면 갈린다.
+    ★대신 **닫힌 집합**으로만 받는다: 계약 밖 숫자(구 서버가 적는 HTTP 숫자)는 없는 것으로 치고
+      상태 매핑으로 내려간다 — 계약을 안 지키는 상대에게도 답을 내야 하기 때문이다.
+    """
+    # ⑴ 상태 400(인자) ↔ 본문 code 7(저장층) — 계약대로면 7 이 이긴다.
+    with _relay_env(body_code_override=errors.STORE) as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 400}
+        try:
+            ctx.store.list_threads()
+        except AgoraError as e:
+            if e.code != errors.STORE:
+                raise AssertionError(f"본문 code 가 안 이겼다: {e.code}") from None
+        else:
+            raise AssertionError("실패를 성공으로 읽었다")
+    # ⑵ 계약 밖 code(구 서버) — 상태 매핑으로 내려간다.
+    with _relay_env(protocol_codes=False) as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 400}
+        try:
+            ctx.store.list_threads()
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"계약 밖 code 를 그대로 썼다: {e.code}") from None
+        else:
+            raise AssertionError("실패를 성공으로 읽었다")
+
+
+def _case_relay_forbidden_is_permission() -> None:
+    """**403 = 5(권한) · 401 = 4(서명)** — 계약 §3-7 표 그대로.
+
+    ★구판은 둘 다 4 로 두고 `detail.reason` 이 있을 때만 5 로 갔다. 「모르면 좁은 쪽」은
+      계약이 말이 없을 때의 규율이지 **계약을 덮는 규율이 아니다** — 확정본이 상태로 갈라 놓았다.
+    ★여기서는 본문 code 를 안 주는 상대(`protocol_codes=False`)로 잰다. code 가 오면 그것이
+      이기므로(위 케이스), 이 축은 **code 가 없을 때의 기본값**을 재는 것이 목적이다.
+    """
+    for status, want in ((403, errors.PERMISSION), (401, errors.SIGNATURE)):
+        with _relay_env(protocol_codes=False) as (ctx, relay, _url):
+            relay.status_override = {"/rooms": status}
+            try:
+                ctx.store.list_threads()
+            except AgoraError as e:
+                if e.code != want:
+                    raise AssertionError(f"{status} 가 {want} 가 아니다: {e.code}") from None
+            else:
+                raise AssertionError(f"{status} 를 성공으로 읽었다")
+
+
+def _case_relay_cursor_is_opaque() -> None:
+    """커서는 **불투명하다** — `=`·`&` 가 들어와도 왕복이 성립한다(계약 §3-3·§3-5).
+
+    ★f-문자열로 이어 붙이면 그런 커서는 다음 요청에서 **두 칸으로 쪼개져** 서버에 닿지 않는다.
+      서버는 오류를 내지 않는다 — 첫 페이지를 다시 주거나 커서를 무시할 뿐이다. **그 실패는 조용하다.**
+    ★그래서 재는 것이 둘이다: ⑴전건이 다 왔는가 ⑵서버가 받은 질의에 **인코딩된** 커서가 있었는가.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env(page_size=1, opaque_cursor=True) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="둘째 글"))
+        got = ctx.store.fetch(thread_id=room)
+        if len(got["items"]) != len(relay.rooms[room]["events"]):
+            raise AssertionError(f"불투명 커서로 전건을 못 받았다: {len(got['items'])}")
+        if not any("cursor=c%26k%3Dv%3D" in q for q in relay.seen_queries):
+            raise AssertionError(f"커서가 인코딩되지 않았다: {relay.seen_queries}")
+
+
+def _case_relay_limit_stays_inside_the_contract() -> None:
+    """`limit` 은 **계약 범위 안**으로 접어 보낸다(방 1..100 · 이벤트 1..200).
+
+    ★넘겨 보내면 서버가 400 을 준다. 부르는 쪽(도구·사람)의 큰 숫자를 그대로 실어 보내면
+      「목록이 안 나온다」가 되고, 원인은 우리 요청에 있다.
+    """
+    with _relay_env() as (ctx, relay, _url):
+        _relay_room(ctx)
+        ctx.store.list_threads(limit=500)
+        if not any("limit=100" in q for q in relay.seen_queries):
+            raise AssertionError(f"방 목록 상한을 안 접었다: {relay.seen_queries}")
+        ctx.store.fetch(thread_id=next(iter(relay.rooms)), limit=1000)
+        if not any("limit=200" in q for q in relay.seen_queries):
+            raise AssertionError(f"이벤트 상한을 안 접었다: {relay.seen_queries}")
+
+
+def _case_relay_honors_retry_after() -> None:
+    """429 의 `Retry-After` 를 **존중한다** — 그러나 우리 상한 안에서(계약 §3-7).
+
+    ★한도는 벽이 아니라 신호다. 서버가 말한 시간을 무시하고 우리 backoff 로 두드리면
+      그 신호를 안 듣는 것이다. ★반대로 값을 무한정 믿으면 서버가 한 시간을 재울 수 있다.
+    """
+    with _relay_env(retry_after="2") as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 429}
+        try:
+            ctx.store.list_threads()
+        except AgoraError:
+            pass
+        if ctx.store.waits[:1] != [2.0]:
+            raise AssertionError(f"Retry-After 를 안 들었다: {ctx.store.waits}")
+    with _relay_env(retry_after="9999") as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 429}
+        try:
+            ctx.store.list_threads()
+        except AgoraError:
+            pass
+        if ctx.store.waits[:1] != [60.0]:
+            raise AssertionError(f"상한이 없다: {ctx.store.waits}")
+
+
+def _case_relay_checkpoint_absence_is_a_two_hundred() -> None:
+    """체크포인트 **부재는 200 + `checkpoint: null`** 이다(계약 §3-6b) — 404 가 아니다.
+
+    ★`revoked_keys` 와 같은 규율이다: 「없음」과 「못 읽음」을 가른다. 그래서 부재일 때도
+      `current`(지금 명부 해시)가 함께 오고, 그 값은 버리지 않고 적는다.
+    ★있어도 **`verified: false`** 다 — 서명 대상 바이트·namespace·`signed_at` 결박이 계약에
+      아직 없다(RL-6). 검증하지 않은 것을 검증했다고 적지 않는다.
+    """
+    from agora import onboard
+    d = _onboard_dir()
+    with _fake_relay().serving() as (url, relay):          # checkpoint=None(부재)
+        absent = onboard._fetch_checkpoint(onboard._relay(url), d)
+    if absent["present"] is not False or not absent.get("current"):
+        raise AssertionError(f"부재를 못 읽었다: {absent}")
+    signed = {"checkpoint": "a" * 64, "signed_at": "2026-09-06T01:00:00.000Z",
+              "signer": "operator-a", "signature": "-----BEGIN SSH SIGNATURE-----\n",
+              "stale": False}
+    with _fake_relay().serving(checkpoint=signed) as (url, relay):
+        present = onboard._fetch_checkpoint(onboard._relay(url), d)
+    if present["present"] is not True or present["verified"] is not False:
+        raise AssertionError(f"체크포인트 판정이 다르다: {present}")
+    if "RL-6" not in present["why"]:
+        raise AssertionError(f"미확정 사유가 사라졌다: {present['why']}")
+    with _fake_relay().serving(checkpoint_404=True) as (url, relay):   # 엔드포인트 자체가 없는 상대
+        old = onboard._fetch_checkpoint(onboard._relay(url), d)
+    if old["present"] is not False or old.get("current"):
+        raise AssertionError(f"404 폴백이 다르다: {old}")
+
+
+def _case_relay_verdict_is_reported_not_obeyed() -> None:
+    """서버 `verdict` 는 **실어 올리되 따르지 않는다**(계약 §3-2·§5 · 설계 §3).
+
+    ★GitHub 시절에는 글쓴이가 `rc 0` 과 URL 을 받고도 자기 글이 반영 안 된 것을 몰랐다.
+      릴레이는 그 자리에서 말해 준다 — 그 말을 **버리지 않고** 결과에 싣는다.
+    ★그러나 이름을 `relay_verdict` 로 가른다: 우리 판정과 같은 칸에 두면 다음 사람이
+      **서버의 판정을 상태로 읽는다.** 정본은 우리 reducer 다 — 그래서 서버가 「격리했다」고
+      말해도 우리 쪽 상태는 그대로 유효해야 한다.
+    """
+    from agora import tools
+    f = _fixtures()
+    verdict = {"accepted_to_ledger": True, "reducer": "quarantined",
+               "reason": "stale_expected_state"}
+    with _relay_env(verdict=verdict, idempotent=False) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 마디"))
+        # ★어댑터 층에서 잰다. 도구 반환은 칸을 **추리므로**(`say` 는 message_id·url·usage 만)
+        #   여기서 도구를 재면 「어댑터가 버렸다」와 「도구가 안 실었다」가 구별되지 않는다.
+        #   ⚠도구 표면에 이 칸을 노출할지는 별개 결정이다 — 계약이 무시를 허용한다(§3-2).
+        before = tools._reduce(ctx, room)
+        body = relay.rooms[room]["events"][-1]["body"]
+        echoed = ctx.store.append(thread_id=room, category="debate", title="",
+                                  body=body, is_genesis=False)
+        if (echoed.get("relay_verdict") or {}).get("reason") != "stale_expected_state":
+            raise AssertionError(f"서버 판정을 버렸다: {echoed}")
+        after = tools._reduce(ctx, room)
+        if after["state"] != before["state"] or len(after["events"]) != len(before["events"]):
+            raise AssertionError(f"서버 판정을 우리 상태로 삼았다: {before['state']}→{after['state']}")
+        if len(after["events"]) != 2:
+            raise AssertionError(f"유효 이벤트 수가 다르다: {len(after['events'])}")
+
+
+def _case_relay_does_not_lean_on_server_validity() -> None:
+    """서버의 `valid`·`quarantined` 칸은 **대조 축이지 근거가 아니다**(계약 §3-5 · 설계 §3).
+
+    ★두 방향으로 잰다: ⑴서버가 「무효」라고 표시한 글도 **거르지 않고 받는다**(거르면 우리
+      reducer 가 `prev` 를 못 찾아 멀쩡한 글을 「닿지 않음」으로 만든다) ⑵서버가 위조 글에
+      「유효」라고 적어도 우리 reducer 는 **자기 눈으로** 격리한다.
+    """
+    from agora import tools
+    from agora.event import parse_post, render_post
+    f = _fixtures()
+    # ⑴ 서버가 **무효로 표시한** 글도 그대로 받는다(계약 §3-5 「거르지 않는다」).
+    with _relay_env(idempotent=False) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        relay.inject_raw(room_id=room, body="사람이 웹에서 쓴 댓글 — 우리 서식이 아니다")
+        marked = ctx.store.fetch(thread_id=room)
+        if len(marked["items"]) != 2:
+            raise AssertionError(f"서버 판정으로 걸러 냈다: {len(marked['items'])}")
+        reduced = tools._reduce(ctx, room)
+        if not reduced["quarantined"]:
+            raise AssertionError("우리 눈으로 격리한 것이 없다")
+    # ⑵ 서버가 위조 글에 **유효**라고 적어도 우리 reducer 는 격리한다.
+    with _relay_env(lie_valid=True, idempotent=False) as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        row = relay.rooms[room]["events"][0]
+        parsed = parse_post(row["body"])
+        forged = dict(parsed["event"])
+        forged["payload"] = {**forged["payload"], "body": "본문만 바꿔치기"}
+        relay.inject_raw(room_id=room, body=render_post(forged, parsed["signature"]))
+        reduced = tools._reduce(ctx, room)
+        reasons = {q.get("reason") for q in reduced["quarantined"]}
+        if "signature" not in reasons:
+            raise AssertionError(f"서버가 유효라고 하자 우리도 유효로 읽었다: {reasons}")
+
+
+def _case_register_refuses_to_send_without_proof() -> None:
+    """소유 증명 없이는 **보내지 않는다** — 계약 §3-1 의 필수 칸이다.
+
+    ★빼고 보내면 서버가 401 을 주고, 사용자는 「키가 잘못됐나」부터 의심한다.
+      빠진 칸의 이름을 우리가 대는 것이 그 왕복을 없앤다(S7-1 계보).
+    """
+    from agora.store_relay import RelayStore
+    store = RelayStore("https://relay.example", sleep=lambda _s: None)
+    try:
+        store.register(participant_id="p", display_name="d",
+                       public_key="ssh-ed25519 AAA", fingerprint="SHA256:x")
+    except AgoraError as e:
+        if e.code != errors.PRECONDITION:
+            raise AssertionError(f"다른 코드: {e.code}") from None
+        if (e.detail or {}).get("missing") != ["signature"]:
+            raise AssertionError(f"빠진 칸 이름을 안 댔다: {e.detail}")
+    else:
+        raise AssertionError("증명 없이 등록을 보냈다")
+
+
+def _case_register_purpose_value_is_pinned() -> None:
+    """등록 소유 증명의 `purpose` 는 **값까지 고정**이다(계약 §3-1 · `agora-register-v1`).
+
+    ★칸만 열어 두면 이 문이 「아무 목적이나 서명해 주는 곳」이 된다 — 그러면 여기서 나온 서명을
+      다른 자리에 재사용할 수 있고, 목적을 서명 안에 박은 뜻이 사라진다.
+    """
+    from agora import signer
+    from agora.contract_open import REGISTER_PURPOSE
+    base = {"display_name": "d", "fingerprint": "SHA256:x", "participant_id": "p",
+            "public_key": "ssh-ed25519 AAA"}
+    signer.self_check_register({**base, "purpose": REGISTER_PURPOSE})    # 계약값은 지나간다
+    try:
+        signer.self_check_register({**base, "purpose": "무언가-다른-목적"})
+    except AgoraError as e:
+        if e.code != errors.ARGUMENT:
+            raise AssertionError(f"다른 코드: {e.code}") from None
+    else:
+        raise AssertionError("계약 밖 purpose 를 서명해 줬다")
+
+
+def _case_relay_exhausted_write_is_unknown() -> None:
+    """쓰기가 **5xx 로 소진**되면 실패(7)가 아니라 **성공 불명(8)** 이다(agy 적대검증 2026-09-05 봉합).
+
+    ★프록시 504·워커 500 은 **서버가 이미 적재한 뒤**일 수 있다. 7 로 올리면 호출자가
+      재조회 판정(`_settle_unknown`)을 **안 탄다** — 사용자는 실패로 읽고 새 글을 다시 쓴다.
+      그것이 조용한 중복이다(GitHub 시절 게시물 4건 사고의 다른 입구).
+    ★**429 는 8 이 아니다.** 계약 §3-2 의 검사 순서에서 멱등이 속도 제한보다 앞이므로,
+      429 로 거절된 요청은 원장에 아무것도 안 남긴다 — 서버가 「안 받았다」를 명시한 것이다.
+    """
+    for status, want in ((500, errors.UNKNOWN_COMMIT), (429, errors.STORE)):
+        with _relay_env() as (ctx, relay, _url):
+            relay.status_override = {"/events": status}
+            try:
+                ctx.store.append(thread_id="a" * 32, category="debate", title="t",
+                                 body="본문", is_genesis=True)
+            except AgoraError as e:
+                if e.code != want:
+                    raise AssertionError(f"{status} 쓰기 소진이 {want} 가 아니다: {e.code}") from None
+            else:
+                raise AssertionError(f"{status} 인데 성공으로 읽었다")
+    # 읽기는 그대로 7 이다 — 읽기는 다시 물으면 되고, 남긴 것이 없다.
+    with _relay_env() as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 500}
+        try:
+            ctx.store.list_threads()
+        except AgoraError as e:
+            if e.code != errors.STORE:
+                raise AssertionError(f"읽기 소진이 7 이 아니다: {e.code}") from None
+        else:
+            raise AssertionError("500 을 성공으로 읽었다")
+
+
+def _case_relay_retry_marker_cannot_be_forged() -> None:
+    """서버는 **우리 재시도 표식을 위조할 수 없다**(agy 적대검증 2026-09-05 봉합).
+
+    ★표식(`detail.retry`)은 transport 가 다는 우리 것이다. 서버 본문을 그대로 `detail` 로 쓰면
+      서버가 `retry: true` 를 적어 **400 을 네 번 두드리게** 만들 수 있었다.
+      ⇒ 남의 말은 언제나 한 겹 아래(`detail.detail`)에 둔다.
+    ★일반형: **표식과 남의 말이 같은 칸에 살면, 그 칸을 읽는 판정은 남의 것이 된다.**
+    """
+    with _relay_env(forge_retry=True) as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 400}
+        try:
+            ctx.store.list_threads()
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"400 이 10 이 아니다: {e.code}") from None
+            if (e.detail or {}).get("retry") is True:
+                raise AssertionError("서버가 우리 표식을 차지했다")
+        else:
+            raise AssertionError("400 을 성공으로 읽었다")
+        if ctx.store.waits:
+            raise AssertionError(f"위조 표식을 믿고 재시도했다: {ctx.store.waits}")
+
+
+def _case_relay_idempotent_two_hundred_and_reuse_conflict() -> None:
+    """계약 §3-2 의 세 갈래 — 새 행 **201** · 멱등 **200** · 같은 id 다른 내용 **422/3**.
+
+    ★agy 적대검증 2026-09-05 지적(수용): 더블이 무엇이 오든 201 을 주고 내용을 안 봐서
+      ⑴어댑터의 200 경로가 한 번도 안 돌았고 ⑵재사용 방어가 더블에 아예 없었다.
+      **더블이 계약을 덜 지키면 그만큼 시험이 공허해진다.**
+    """
+    from agora import tools
+    from agora.event import parse_post, render_post
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 마디"))
+        body = relay.rooms[room]["events"][-1]["body"]
+        again = ctx.store.append(thread_id=room, category="debate", title="",
+                                 body=body, is_genesis=False)
+        if len(relay.rooms[room]["events"]) != 2:
+            raise AssertionError("멱등 재전송이 새 행을 만들었다")
+        if again["node_id"] != relay.rooms[room]["events"][-1]["event_id"]:
+            raise AssertionError(f"멱등 응답이 기존 행을 가리키지 않는다: {again}")
+        # 같은 message_id · 다른 내용 = 재시도가 아니라 다른 글이다.
+        parsed = parse_post(body)
+        other = dict(parsed["event"])
+        other["payload"] = {**other["payload"], "body": "내용만 바꿨다"}
+        try:
+            ctx.store.append(thread_id=room, category="debate", title="",
+                             body=render_post(other, parsed["signature"]),
+                             is_genesis=False)
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT:
+                raise AssertionError(f"재사용 충돌이 3 이 아니다: {e.code}") from None
+            if ((e.detail or {}).get("detail") or {}).get("detail", {}).get("conflict") \
+                    != "message_id_reused":
+                raise AssertionError(f"충돌 표식이 안 왔다: {e.detail}")
+        else:
+            raise AssertionError("같은 id 로 다른 글을 썼는데 받아들였다")
+    # 계약 밖 코드를 적는 상대에서도 422 는 게이트 거부다(상태 매핑 축).
+    with _relay_env(protocol_codes=False) as (ctx, relay, _url):
+        relay.status_override = {"/events": 422}
+        try:
+            ctx.store.append(thread_id="b" * 32, category="debate", title="t",
+                             body="본문", is_genesis=True)
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT:
+                raise AssertionError(f"422 상태 매핑이 3 이 아니다: {e.code}") from None
+        else:
+            raise AssertionError("422 를 성공으로 읽었다")
+
+
+def _case_register_carries_proof_of_possession() -> None:
+    """등록은 **소유 증명 서명**을 동봉한다(릴레이 계약 3-1).
+
+    ★없으면 「남의 공개키를 주워다 그 이름으로 등록」이 열린다. 그래서 가짜 릴레이도
+      증명 없는 등록을 **거부하게** 해 뒀다 — 서버가 그 규칙을 지키는지까지 이 케이스가 잰다.
+    """
+    from agora import onboard
+    d = _onboard_dir()
+    key = os.path.join(d, "id_ed25519")
+    with _fake_relay().serving() as (url, relay):
+        out = _with_key(key, lambda: onboard.register(directory=d, relay_url=url,
+                                                      unattended=True))
+        row = relay.registered.get("operator-a")
+        if not row:
+            raise AssertionError("등록이 서버에 안 남았다")
+        if "BEGIN SSH SIGNATURE" not in (row.get("signature") or ""):
+            raise AssertionError("소유 증명 서명이 안 실렸다")
+        if out["human_approval"] is not False:
+            raise AssertionError("--unattended 인데 승인 게이트가 안 꺼졌다")
+        cfg = onboard._load_config(d)
+        if cfg.get("transport") != "relay" or (cfg.get("relay") or {}).get("url") != url:
+            raise AssertionError(f"설정에 릴레이가 안 적혔다: {cfg}")
+
+
+def _case_register_door_is_not_a_signing_oracle() -> None:
+    """등록 문으로 **이벤트를 서명받을 수 없다**.
+
+    ★등록 요청에는 kind 검사가 없다(이벤트가 아니니까). 칸 집합을 열어 두면 그 문이 곧
+      「계약 밖 kind 도 서명해 주는 신탁」이 된다 — 그래서 다섯 칸 **정확히**로 닫아 뒀다
+      (계약 확정본 §3-1 · `purpose` 포함).
+    """
+    from agora import signer
+    # ★셋째 문서가 이 그물의 조준점이다: **계약 다섯 칸을 다 갖춘 뒤 덧칸을 붙였다.**
+    #   「필요한 칸이 있는가」로만 검사하면 이것이 통과한다 — 닫힌 집합이라야 막힌다.
+    #   (2026-09-05 r2 실측: purpose 가 늘면서 둘째 문서만으로는 M313 이 살아남았다.)
+    for doc in ({"v": 1, "kind": "genesis", "thread_id": "a" * 32},
+                {"display_name": "d", "fingerprint": "SHA256:x", "participant_id": "p",
+                 "public_key": "ssh-ed25519 AAA", "kind": "genesis"},
+                {"display_name": "d", "fingerprint": "SHA256:x", "participant_id": "p",
+                 "public_key": "ssh-ed25519 AAA", "purpose": "agora-register-v1",
+                 "kind": "genesis"}):
+        try:
+            signer.self_check_register(doc)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"다른 코드: {e.code}") from None
+        else:
+            raise AssertionError(f"등록 문이 이벤트를 받았다: {sorted(doc)}")
+
+
+def _case_sync_roster_is_tofu_then_confirmed() -> None:
+    """명부 동기화 — **첫 번째는 그대로(TOFU) · 그 뒤 변경은 `--yes` 없이는 거부**(RC-1).
+
+    ★명부의 정본이 운반층으로 옮겨 갔기 때문에 둔 문이다: 릴레이가 한 줄을 더 넣으면
+      그 키의 서명이 유효해진다. 첫 sync 는 대조할 것이 없지만(어떤 방식에서도 그렇다)
+      **그 뒤의 변화는 사람이 봐야 한다.**
+    ★거부할 때 **아무것도 안 쓴다**는 것까지 잰다 — 반쪽만 갱신되면 「그때의 명부」가 갈라진다.
+    """
+    from agora import onboard
+    d = _onboard_dir()
+    with _fake_relay().serving() as (url, relay):
+        relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
+        relay.roster_text["operators"] = "operator-a\n"
+        first = onboard.sync_roster(directory=d, relay_url=url)
+        if not first["first_sync"] or len(first["wrote"]) != 3:
+            raise AssertionError(f"첫 sync 가 계약과 다르다: {first}")
+        # 같은 내용 다시 = 변경 없음 → 승인 없이도 통과한다.
+        again = onboard.sync_roster(directory=d, relay_url=url)
+        if again["changes"]:
+            raise AssertionError(f"안 바뀌었는데 바뀌었다고 한다: {again['changes']}")
+        # 릴레이가 명부에 한 줄을 더한다 = 우리가 보고 판단해야 하는 사건이다.
+        relay.roster_text["allowed_signers"] += "낯선-참가자 ssh-ed25519 BBBB\n"
+        before = open(os.path.join(d, "allowed_signers"), encoding="utf-8").read()
+        try:
+            onboard.sync_roster(directory=d, relay_url=url)
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT:
+                raise AssertionError(f"다른 코드: {e.code}") from None
+            if "낯선-참가자" not in str((e.detail or {}).get("changes")):
+                raise AssertionError(f"무엇이 바뀌는지 안 말한다: {e.detail}")
+        else:
+            raise AssertionError("명부 변경을 확인 없이 받아들였다")
+        if open(os.path.join(d, "allowed_signers"), encoding="utf-8").read() != before:
+            raise AssertionError("거부했는데 파일을 썼다")
+        confirmed = onboard.sync_roster(directory=d, relay_url=url, yes=True)
+        if "낯선-참가자" not in open(os.path.join(d, "allowed_signers"), encoding="utf-8").read():
+            raise AssertionError("승인했는데 반영이 안 됐다")
+        if not os.path.exists(os.path.join(d, "allowed_signers.prev")):
+            raise AssertionError("되돌릴 손잡이(.prev)가 없다")
+        if confirmed["confirmed_by"] != "--yes":
+            raise AssertionError(f"무엇으로 확인했는지 안 적는다: {confirmed}")
+
+
+def _case_sync_roster_stops_when_revocations_are_missing() -> None:
+    """폐기 목록에 **404** 로 답하는 서버에서는 **멈춘다**(fail-closed).
+
+    ★「없음」은 빈 파일로 말한다. 404 를 「폐기된 키 0건」으로 읽으면, 파일 하나를 안 주는 것이
+      곧 **폐기 목록 전체를 끄는 방법**이 된다 — `roster._fingerprints_of` 가 파일 부재를
+      fail-closed 로 다루는 것과 같은 규율을 네트워크 경계에도 둔다.
+    """
+    from agora import onboard
+    d = _onboard_dir()
+    with _fake_relay().serving(revoked_404=True) as (url, relay):
+        try:
+            onboard.sync_roster(directory=d, relay_url=url)
+        except AgoraError as e:
+            if e.code != errors.STORE:
+                raise AssertionError(f"다른 코드: {e.code}") from None
+        else:
+            raise AssertionError("폐기 목록 없이 명부를 갈아 끼웠다")
+        if os.path.exists(os.path.join(d, "allowed_signers")):
+            raise AssertionError("멈췄는데 파일을 썼다")
+
+
+def _case_whoami_puts_the_approval_gate_first() -> None:
+    """`whoami` 의 **첫 칸이 승인 게이트**다(RC-2 · master 결정 2026-09-05).
+
+    ★사람 승인 겹이 꺼진 것은 설치가 내린 결정이고, 그 결정은 **볼 때마다 보여야** 한다.
+      출력은 키 정렬이라 이름이 곧 자리다 — 이름을 바꾸면 그 사실이 화면 아래로 내려간다.
+    """
+    import json as _json
+    from agora import onboard
+    d = _onboard_dir()
+    key = os.path.join(d, "id_ed25519")
+    with _fake_relay().serving() as (url, relay):
+        relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
+        _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True))
+        onboard.sync_roster(directory=d, relay_url=url)
+    out = onboard.whoami(directory=d)
+    rendered = _json.dumps(out, ensure_ascii=False, sort_keys=True, indent=2)
+    first_key = rendered.splitlines()[1].strip().split('"')[1]
+    if first_key != "approval_gate":
+        raise AssertionError(f"첫 칸이 승인 게이트가 아니다: {first_key}")
+    if "꺼짐" not in out["approval_gate"]["state"]:
+        raise AssertionError(f"꺼진 사실을 안 적는다: {out['approval_gate']}")
+    if not out["roster_checkpoint"]["sha256"]:
+        raise AssertionError("명부 해시가 없다")
+    if out["transport"] != "relay" or not out["relay"]:
+        raise AssertionError(f"운반층을 안 적는다: {out}")
+
+
+def _case_journey_tools_call_the_existing_ones() -> None:
+    """여정 3종은 **기존 도구를 부른다** — 새 발행 경로·새 목록을 만들지 않는다(RC-5).
+
+    ★새로 짜면 두 곳이 갈라지고, 갈라진 날 한쪽만 고쳐진다(F-07 「한 사건에 이름 셋」의 재발).
+      특히 `enter` 가 발행 경로를 직접 부르면 계약→스크럽→승인→서명→쓰기→원장 중 몇이 조용히 빠진다.
+    ★소스를 **AST 로** 본다 — 문자열 검색은 주석·docstring 에 걸린다.
+    """
+    import ast
+    tree = ast.parse(_read_text(os.path.join(_ROOT, "agora", "tools.py")))
+    bodies = {node.name: node for node in ast.walk(tree)
+              if isinstance(node, ast.FunctionDef)}
+    for name, must_call, must_not in (("enter", "propose", "_publish"),
+                                      ("browse", "threads", "list_threads")):
+        node = bodies.get(name)
+        if node is None:
+            raise AssertionError(f"{name} 이 없다")
+        called = {n.func.id for n in ast.walk(node)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        if must_call not in called:
+            raise AssertionError(f"{name} 이 {must_call} 을 안 부른다: {sorted(called)}")
+        if must_not in called:
+            raise AssertionError(f"{name} 이 {must_not} 을 직접 부른다 — 두 번째 경로가 생겼다")
+    join_node = bodies.get("join")
+    join_calls = {n.func.id for n in ast.walk(join_node)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    if "_publish" in join_calls:
+        raise AssertionError("join 이 이벤트를 만든다 — 로컬 동작이어야 한다(kind 9종 동결)")
+
+
+def _case_cli_surface_accepts_flag_arguments() -> None:
+    """★**`bin/agora` 의 진입점**이 `--key value` 를 실제로 받는다(설치 한 줄이 그 서식이다).
+
+    ★★이 그물이 없어서 뚫렸다(2026-09-05 CLI 실사격): `cli._kv` 는 세 서식을 읽을 줄 아는데
+      **argparse 가 그 값을 거기까지 보내지 않았다** — 서브커맨드 뒤의 `--topic` 을 「모르는 옵션」으로
+      보고 죽였다. 시험은 `_kv` 를 **직접** 부르고 있어서 전건 초록이었다.
+      ⇒ 「등록됐다」와 「동작한다」의 그 자리다. 그래서 이 케이스는 **진입점(`cli.main`)을 부른다.**
+    ★한 명령이 아니라 **설치 한 줄의 순서 그대로** 태운다(register → sync-roster → enter) —
+      낱개로 재면 「따로는 되는데 이어서는 안 되는」 조합이 안 보인다.
+    """
+    import contextlib
+    import io as _io
+    from agora import cli
+    d = _onboard_dir()
+    key = os.path.join(d, "id_ed25519")
+    old_dir = os.environ.get("AGORA_CONFIG_DIR")
+    os.environ["AGORA_CONFIG_DIR"] = d
+    try:
+        with _fake_relay().serving() as (url, relay):
+            relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
+
+            def run(argv: list[str]) -> int:
+                with contextlib.redirect_stdout(_io.StringIO()):
+                    return _with_key(key, lambda: cli.main(argv))
+
+            for argv in (["register", "--relay", url, "--unattended"],
+                         ["sync-roster"],
+                         ["whoami"],
+                         ["enter", "--topic", "가짜 주제", "--kind", "debate"]):
+                rc = run(argv)
+                if rc != errors.OK:
+                    raise AssertionError(f"CLI 가 이 인자를 못 받았다: {argv[0]} rc={rc}")
+            if len(relay.rooms) != 1:
+                raise AssertionError(f"CLI 로 연 방이 릴레이에 없다: {len(relay.rooms)}")
+            # 기존 서식(`key=value`)도 그대로여야 한다 — 새 서식을 들이면서 옛 서식을 깨지 않는다.
+            room = next(iter(relay.rooms))
+            if run(["join", f"room_id={room}"]) != errors.OK:
+                raise AssertionError("key=value 서식이 깨졌다")
+    finally:
+        if old_dir is None:
+            os.environ.pop("AGORA_CONFIG_DIR", None)
+        else:
+            os.environ["AGORA_CONFIG_DIR"] = old_dir
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
@@ -9078,7 +10140,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("관계: 안 열린 것도 가리킨다",   _case_link_to_unopened_thread_is_allowed, None),
     ("S6: 9축 그물 실재",             _case_s6_axes_have_nets, None),
     ("표: 모든 변이가 축에 속한다",   _case_every_mutation_belongs_to_an_axis, None),
-    ("MCP: 도구 11종 노출",           _case_mcp_exposes_eleven_tools, None),
+    ("MCP: 도구 14종 노출",           _case_mcp_exposes_eleven_tools, None),
     ("MCP: 스키마는 시그니처 파생",   _case_mcp_schema_follows_signature, None),
     ("MCP: 경로형 인자 0건",          _case_mcp_has_no_path_arguments, None),
     ("MCP: 모르는 것은 거부",         _case_mcp_rejects_unknown_method_and_tool, None),
@@ -9147,12 +10209,186 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("봉투: 정본 표와 코드가 같다",    _case_envelope_table_is_the_source_and_code_matches, None),
     ("잠금: 두 번째 실행은 즉시 거부된다", _case_second_selftest_is_refused_at_once, None),
     ("계약: 03 예외 목록은 코드와 같다", _case_design_exempt_list_matches_code, None),
+    # ── S8 릴레이 운반층(2026-09-05) ────────────────────────────────────────
+    ("릴레이: J1 방 개설~권고 완주",  _case_relay_journey_one, None),
+    ("릴레이: J2 로비~참가~발언",     _case_relay_journey_two, None),
+    ("릴레이: join 은 관문이 아니다", _case_relay_join_is_not_a_gate, None),
+    ("릴레이: 위조 서명 격리",        _case_relay_forged_signature_is_quarantined, None),
+    ("릴레이: 사슬 경합은 stale",     _case_relay_chain_fork_is_stale, None),
+    ("릴레이: 봉투 위반은 쓰기 0",    _case_relay_envelope_violation_never_writes, None),
+    ("릴레이: 페이지를 끝까지 받는다", _case_relay_fetch_follows_every_page, None),
+    ("릴레이: 멱등 재전송",           _case_relay_idempotent_resend_makes_no_row, None),
+    ("릴레이: 갱신 안 하면 눈이 먼다", _case_relay_stale_updated_at_blinds_watch, None),
+    ("릴레이: 상태 매핑 404·429",     _case_relay_maps_http_status_to_our_codes, None),
+    ("릴레이: 무응답 = 쓰기 8·읽기 7", _case_relay_no_answer_is_eight_on_write_seven_on_read, None),
+    ("릴레이: number 는 문자열",      _case_relay_number_is_a_string_and_round_trips, None),
+    ("릴레이: 투영은 할 것이 없다",   _case_relay_projection_says_nothing_to_do, None),
+    ("등록: 소유 증명 동봉",          _case_register_carries_proof_of_possession, None),
+    ("등록: 문이 서명 신탁이 아니다", _case_register_door_is_not_a_signing_oracle, None),
+    ("명부: TOFU 뒤 변경은 확인",     _case_sync_roster_is_tofu_then_confirmed, None),
+    ("명부: 폐기 목록 없으면 멈춤",   _case_sync_roster_stops_when_revocations_are_missing, None),
+    ("whoami: 첫 칸이 승인 게이트",   _case_whoami_puts_the_approval_gate_first, None),
+    ("여정: 기존 도구를 부른다",      _case_journey_tools_call_the_existing_ones, None),
+    ("CLI: 진입점이 플래그를 받는다", _case_cli_surface_accepts_flag_arguments, None),
+    ("릴레이: 본문 code 가 정본",     _case_relay_body_code_wins_over_status, None),
+    ("릴레이: 403 은 권한 5",         _case_relay_forbidden_is_permission, None),
+    ("릴레이: 커서는 불투명하다",     _case_relay_cursor_is_opaque, None),
+    ("릴레이: limit 은 계약 안",      _case_relay_limit_stays_inside_the_contract, None),
+    ("릴레이: Retry-After 존중",      _case_relay_honors_retry_after, None),
+    ("릴레이: 체크포인트 부재는 200", _case_relay_checkpoint_absence_is_a_two_hundred, None),
+    ("릴레이: verdict 는 참고값",     _case_relay_verdict_is_reported_not_obeyed, None),
+    ("릴레이: 서버 valid 에 안 기댄다", _case_relay_does_not_lean_on_server_validity, None),
+    ("등록: 증명 없이 안 보낸다",     _case_register_refuses_to_send_without_proof, None),
+    ("등록: purpose 값이 고정",       _case_register_purpose_value_is_pinned, None),
+    ("릴레이: 쓰기 소진은 8",         _case_relay_exhausted_write_is_unknown, None),
+    ("릴레이: 표식은 위조 불가",      _case_relay_retry_marker_cannot_be_forged, None),
+    ("릴레이: 멱등 200·재사용 422",   _case_relay_idempotent_two_hundred_and_reuse_conflict, None),
+    ("S8: 8축이 그물을 갖는다",       _case_s8_axes_have_nets, None),
 )
 
 
 # ── 뮤테이션 ────────────────────────────────────────────────────────────────
 # (id, 파일, 찾을 문자열, 바꿀 문자열, 이 변이를 잡아야 하는 케이스 이름)
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+    # ── S8 릴레이 운반층(2026-09-05) ────────────────────────────────────────
+    # ── r2 릴레이 계약 확정본 대조(2026-09-05 · docs/RELAY.md@b2ca815) ──────
+    # ★agy 적대검증 1R 봉합(2026-09-05) — 셋 다 「조용히 틀리는」 자리다.
+    ("M334-relay-exhausted-write-is-seven", "agora/store_relay.py",
+     '    may_have_landed = bool(write and type(status) is int and status >= 500)',
+     '    may_have_landed = False',
+     "릴레이: 쓰기 소진은 8"),
+    ("M335-relay-lets-server-forge-retry", "agora/store_relay.py",
+     '        return AgoraError(code or default, message, {"status": status, "detail": detail})',
+     '        return AgoraError(code or default, message, detail)',
+     "릴레이: 표식은 위조 불가"),
+    ("M336-relay-unprocessable-is-not-a-gate", "agora/store_relay.py",
+     '    if status in (413, 422):',
+     '    if status == 413:',
+     "릴레이: 멱등 200·재사용 422"),
+    ("M323-register-signs-four-fields", "agora/onboard.py",
+     '             "participant_id": doc["id"], "public_key": public_key,\n             "purpose": REGISTER_PURPOSE}',
+     '             "participant_id": doc["id"], "public_key": public_key}',
+     "등록: 소유 증명 동봉"),
+    ("M324-register-purpose-not-pinned", "agora/signer.py",
+     '    if doc.get("purpose") != REGISTER_PURPOSE:',
+     '    if False:',
+     "등록: purpose 값이 고정"),
+    ("M325-relay-ignores-body-code", "agora/store_relay.py",
+     '    code = _body_code(detail)\n',
+     '    code = None\n',
+     "릴레이: 본문 code 가 정본"),
+    ("M326-relay-forbidden-is-signature", "agora/store_relay.py",
+     '        return wrap(errors.PERMISSION if status == 403 else errors.SIGNATURE,',
+     '        return wrap(errors.SIGNATURE,',
+     "릴레이: 403 은 권한 5"),
+    ("M327-relay-cursor-not-encoded", "agora/store_relay.py",
+     '    items = [(k, str(v)) for k, v in params.items() if v not in (None, "")]\n    return ("?" + urlencode(items)) if items else ""',
+     '    items = [(k, str(v)) for k, v in params.items() if v not in (None, "")]\n    return ("?" + "&".join(f"{k}={v}" for k, v in items)) if items else ""',
+     "릴레이: 커서는 불투명하다"),
+    ("M328-relay-limit-unclamped", "agora/store_relay.py",
+     '    return max(1, min(wanted, high))',
+     '    return wanted',
+     "릴레이: limit 은 계약 안"),
+    ("M329-relay-ignores-retry-after", "agora/store_relay.py",
+     '                wait = _retry_delay(e, delay)      # ★서버가 말한 값이 우리 곱보다 앞선다',
+     '                wait = delay      # ★서버가 말한 값이 우리 곱보다 앞선다',
+     "릴레이: Retry-After 존중"),
+    ("M330-relay-checkpoint-null-is-present", "agora/onboard.py",
+     '    if doc.get("checkpoint") is None:',
+     '    if False:',
+     "릴레이: 체크포인트 부재는 200"),
+    ("M331-relay-drops-verdict", "agora/store_relay.py",
+     '        if out.get("verdict") is not None:\n            row["relay_verdict"] = out["verdict"]',
+     '        if False:\n            row["relay_verdict"] = out["verdict"]',
+     "릴레이: verdict 는 참고값"),
+    ("M332-relay-filters-server-invalid", "agora/store_relay.py",
+     '            for item in data.get("items") or []:\n                rows.append({',
+     '            for item in data.get("items") or []:\n                if item.get("valid") is False:\n                    continue\n                rows.append({',
+     "릴레이: 서버 valid 에 안 기댄다"),
+    ("M333-relay-register-without-proof", "agora/store_relay.py",
+     '        if not signature:\n            raise AgoraError(errors.PRECONDITION,',
+     '        if False:\n            raise AgoraError(errors.PRECONDITION,',
+     "등록: 증명 없이 안 보낸다"),
+    ("M305-relay-fetch-stops-at-first-page", "agora/store_relay.py",
+     '            page_cursor = data.get("next_cursor")\n            if not page_cursor:\n                break',
+     '            page_cursor = data.get("next_cursor")\n            if True:\n                break',
+     "릴레이: 페이지를 끝까지 받는다"),
+    # ★2026-09-05 r2 재조준 3건(M306·M325·M326) — agy 봉합으로 `_map_status` 가 `wrap` 을 쓰게 되며
+    #   조준 문자열이 사라졌다. 옮기지 않으면 그 축이 **NOT-APPLIED 로 조용히 꺼진다**(같은 형태 4번째).
+    ("M306-relay-retries-404", "agora/store_relay.py",
+     '        return wrap(errors.STORE, "릴레이에 그것이 없다")',
+     '        return AgoraError(errors.STORE, "릴레이에 그것이 없다",\n                          {"status": 404, "retry": True, "detail": detail})',
+     "릴레이: 상태 매핑 404·429"),
+    ("M319-relay-retries-everything", "agora/store_relay.py",
+     '                if not is_retryable_store(e):\n                    raise',
+     '                if False:\n                    raise',
+     "릴레이: 상태 매핑 404·429"),
+    ("M307-relay-write-timeout-is-seven", "agora/store_relay.py",
+     '        code = errors.UNKNOWN_COMMIT if write else errors.STORE\n        raise AgoraError(code, "릴레이 응답이 없다",',
+     '        code = errors.STORE\n        raise AgoraError(code, "릴레이 응답이 없다",',
+     "릴레이: 무응답 = 쓰기 8·읽기 7"),
+    ("M308-relay-projection-claims-ok", "agora/store_relay.py",
+     '        return {"projected": "derived",',
+     '        return {"projected": "ok", "ok": True,',
+     "릴레이: 투영은 할 것이 없다"),
+    # ★RC-4 의 그물에 **뮤턴트가 없었다**(케이스만 있었다) — 「케이스가 있다」와 「그 축을 잰다」는 다르다.
+    ("M321-relay-coerces-number-to-int", "agora/store_relay.py",
+     '        room = number or thread_id',
+     '        room = int(number) if number else thread_id',
+     "릴레이: number 는 문자열"),
+    ("M320-relay-status-never-derives", "agora/store_relay.py",
+     '        if "closed" not in data:',
+     '        if "closed" in data:',
+     "릴레이: J1 방 개설~권고 완주"),
+    ("M309-relay-roster-swallows-404", "agora/store_relay.py",
+     '        for name in ROSTER_FILES:\n            out[name] = self._run("GET", f"/participants/{name}", accept="text")',
+     '        for name in ROSTER_FILES:\n            try:\n                out[name] = self._run("GET", f"/participants/{name}", accept="text")\n            except AgoraError:\n                out[name] = ""',
+     "명부: 폐기 목록 없으면 멈춤"),
+    ("M310-sync-roster-skips-confirmation", "agora/onboard.py",
+     '    if changes and not first_sync and not yes:',
+     '    if changes and not first_sync and not yes and False:',
+     "명부: TOFU 뒤 변경은 확인"),
+    # ★2026-09-05 재조준 — agy 봉합으로 이 블록이 try 안으로 들어가며 들여쓰기가 바뀌었다.
+    #   조준을 안 옮기면 「.prev 보존」 축이 NOT-APPLIED 로 조용히 꺼진다(오늘 세 번째 같은 형태).
+    ("M311-sync-roster-keeps-no-previous", "agora/onboard.py",
+     '            if os.path.exists(path):\n                # 되돌릴 손잡이 — 잘못된 명부를 받았을 때 직전 것이 옆에 있어야 한다.',
+     '            if False:\n                # 되돌릴 손잡이 — 잘못된 명부를 받았을 때 직전 것이 옆에 있어야 한다.',
+     "명부: TOFU 뒤 변경은 확인"),
+    ("M312-register-drops-proof", "agora/onboard.py",
+     '        public_key=claim["public_key"], fingerprint=claim["fingerprint"],\n        signature=signed["signature"])',
+     '        public_key=claim["public_key"], fingerprint=claim["fingerprint"])',
+     "등록: 소유 증명 동봉"),
+    ("M313-register-door-accepts-extra-fields", "agora/signer.py",
+     '    if tuple(sorted(doc)) != REGISTER_FIELDS:',
+     '    if not set(REGISTER_FIELDS) <= set(doc):',
+     "등록: 문이 서명 신탁이 아니다"),
+    ("M314-whoami-buries-the-gate", "agora/onboard.py",
+     '        "approval_gate": {',
+     '        "zz_gate": {',
+     "whoami: 첫 칸이 승인 게이트"),
+    ("M315-enter-opens-its-own-write-path", "agora/tools.py",
+     '    if kind not in ROOM_KINDS:\n        raise AgoraError(errors.ARGUMENT, "방은 debate 나 problem 이다",\n                         {"kind": kind, "allowed": list(ROOM_KINDS)})',
+     '    if kind not in ROOM_KINDS:\n        _publish(ctx, kind="genesis", thread_id=topic, payload={}, prev="",\n                 expected_state="", category=kind)',
+     "여정: 기존 도구를 부른다"),
+    ("M316-browse-shows-closed-rooms", "agora/tools.py",
+     '        if item["state"] == "closed":\n            closed += 1\n            continue',
+     '        if item["state"] == "closed":\n            closed += 1',
+     "릴레이: J2 로비~참가~발언"),
+    ("M317-join-enters-closed-rooms", "agora/tools.py",
+     '    if reduced["state"] == "closed":\n        raise AgoraError(errors.PRECONDITION, "닫힌 방에는 참가할 수 없다",',
+     '    if False:\n        raise AgoraError(errors.PRECONDITION, "닫힌 방에는 참가할 수 없다",',
+     "릴레이: J2 로비~참가~발언"),
+    # ★첫 조준은 **등가 뮤턴트**였다(SURVIVED): 서브파서의 `nargs` 를 되돌려도 진입점이 이제
+    #   서브커맨드 뒤를 argparse 에 안 넘기므로 동작이 안 바뀐다. ⇒ **동작을 만드는 자리**를 조준한다.
+    ("M322-cli-entry-rejects-flags", "agora/cli.py",
+     "        command, rest = argv[0], argv[1:]",
+     "        command, rest = parser.parse_args(argv).command, []",
+     "CLI: 진입점이 플래그를 받는다"),
+    ("M318-transport-precedence-flipped", "agora/tools.py",
+     '    if (cfg.get("relay") or {}).get("url"):\n        return "relay"\n    if cfg.get("repo"):\n        return "github"',
+     '    if cfg.get("repo"):\n        return "github"\n    if (cfg.get("relay") or {}).get("url"):\n        return "relay"',
+     "설정: 빠진 저장소 칸을 댄다"),
+
     # ★S1-8 AC ②(B③ 드릴) — 하네스 자기 파일을 조준한다. 복구 루틴 무력 · run() 미배선.
     ("M296-recovery-does-not-restore", "agora/selftest.py",
      '        with open(path, "w", encoding="utf-8") as fh:\n            fh.write(entry["original"])',
@@ -9834,9 +11070,12 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    path = _os.path.join(directory, "config.json")',
      '    path = _os.path.join(directory, "participant.json")',
      "설정: config.json 에서 온다"),
+    # ★2026-09-05 재조준(계약 확장 5로 목록이 길어졌다) — **변이가 겨누는 것은 목록의 내용**이므로
+    #   목록이 바뀌면 이 문자열도 함께 옮겨야 한다. 안 옮기면 NOT-APPLIED 로 이 축이 조용히 꺼진다.
     ("M164-local-command-becomes-tool", "agora/cli.py",
-     'MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",\n                        "reconcile", "mcp-serve", "delegate-chair", "abort"})',
-     'MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import"})',
+     '''MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
+                        "reconcile", "mcp-serve", "delegate-chair", "abort",''',
+     '''MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export",''',
      "CLI: 전용 명령은 도구 아니다"),
     # ── S6-3 대리인 스킬 ────────────────────────────────────────────────────
     ("M165-brief-tools-hardcoded", "agora/brief.py",
@@ -10075,9 +11314,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "        mcp_server.serve()\n        return None",
      "        return mcp_server.serve()",
      "MCP: 예시대로 서버가 뜬다"),
+    # ★2026-09-05 재조준 — 같은 이유(목록이 길어졌다). `mcp-serve` 를 예외에서 빼면 도구로 노출된다.
     ("M213-mcp-serve-exposed-as-tool", "agora/cli.py",
-     '                        "reconcile", "mcp-serve", "delegate-chair", "abort"})',
-     '                        "reconcile"})',
+     '                        "reconcile", "mcp-serve", "delegate-chair", "abort",',
+     '                        "reconcile", "delegate-chair", "abort",',
      "MCP: 기동은 도구가 아니다"),
     ("M211-head-advances-on-accepted-only", "agora/reducer.py",
      '        state["head"] = entry["hash"]\n\n    for entry in chain[1:]:',
@@ -10428,9 +11668,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "def _is_drill_exit_mismatch(e: BaseException) -> bool:\n    return \"-9\" in str(e)\n    \"\"\"",
      "복구: 드릴은 진짜 -9 를 요구한다"),
     # ★J-7 잔여(codex b4) — 정본 행의 이름 하나를 바꾼다: 문서↔코드 대조가 없으면 초록이었다.
+    # ★2026-09-05 재조준 — 03 §4 정본 행이 12종으로 늘며 `abort` 뒤에 이름이 붙었다.
+    #   조준 문자열을 안 옮기면 이 축(문서↔코드 대조)이 NOT-APPLIED 로 조용히 꺼진다.
     ("M304-design-exempt-list-renames-one", ".appbuild/03-architecture.md",
-     "· `abort` | |",
-     "· `abort-renamed` | |",
+     "· `abort` · `register`",
+     "· `abort-renamed` · `register`",
      "계약: 03 예외 목록은 코드와 같다"),
 )
 
@@ -10684,7 +11926,7 @@ def _run_locked() -> dict[str, Any]:
             "뮤테이션": f"{len([r for r in mutation_rows if r['result'] == 'KILLED'])}/"
                         f"{len(mutation_rows)} KILLED",
             "미구현_서브커맨드": unbuilt,
-            "슬라이스": "S7-3(debate 완주)"
+            "슬라이스": "S8(릴레이 운반층)"
         },
         # ok 는 「이 슬라이스가 자기 몫을 했는가」다.
         # 미발생 오류코드는 다음 슬라이스의 몫이므로 여기서 ok 를 깎지 않는다 —
