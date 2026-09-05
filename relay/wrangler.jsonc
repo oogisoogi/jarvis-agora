@@ -30,7 +30,7 @@
 
   // 박람회장 보드(정적 화면 · 워커 D 소유 = fair/board 의 relay/board/) 를 같은 Worker 에서 서빙하는 블록.
   // ⛔지금은 **주석이다.** 켜는 시점 = master 가 fair/board 를 병합해 relay/board/ 실물이 들어오는 그 커밋.
-  //   "assets": { "directory": "./board" },
+  "assets": { "directory": "./board" },
   //
   // ★실측(2026-09-05 · 이 기계):
   //   ⑴ 디렉터리가 **비어 있으면** wrangler dev 는 **정상 기동**한다 — /health 200 · /rooms 200(Worker 가 받는다)
