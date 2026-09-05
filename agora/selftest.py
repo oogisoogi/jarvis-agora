@@ -4396,7 +4396,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M330-relay-checkpoint-null-is-present"),
     # ★r3 신설 — 명부의 정본이 운반층으로 간 뒤 **유일하게 되돌려 오는 장치**가 이 서명이다.
     "체크포인트": ("M337-checkpoint-verifies-nothing", "M338-checkpoint-ignores-operators",
-                   "M339-checkpoint-signed-at-unbound", "M340-checkpoint-verdict-not-wired"),
+                   "M339-checkpoint-signed-at-unbound", "M340-checkpoint-verdict-not-wired",
+                   "M343-checkpoint-accepts-rollback", "M344-checkpoint-writes-before-verify"),
     "소유증명": ("M312-register-drops-proof", "M313-register-door-accepts-extra-fields",
                  "M323-register-signs-four-fields", "M324-register-purpose-not-pinned",
                  "M333-relay-register-without-proof"),
@@ -9428,8 +9429,12 @@ def _case_relay_checkpoint_absence_is_a_two_hundred() -> None:
         raise AssertionError(f"체크포인트 판정이 다르다: {present}")
     if not present["why"] or present["why"].startswith("검증 계약 미확정"):
         raise AssertionError(f"검증 사유가 아니다: {present['why']}")
-    if present.get("file") != onboard.CHECKPOINT_FILENAME:
-        raise AssertionError("검증 실패인데 받은 것을 안 남겼다")
+    # ★검증 실패분은 **옆자리**(`.rejected.json`)에 남긴다 — 정본 자리는 검증을 지난 것만 차지한다
+    #   (agy 적대검증 2026-09-06 · write-before-verify 봉합). 무엇이 왔는지는 남기되 성한 것을 안 덮는다.
+    if present.get("file") != onboard.CHECKPOINT_FILENAME.replace(".json", ".rejected.json"):
+        raise AssertionError(f"실패분을 옆자리에 안 남겼다: {present.get('file')}")
+    if os.path.exists(os.path.join(d, onboard.CHECKPOINT_FILENAME)):
+        raise AssertionError("검증 실패 문서가 정본 자리를 차지했다")
     with _fake_relay().serving(checkpoint_404=True) as (url, relay):   # 엔드포인트 자체가 없는 상대
         old = onboard._fetch_checkpoint(onboard._relay(url), d)
     if old["present"] is not False or old.get("current"):
@@ -9712,7 +9717,22 @@ def _case_checkpoint_signature_is_verified() -> None:
     out = check(dict(good, signed_at="2026-09-06T01:00:00Z"))
     if out["verified"] or out["why"] != "signed_at_format":
         raise AssertionError(f"서식 검사가 없다: {out}")
-    # ⑸ 명부가 자란 뒤 — **서명은 여전히 유효**하고 `matches_local` 만 거짓이다.
+    # ⑸ **되돌리기**: 서명은 유효하지만 내가 이미 본 것보다 과거다(agy 2026-09-06 지적 · 부분 수용).
+    #   ★서명은 과거의 사실이라, 옛 문서를 다시 내놓는 것만으로 명부를 되돌릴 수 있다.
+    older = _signed_checkpoint(f["key_a"], checkpoint=local,
+                               signed_at="2026-09-05T00:00:00.000Z")
+    out = roster_mod.verify_checkpoint(
+        older, allowed_signers_path=paths["participants/allowed_signers"],
+        operators_path=paths["participants/operators"],
+        revoked_path=paths["participants/revoked_keys"],
+        last_signed_at="2026-09-06T01:00:00.000Z")
+    if out["verified"] or out["why"] != "signed_at_regressed":
+        raise AssertionError(f"되돌리기를 통과시켰다: {out}")
+    # ⑹ `signature` 가 문자열이 아니다 — **거부**해야지 터지면 안 된다(같은 검증의 지적).
+    out = check(dict(good, signature=1234))
+    if out["verified"] or out["why"] != "missing_field:signature":
+        raise AssertionError(f"타입이 틀린 서명에 우아하게 답하지 않았다: {out}")
+    # ⑺ 명부가 자란 뒤 — **서명은 여전히 유효**하고 `matches_local` 만 거짓이다.
     with open(paths["participants/allowed_signers"], "a", encoding="utf-8") as fh:
         fh.write("낯선-참가자 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZha2U=\n")
     grown = roster_mod.checkpoint(paths=paths)
@@ -10450,6 +10470,15 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        "signed_at": doc.get("signed_at"), "signer": doc.get("signer")})',
      '        "signed_at": "", "signer": doc.get("signer")})',
      "명부: 체크포인트 서명 검증"),
+    # ★agy 적대검증 r3 봉합(2026-09-06).
+    ("M343-checkpoint-accepts-rollback", "agora/roster.py",
+     '    if last_signed_at and doc["signed_at"] < last_signed_at:',
+     '    if False:',
+     "명부: 체크포인트 서명 검증"),
+    ("M344-checkpoint-writes-before-verify", "agora/onboard.py",
+     '    name = (CHECKPOINT_FILENAME if verdict["verified"]\n            else CHECKPOINT_FILENAME.replace(".json", ".rejected.json"))',
+     '    name = CHECKPOINT_FILENAME',
+     "릴레이: 체크포인트 부재는 200"),
     ("M340-checkpoint-verdict-not-wired", "agora/onboard.py",
      '    return {"present": True, "verified": verdict["verified"], "why": verdict["why"],',
      '    return {"present": True, "verified": True, "why": verdict["why"],',

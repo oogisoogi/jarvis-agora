@@ -48,6 +48,17 @@ def _write_json(path: str, doc: Any, *, mode: int = 0o600) -> None:
     os.replace(tmp, path)
 
 
+def _read_json(path: str) -> dict[str, Any] | None:
+    """있으면 읽고, 없거나 깨졌으면 **None**. 「없다」와 「못 읽었다」를 여기서는 같게 다룬다 —
+    둘 다 「비교할 지난 것이 없다」는 뜻이고, 그 경우 단조 검사는 그냥 건너뛴다."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if type(doc) is dict else None
+
+
 def _load_config(directory: str) -> dict[str, Any]:
     from agora.tools import load_config
     return load_config(directory)
@@ -225,21 +236,29 @@ def _fetch_checkpoint(store: Any, directory: str) -> dict[str, Any]:
         # 서버는 답했고, 답의 내용이 「아직 없다」다. 「못 읽었다」와 같은 칸에 적지 않는다.
         return {"present": False, "verified": False, "why": "relay_has_no_checkpoint",
                 "current": doc.get("current"), "stale": doc.get("stale")}
-    _write_json(os.path.join(directory, CHECKPOINT_FILENAME), doc)
+    # ★★**검증 전에 덮어쓰지 않는다**(agy 적대검증 2026-09-06 지적 · 수용): 먼저 쓰면 서명이 틀린
+    #   문서가 **직전의 성한 체크포인트를 파괴**한다. 못 믿을 것은 옆(`.rejected.json`)에 두고,
+    #   정본 자리는 **검증을 지난 것만** 차지한다 — 그래야 「무엇이 왔길래 실패했나」도 남고
+    #   마지막으로 믿을 수 있었던 것도 남는다.
+    previous = _read_json(os.path.join(directory, CHECKPOINT_FILENAME))
     verdict = roster.verify_checkpoint(
         doc,
         allowed_signers_path=os.path.join(directory, "allowed_signers"),
         operators_path=os.path.join(directory, "operators"),
         revoked_path=os.path.join(directory, "revoked_keys"),
+        last_signed_at=(previous or {}).get("signed_at"),
         local_checkpoint=roster.checkpoint(paths={
             "participants/allowed_signers": os.path.join(directory, "allowed_signers"),
             "participants/revoked_keys": os.path.join(directory, "revoked_keys"),
             "participants/operators": os.path.join(directory, "operators")}))
+    name = (CHECKPOINT_FILENAME if verdict["verified"]
+            else CHECKPOINT_FILENAME.replace(".json", ".rejected.json"))
+    _write_json(os.path.join(directory, name), doc)
     return {"present": True, "verified": verdict["verified"], "why": verdict["why"],
+            "file": name,
             "signer": verdict.get("signer"), "signed_at": verdict.get("signed_at"),
             # ★서명이 유효해도 **지금 명부와 같다는 뜻이 아니다** — 새 등록으로 명부는 자란다.
             "matches_local": verdict.get("matches_local"),
-            "file": CHECKPOINT_FILENAME,
             "stale": doc.get("stale"), "checkpoint": doc.get("checkpoint"),
             "current": doc.get("current")}
 
