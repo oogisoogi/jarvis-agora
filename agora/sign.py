@@ -38,12 +38,30 @@ def sign_event(event: Any, timeout: int = 60,
       cwd 로 돌므로 상대경로를 물려주면 코어와 다른 폴더를 본다(codex 라운드 2 재현: 코어는 차단·서명기는 code 0).
       전역 환경을 바꾸지 않는 이유: 한 프로세스의 Context 둘이 서로를 덮었다.
     """
+    # ★어느 층이 막았는지 표식(`layer: signer`)은 `_call_signer` 가 단다(R3-②). 코어 스크럽과
+    #   서명기 재검사는 같은 code 3 을 내므로, 표식이 없으면 「코어가 안 걸렀는데 서명기가 가려 준」
+    #   상태가 초록으로 남는다.
+    return _call_signer({"event": event}, timeout=timeout, config_dir=config_dir)
+
+
+def sign_register(doc: Any, timeout: int = 60,
+                  config_dir: str | None = None) -> dict[str, Any]:
+    """등록 소유 증명 서명(릴레이 계약 3-1). **같은 서명기 프로세스**에 위임한다.
+
+    ★여기서 직접 `ssh-keygen -Y sign` 을 부르지 않는다 — 이 모듈에 개인키를 읽는 코드가
+      없다는 것이 계약이고, 등록이라고 그 계약을 비켜 가면 분리는 그날로 무의미해진다.
+    """
+    return _call_signer({"register": doc}, timeout=timeout, config_dir=config_dir)
+
+
+def _call_signer(request: dict[str, Any], *, timeout: int,
+                 config_dir: str | None) -> dict[str, Any]:
     env = dict(os.environ)
     if config_dir:
         env["AGORA_CONFIG_DIR"] = os.path.abspath(config_dir)
     proc = subprocess.run(
         [SIGNER_BIN],
-        input=json.dumps({"event": event}, ensure_ascii=False),
+        input=json.dumps(request, ensure_ascii=False),
         capture_output=True, text=True, timeout=timeout, cwd=_ROOT, env=env,
     )
     if proc.returncode != 0:
@@ -51,8 +69,6 @@ def sign_event(event: Any, timeout: int = 60,
             payload = json.loads(proc.stderr.strip() or "{}")
         except ValueError:
             payload = {"message": proc.stderr.strip()[:300]}
-        # ★어느 층이 막았는지 표식을 단다(R3-②). 코어 스크럽과 서명기 재검사는 같은 code 3 을 내므로,
-        #   표식이 없으면 「코어가 안 걸렀는데 서명기가 가려 준」 상태가 초록으로 남는다.
         detail = payload.get("detail")
         detail = {**detail, "layer": "signer"} if type(detail) is dict else {"layer": "signer"}
         raise AgoraError(

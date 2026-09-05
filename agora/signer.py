@@ -90,12 +90,49 @@ def sign_bytes(raw: bytes, key_path: str) -> str:
             return fh.read()
 
 
+# 등록 소유 증명이 서명하는 **정확한 네 칸**(릴레이 계약 3-1 · master 통지 2026-09-05 `[master#283b2c7e]`).
+# ★집합을 **닫아 둔다.** 열어 두면 이 경로가 「kind 검사를 안 지나는 서명 신탁」이 된다 —
+#   이벤트를 이 문으로 들이밀면 계약 밖 kind 도 서명되어 나간다.
+REGISTER_FIELDS = ("display_name", "fingerprint", "participant_id", "public_key")
+
+
+def self_check_register(doc: Any) -> tuple[bytes, dict[str, Any]]:
+    """등록 요청 자기 검사 — 네 칸 정확히 · 전부 비지 않은 문자열 · 스크럽 · canonical·상한.
+
+    ★`self_check`(이벤트용)와 **함수를 나눈 이유**: 이벤트 검사는 kind 를 요구하고 등록 요청에는
+      kind 가 없다. 같은 함수에 「kind 가 없으면 통과」를 더하면 **그 조건이 곧 우회로**가 된다.
+    """
+    if type(doc) is not dict:
+        raise AgoraError(errors.ARGUMENT, "등록 요청은 객체여야 한다", None)
+    if tuple(sorted(doc)) != REGISTER_FIELDS:
+        raise AgoraError(errors.ARGUMENT, "등록 요청은 계약된 네 칸만 가진다",
+                         {"got": sorted(doc), "want": list(REGISTER_FIELDS)})
+    for key in REGISTER_FIELDS:
+        if type(doc[key]) is not str or not doc[key].strip():
+            raise AgoraError(errors.ARGUMENT, "등록 요청 칸은 비지 않은 문자열이어야 한다",
+                             {"key": key})
+    report = scrub.enforce(doc)
+    raw = canonical_bytes(doc)
+    if len(raw) > MAX_EVENT_BYTES:
+        raise AgoraError(errors.GATE_REJECT, "등록 요청 크기 상한 초과",
+                         {"bytes": len(raw), "limit": MAX_EVENT_BYTES})
+    return raw, report
+
+
 def handle(request: dict[str, Any]) -> dict[str, Any]:
     if "key" in request or "key_path" in request:
         # 호출자가 키를 지목하려 하면 그 자체가 계약 위반이다.
         raise AgoraError(errors.ARGUMENT,
                          "호출자는 서명 키를 지정할 수 없다",
                          {"hint": KEY_ENV})
+    if "register" in request:
+        # ★등록 소유 증명(릴레이 계약 3-1) — 이벤트가 아니라서 kind 검사가 없다. 그 대신
+        #   **칸 집합을 닫아** 이벤트가 이 문으로 새지 못하게 한다.
+        import hashlib as _hashlib
+        raw, report = self_check_register(request.get("register"))
+        signature = sign_bytes(raw, _signing_key_path())
+        return {"hash": _hashlib.sha256(raw).hexdigest(), "signature": signature,
+                "scrub": report, "namespace": SIGN_NAMESPACE, "kind_of_request": "register"}
     event = request.get("event")
     raw, report = self_check(event)
     signature = sign_bytes(raw, _signing_key_path())

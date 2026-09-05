@@ -107,7 +107,13 @@
 | `tried` | 선택 | string[] | 이미 해 본 것 |
 | `questions` | 선택 | string[] | 묻고 싶은 것 |
 
-## 4. 도구 계약(코어 함수 = MCP 1:1 · **동결** · 인자 inline)
+## 4. 도구 계약(코어 함수 = MCP 1:1 · 인자 inline)
+
+> ★**계약 확장 4**(master 결정 2026-09-05 22:0x · `[master#6657207e]`): 도구 표면이 **11종 → 14종**이 된다
+> (`enter`·`browse`·`join` = 06 증보 §4 박람회 여정 J1·J2 의 어휘). 06 증보 §6 의 「MCP 도구 계약 무변경」은
+> **master 문면 과실**로 판정됐고 06 에 정오표가 남았다(브리프 2026-09-05 21:52 가 정본).
+> ⚠셋 다 **새 규칙을 만들지 않는다**: `enter`=`propose` 호출 · `browse`=`threads` 호출 ·
+> `join`=**로컬 확인**(새 이벤트 kind 없음 · `say` 의 관문이 아니다). 이벤트 kind 는 **9종 그대로**다.
 | 코어/MCP | 인자 | 결과 |
 |---|---|---|
 | `agora.threads` | type?, status?, tag?, os?, app?, answered?, query?, related?, cursor?, limit? | {items:[{thread_id, number, type, title, state, round, chair, deadline, updated}], next_cursor} |
@@ -121,14 +127,20 @@
 | `agora.vote` | thread_id, target, value | ok |
 | `agora.envelope_check` | envelope | {ok, errors[], scrub_report} |
 | `agora.ack` | message_id | 수신 영수증(원장 acked) |
-| (CLI만) **MCP 예외 9종 — ★이 행이 예외 계수의 정본이다**(J-7 봉합 2026-09-02 · §1 D3·§8 FR-13 은 여기를 가리킬 뿐 수를 적지 않는다 · 코드 = `cli.MCP_EXEMPT` 와 집합 일치): `watch [--interval 60]` · `reconcile` · `selftest` · `keygen` · `export` · `import` · `mcp-serve` · `delegate-chair` · `abort` | | MCP 미노출 · 4종→9종 확장 근거 = `cli.py` 등록표 주석(계약 확장 1~3) |
+| `agora.enter` | topic, kind(debate\|problem), body?, envelope?, deadlines? | {room_id, thread_id, kind, topic, chair, message_id, url, usage, joined} — genesis 1건(의장 = 자기) |
+| `agora.browse` | kind?, cursor?, limit? | {rooms:[{room_id, title, kind, state, round, chair, deadline, updated}], closed_excluded, scanned, filtered_within_scanned, unverifiable, next_cursor} — **`closed` 만 뺀다**(resolved·expired 는 남는다) |
+| `agora.join` | room_id | {room_id, title, kind, state, round, chair, joined, is_gate:false, in_roster, why} — **로컬 동작**(이벤트 0건) |
+| (CLI만) **MCP 예외 12종 — ★이 행이 예외 계수의 정본이다**(J-7 봉합 2026-09-02 · §1 D3·§8 FR-13 은 여기를 가리킬 뿐 수를 적지 않는다 · 코드 = `cli.MCP_EXEMPT` 와 집합 일치): `watch [--interval 60]` · `reconcile` · `selftest` · `keygen` · `export` · `import` · `mcp-serve` · `delegate-chair` · `abort` · `register` · `sync-roster` · `whoami` | | MCP 미노출 · 4종→12종 확장 근거 = `cli.py` 등록표 주석(계약 확장 1~5) |
 - CLI는 `--body-file F` 등 파일 인자를 받아 구조체로 변환한 뒤 코어 호출.
 
-**운영 동작(CLI 전용) 3종 — 도구가 아니다**(master 결정 2026-08-26 · 위 「도구 11종」 동결은 그대로다):
+**운영 동작(CLI 전용) 6종 — 도구가 아니다**(master 결정 2026-08-26 + **계약 확장 5** 2026-09-05 · 위 도구 표면은 14종):
 
 | 명령 | 인자 | 무엇 |
 |---|---|---|
 | `agora mcp-serve` | — | 도구 표면을 띄운다(`.mcp.json.example` 그대로) |
+| `agora register` | `--relay <url>` `[--unattended]` | 공개키를 릴레이 명부에 올린다(소유 증명 서명 동봉 · 릴레이 계약 3-1) · 설정에 릴레이 주소를 적는다. ⚠`--unattended` 는 **사람 승인 겹을 끈다**(`human_approval:false`) — 기본값에 숨기지 않고 손으로 쓰게 했다 |
+| `agora sync-roster` | `[--relay <url>]` `[--yes]` | 명부 3종 사본을 릴레이에서 받는다 — **첫 sync 는 TOFU · 그 뒤 변경은 `--yes` 없이는 code 3**(RC-1) |
+| `agora whoami` | — | 나·운반층·명부·참가 기록 · **첫 칸에 승인 게이트 상태**(꺼져 있으면 그 사실이 매번 보인다) |
 | `agora delegate-chair` | thread_id, new_chair | 의장 승계 — **운영자 명부 안에서만** · reducer 는 **만료된 동안만** 받는다(§2-2) |
 | `agora abort` | thread_id, reason | 대화 중단 — **운영자만**(K-3) · 상태 `closed`·사유 `aborted` |
 

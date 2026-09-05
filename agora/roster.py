@@ -39,12 +39,19 @@ def _read(path: str) -> bytes:
         return b""
 
 
-def checkpoint(root: str | None = None) -> str:
-    """명부 3종의 내용 해시. 파일 하나만 바뀌어도 값이 바뀐다."""
+def checkpoint(root: str | None = None, *, paths: dict[str, str] | None = None) -> str:
+    """명부 3종의 내용 해시. 파일 하나만 바뀌어도 값이 바뀐다.
+
+    ★`paths` = 논리 이름(`participants/…`) → **실제 파일 경로**. 참가자 기계의 사본은
+      설정 폴더에 **납작한 이름**(`allowed_signers` …)으로 놓이기 때문이다(ONBOARDING §파일).
+      ⚠해시에 넣는 **이름표는 논리 이름 그대로** 둔다 — 그래야 저장소 배치와 설정 폴더 배치가
+      **같은 내용에 같은 값**을 낸다. 경로를 이름표로 쓰면 기계마다 다른 값이 나와 대조가 불가능해진다.
+    """
     root = root or _ROOT
+    paths = paths or {}
     h = hashlib.sha256()
     for rel in (ROSTER_ALLOWED_SIGNERS, ROSTER_REVOKED_KEYS, ROSTER_OPERATORS):
-        blob = _read(_path(root, rel))
+        blob = _read(paths.get(rel) or _path(root, rel))
         # 파일 경계를 해시에 넣는다 — 안 넣으면 A의 끝과 B의 시작을 옮겨도 같은 해시가 된다.
         h.update(rel.encode("utf-8"))
         h.update(len(blob).to_bytes(8, "big"))
@@ -110,6 +117,26 @@ def _fingerprints_of(path: str) -> frozenset[str]:
         for p in parts:
             if p.startswith("SHA256:"):
                 out.add(p)
+    return frozenset(out)
+
+
+def principals(root: str | None = None, *, path: str | None = None) -> frozenset[str]:
+    """명부에 이름이 올라 있는 참가자 id 들(`allowed_signers` 첫 칸).
+
+    ★**검증이 아니다.** 서명 검증은 `ssh-keygen -Y verify` 가 하고, 이 함수는 「내 id 가
+      명부에 보이는가」를 사람에게 알려 주기 위한 것이다(`join`·`whoami`).
+      이 값으로 판정을 내리면 명부를 손으로 고친 사람이 자기를 통과시키게 된다.
+    ★`allowed_signers` 는 `<principal> <keytype> <key...>` 형식이고, principal 자리에는
+      쉼표로 여럿이 올 수 있다(OpenSSH 문법) — 그래서 쉼표로 한 번 더 가른다.
+    """
+    text = _read(path or _path(root or _ROOT, ROSTER_ALLOWED_SIGNERS)).decode("utf-8", "replace")
+    out: set[str] = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        first = line.split()[0]
+        out.update(p for p in first.split(",") if p)
     return frozenset(out)
 
 

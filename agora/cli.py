@@ -49,6 +49,19 @@ COMMANDS: dict[str, dict[str, Any]] = {
     #   ⇒ 도구가 아니라 **운영 동작**이므로 core=False 이고 MCP 에 노출하지 않는다
     #     (서버를 띄우는 명령을 서버가 노출하면 대리인이 서버를 또 띄운다).
     "mcp-serve":      {"core": False, "built": True,  "slice": "S6-6"},
+    # ★계약 확장 4(master 결정 2026-09-05 22:0x · `[master#6657207e]`) — **박람회 여정 3종**.
+    #   06 증보 §4 의 J1·J2 가 요구하는 어휘(방을 연다·로비를 돈다·참가한다)를 손에 쥐여 준다.
+    #   ⇒ 도구 표면이 11종 → **14종**이 된다. 06 §6 의 「도구 계약 무변경」은 master 문면 과실로
+    #     판정됐고 06 에 정오표가 남았다(브리프 21:52 가 정본).
+    #   ★새 규칙은 없다 — `enter`=propose · `browse`=threads · `join`=로컬 확인(새 kind 없음).
+    "enter":          {"core": True,  "built": True,  "slice": "S8-1"},
+    "browse":         {"core": True,  "built": True,  "slice": "S8-1"},
+    "join":           {"core": True,  "built": True,  "slice": "S8-1"},
+    # ★계약 확장 5(같은 결정) — **가입·명부 운영 3종**. 도구가 아니다:
+    #   설치 도우미가 부르는 한 줄이고, MCP 표면에 올리면 대리인 세션 손에 「명부를 갈아라」가 쥐어진다.
+    "register":       {"core": False, "built": True,  "slice": "S8-2"},
+    "sync-roster":    {"core": False, "built": True,  "slice": "S8-2"},
+    "whoami":         {"core": False, "built": True,  "slice": "S8-2"},
     # ★계약 확장 3(master 결정 2026-08-26 (b)안) — **절차 개입** 2종.
     #   계약 kind 9종 중 `delegate_chair`·`abort` 는 **내보낼 자리가 없었다**(발신자 0).
     #   그래서 만료된 스레드를 되살릴 수도, 운영자가 중단할 수도 없었다 — 받을 준비만 돼 있었다.
@@ -60,7 +73,9 @@ COMMANDS: dict[str, dict[str, Any]] = {
 # MCP 에 노출하지 않는 것 — 정본 = 설계 §4 「(CLI만)」 행(예외 계수는 그 한 곳에만 · J-7 2026-09-02).
 #   이 집합은 그 행과 같아야 한다(`_case_mcp_names_derive_from_cli`·`_case_local_commands_are_not_tools` 가 잰다).
 MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
-                        "reconcile", "mcp-serve", "delegate-chair", "abort"})
+                        "reconcile", "mcp-serve", "delegate-chair", "abort",
+                        # 계약 확장 5(2026-09-05) — 가입·명부 운영. 설치가 부르고 대리인은 못 부른다.
+                        "register", "sync-roster", "whoami"})
 
 # ── 역할별 노출표(설계 §5 「수신 격리」 H-3 · NFR-2) ─────────────────────────
 # ★**여기가 「도구 목록」의 단일 출처다.** 대리인 브리프(S6-3 `brief-reader.md`)는 이 표를
@@ -113,7 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
 #   그러면 스키마가 「title 은 문자열이어야 한다」로 거절하고, 사용자는 자기가 문자열을 줬다고
 #   믿는다 — 틀린 곳과 탓하는 곳이 어긋난다. 처음 쓴 파서가 실제로 그랬다.
 INT_ARGS = frozenset({"round", "to_round", "value", "limit", "interval"})
-BOOL_ARGS = frozenset({"audit", "answered", "once"})
+BOOL_ARGS = frozenset({"audit", "answered", "once", "unattended", "yes"})
+# 값 **없이** 올 수 있는 플래그(`--unattended`). 목록 밖의 `--키`는 값을 요구한다 —
+# ★아무 `--키`나 값 없이 참으로 읽으면 `--body --relay x` 가 조용히 `body=True` 가 된다.
+FLAG_ARGS = frozenset({"unattended", "yes", "once", "audit"})
 # JSON 으로 읽는 칸 — **여기 없으면 문자열이다.**
 # ★「`{`·`[` 로 시작하면 JSON」으로 하면 **우리 규약이 요구하는 제목이 깨진다**:
 #   시험 글 제목은 `[selftest] …` 로 시작해야 하는데(04-tasks S7-2), 그 값이 JSON 으로 해석되어
@@ -121,6 +139,30 @@ BOOL_ARGS = frozenset({"audit", "answered", "once"})
 #   언제나 이런 충돌이 생긴다.** 칸 이름은 계약이 정하고, 계약은 충돌하지 않는다.
 JSON_ARGS = frozenset({"envelope", "deadlines", "counter", "refs", "parent",
                        "dissent", "recommended_actions", "arguments"})
+
+
+def _run_onboard(name: str, rest: list[str]) -> Any:
+    """가입·명부 운영 3종 — **도구가 아니라 설치·운영 동작**이다(계약 확장 5).
+
+    ★`context_from_config` 를 거치지 않는다. 그 함수는 **운반층을 세우는 것부터** 하는데,
+      `register` 는 바로 그 운반층 주소를 **설정에 적으러** 온 명령이다 — 거치면
+      「설정이 없어서 설정을 못 적는」 닭·달걀이 된다(첫 설치가 정확히 그 상태다).
+    """
+    from agora import onboard
+    kw = _kv(rest)
+    directory = kw.get("dir")
+    if name == "register":
+        relay_url = kw.get("relay") or kw.get("relay_url")
+        if not relay_url:
+            raise AgoraError(errors.ARGUMENT, "register 는 --relay <url> 이 필요하다",
+                             {"usage": "agora register --relay <url> [--unattended]"})
+        return onboard.register(directory=directory, relay_url=relay_url,
+                                unattended=bool(kw.get("unattended", False)))
+    if name == "sync-roster":
+        return onboard.sync_roster(directory=directory,
+                                   relay_url=kw.get("relay") or kw.get("relay_url"),
+                                   yes=bool(kw.get("yes", False)))
+    return onboard.whoami(directory=directory)
 
 
 def _run_operator(name: str, rest: list[str]) -> Any:
@@ -191,7 +233,27 @@ def _kv(rest: list[str]) -> dict[str, Any]:
       JSON 은 `{`·`[` 로 시작할 때만, 나머지는 **문자열 그대로** 둔다.
     """
     out: dict[str, Any] = {}
-    for token in rest:
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        index += 1
+        # ★`--key value` · `--key=value` 도 받는다(06 §4·브리프가 그 모양으로 적혀 있다).
+        #   기존 `key=value` 는 그대로다 — 두 서식이 같은 자리에서 같은 뜻이 되게만 한다.
+        if token.startswith("--") and len(token) > 2:
+            flag = token[2:]
+            if "=" not in flag:
+                name = flag.replace("-", "_")
+                nxt = rest[index] if index < len(rest) else None
+                if nxt is None or nxt.startswith("--"):
+                    if name not in FLAG_ARGS:
+                        raise AgoraError(errors.ARGUMENT, "이 인자는 값이 필요하다",
+                                         {"key": name})
+                    out[name] = True          # 값 없는 플래그
+                    continue
+                out[name] = _value(name, nxt)
+                index += 1
+                continue
+            token = flag
         if "=" not in token:
             raise AgoraError(errors.ARGUMENT, "인자는 key=value 형식이다",
                              {"token_len": len(token)})
@@ -243,6 +305,8 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
         from agora import mcp_server
         mcp_server.serve()
         return None
+    if name in ("register", "sync-roster", "whoami"):
+        return _run_onboard(name, list(args.rest) if hasattr(args, "rest") else [])
     if name in ("delegate-chair", "abort"):
         return _run_operator(name, list(args.rest) if hasattr(args, "rest") else [])
     if name in ("watch", "reconcile", "export", "import"):

@@ -1,11 +1,7 @@
 {
+  "transport": "relay",
+  "relay": {"url": "https://<릴레이 호스트>", "timeout_seconds": 30},
   "human_approval": true,
-  "repo": {"owner": "<계정>", "name": "<저장소>"},
-  "categories": {
-    "problem": "<problem 카테고리 id>",
-    "knowhow": "<knowhow 카테고리 id>",
-    "debate": "<debate 카테고리 id>"
-  },
   "budget": {"posts_per_round": 2, "max_chars_per_round": 6000},
   "watch": {"interval_seconds": 60, "reconcile_every": 20}
 }
