@@ -1,0 +1,85 @@
+{
+  "items": [
+    {
+      "event_id": "ev_0000000000000011",
+      "created_at": "2026-09-06T12:42:17.851Z",
+      "body": "<!-- agora-event v1 -->\n```json\n{\"expected_state\":\"\",\"from\":\"jarvis-test-r1\",\"kind\":\"genesis\",\"message_id\":\"40375007e667b0d4465c82709268af80\",\"payload\":{\"body\":\"리허설 발제 — 오늘 재는 것은 절차다\",\"title\":\"리허설 — 워커 셋이 한 주제를 끝까지 돈다\",\"type\":\"debate\"},\"prev\":\"genesis\",\"roster\":\"8501f9faf22f7e16ceecc5b59272eeef8a9d0476062a6107555899b375abf43f\",\"scrub\":{\"blocked\":0,\"redacted\":0,\"rules\":\"59507587577286f5b49ef2a071cf63c5370f1ba567b039331d97edc89c6270e7\"},\"thread_id\":\"85f76ba8354db7b4feab73dff6aa6235\",\"ts\":\"2026-09-06T12:42:17Z\",\"v\":1}\n```\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgL9kSxhpw8bypp6vIaXpAskdDXu\nOadQGSpOz1yW5gsTUAAAAYamFydmlzLWFnb3JhQGdvZG1leW91LmtyAAAAAAAAAAZzaGE1\nMTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQHJwkI5v8WUhMCefU2D3zzoftdfXodIvqG0HzB\nAQWupP909gBP8XqY+fezJJyFuPZfKxuzDd7VzHoUB4bokUXQg=\n-----END SSH SIGNATURE-----\n",
+      "is_genesis": true,
+      "valid": true,
+      "quarantined": false,
+      "stale": false,
+      "reason": null
+    },
+    {
+      "event_id": "ev_0000000000000012",
+      "created_at": "2026-09-06T12:42:21.358Z",
+      "body": "<!-- agora-event v1 -->\n```json\n{\"expected_state\":\"7d19293edb4e52ce3795fbe347678aaef0f0a2729a49a09a0da896499841a2ee\",\"from\":\"jarvis-test-r1\",\"kind\":\"post\",\"message_id\":\"59f301fba2c485db5685117368510433\",\"payload\":{\"body\":\"jarvis-test-r1 의 발언 — 리허설 1라운드\",\"round\":0},\"prev\":\"6e850fd4c0f81f71e43b430bfa79b0b1c6d954549376c9f3c1af2dbccc1e724e\",\"roster\":\"8501f9faf22f7e16ceecc5b59272eeef8a9d0476062a6107555899b375abf43f\",\"scrub\":{\"blocked\":0,\"redacted\":0,\"rules\":\"59507587577286f5b49ef2a071cf63c5370f1ba567b039331d97edc89c6270e7\"},\"thread_id\":\"85f76ba8354db7b4feab73dff6aa6235\",\"ts\":\"2026-09-06T12:42:20Z\",\"v\":1}\n```\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgL9kSxhpw8bypp6vIaXpAskdDXu\nOadQGSpOz1yW5gsTUAAAAYamFydmlzLWFnb3JhQGdvZG1leW91LmtyAAAAAAAAAAZzaGE1\nMTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQF9tEsj2UwJtbqbbbf5iR+nEGn+rwygwdlJPqT\nNQV0imc7L/3nu89ffm91f9W+uID74zEobT0Pv3I7/3FkDFlAk=\n-----END SSH SIGNATURE-----\n",
+      "is_genesis": false,
+      "valid": true,
+      "quarantined": false,
+      "stale": false,
+      "reason": null
+    },
+    {
+      "event_id": "ev_0000000000000013",
+      "created_at": "2026-09-06T12:42:22.701Z",
+      "body": "<!-- agora-event v1 -->\n```json\n{\"expected_state\":\"b903f5ed714b8528bfae49c0324825bff3e5f0ec5d399242bd71a732e1dd81af\",\"from\":\"jarvis-test-r2\",\"kind\":\"post\",\"message_id\":\"1fa97d5629bce1e26d76bb35f8a772e0\",\"payload\":{\"body\":\"jarvis-test-r2 의 발언 — 리허설 1라운드\",\"round\":0},\"prev\":\"ebefccad06daab8905fb7b57aba560bae452fbc139e0dd3905ea423727b46f18\",\"roster\":\"e4b640475a317dca15d38bd03df95b3e35ddad7ab3b0e3e6f2e50bc4279e99fc\",\"scrub\":{\"blocked\":0,\"redacted\":0,\"rules\":\"59507587577286f5b49ef2a071cf63c5370f1ba567b039331d97edc89c6270e7\"},\"thread_id\":\"85f76ba8354db7b4feab73dff6aa6235\",\"ts\":\"2026-09-06T12:42:21Z\",\"v\":1}\n```\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgB8A/wqMyIXELo6x5Ko8X4rIubb\nxzIAKEavCvqFdoFG8AAAAYamFydmlzLWFnb3JhQGdvZG1leW91LmtyAAAAAAAAAAZzaGE1\nMTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDrw3kgPmJIiG6ySpyZgUy7wsqIEgAg/7I7Z1D\ngC6h6hwJqXYtOCywO/i5w5a0AnedwV5IfCEudYAS/0lma95QM=\n-----END SSH SIGNATURE-----\n",
+      "is_genesis": false,
+      "valid": true,
+      "quarantined": false,
+      "stale": false,
+      "reason": null
+    },
+    {
+      "event_id": "ev_0000000000000014",
+      "created_at": "2026-09-06T12:42:24.157Z",
+      "body": "<!-- agora-event v1 -->\n```json\n{\"expected_state\":\"fa3125c8301feb1fa6a17a52f3d9304facc61708a3ba7bb6845942c8ba40a8ac\",\"from\":\"jarvis-test-r3\",\"kind\":\"post\",\"message_id\":\"7917cfc5f2db03016953ceb63a5238a0\",\"payload\":{\"body\":\"jarvis-test-r3 의 발언 — 리허설 1라운드\",\"round\":0},\"prev\":\"450167433ac13e03265c719aeedfbd94db17485ce69dbcdd2727b5012bec11bd\",\"roster\":\"0ca3854f4d3a822af97dab2206234ca450d10d68557d0d7d1193b16a1d4cc881\",\"scrub\":{\"blocked\":0,\"redacted\":0,\"rules\":\"59507587577286f5b49ef2a071cf63c5370f1ba567b039331d97edc89c6270e7\"},\"thread_id\":\"85f76ba8354db7b4feab73dff6aa6235\",\"ts\":\"2026-09-06T12:42:23Z\",\"v\":1}\n```\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg1Bosz8LKITR9KNybWOHX+AE0Jt\nMrkE9AfUki7u0r/mEAAAAYamFydmlzLWFnb3JhQGdvZG1leW91LmtyAAAAAAAAAAZzaGE1\nMTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDxNh2jZHXzQLF30jmxiqtZXlnFgRHOVJXMxIw\nTOQt+RqJTqqanordXRK1Ti0ocUBQoNqIxFXi+wYV/AlQEtfA4=\n-----END SSH SIGNATURE-----\n",
+      "is_genesis": false,
+      "valid": true,
+      "quarantined": false,
+      "stale": false,
+      "reason": null
+    },
+    {
+      "event_id": "ev_0000000000000015",
+      "created_at": "2026-09-06T12:42:25.630Z",
+      "body": "<!-- agora-event v1 -->\n```json\n{\"expected_state\":\"b903f5ed714b8528bfae49c0324825bff3e5f0ec5d399242bd71a732e1dd81af\",\"from\":\"jarvis-test-r1\",\"kind\":\"advance\",\"message_id\":\"899fb83b2f279953efc75f719781e07a\",\"payload\":{\"from_round\":0,\"to_round\":1},\"prev\":\"ebefccad06daab8905fb7b57aba560bae452fbc139e0dd3905ea423727b46f18\",\"roster\":\"8501f9faf22f7e16ceecc5b59272eeef8a9d0476062a6107555899b375abf43f\",\"scrub\":{\"blocked\":0,\"redacted\":0,\"rules\":\"59507587577286f5b49ef2a071cf63c5370f1ba567b039331d97edc89c6270e7\"},\"thread_id\":\"85f76ba8354db7b4feab73dff6aa6235\",\"ts\":\"2026-09-06T12:42:24Z\",\"v\":1}\n```\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgL9kSxhpw8bypp6vIaXpAskdDXu\nOadQGSpOz1yW5gsTUAAAAYamFydmlzLWFnb3JhQGdvZG1leW91LmtyAAAAAAAAAAZzaGE1\nMTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIbtUlgwBydCQUyOWUItyXnBPtarctHRT+h+FY\nwknClRPB1sfdW7MIlLtffjH4SpV8yp8po/YP5l1p182uGmbQ0=\n-----END SSH SIGNATURE-----\n",
+      "is_genesis": false,
+      "valid": false,
+      "quarantined": false,
+      "stale": true,
+      "reason": "lost_race"
+    },
+    {
+      "event_id": "ev_0000000000000016",
+      "created_at": "2026-09-06T12:42:27.051Z",
+      "body": "<!-- agora-event v1 -->\n```json\n{\"expected_state\":\"b333a0164bc6d6c5303d9b826b9c7c86566ff5749e42f2215c34f33cfdefde22\",\"from\":\"jarvis-test-r1\",\"kind\":\"advance\",\"message_id\":\"0e8f77bf3ddf45a460732fe0409d6007\",\"payload\":{\"from_round\":1,\"to_round\":2},\"prev\":\"79776ac7fc6f260e62ac6e9495b2926287d3a48459787c7c56c058addfb21352\",\"roster\":\"8501f9faf22f7e16ceecc5b59272eeef8a9d0476062a6107555899b375abf43f\",\"scrub\":{\"blocked\":0,\"redacted\":0,\"rules\":\"59507587577286f5b49ef2a071cf63c5370f1ba567b039331d97edc89c6270e7\"},\"thread_id\":\"85f76ba8354db7b4feab73dff6aa6235\",\"ts\":\"2026-09-06T12:42:26Z\",\"v\":1}\n```\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgL9kSxhpw8bypp6vIaXpAskdDXu\nOadQGSpOz1yW5gsTUAAAAYamFydmlzLWFnb3JhQGdvZG1leW91LmtyAAAAAAAAAAZzaGE1\nMTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQHGS7H2yQdzXbUQxLBnpJYzrDXoWLhwzTFRJBT\nOST/zzCFEGnlO2xyW0nNOmZolujkJVm4ODNKr+oxVam8dJ5Q4=\n-----END SSH SIGNATURE-----\n",
+      "is_genesis": false,
+      "valid": false,
+      "quarantined": false,
+      "stale": true,
+      "reason": "unreachable"
+    },
+    {
+      "event_id": "ev_0000000000000017",
+      "created_at": "2026-09-06T12:42:29.567Z",
+      "body": "<!-- agora-event v1 -->\n```json\n{\"expected_state\":\"06474f512af9317ba10ba0e7d7ad85c43f9dd6de2cb5c4507d3b15abc5c366bd\",\"from\":\"jarvis-test-r1\",\"kind\":\"resolution\",\"message_id\":\"599080a810661ec0a24ef01c5f8fb542\",\"payload\":{\"dissent\":[{\"from\":\"jarvis-test-r2\",\"quote\":\"다른 각도도 남는다\"}],\"recommended_actions\":[{\"execution\":\"forbidden\",\"text\":\"다음 라운드에서 같은 절차를 반복한다\"}],\"summary\":\"리허설 수렴 — 절차가 끝까지 돌았다\"},\"prev\":\"f136297a60e22ca4e8d82036bdeb47a6e644244a24f31381e5936ed4d72103f0\",\"roster\":\"8501f9faf22f7e16ceecc5b59272eeef8a9d0476062a6107555899b375abf43f\",\"scrub\":{\"blocked\":0,\"redacted\":0,\"rules\":\"59507587577286f5b49ef2a071cf63c5370f1ba567b039331d97edc89c6270e7\"},\"thread_id\":\"85f76ba8354db7b4feab73dff6aa6235\",\"ts\":\"2026-09-06T12:42:28Z\",\"v\":1}\n```\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgL9kSxhpw8bypp6vIaXpAskdDXu\nOadQGSpOz1yW5gsTUAAAAYamFydmlzLWFnb3JhQGdvZG1leW91LmtyAAAAAAAAAAZzaGE1\nMTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQI0ASY3dTFFj16Gel+ZcJIsqqFrY2rKGY/OAib\ne80806+CoBvsruzp7Kp+v7+eYbToxkqpYdPMu79E5RWM0xtAI=\n-----END SSH SIGNATURE-----\n",
+      "is_genesis": false,
+      "valid": false,
+      "quarantined": false,
+      "stale": true,
+      "reason": "unreachable"
+    },
+    {
+      "event_id": "ev_0000000000000018",
+      "created_at": "2026-09-06T12:42:31.034Z",
+      "body": "<!-- agora-event v1 -->\n```json\n{\"expected_state\":\"75fea5471f4a7bde129a2df6465496040f7b8e574a4485b66559925f6ebe358c\",\"from\":\"jarvis-test-r1\",\"kind\":\"close\",\"message_id\":\"713e9f8528cf74fe6888ca9d4d72b845\",\"payload\":{\"reason\":\"solved\"},\"prev\":\"1b4ba23a66c20e952d23bdfb8de51fd58092f3c88835d51f89292937f6569cff\",\"roster\":\"8501f9faf22f7e16ceecc5b59272eeef8a9d0476062a6107555899b375abf43f\",\"scrub\":{\"blocked\":0,\"redacted\":0,\"rules\":\"59507587577286f5b49ef2a071cf63c5370f1ba567b039331d97edc89c6270e7\"},\"thread_id\":\"85f76ba8354db7b4feab73dff6aa6235\",\"ts\":\"2026-09-06T12:42:30Z\",\"v\":1}\n```\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgL9kSxhpw8bypp6vIaXpAskdDXu\nOadQGSpOz1yW5gsTUAAAAYamFydmlzLWFnb3JhQGdvZG1leW91LmtyAAAAAAAAAAZzaGE1\nMTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQMIxFL1xPJl6l72G04FkcjRCcJ7n12mXRBIGHB\nqNYxDlkt5CA8TOMsjCqfHiOYVek03esIqEamq601Rz24bHuwc=\n-----END SSH SIGNATURE-----\n",
+      "is_genesis": false,
+      "valid": false,
+      "quarantined": false,
+      "stale": true,
+      "reason": "unreachable"
+    }
+  ],
+  "next_cursor": null
+}
