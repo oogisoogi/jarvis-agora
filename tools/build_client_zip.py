@@ -10,9 +10,14 @@
 무엇을 고정했나(그리고 무엇을 못 고정했나)
 -----------------------------------------
 고정한 것 = 파일 목록·순서(정렬)·시각(1980-01-01)·권한 비트·압축 방식.
-⚠**못 고정한 것 = zlib 판본**이다. 같은 기계·같은 파이썬에서 두 번 만들면 같지만,
-다른 zlib 판본이 같은 바이트를 낸다는 것은 **재지 않았다.** 그래서 이 도구가 내는 해시는
-「이 기계에서 만든 그 꾸러미」의 이름이고, 그 이상을 뜻하지 않는다.
+★같은 바이트가 나오는 **조건**을 정직하게 적는다(이종 검증 2026-09-09 로 좁혀졌다):
+  ⑴ 빌드 도중 입력이 안 바뀐다 ⑵ 같은 파이썬·zlib ⑶ 산출물이 소스 트리 밖에 있다
+  ⑷ 체크아웃의 줄바꿈이 같다.
+⚠**못 고정한 것 = ⑵ 와 ⑷**다. 다른 zlib 판본이 같은 바이트를 내는지, 줄바꿈 설정이 다른
+기계에서 같은 바이트가 되는지는 **재지 않았다**(⑷ 는 실제로 달라진다 — 그 트리는 바이트가
+다른 트리이므로 「같은 트리」라는 전제가 이미 깨진 것이다).
+그래서 이 도구가 내는 해시는 「이 기계에서 만든 그 꾸러미」의 이름이고, 그 이상을 뜻하지 않는다.
+⑶ 은 이제 도구가 **거부해서** 지킨다(`_assert_output_is_outside`).
 ⇒ 게시하는 사람과 해시를 재는 사람이 **같은 산출물 파일**을 봐야 한다(다시 만들어 대조하지 마라).
 
 담는 것
@@ -140,8 +145,14 @@ def collect(root: str | None = None) -> list[tuple[str, int]]:
 MANIFEST_NAME = "PACKAGE-MANIFEST.json"
 
 
-def manifest_document(root: str | None = None) -> dict[str, object]:
+def manifest_document(blobs: dict[str, bytes], version: str) -> dict[str, object]:
     """꾸러미 안에 함께 담는 **내용물 표** — 파일마다 sha256 한 줄.
+
+    ★★해시는 **꾸러미에 실제로 담은 그 바이트**에서 낸다 — 파일을 다시 읽지 않는다.
+      전에는 zip 을 쓴 뒤 트리를 **다시 순회해** 해시를 냈고, 그 사이 파일이 바뀌면
+      표에는 새 해시가 들어가는데 꾸러미 안에는 옛 바이트가 들어갔다 ⇒ 갓 만든 꾸러미가
+      그 자리에서 `selfcheck` 무결성 실패를 냈다(이종 검증 2026-09-09 지적 · HIGH).
+      ★검증한 것과 봉인한 것이 다르면 검증은 통과하면서 다른 것이 남는다.
 
     ★`selfcheck` 의 무결성 축이 이 표를 읽어 실제 파일과 대조한다. 표가 없으면 그 축은
       「잰 것이 없다」가 되고, 그것을 통과로 세면 안 된다(그래서 `selfcheck` 는 미측정으로 낸다).
@@ -149,31 +160,56 @@ def manifest_document(root: str | None = None) -> dict[str, object]:
       「담긴 파일이 바뀌지 않았다」를 말하지, 「표가 바뀌지 않았다」는 말하지 못한다 —
       그 축은 꾸러미 **전체 sha256**(설치기 핀)이 진다. 두 겹이 서로 다른 것을 잰다.
     """
-    root = root or _ROOT
-    entries: dict[str, str] = {}
-    for rel, _mode in collect(root):
-        with open(os.path.join(root, rel), "rb") as fh:
-            entries[rel] = hashlib.sha256(fh.read()).hexdigest()
     return {
-        "version": client_version(),
-        "files": dict(sorted(entries.items())),
+        "version": version,
+        "files": {rel: hashlib.sha256(blob).hexdigest()
+                  for rel, blob in sorted(blobs.items())},
         "note": ("이 표에 표 자신은 없다 — 표의 무결성은 꾸러미 전체 sha256(설치기 핀)이 진다."),
     }
+
+
+def _assert_output_is_outside(root: str, out_path: str) -> None:
+    """산출물이 **소스 안에** 놓이지 않게 한다(이종 검증 2026-09-09 지적 · HIGH).
+
+    ★`--out participants/x.zip` 처럼 **수집되는 경로** 아래로 내면, 이번 빌드가 만든 파일(과 그
+      `.tmp`)이 **다음 빌드의 입력**이 된다. 그러면 「같은 트리면 같은 바이트」가
+      한 번 만드는 순간 거짓이 되고, 재현 가능성이 조용히 무너진다.
+    ★막는 것은 「트리 안」이 아니라 **「수집되는 자리」**다. 트리 안이어도 목록이 훑지 않는
+      곳(`dist/`)은 안전하고, 그것까지 막으면 기본 산출 경로가 자기 손에 막힌다
+      (처음 쓴 판이 실제로 그랬다 — 규칙을 넓게 잡으면 정상 사용을 먼저 때린다).
+    """
+    targets = {os.path.realpath(os.path.abspath(out_path)),
+               os.path.realpath(os.path.abspath(out_path + ".tmp"))}
+    for item in MANIFEST:
+        full = os.path.realpath(os.path.join(root, str(item["path"])))
+        for t in targets:
+            if item["kind"] == "dir":
+                if t == full or t.startswith(full + os.sep):
+                    raise SystemExit(
+                        f"산출 경로가 수집 대상 안이다 — 다음 빌드의 입력이 된다: {out_path}\n"
+                        f"  수집 대상: {item['path']}/ · 목록 밖(예: dist/)으로 지정하라.")
+            elif t == full:
+                raise SystemExit(
+                    f"산출 경로가 담기는 파일과 같다: {out_path}")
 
 
 def build(out_path: str, root: str | None = None) -> tuple[str, int, int]:
     """꾸러미를 만들고 (sha256, 바이트, 파일 수) 를 돌려준다."""
     root = root or _ROOT
     _assert_roster_is_template(root)
+    version = client_version()
     files = collect(root)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     # 임시 이름으로 만들고 마지막에 옮긴다 — 중간에 죽으면 반쪽 꾸러미가 남고,
     # 그 반쪽이 게시되면 sha 는 맞는데 내용이 모자란 물건이 된다.
     tmp = out_path + ".tmp"
+    blobs: dict[str, bytes] = {}
     with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for rel, mode in files:
             with open(os.path.join(root, rel), "rb") as fh:
                 data = fh.read()
+            # ★담은 바이트를 그대로 들고 있는다 — 표는 이 바이트에서 만든다(다시 읽지 않는다).
+            blobs[rel] = data
             info = zipfile.ZipInfo(rel, date_time=FIXED_DATE)
             info.compress_type = zipfile.ZIP_DEFLATED
             # create_system 을 고정한다 — 기본값은 만든 운영체제를 적어 넣는다.
@@ -181,7 +217,7 @@ def build(out_path: str, root: str | None = None) -> tuple[str, int, int]:
             info.external_attr = (mode & 0o7777) << 16
             zf.writestr(info, data)
         # 내용물 표를 마지막에 넣는다. 정렬·개행까지 고정해야 두 번 만든 것이 같은 바이트가 된다.
-        doc = json.dumps(manifest_document(root), ensure_ascii=False,
+        doc = json.dumps(manifest_document(blobs, version), ensure_ascii=False,
                          sort_keys=True, indent=2) + "\n"
         info = zipfile.ZipInfo(MANIFEST_NAME, date_time=FIXED_DATE)
         info.compress_type = zipfile.ZIP_DEFLATED
@@ -202,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ver = client_version()
     out = args.out or os.path.join(_ROOT, "dist", f"agora-client-{ver}.zip")
+    _assert_output_is_outside(_ROOT, out)
     sha, size, count = build(out)
     if args.print_sha:
         print(sha)

@@ -9568,6 +9568,148 @@ def _case_selfcheck_catches_a_tampered_package_file() -> None:
     del d
 
 
+def _case_selfcheck_refuses_an_empty_manifest() -> None:
+    """**빈 표를 통과로 세지 않는다**(이종 검증 2026-09-09 · agy·codex 동시 CRITICAL).
+
+    ★전에는 `files` 가 `{}` 면 순회할 것이 없어 아무것도 재지 않고 통과였다 —
+      ⇒ **표를 비우는 것이 이 축을 끄는 방법**이었다.
+    """
+    import json as _json
+    import shutil
+    import tempfile
+    from agora import selfcheck as sc
+    root = tempfile.mkdtemp(prefix="agora-pkg-")
+    rel = "config/allow-domains.txt"
+    os.makedirs(os.path.join(root, "config"), exist_ok=True)
+    shutil.copy(os.path.join(_ROOT, rel), os.path.join(root, rel))
+    with open(os.path.join(root, rel), "rb") as fh:
+        blob = fh.read()
+    man = os.path.join(root, sc.MANIFEST_NAME)
+    import hashlib as _h
+    with open(man, "w", encoding="utf-8") as fh:
+        _json.dump({"version": "t", "files": {rel: _h.sha256(blob).hexdigest()}}, fh)
+    if sc.check_package(root)["결과"] != "통과":
+        raise AssertionError("고장 심기 전부터 붉다")
+    # ★★이 축만 재려면 **다른 겹을 치워야 한다.** 나무에 파일이 남아 있으면 그것들이
+    #   「표 밖 파일」로 잡혀 빈 표 가드를 지워도 여전히 붉다 — 그러면 이 케이스는
+    #   빈 표 축이 아니라 양방향 축을 재고 있는 것이다(뮤턴트가 살아남아 드러났다).
+    #   ⇒ 파일이 하나도 없는 나무 + 빈 표. 이때 가드가 없으면 「잰 것이 없는데 통과」가 된다.
+    empty_root = tempfile.mkdtemp(prefix="agora-pkg-empty-")
+    with open(os.path.join(empty_root, sc.MANIFEST_NAME), "w", encoding="utf-8") as fh:
+        _json.dump({"version": "t", "files": {}}, fh)
+    row = sc.check_package(empty_root)
+    if row["결과"] != "실패":
+        raise AssertionError(f"빈 표를 통과로 센다: {row}")
+    if "비었다" not in str(row["상세"].get("why", "")):
+        raise AssertionError(f"빈 표라고 말하지 않는다: {row['상세']}")
+    shutil.rmtree(empty_root, ignore_errors=True)
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _case_selfcheck_counts_files_missing_from_the_table() -> None:
+    """표에 **없는** 파일도 센다 — 양방향(이종 검증 2026-09-09 · codex HIGH).
+
+    ★표에 적힌 것만 세면 「표에서 항목을 지우고 그 파일을 고치는」 변조가 통째로 안 잡힌다.
+      지운 자리는 검사 대상에서 사라지기 때문이다.
+    """
+    import json as _json
+    import shutil
+    import tempfile
+    import hashlib as _h
+    from agora import selfcheck as sc
+    root = tempfile.mkdtemp(prefix="agora-pkg2-")
+    rel = "config/allow-domains.txt"
+    os.makedirs(os.path.join(root, "config"), exist_ok=True)
+    shutil.copy(os.path.join(_ROOT, rel), os.path.join(root, rel))
+    with open(os.path.join(root, rel), "rb") as fh:
+        blob = fh.read()
+    man = os.path.join(root, sc.MANIFEST_NAME)
+    with open(man, "w", encoding="utf-8") as fh:
+        _json.dump({"version": "t", "files": {rel: _h.sha256(blob).hexdigest()}}, fh)
+    if sc.check_package(root)["결과"] != "통과":
+        raise AssertionError("고장 심기 전부터 붉다")
+    # 표에서 지우고 그 파일을 고친다 — 「적힌 것만」 세면 이것이 통과한다.
+    with open(man, "w", encoding="utf-8") as fh:
+        _json.dump({"version": "t", "files": {}}, fh)
+    # ⚠빈 표 가드가 먼저 걸리면 이 케이스가 재려던 축이 아니다. 다른 파일 하나를 표에 남긴다.
+    other = "config/allowlist-v1.json"
+    shutil.copy(os.path.join(_ROOT, other), os.path.join(root, other))
+    with open(os.path.join(root, other), "rb") as fh:
+        oblob = fh.read()
+    with open(man, "w", encoding="utf-8") as fh:
+        _json.dump({"version": "t", "files": {other: _h.sha256(oblob).hexdigest()}}, fh)
+    row = sc.check_package(root)
+    if row["결과"] != "실패":
+        raise AssertionError(f"표에 없는 파일을 안 센다: {row}")
+    if row["상세"]["표에_없는_파일"] != [rel]:
+        raise AssertionError(f"어느 파일이 표 밖인지 못 짚는다: {row['상세']}")
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _case_selfcheck_checks_who_signed() -> None:
+    """서명이 유효한 것과 **내 열쇠가 서명한 것**은 다르다(이종 검증 · agy·codex 동시 CRITICAL).
+
+    ★신원 파일에는 열쇠 A 의 지문이 적혀 있는데 실제로는 열쇠 B 가 서명하면,
+      전에는 **참가자 축과 서명 축이 둘 다 초록**이었다. 그 참가자는 광장에서만 거절당한다.
+    """
+    import subprocess as sp
+    d = _selfcheck_dir()
+    if _selfcheck_run(d)["축"]["서명_키"]["결과"] != "통과":
+        raise AssertionError("고장 심기 전부터 붉다")
+    other = os.path.join(d, "other_key")
+    sp.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "other", "-f", other, "-q"],
+           check=True, capture_output=True, stdin=sp.DEVNULL)
+    os.chmod(other, 0o600)
+    before = os.environ.get("AGORA_SIGNING_KEY")
+    os.environ["AGORA_SIGNING_KEY"] = other
+    try:
+        from agora import selfcheck as sc
+        row = sc.check_signing(d)
+    finally:
+        if before is None:
+            os.environ.pop("AGORA_SIGNING_KEY", None)
+        else:
+            os.environ["AGORA_SIGNING_KEY"] = before
+    if row["결과"] != "실패":
+        raise AssertionError(f"남의 열쇠로 서명해도 통과한다: {row}")
+    if row["상세"].get("서명한_열쇠") == row["상세"].get("신원의_열쇠"):
+        raise AssertionError("두 지문을 갈라 보고하지 않는다")
+    # 원복 뒤 통과 — 심은 고장이 남으면 다음 케이스가 남의 고장을 잰다.
+    if _selfcheck_run(d)["축"]["서명_키"]["결과"] != "통과":
+        raise AssertionError("원복 뒤에도 붉다")
+
+
+def _case_selfcheck_keeps_measuring_when_one_axis_explodes() -> None:
+    """축 하나가 예상 못 한 예외로 죽어도 **나머지를 잰다**(이종 검증 · codex HIGH).
+
+    ★전에는 새는 예외 하나가 점검 전체를 중단시켰고, 그러면 이 명령이 약속한 0/1/3 판정이
+      **아예 만들어지지 않았다** — 사람은 무엇이 되고 무엇이 안 되는지를 한 줄도 못 받는다.
+    """
+    from agora import selfcheck as sc
+    d = _selfcheck_dir()
+    original = sc.check_roster
+
+    def boom(_directory):
+        raise RuntimeError("일부러 터뜨린다")
+
+    sc.check_roster = boom
+    try:
+        out = _selfcheck_run(d)
+    finally:
+        sc.check_roster = original
+    if out["축"]["명부_3종"]["결과"] != "실패":
+        raise AssertionError(f"터진 축이 실패로 안 잡힌다: {out['축']['명부_3종']}")
+    if out["축"]["명부_3종"]["상세"].get("exception") != "RuntimeError":
+        raise AssertionError("무엇이 터졌는지 안 적는다")
+    if out["축"]["서명_키"]["결과"] != "통과":
+        raise AssertionError("한 축이 터지자 뒤 축을 안 쟀다")
+    if out["판정"]["종료코드"] != 1:
+        raise AssertionError(f"판정이 안 만들어졌다: {out['판정']}")
+    # 원복 확인
+    if _selfcheck_run(d)["축"]["명부_3종"]["결과"] != "통과":
+        raise AssertionError("원복 뒤에도 붉다")
+
+
 def _case_selftest_refuses_outside_a_dev_tree() -> None:
     """꾸러미 안에서는 `selftest` 가 **정직하게 거절**한다(master 판정 ①).
 
@@ -11870,6 +12012,11 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("점검: 주소 훼손은 실패",        _case_selfcheck_reports_a_broken_relay_address, None),
     ("점검: 변조된 꾸러미는 실패",    _case_selfcheck_catches_a_tampered_package_file, None),
     ("점검: 꾸러미에선 selftest 거절", _case_selftest_refuses_outside_a_dev_tree, None),
+    # ── 이종 검증 봉합(2026-09-09 · agy·codex R1 REVISE) ────────────────────
+    ("점검: 빈 표는 실패",            _case_selfcheck_refuses_an_empty_manifest, None),
+    ("점검: 표 밖 파일도 센다",       _case_selfcheck_counts_files_missing_from_the_table, None),
+    ("점검: 누가 서명했는지 본다",    _case_selfcheck_checks_who_signed, None),
+    ("점검: 축이 터져도 계속 잰다",   _case_selfcheck_keeps_measuring_when_one_axis_explodes, None),
     ("릴레이: 표식은 위조 불가",      _case_relay_retry_marker_cannot_be_forged, None),
     ("릴레이: 멱등 200·재사용 422",   _case_relay_idempotent_two_hundred_and_reuse_conflict, None),
     ("명부: 체크포인트 서명 검증",    _case_checkpoint_signature_is_verified, None),
@@ -11925,9 +12072,13 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if transport == "relay" and not url:',
      '    if False:',
      "점검: 주소 훼손은 실패"),
+    # ★앵커 재조준(2026-09-09) — 이종 검증 봉합이 이 줄에 `or extra` 를 더하면서
+    #   옛 앵커(`if missing or changed:`)가 사라져 이 뮤턴트가 **NOT-APPLIED** 가 됐다.
+    #   ⇒ 「소스를 고치면 그것을 겨누던 뮤턴트가 조용히 빗나간다」의 실물. 뜻은 그대로 두고
+    #     조준만 옮긴다: 여기는 여전히 **변조된 파일을 무시하는가**를 잰다.
     ("M384-selfcheck-ignores-changed-files", "agora/selfcheck.py",
-     '    if missing or changed:',
-     '    if missing:',
+     '    if missing or changed or extra:',
+     '    if missing or extra:',
      "점검: 변조된 꾸러미는 실패"),
     ("M385-selfcheck-counts-no-manifest-as-pass", "agora/selfcheck.py",
      '        return _row(UNMEASURED, {"why": "내용물 표가 없다 — 개발 트리이거나 꾸러미가 아니다",\n                                 "file": MANIFEST_NAME})',
@@ -11937,6 +12088,23 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if present:\n        return',
      '    if True:\n        return',
      "점검: 꾸러미에선 selftest 거절"),
+    # ── 이종 검증 봉합의 그물(2026-09-09) — 봉합이 되돌아가면 여기가 붉어진다 ──
+    ("M368-selfcheck-empty-table-passes", "agora/selfcheck.py",
+     '    if not files:\n        return _row(FAIL, {"why": "내용물 표가 비었다 — 잴 대상이 없다", "표에_적힌_파일": 0},\n                    "꾸러미를 다시 받아라(설치 한 줄을 다시 돌리면 된다).")',
+     '    if False:\n        pass',
+     "점검: 빈 표는 실패"),
+    ("M369-selfcheck-one-way-sweep", "agora/selfcheck.py",
+     '    if missing or changed or extra:',
+     '    if missing or changed:',
+     "점검: 표 밖 파일도 센다"),
+    ("M370-selfcheck-ignores-who-signed", "agora/selfcheck.py",
+     '    if signer_fp != want_fp:',
+     '    if False:',
+     "점검: 누가 서명했는지 본다"),
+    ("M371-selfcheck-axis-explosion-escapes", "agora/selfcheck.py",
+     '        except Exception as e:      # noqa: BLE001 — 축을 세 값 밖으로 내보내지 않는다',
+     '        except ZeroDivisionError as e:',
+     "점검: 축이 터져도 계속 잰다"),
     # ── S8 릴레이 운반층(2026-09-05) ────────────────────────────────────────
     # ── r2 릴레이 계약 확정본 대조(2026-09-05 · docs/RELAY.md@b2ca815) ──────
     ("M342-cli-drops-positional", "agora/cli.py",

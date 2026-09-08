@@ -459,8 +459,14 @@ def main(argv: list[str] | None = None) -> int:
         # ★0(전축 통과) · 1(실패 있음) · 3(실패는 없고 미측정 있음) — 3 을 0 으로 접지 않는다.
         if isinstance(result, dict) and isinstance(result.get("판정"), dict):
             rc = result["판정"].get("종료코드")
-            if isinstance(rc, int):
+            # ★`type(rc) is int` 여야 한다 — `isinstance` 는 **참·거짓도 정수로 받는다**
+            #   (파이썬에서 bool 은 int 의 하위형이다). `종료코드: false` 가 0 으로 통과했다.
+            if type(rc) is int:
                 return rc
+            # ★판정 칸은 있는데 종료 코드를 못 읽으면 **실패 쪽으로 넘어진다.**
+            #   여기서 0 으로 폴백하면 결과 형태가 깨지는 순간 fail-open 이 된다
+            #   (이종 검증 2026-09-09 지적 · agy·codex 둘 다).
+            return 1
         return errors.OK
     except AgoraError as e:
         print(e.to_json(), file=sys.stderr)

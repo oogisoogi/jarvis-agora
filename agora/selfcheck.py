@@ -90,27 +90,58 @@ def check_package(root: str | None = None) -> dict[str, Any]:
     try:
         with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
+        if type(doc) is not dict:
+            raise ValueError("표가 객체가 아니다")
         files = doc["files"]
         if type(files) is not dict:
             raise ValueError("files 가 객체가 아니다")
-    except (OSError, ValueError, KeyError) as e:
+    except (OSError, ValueError, KeyError, TypeError) as e:
         return _row(FAIL, {"why": "내용물 표를 읽지 못했다", "error": str(e)[:200]},
+                    "꾸러미를 다시 받아라(설치 한 줄을 다시 돌리면 된다).")
+
+    # ★빈 표를 통과로 세지 않는다(이종 검증 2026-09-09 · agy·codex 동시 지적 · CRITICAL).
+    #   전에는 `files` 가 `{}` 면 순회할 것이 없어 **아무것도 재지 않고 통과**였다 —
+    #   ⇒ 표를 비우는 것이 이 축을 끄는 방법이었다. 「검사를 끄는 손잡이」를 남기지 않는다.
+    if not files:
+        return _row(FAIL, {"why": "내용물 표가 비었다 — 잴 대상이 없다", "표에_적힌_파일": 0},
                     "꾸러미를 다시 받아라(설치 한 줄을 다시 돌리면 된다).")
 
     missing: list[str] = []
     changed: list[str] = []
     for rel, want in sorted(files.items()):
         full = os.path.join(root, rel)
-        if not os.path.exists(full):
+        if not os.path.isfile(full):
             missing.append(rel)
             continue
-        with open(full, "rb") as fh:
-            if hashlib.sha256(fh.read()).hexdigest() != want:
-                changed.append(rel)
+        try:
+            with open(full, "rb") as fh:
+                got = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            missing.append(rel)
+            continue
+        if got != want:
+            changed.append(rel)
+
+    # ★**양방향으로 본다**(같은 지적). 표에 적힌 것만 세면 「표에서 항목을 지우고 그 파일을 고치는」
+    #   변조가 통째로 안 잡힌다 — 지운 자리는 검사 대상에서 사라지기 때문이다.
+    #   ⇒ 꾸러미에 있는데 표에 없는 파일도 센다.
+    #   ⚠파이썬이 실행하며 만드는 캐시는 뺀다 — 그것은 꾸러미가 실어 온 것이 아니다.
+    #     (뺀 것은 아래 `제외`에 이름을 적는다 — 보이지 않는 억제는 미탐과 구별되지 않는다.)
+    extra: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        for fn in filenames:
+            if fn.endswith(".pyc") or fn == MANIFEST_NAME:
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, fn), root)
+            if rel not in files:
+                extra.append(rel)
+
     detail = {"표에_적힌_파일": len(files), "없는_파일": missing, "달라진_파일": changed,
-              "판본": doc.get("version"),
+              "표에_없는_파일": sorted(extra), "판본": doc.get("version"),
+              "제외": ["__pycache__/", "*.pyc", MANIFEST_NAME],
               "note": "표 자신의 변조는 이 축이 못 잡는다 — 그 축은 꾸러미 전체 sha256 이 진다"}
-    if missing or changed:
+    if missing or changed or extra:
         return _row(FAIL, detail, "꾸러미를 다시 받아라(설치 한 줄을 다시 돌리면 된다).")
     return _row(PASS, detail)
 
@@ -205,22 +236,47 @@ def check_signing(directory: str) -> dict[str, Any]:
                     "꾸러미를 다시 받아라(설치 한 줄을 다시 돌리면 된다).")
     # ★돌려받은 서명을 **실제로 검증까지 한다.** 서명 문자열이 왔다는 것과 그것이 유효하다는
     #   것은 다른 일이고, 여기서 안 재면 그 차이를 아무도 안 잰다.
-    verdict = _verify_probe(PROBE_PREFIX + nonce.encode("ascii"), signature)
+    verdict, signer_fp = _verify_probe(PROBE_PREFIX + nonce.encode("ascii"), signature)
     if verdict != "ok":
         return _row(FAIL, {"why": "만든 서명이 검증을 통과하지 못했다", "verdict": verdict},
                     "설치 한 줄을 다시 돌려라.")
+    # ★★**누가 서명했는지**까지 본다(이종 검증 2026-09-09 · agy·codex 동시 지적 · CRITICAL).
+    #   서명 수학이 맞는 것과 **내 이름의 열쇠가 서명한 것**은 다른 일이다. 이것을 안 재면
+    #   신원 파일에는 열쇠 A 의 지문이 적혀 있는데 실제로는 열쇠 B 가 서명하는 상태가
+    #   **두 축 모두 초록**으로 통과한다 — 그리고 그 참가자는 광장에서만 거절당한다.
+    want_fp = None
+    try:
+        from agora.participant import load as _load
+        want_fp = _load(directory).get("key_fingerprint")
+    except AgoraError:
+        # 신원을 못 읽는 것은 ⑵ 축이 이미 붉게 보고한다. 여기서 두 번 말하지 않는다 —
+        # 대신 **대조를 못 했다는 사실**을 남긴다(조용히 넘어가지 않는다).
+        return _row(FAIL, {"why": "서명은 되는데 신원 파일을 못 읽어 지문을 대조하지 못했다",
+                           "서명한_열쇠": signer_fp},
+                    "참가자 신원 축을 먼저 보라.")
+    if not signer_fp:
+        return _row(FAIL, {"why": "서명한 열쇠의 지문을 읽지 못했다 — 대조할 수 없다"},
+                    "설치 한 줄을 다시 돌려라.")
+    if signer_fp != want_fp:
+        return _row(FAIL, {"why": "서명한 열쇠가 신원 파일에 적힌 열쇠가 아니다",
+                           "서명한_열쇠": signer_fp, "신원의_열쇠": want_fp},
+                    "설치 한 줄을 다시 돌려라 — 열쇠와 이름이 어긋나 있다.")
     return _row(PASS, {"namespace": out.get("namespace"), "검증": "ok",
+                       "서명한_열쇠": signer_fp,
                        "note": "계약 문서가 아닌 바이트에 서명했다 — 이 서명은 다른 자리에 못 쓴다"})
 
 
-def _verify_probe(raw: bytes, signature: str) -> str:
-    """서명 주체를 묻지 않고 **서명 자체가 유효한지**만 본다(`check-novalidate`).
+def _verify_probe(raw: bytes, signature: str) -> tuple[str, str | None]:
+    """서명이 유효한가 — 그리고 **어느 열쇠가** 서명했는가.
 
-    ★명부 대조를 여기서 하지 않는 이유: 갓 설치한 참가자는 아직 명부에 없을 수 있고,
+    ★**명부** 대조는 여기서 하지 않는다: 갓 설치한 참가자는 아직 명부에 없을 수 있고,
       그때 이 축이 붉어지면 사람은 **서명이 안 된다고 읽는다.** 명부 문제는 ⑷ 축이 진다.
+    ★그러나 **지문**은 돌려준다. 「서명이 유효하다」와 「내 열쇠가 서명했다」는 다른 주장이고,
+      부르는 쪽이 뒤엣것을 물을 수 있어야 한다(이종 검증 2026-09-09).
     """
     import subprocess
     import tempfile
+    from agora.sign import _signing_fingerprint
     with tempfile.TemporaryDirectory() as tmp:
         sig = os.path.join(tmp, "probe.sig")
         with open(sig, "w", encoding="utf-8") as fh:
@@ -228,8 +284,10 @@ def _verify_probe(raw: bytes, signature: str) -> str:
         proc = subprocess.run(
             ["ssh-keygen", "-Y", "check-novalidate", "-n", SIGN_NAMESPACE, "-s", sig],
             input=raw, capture_output=True, timeout=30)
-        return "ok" if proc.returncode == 0 else (
-            (proc.stderr or b"").decode("utf-8", "replace").strip()[:200] or "rc!=0")
+        text = ((proc.stdout or b"") + b"\n" + (proc.stderr or b"")).decode("utf-8", "replace")
+        if proc.returncode != 0:
+            return (text.strip()[:200] or "rc!=0"), None
+        return "ok", _signing_fingerprint(text)
 
 
 # ── ⑹ 릴레이 도달 — 읽기만 한다 ──────────────────────────────────────────────
@@ -266,7 +324,22 @@ def check_relay(directory: str, *, timeout: int = 15) -> dict[str, Any]:
         return _row(FAIL, {"url": target, "why": "상대에 닿지 못했다",
                            "error": str(getattr(e, "reason", e))[:200]},
                     "인터넷 연결과 회사·백신의 차단을 확인하고 다시 해 보라.")
-    return _row(PASS, {"url": target, "http": code, "bytes": len(body)})
+    # ★2xx 를 받았다는 것과 **명부를 받았다는 것**은 다른 일이다(이종 검증 2026-09-09).
+    #   빈 본문이나 로그인 가로채기 페이지도 200 을 낸다 — 그것을 통과로 세면 이 축은
+    #   「어딘가가 200 을 냈다」만 재는 것이 된다.
+    #   ⚠그래도 이 축이 증명하는 것은 **도달**까지다. 받은 것이 진짜 우리 명부인지는
+    #     서명·체크포인트가 지고, 여기서는 재지 않는다(그 사실을 적어 둔다).
+    if not body.strip():
+        return _row(FAIL, {"url": target, "http": code, "bytes": 0,
+                           "why": "응답은 왔는데 본문이 비었다"},
+                    "잠시 뒤 다시 해 보고, 계속 같으면 알려 달라.")
+    head = body[:200].lstrip().lower()
+    if head.startswith(b"<!doctype") or head.startswith(b"<html"):
+        return _row(FAIL, {"url": target, "http": code, "bytes": len(body),
+                           "why": "명부 자리에서 웹 페이지가 왔다 — 중간에서 가로챈 것일 수 있다"},
+                    "회사·공용 네트워크의 로그인 가로채기를 확인하고 다시 해 보라.")
+    return _row(PASS, {"url": target, "http": code, "bytes": len(body),
+                       "note": "재는 것은 도달까지다 — 받은 것이 진짜 우리 명부인지는 서명이 진다"})
 
 
 # ── 묶어서 ───────────────────────────────────────────────────────────────────
@@ -277,15 +350,31 @@ def run(*, directory: str | None = None, root: str | None = None,
     directory = os.path.abspath(directory or config_dir())
     root = root or _ROOT
 
+    # ★**축 하나가 예상 못 한 예외로 죽어도 나머지를 계속 잰다**(이종 검증 2026-09-09).
+    #   전에는 축 안에서 새는 예외 하나가 점검 전체를 중단시켰고, 그러면 이 명령이 약속한
+    #   0/1/3 판정이 **아예 만들어지지 않았다** — 사람은 「무엇이 되고 무엇이 안 되는지」를
+    #   한 줄도 못 받는다. 그 예외는 **그 축의 실패**이지 명령의 실패가 아니다.
+    def _axis(name: str, fn: Any) -> dict[str, Any]:
+        try:
+            return fn()
+        except AgoraError as e:
+            return _row(FAIL, {"code": e.code, "message": e.message, "detail": e.detail},
+                        "이 축의 상세를 그대로 알려 달라.")
+        except Exception as e:      # noqa: BLE001 — 축을 세 값 밖으로 내보내지 않는다
+            # ★메시지 원문은 싣지 않는다 — 경로·값이 섞여 나갈 수 있다. **타입만** 싣는다.
+            return _row(FAIL, {"why": "이 축을 재다 예상하지 못한 오류가 났다",
+                               "exception": type(e).__name__, "축": name},
+                        "이 축의 상세를 그대로 알려 달라.")
+
     axes: dict[str, Any] = {}
-    axes["꾸러미_무결성"] = check_package(root)
-    axes["참가자_신원"] = check_participant(directory)
+    axes["꾸러미_무결성"] = _axis("꾸러미_무결성", lambda: check_package(root))
+    axes["참가자_신원"] = _axis("참가자_신원", lambda: check_participant(directory))
     # 앞 축이 무너졌으면 뒤 축은 그 무너짐을 다시 보고할 뿐이다 — 그래도 **돌린다.**
     # 건너뛰면 「미측정」이 되는데, 여기서는 무엇이 되고 무엇이 안 되는지를 한 번에 보여야 한다.
-    axes["운반층_해석"] = check_transport(directory)
-    axes["명부_3종"] = check_roster(directory)
-    axes["서명_키"] = check_signing(directory)
-    axes["릴레이_도달"] = (check_relay(directory) if relay else
+    axes["운반층_해석"] = _axis("운반층_해석", lambda: check_transport(directory))
+    axes["명부_3종"] = _axis("명부_3종", lambda: check_roster(directory))
+    axes["서명_키"] = _axis("서명_키", lambda: check_signing(directory))
+    axes["릴레이_도달"] = (_axis("릴레이_도달", lambda: check_relay(directory)) if relay else
                        _row(UNMEASURED, {"why": "--no-relay 로 껐다 — 상대에 물어보지 않았다"}))
 
     results = [axes[a]["결과"] for a in AXES]
