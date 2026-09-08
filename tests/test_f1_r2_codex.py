@@ -409,7 +409,7 @@ def test_d2_fake_relay_contract_shapes() -> None:
 _JUDGED_AXES = (
     "본문 크기 상한", "봉투 뼈대 11칸", "요청 인자 == 서명된 값", "서명이 이 참가자의 것인가",
     "message_id 재사용", "사슬 경합", "expected_state == stateHash(state)",
-    "vote 는 머리를 안 옮긴다", "전이 권한", "사슬 자리 소유", "post_ids 시드",
+    "vote 는 머리를 안 옮긴다", "전이 권한", "사슬 자리 소유",
     "만료 판정", "등록 소유 증명 서명", "체크포인트",
     # ★codex 4R HIGH — 「무엇을 판정하는가」에 유형 경계가 없어서, 시험이 잘못된 동작을 고정했다.
     "유형별 허용 kind", "after_close",
@@ -419,6 +419,9 @@ _JUDGED_AXES = (
 _UNJUDGED_AXES = (
     "kind 9종 payload 닫힌 스키마", "스크럽 백스톱", "만료 중 운영자 대리 의장 위임",
     "예산",
+    # ★codex 6R HIGH — 「예산은 안 잰다」와 「대상 후보는 잰다」는 함께 참일 수 없다.
+    #   뒤엣것을 **판정에서 뺐다**(표만 고치는 것은 교정이 아니라 변명이다).
+    "answer_selected 대상 검증",
 )
 
 
@@ -481,6 +484,9 @@ def test_d4_double_matches_reducer_on_the_transitions_it_claims() -> None:
     #   방에서 했는데 `answer_selected` 는 **problem 전용**이다(계약 §6) — 실물·우리 리듀서는
     #   `kind_not_allowed` 로 격리하고, 그 시절 더블은 유형을 안 봐서 `solved` 를 냈다.
     #   ⇒ 이 시험은 **더블만 내는 답을 정답으로 고정**하고 있었다. 기대값을 이제 리듀서에서 받는다.
+    # ⚠**대상 검증 자체는 이제 판정 축이 아니다**(codex 6R HIGH · `test_j1`): 후보 집합이 예산
+    #   판정에 의존해서다. 여기서 재는 것은 「허용된 유형·권한에서 답 선택이 두 구현에서 같은
+    #   상태를 낸다」이고, genesis 는 실물에서 **언제나** 후보이므로 이 입력은 그 경계 밖이다.
     relay, gen, head = room(gtype="problem")
     sh = mod._state_hash(relay.rooms["t1"]["state"])
     ab = put(relay, "answer_selected", head, sh, {"post_message_id": gen["message_id"]},
@@ -546,15 +552,27 @@ def test_h2_double_enforces_per_type_allowed_kinds() -> None:
     """
     mod = _fake_relay_module()
     room, put = _double_kit(mod)
-    for gtype, want in (("debate", "kind_not_allowed"), ("problem", None)):
+    # ★★**표를 통째로 견준다**(codex 6R MEDIUM): 구판은 `answer_selected` 의 `debate`/`problem` 만
+    #   재서 **`knowhow` 행을 망가뜨린 변이가 살아남았다**(codex 실측 `TYPE_NET_MUTANT SURVIVED`).
+    #   한 유형만 재는 시험은 「표가 맞다」를 증명하지 않는다 — 표는 세 줄이고 셋 다 계약이다.
+    assert mod._ALLOWED_KINDS == dict(reducer.ALLOWED_KINDS), \
+        f"더블의 유형 표가 계약과 갈렸다: {mod._ALLOWED_KINDS} vs {dict(reducer.ALLOWED_KINDS)}"
+    # 유형별로 **그 유형이 안 받는 kind** 를 하나씩 태운다(행마다 그물이 있어야 한다).
+    for gtype, kind, want in (("debate", "answer_selected", "kind_not_allowed"),
+                              ("knowhow", "answer_selected", "kind_not_allowed"),
+                              ("knowhow", "advance", "kind_not_allowed"),
+                              ("problem", "advance", "kind_not_allowed"),
+                              ("problem", "answer_selected", None)):
         relay, gen, head = room(gtype=gtype)
         sh = mod._state_hash(relay.rooms["t1"]["state"])
-        row = put(relay, "answer_selected", head, sh,
-                  {"post_message_id": gen["message_id"]}, gtype=gtype)
+        payload = ({"post_message_id": gen["message_id"]} if kind == "answer_selected"
+                   else {"from_round": 0, "to_round": 1})
+        row = put(relay, "answer_selected" if kind == "answer_selected" else kind,
+                  head, sh, payload, gtype=gtype)
         oracle = _reduce_bodies([render_post(gen), row["body"]])
         reasons = [q["reason"] for q in oracle["quarantined"]]
-        assert reasons == ([want] if want else []), (gtype, reasons)
-        assert row["reason"] == want, f"{gtype}: 더블 {row['reason']} · 리듀서 {want}"
+        assert reasons == ([want] if want else []), (gtype, kind, reasons)
+        assert row["reason"] == want, f"{gtype}/{kind}: 더블 {row['reason']} · 리듀서 {want}"
         if want:
             assert (row["valid"], row["quarantined"]) == (False, True), row
             # ★거부돼도 자리는 지나갔다 — 두 머리 모두.
@@ -748,6 +766,136 @@ def test_i3_whitespace_gate_treats_unmeasured_as_failure() -> None:
     assert "미측정" in bad.stdout, f"측정 실패를 위반과 구별해 말하지 않았다: {bad.stdout!r}"
     ok = subprocess.run(["bash", script], cwd=root, capture_output=True, text=True)
     assert ok.returncode == 0, f"깨끗한 트리를 위반으로 봤다: {ok.stdout!r}"
+
+
+# ── codex 6R(2026-09-09 · REVISE) — master 판정 = 「판정 안 함 + 표 사유 교정」 ─────
+# ★★6R 의 두 HIGH 는 **선언의 병**이다: 표에 `judged:False` 로 적어 둔 것이 면제처럼 쓰였다.
+#   ⑴「예산은 안 잰다」와 「답 후보는 잰다」는 **함께 참일 수 없다**(후보 집합이 예산 판정의
+#     결과다) — 뒤엣것을 판정에서 뺐다. ⑵「만료 중 운영자 위임은 안 잰다」고 적어 놓고
+#     코드는 `permission` 을 **냈다** — 안 재는 것이 아니라 **좁게 틀린 것**이고 그것은 거짓 적색이다.
+# ★그래서 이 두 시험은 **「더블이 여기서 verdict 를 내지 않는다」**를 단언한다. 무엇을 잰다가
+#   아니라 **무엇을 재지 않는다**를 재는 시험이다 — 선언이 코드로 성립하는지 보는 유일한 방법이다.
+# ⛔이식(계약 규칙을 더블에 손으로 더 옮기는 것)은 master 가 금했다: 남은 것은 손으로 옮긴
+#   더블의 꼬리라 라운드로는 수렴하지 않고, 구조 처방(계약 전수 대조표)은 별도 티켓이다.
+
+
+def test_j1_double_issues_no_verdict_on_answer_target() -> None:
+    """대상 검증은 **판정하지 않는다** — 그것이 코드로 성립하는가(codex 6R HIGH).
+
+    ★재현(6R): `problem` 방에 6,001자 post → 리듀서는 `budget_exceeded` 로 거부해 **후보가 아닌데**,
+      더블은 예산을 안 재므로 후보로 세고 그 대상의 `answer_selected` 를 `solved` 로 통과시켰다.
+    ★봉합은 「예산 이식」이 아니라 **후보 집합의 제거**다: 오염된 값을 아무도 소비하지 않으면
+      그 오염은 판정에 닿지 않는다. 대가는 이 축이 **선언된 공백**이 되는 것이고, 표가 그것을 적는다.
+    """
+    mod = _fake_relay_module()
+    room, put = _double_kit(mod)
+    # ⑴ 아무도 낸 적 없는 message_id 를 대상으로 삼아도 더블은 `unknown_target` 을 내지 않는다.
+    relay, gen, head = room(gtype="problem")
+    row = put(relay, "answer_selected", head, mod._state_hash(relay.rooms["t1"]["state"]),
+              {"post_message_id": "f" * 32}, gtype="problem")
+    assert row["reason"] != "unknown_target", \
+        f"판정하지 않겠다고 선언한 축에서 verdict 를 냈다: {row}"
+    # ⑵ 그 축이 표에 **경계로** 적혀 있는가(코드와 표가 함께 참이어야 한다).
+    unjudged = [r for r in mod.CONTRACT_COVERAGE if not r["judged"]]
+    assert any("대상 검증" in r["check"] for r in unjudged), \
+        "코드는 안 재는데 표는 안 적었다 — 보이지 않는 억제는 미탐과 구별되지 않는다"
+    # ⑶ 후보 집합 자체가 사라졌는가(오염될 값이 없어야 오염 경로가 닫힌다).
+    assert "post_ids" not in relay.rooms["t1"], \
+        "예산에 의존하는 후보 집합이 남아 있다 — 다음 사람이 다시 판정에 쓴다"
+    # ⑷ 대조군: 리듀서는 여전히 그 축을 **잰다**(우리가 약하게 만든 것은 더블 하나다).
+    oracle = _reduce_bodies([render_post(gen), row["body"]])
+    assert [q["reason"] for q in oracle["quarantined"]] == ["unknown_target"], oracle
+
+
+def test_j2_double_does_not_falsely_reject_operator_delegation() -> None:
+    """운영자 위임에 **거짓 적색을 내지 않는다**(codex 6R HIGH).
+
+    ★재현(6R): 만료된 debate 에서 운영자 `op1` 의 `delegate_chair` 를 리듀서는 격리 없이 받아
+      `chair=bob` 으로 갔는데, 더블은 `permission` 으로 **격리**했다. 표는 그 조합을
+      「판정 안 함」이라 적고 있었다 — ★안 재는 것과 **틀리게 좁게 재는 것**은 다른 사건이다.
+    ★넓게 틀리면 시험이 비고(표가 그 공백을 적는다), 좁게 틀리면 **옳은 쪽이 붉어진다.**
+      선언된 경계는 언제나 넓은 쪽이어야 한다.
+    """
+    import datetime
+    mod = _fake_relay_module()
+    room, put = _double_kit(mod)
+    past = (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(seconds=3600)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    for label, deadlines in (("만료", {"r0": past}), ("만료 아님", None)):
+        relay, gen, head = room(ops="op1\n", deadlines=deadlines)
+        st = relay.rooms["t1"]["state"]
+        row = put(relay, "delegate_chair", head, mod._state_hash(st),
+                  {"new_chair": "bob"}, frm="op1")
+        assert row["reason"] != "permission", \
+            f"{label}: 운영자 위임에 거짓 적색을 냈다(실물은 만료 중 이것을 받는다): {row}"
+        assert relay.rooms["t1"]["state"]["chair"] == "bob", (label, row)
+    # 대조군 — 의장도 운영자도 아닌 사람의 위임은 **여전히** permission 이다(권한 축은 살아 있다).
+    relay, gen, head = room(ops="op1\n")
+    row = put(relay, "delegate_chair", head, mod._state_hash(relay.rooms["t1"]["state"]),
+              {"new_chair": "bob"}, frm="mallory")
+    assert (row["valid"], row["reason"]) == (False, "permission"), row
+    oracle = _reduce_bodies([render_post(gen), row["body"]], operators=frozenset({"op1"}))
+    assert [q["reason"] for q in oracle["quarantined"]] == ["permission"], oracle
+    # 그 경계가 표에 적혀 있는가.
+    unjudged = [r for r in mod.CONTRACT_COVERAGE if not r["judged"]]
+    assert any("운영자 대리 의장 위임" in r["check"] for r in unjudged), \
+        "조건을 안 보고 받는다면 그 사실이 표에 있어야 한다"
+
+
+def test_j3_report_boundary_applies_expiry_everywhere() -> None:
+    """만료는 **보고 경계 전부**에 입혀진다 — `derived()` 와 `verdict_of_row()`(codex 6R MEDIUM).
+
+    ★M375 는 `_effective_state()` **자체**만 겨눴다. 그래서 `verdict_of_row()` 쪽 호출을 원상태로
+      되돌린 변이가 **살아남았다**(codex 실측 `REPORT_BOUNDARY_MUTANT SURVIVED`).
+    ★★한 함수를 고친 것과 **그것을 부르는 모든 자리가 고쳐진 것**은 다른 말이다 —
+      이 저장소가 「구현했다 ≠ 배선됐다」로 이미 두 번 다친 자리다. ⇒ 두 문을 각각 잰다.
+    """
+    import datetime
+    mod = _fake_relay_module()
+    room, put = _double_kit(mod)
+    past = (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(seconds=3600)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    relay, gen, head = room(deadlines={"r0": past})
+    st = relay.rooms["t1"]["state"]
+    expired_hash = mod._state_hash({**st, "state": "expired"})
+    row = put(relay, "post", head, expired_hash, {"round": 0, "body": "x"})
+    assert row["valid"] is True, row
+    seen = relay.derived("t1")
+    verdict = mod.verdict_of_row(row, relay.rooms["t1"])
+    assert seen["state"] == "expired", seen
+    assert verdict["state_hash"] == seen["state_hash"], \
+        f"두 보고 문이 서로 다른 상태를 말한다: verdict {verdict['state_hash'][:8]} vs derived {seen['state_hash'][:8]}"
+    oracle = _reduce_bodies([render_post(gen), row["body"]], now=_now_iso())
+    assert verdict["state_hash"] == oracle["state_hash"], \
+        (verdict["state_hash"][:8], oracle["state_hash"][:8])
+
+
+def test_j4_whitespace_gate_fails_when_base_branch_is_missing() -> None:
+    """`main` 이 없으면 **실패**한다 — 실제 그 분기를 지난다(codex 6R LOW).
+
+    ★`test_i3` 는 「없는 ref 를 인자로 준 경우」만 쟀고, **실제 `main` 부재 분기**(`merge-base` 가
+      비는 경로)는 지나가지 않았다. 그래서 그 분기의 `rc=1` 을 지운 변이가 살아남았다
+      (codex 실측 `nomain_rc=0`). ⇒ `main` 이 없는 임시 저장소에서 스크립트를 실제로 돌린다.
+    ★★같은 병의 판본이다: 「그 줄을 썼다」와 「그 줄이 도는 것을 봤다」는 다른 말이다.
+    """
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as tmp:
+        run = lambda *a: subprocess.run(a, cwd=tmp, capture_output=True, text=True)
+        run("git", "init", "-q", "-b", "other")
+        os.makedirs(os.path.join(tmp, "tests"))
+        with open(os.path.join(root, "tests", "ws_hygiene.sh"), encoding="utf-8") as fh:
+            script = fh.read()
+        target = os.path.join(tmp, "tests", "ws_hygiene.sh")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(script)
+        with open(os.path.join(tmp, "seed.txt"), "w", encoding="utf-8") as fh:
+            fh.write("seed\n")
+        run("git", "add", "-A")
+        run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed")
+        out = subprocess.run(["bash", target], cwd=tmp, capture_output=True, text=True)
+    assert out.returncode != 0, f"main 이 없는데 통과했다: {out.stdout!r}"
+    assert "미측정" in out.stdout, f"미측정이라고 말하지 않았다: {out.stdout!r}"
 
 
 # ── [MEDIUM] roster 동기화 실패 뒤에도 하네스가 쓰기로 진행 ─────────────────

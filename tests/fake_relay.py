@@ -108,7 +108,7 @@ class FakeRelay:
                     "head": None, "hashes": set(), "claimed_prevs": set(),
                     # ★전이 상태 — `expected_state` 를 판정하려면 **해시 대상 8칸**이 필요하다
                     #   (계약 §2-1 · reducer 의 `_state_hash`). genesis 에서 세워진다.
-                    "state": None, "post_ids": set()}
+                    "state": None}
             self.rooms[room_id] = room
         return room
 
@@ -181,12 +181,6 @@ class FakeRelay:
             #   생긴다(agy 1R 지적 4 · 수용) — 이미 머리가 있으면 아래 규칙으로 떨어져야 한다.
             room["head"], _ = digest, room["hashes"].add(digest)
             room["state"] = _genesis_state(body, digest)
-            # ★genesis 의 message_id 는 **처음부터 post_ids 안에 있다**(우리 리듀서·실물이
-            #   `{chain[0].message_id}` 로 시드한다). 안 넣으면 genesis 를 답으로 고르는
-            #   `answer_selected` 에서 더블만 상태를 안 바꿔 두 구현이 갈린다(codex 3R HIGH).
-            gid = _event_of(body).get("message_id")
-            if gid:
-                room["post_ids"].add(gid)
             return {"valid": True, "stale": False, "quarantined": False, "reason": None}
         prev = _prev_of(body)
         if prev != room["head"] or prev in room["claimed_prevs"]:
@@ -667,8 +661,6 @@ def _apply_transition(room: dict[str, Any], body: str, kind: str | None,
     operators = {ln.strip() for ln in operators_text.splitlines()
                  if ln.strip() and not ln.lstrip().startswith("#")}
     if kind == "post":
-        if event.get("message_id"):
-            room["post_ids"].add(event["message_id"])
         return None
     if kind == "advance":
         if who != state["chair"]:
@@ -688,8 +680,16 @@ def _apply_transition(room: dict[str, Any], body: str, kind: str | None,
     elif kind == "answer_selected":
         if who != state["requester"]:
             return "permission"
-        if payload.get("post_message_id") not in room["post_ids"]:
-            return "unknown_target"
+        # ★★**대상 검증은 판정하지 않는다**(codex 6R HIGH · master 판정 2026-09-09).
+        #   구판은 `post_ids` 로 `unknown_target` 을 냈다. 그런데 그 후보 집합은 **예산 판정에
+        #   의존한다**: 예산 초과로 거부된 post 는 실물에서 후보가 **아니다.** 더블은 예산을
+        #   안 재므로(표에 그렇게 적혀 있다) 거부됐어야 할 post 를 후보로 세고 있었고,
+        #   그래서 실물이 `unknown_target` 으로 막는 답 선택을 더블만 `solved` 로 통과시켰다.
+        #   ★★**안 재는 축이 판정 축을 먹이면 그 판정은 거짓이다.** 표는 「예산은 안 잰다」와
+        #   「대상 후보는 잰다」를 동시에 적고 있었는데, 뒤엣것은 앞엣것 없이는 성립하지 않는다.
+        #   ⛔예산을 이식하지 않는다(master 결정 — 손으로 옮긴 꼬리는 라운드로 수렴 안 한다).
+        #   ⇒ 후보 집합 자체를 **없앴다**(오염된 값을 아무도 소비하지 않는다). 이 축은 표에
+        #     `judged:False` 로 적히고, 시험이 「더블은 여기서 verdict 를 내지 않는다」를 단언한다.
         state["state"], state["solved_by"] = "solved", payload.get("post_message_id")
     elif kind == "close":
         # ★운영자도 닫을 수 있다(계약 §6). 2차 판이 이 갈래를 빠뜨려 더블만 방을 안 닫았다.
@@ -708,7 +708,15 @@ def _apply_transition(room: dict[str, Any], body: str, kind: str | None,
             return "permission"
         state["state"], state["close_reason"] = "closed", "aborted"
     elif kind == "delegate_chair":
-        if who != state["chair"]:
+        # ★★**운영자 위임은 조건을 안 보고 받는다**(codex 6R HIGH · master 판정 2026-09-09).
+        #   실물은 운영자가 **만료된 동안만** 대신 넘길 수 있다고 본다. 더블은 그 조합을
+        #   「판정 안 함」으로 표에 적어 뒀는데 **코드는 `permission` 을 냈다** — 안 재는 것이
+        #   아니라 **좁게 틀리게 쟀다**(만료 debate 에서 운영자 위임을 실물은 받고 더블은 격리).
+        #   ★★안 재는 축의 선언은 「넓게 통과」를 뜻한다 — **좁게 틀림은 면제되지 않는다.**
+        #   좁은 오답은 **거짓 적색**이라 옳은 쪽을 붉게 만들고, 넓은 오답은 그 축의 시험을
+        #   비운다(그리고 표가 그 공백을 적어 둔다). 선언된 경계는 넓은 쪽이어야 한다.
+        #   ⛔만료 조건을 이식하지 않는다(master 결정).
+        if who != state["chair"] and who not in operators:
             return "permission"
         state["chair"] = payload.get("new_chair")
     return None
@@ -754,15 +762,14 @@ CONTRACT_COVERAGE: tuple[dict[str, Any], ...] = (
      "judged": True, "why": "F-1 의 핵심 계약. 상태 해시 8칸을 계약에서 옮겨 적어 판정한다"},
     {"check": "§5 규칙 5 vote 는 머리를 안 옮긴다", "where": "_chain_verdict",
      "judged": True, "why": "안 옮기면 state_hash 가 갈려 3자 대조가 깨진다"},
-    {"check": "전이 권한(의장·의뢰자·운영자 · advance/resolution/answer_selected/close/abort/delegate_chair)",
+    {"check": "전이 권한(의장·의뢰자·운영자 · advance/resolution/answer_selected/close/abort) — delegate_chair 의 만료 조건은 제외(아래 행)",
      "where": "_apply_transition", "judged": True,
      "why": "거부하면 실물처럼 permission 격리를 낸다 — 상태 변경만 건너뛰면 더블이 valid:true 를 내 두 구현이 갈린다"},
     {"check": "§5 규칙 2 사슬 자리 소유(같은 prev 는 하나만) — vote 뒤에도 자리는 찼다",
      "where": "_chain_verdict claimed_prevs", "judged": True,
      "why": "vote 는 head 를 안 옮기므로 head 만 보면 같은 자리를 두 번 내준다"},
-    {"check": "answer_selected 대상 후보에 genesis 포함(post_ids 시드)",
-     "where": "_chain_verdict", "judged": True,
-     "why": "실물·우리 리듀서가 chain[0].message_id 로 시드한다 — 안 넣으면 그 입력에서 갈린다"},
+    {"check": "answer_selected 대상 검증(unknown_target)", "where": "—", "judged": False,
+     "why": "후보 집합이 **예산 판정에 의존한다**(예산 초과로 거부된 post 는 후보가 아니다). 예산을 안 재면서 이 축을 재면 그 판정이 거짓이 된다 — 안 재는 축이 판정 축을 먹이면 안 된다(codex 6R HIGH). 그래서 후보 집합 자체를 없앴다"},
     {"check": "만료 판정(마감 경과 + 유예 300초)", "where": "_expired_now", "judged": True,
      "why": "안 재면서 만료 해시를 무조건 허용하면 실물보다 넓게 뚫려 그 축의 시험이 빈다"},
     {"check": "만료 전이(루프 뒤 · 보고 상태·상태해시에 반영)", "where": "_effective_state",
@@ -782,11 +789,11 @@ CONTRACT_COVERAGE: tuple[dict[str, Any], ...] = (
      "why": "agora.schema 를 부르면 자기 대조가 된다. 클라 조립 결함은 실물에서 422 로 터진다"},
     {"check": "§3-2/7 스크럽 백스톱", "where": "—", "judged": False,
      "why": "agora.scrub 을 부르면 자기 대조가 된다. 클라 쪽 게이트가 막고 있다"},
-    {"check": "만료 중 운영자 대리 의장 위임", "where": "—", "judged": False,
-     "why": "만료 조건이 걸린 갈래다. 더블은 위임에서 운영자를 안 보므로 그 조합만 실물보다 좁다"},
+    {"check": "만료 중 운영자 대리 의장 위임(조건)", "where": "—", "judged": False,
+     "why": "운영자 위임을 **조건 없이 받는다** — 만료 아닌 때는 실물보다 넓다. 구판은 여기서 permission 을 내 **좁게 틀렸고**(만료 중 위임을 실물은 받는데 더블이 격리 = 거짓 적색 · codex 6R HIGH), 선언은 좁게 틀림을 면제하지 않는다"},
     {"check": "예산(posts_per_round·max_chars) · 라운드 밖 발언 · 반론 대상 필수",
      "where": "—", "judged": False,
-     "why": "상태 해시 8칸을 안 바꾸므로 CAS 대조를 흐리지 않는다. 판정은 실물·우리 리듀서가 한다"},
+     "why": "판정은 실물·우리 리듀서가 한다. ⚠구 사유(「상태 해시 8칸을 안 바꾸므로 대조를 흐리지 않는다」)는 **거짓이었다**(codex 6R HIGH): 예산으로 거부된 post 는 답 후보가 아니므로 answer_selected 결과를 바꾼다 — 그 경로를 막으려고 위 대상 검증 축도 판정하지 않는다"},
 )
 
 

@@ -4430,7 +4430,10 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                    # ★codex 5R — 수용은 맞는데 **상태**가 갈린 자리들 + 두 머리 혼용 + 게이트 순서.
                    "M375-double-never-transitions-to-expired",
                    "M376-double-closes-knowhow-with-any-reason",
-                   "M377-double-conflates-the-two-heads", "M378-gate-order-reversed"),
+                   "M377-double-conflates-the-two-heads", "M378-gate-order-reversed",
+                   # ★codex 6R — 봉합을 재는 자리가 **한 곳만**이었던 셋.
+                   "M379-expiry-skipped-at-the-other-report-door",
+                   "M380-type-table-knowhow-row-broken"),
     # ★서버가 답한 **상태 코드**를 위로 올리는 자리. 여기가 비면 201/200 이 한 칸에 뭉쳐
     #   「새로 적었다」와 「이미 있었다」가 구별되지 않는다(P4 에서 실제로 못 쟀다).
     "쓰기상태": ("M356-write-drops-http-status",),
@@ -4454,7 +4457,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     "읽기상한": ("M369-fetch-runs-without-a-cap",),
     # ★r7(codex 3R) — **하네스 자신**. 빨간 killer 의 KILLED 는 공짜라, 이 축이 비면
     #   나머지 축의 수치 전체가 의심받는다(측정기를 재는 축이다).
-    "하네스무결성": ("M370-red-killer-counts-as-killed",),
+    # ★r8(codex 6R) — 게이트의 「미측정은 통과가 아니다」가 **코드로 성립하는가**(주석은 검사가 아니다).
+    "하네스무결성": ("M370-red-killer-counts-as-killed", "M381-missing-base-branch-passes"),
 }
 
 
@@ -10317,7 +10321,13 @@ def _case_double_enforces_type_kind_boundary() -> None:
     """
     from agora import reducer
     fake = _fake_relay()
-    for gtype, want in (("debate", "kind_not_allowed"), ("problem", None)):
+    # ★★**표를 통째로 견준다**(codex 6R MEDIUM): 한 유형만 재면 `knowhow` 행을 망가뜨린 변이가
+    #   살아남는다(실측). 표는 세 줄이고 **셋 다** 계약이다.
+    if fake._ALLOWED_KINDS != dict(reducer.ALLOWED_KINDS):
+        raise AssertionError(f"더블의 유형 표가 계약과 갈렸다: {fake._ALLOWED_KINDS} vs "
+                             f"{dict(reducer.ALLOWED_KINDS)}")
+    for gtype, want in (("debate", "kind_not_allowed"), ("knowhow", "kind_not_allowed"),
+                        ("problem", None)):
         if (("answer_selected" in reducer.ALLOWED_KINDS[gtype]) is (want is not None)):
             raise AssertionError(f"계약 표가 움직였다 — 기대값을 다시 세워라: {gtype}")
         relay, gen, head = _double_room(fake, gtype=gtype)
@@ -10385,6 +10395,14 @@ def _case_double_measures_expiry_both_ways() -> None:
             raise AssertionError(f"마감 {offset}초: 보고 상태 {seen.get('state')}(기대 {want})")
         if seen.get("state_hash") != fake._state_hash({**st, "state": want}):
             raise AssertionError(f"마감 {offset}초: 보고 상태해시가 그 상태의 해시가 아니다")
+        # ★★**보고 문은 둘이다**(codex 6R MEDIUM): `derived()` 만 재면 `verdict_of_row()` 쪽
+        #   호출을 원상태로 되돌린 변이가 **살아남는다**(실측). 한 함수를 고친 것과
+        #   그것을 부르는 모든 자리가 고쳐진 것은 다른 말이다(「구현했다 ≠ 배선됐다」).
+        verdict = fake.verdict_of_row(row, relay.rooms["t1"])
+        if verdict.get("state_hash") != seen.get("state_hash"):
+            raise AssertionError(f"마감 {offset}초: 두 보고 문이 다른 상태를 말한다 — "
+                                 f"verdict {str(verdict.get('state_hash'))[:8]} vs "
+                                 f"derived {str(seen.get('state_hash'))[:8]}")
 
 
 def _case_double_keeps_knowhow_close_reasons() -> None:
@@ -10449,6 +10467,36 @@ def _case_double_separates_transport_head_from_state_head() -> None:
     dup = _double_put(relay2, "post", head2, sh2, {"round": 0, "body": "x"})
     if (dup.get("valid"), dup.get("reason")) != (False, "lost_race"):
         raise AssertionError(f"이미 찬 자리를 다시 내줬다: {dup}")
+
+
+def _case_whitespace_gate_fails_without_base_branch() -> None:
+    """공백 검사는 `main` 이 없으면 **실패**한다 — 그 분기를 실제로 지난다(codex 6R LOW).
+
+    ★★「미측정은 통과가 아니다」라고 **주석에 적고 rc 를 안 올린** 자리였다(5R LOW 봉합).
+      그 뒤에도 시험은 「없는 ref 를 인자로 준 경우」만 쟀고 **실제 `main` 부재 분기**는
+      지나가지 않아, 그 분기의 `rc=1` 을 지운 변이가 살아남았다(실측 `nomain_rc=0`).
+    ★★「그 줄을 썼다」와 「그 줄이 도는 것을 봤다」는 다른 말이다 — 이 저장소가 아는 병이다.
+    """
+    import subprocess
+    import tempfile
+    script_src = _read_text(os.path.join(_ROOT, "tests", "ws_hygiene.sh"))
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "tests"))
+        target = os.path.join(tmp, "tests", "ws_hygiene.sh")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(script_src)
+        with open(os.path.join(tmp, "seed.txt"), "w", encoding="utf-8") as fh:
+            fh.write("seed\n")
+        quiet = {"cwd": tmp, "capture_output": True, "text": True}
+        subprocess.run(["git", "init", "-q", "-b", "other"], **quiet)
+        subprocess.run(["git", "add", "-A"], **quiet)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "seed"], **quiet)
+        out = subprocess.run(["bash", target], **quiet)
+    if out.returncode == 0:
+        raise AssertionError(f"main 이 없는데 통과했다(미측정을 통과로 셌다): {out.stdout!r}")
+    if "미측정" not in out.stdout:
+        raise AssertionError(f"미측정이라고 말하지 않았다: {out.stdout!r}")
 
 
 def _case_audit_read_fails_closed_on_repeated_cursor() -> None:
@@ -11650,6 +11698,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     # ── F-1 봉합 5차(codex 5R REVISE · 2026-09-09) ─────────────────────────
     ("더블: knowhow 종결 사유를 지킨다", _case_double_keeps_knowhow_close_reasons, None),
     ("더블: 두 머리는 뜻이 다르다", _case_double_separates_transport_head_from_state_head, None),
+    # ── F-1 봉합 6차(codex 6R · master 한정 승인 2026-09-09) ────────────────
+    ("게이트: 기준 브랜치 부재는 실패", _case_whitespace_gate_fails_without_base_branch, None),
 )
 
 
@@ -11775,6 +11825,20 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if state.get("state") == "closed":\n        return "after_close"\n    allowed = _ALLOWED_KINDS.get(state.get("type"))\n    if allowed is not None and kind not in allowed:\n        return "kind_not_allowed"',
      '    allowed = _ALLOWED_KINDS.get(state.get("type"))\n    if allowed is not None and kind not in allowed:\n        return "kind_not_allowed"\n    if state.get("state") == "closed":\n        return "after_close"',
      "더블: 유형 경계를 지킨다"),
+    # ── F-1 봉합 6차(codex 6R · master 한정 승인 2026-09-09) — 그물의 구멍 셋 ─────────────
+    # ★이 셋은 「봉합은 있는데 **그 봉합을 재는 자리가 한 곳만**이었다」는 판정에 1:1 이다.
+    ("M379-expiry-skipped-at-the-other-report-door", "tests/fake_relay.py",
+     '    state = _effective_state(room)\n    return {"accepted_to_ledger": True, "reducer": reducer_said,',
+     '    state = room.get("state")\n    return {"accepted_to_ledger": True, "reducer": reducer_said,',
+     "더블: 만료를 양쪽으로 잰다"),
+    ("M380-type-table-knowhow-row-broken", "tests/fake_relay.py",
+     '    "knowhow": frozenset({"post", "close", "vote", "abort"}),',
+     '    "knowhow": frozenset({"post", "close", "vote", "abort", "answer_selected"}),',
+     "더블: 유형 경계를 지킨다"),
+    ("M381-missing-base-branch-passes", "tests/ws_hygiene.sh",
+     '  echo "  FAIL — main 을 못 찾아 커밋 범위 **미측정**(통과 아님 · 작업트리·staged 만 쟀다)"\n  rc=1',
+     '  echo "  FAIL — main 을 못 찾아 커밋 범위 **미측정**(통과 아님 · 작업트리·staged 만 쟀다)"',
+     "게이트: 기준 브랜치 부재는 실패"),
     ("M362-resolution-skips-local-round-gate", "agora/tools.py",
      '    if state.get("state") != "r3":',
      '    if False:',
