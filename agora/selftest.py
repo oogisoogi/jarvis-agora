@@ -4443,17 +4443,49 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                 "M367-triple-check-swallows-read-failure"),
     # ★r6 — **읽기도 끝나야 한다**. 쓰기 재시도만 막혀 있었고 전건 읽기는 상한이 없었다.
     "읽기상한": ("M369-fetch-runs-without-a-cap",),
+    # ★r7(codex 3R) — **하네스 자신**. 빨간 killer 의 KILLED 는 공짜라, 이 축이 비면
+    #   나머지 축의 수치 전체가 의심받는다(측정기를 재는 축이다).
+    "하네스무결성": ("M370-red-killer-counts-as-killed",),
 }
 
 
 def _case_s8_axes_have_nets() -> None:
-    """S8 의 16축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한)도 같은 방식으로 덮인다."""
+    """S8 의 17축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한·하네스무결성)도 같은 방식으로 덮인다."""
     _axes_have_nets(S8_AXES, "S8")
 
 
 def _case_s7_axes_have_nets() -> None:
     """S7 의 축(온보딩공백)도 같은 방식으로 덮인다."""
     _axes_have_nets(S7_AXES, "S7")
+
+
+def _case_mutation_anchors_still_aim_at_something() -> None:
+    """모든 변이의 **찾을 문자열이 대상 파일에 정확히 한 곳**인가.
+
+    ★★왜 따로 재는가(비용이 아니라 **속도**의 문제다): 하네스는 이것을 이미 `NOT-APPLIED` 로
+      보고하지만, 그 사실은 **뮤테이션 단계를 끝까지 돌린 뒤에야** 나온다(이 저장소에서 15분).
+      앵커는 **내가 그 코드를 고칠 때마다** 낡으므로, 한 라운드 안에서 여러 번 낡는다 —
+      2026-09-09 이 티켓에서만 **세 번** 났다(M104·M360 → M366 → M104·M360·M363·M365).
+      그때마다 15분을 다시 썼다. 케이스 단계에서 몇 초에 잡으면 그 왕복이 사라진다.
+    ★그리고 이것은 **정확성 문제이기도 하다**: 낡은 앵커는 「그 축을 안 쟀다」는 뜻인데,
+      15분 뒤 요약의 각주로 나오면 사람은 그것을 실패로 안 읽는다.
+    ⚠자기 파일(`agora/selftest.py`)을 겨누는 변이는 **등록 줄 자신이 두 번째 일치**가 되기 쉽다 —
+      그래서 「1곳」이 곧 「자기 자신을 안 겨눈다」의 검사이기도 하다.
+    """
+    problems: list[str] = []
+    for mid, relpath, old, _new, _killer in MUTATIONS:
+        path = os.path.join(_ROOT, relpath)
+        try:
+            body = _read_text(path)
+        except OSError as e:
+            problems.append(f"{mid}: 대상 파일을 못 읽는다({relpath}: {e})")
+            continue
+        n = body.count(old)
+        if n != 1:
+            problems.append(f"{mid}: {relpath} 안에 {n}곳(1이어야 한다)")
+    if problems:
+        raise AssertionError("앵커가 낡았다 — 소스를 고치고 변이를 안 옮겼다:\n  "
+                             + "\n  ".join(problems))
 
 
 def _case_mutation_ids_are_unique() -> None:
@@ -7620,7 +7652,15 @@ def _sigkill_drill(root: str, target: str, pristine: str, journal: str, env: dic
         "import sys, time; sys.path.insert(0, %r);"
         "import agora.selftest as st;"
         "st.MUTATIONS = tuple(m for m in st.MUTATIONS if m[0] == %r);"
-        "st._case_passes_in_subprocess = lambda killer: time.sleep(120);"
+        # ★스텁은 **변이 뒤 호출만** 멈춰 세워야 한다. 하네스는 변이 **전에** killer 가 깨끗한
+        #   트리에서 통과하는지 먼저 재므로(baseline 게이트 · 2026-09-09), 첫 호출까지 재우면
+        #   **변이가 아예 안 쓰이고** 이 드릴은 「30초 안에 변이가 없다」로 죽는다.
+        #   ⇒ 첫 호출(=baseline)은 통과시키고 그 뒤부터 멈춘다. 드릴의 뜻은 그대로다:
+        #     **변이가 적용된 채 자식이 매달린 상태**를 만들어 -9 로 죽이는 것.
+        "st._seen = [];"
+        "st._case_passes_in_subprocess = ("
+        "  lambda killer: True if not st._seen and st._seen.append(1) is None"
+        "  else time.sleep(120));"
         "st._run_mutations()"
     ) % (root, mid)
     proc = popen([sys.executable, "-B", "-c", child1], cwd=root, env=env,
@@ -10339,6 +10379,59 @@ def _case_full_fetch_terminates() -> None:
             raise AssertionError(f"{name}: 끝없이 페이지를 받는데 조용히 성공했다")
 
 
+def _case_mutation_harness_needs_a_green_killer() -> None:
+    """**빨간 killer 의 KILLED 는 공짜다** — 하네스가 그것을 구별해야 한다(codex 3R · master 승인).
+
+    ★재는 법: killer 가 baseline 에서 실패하도록 만들어 놓고 변이 하나를 태운다. 하네스가
+      그 변이를 `KILLED` 로 적으면 결함이고, `NOT-APPLIED`(측정 실패)로 적으면 통과다.
+    ★**대조군을 함께 둔다**: 정상 killer 는 여전히 KILLED 로 잡혀야 한다. 안 그러면 이 게이트가
+      「전부 측정 실패」로 만들어 놓고 초록을 낼 수 있다(막는 것과 마비시키는 것은 다르다).
+    ⚠하네스 전체를 돌리지 않는다 — `MUTATIONS` 를 한 건으로 좁혀 그 한 건만 태운다.
+    """
+    import agora.selftest as st
+    real_mutations = st.MUTATIONS
+    real_probe = st._case_passes_in_subprocess
+    picked = next(m for m in real_mutations if m[1] != "agora/selftest.py")
+    calls: list[str] = []
+
+    def probe_factory(green: bool):
+        def probe(case_name: str) -> bool:
+            calls.append(case_name)
+            # baseline 호출(1회차)만 green 스위치를 따르고, 변이 뒤 호출은 실패로 둔다
+            #   = 「변이가 잡혔다」를 흉내낸다.
+            return green if calls.count(case_name) == 1 else False
+        return probe
+
+    try:
+        for green, want in ((False, "NOT-APPLIED"), (True, "KILLED")):
+            calls.clear()
+            st.MUTATIONS = (picked,)
+            st._case_passes_in_subprocess = probe_factory(green)
+            rows = st._run_mutations()
+            got = rows[0]["result"]
+            if got != want:
+                raise AssertionError(
+                    f"killer baseline={'초록' if green else '적색'} 인데 {got} 로 적었다(기대 {want})")
+            if not green and len(calls) != 1:
+                raise AssertionError(
+                    f"baseline 이 빨간데 변이를 태웠다(호출 {len(calls)}회) — 트리를 건드리면 안 된다")
+    finally:
+        st.MUTATIONS = real_mutations
+        st._case_passes_in_subprocess = real_probe
+    # ★캐시가 실제로 도는가: 같은 killer 를 두 변이가 공유하면 baseline 은 **한 번만** 재야 한다.
+    calls.clear()
+    try:
+        st.MUTATIONS = (picked, picked)
+        st._case_passes_in_subprocess = probe_factory(True)
+        st._run_mutations()
+    finally:
+        st.MUTATIONS = real_mutations
+        st._case_passes_in_subprocess = real_probe
+    baseline_calls = [c for c in calls if c == picked[4]]
+    if len(baseline_calls) != 3:      # baseline 1회 + 변이 뒤 판정 2회
+        raise AssertionError(f"baseline 캐시가 안 돈다 — killer 호출 {len(baseline_calls)}회(기대 3)")
+
+
 def _prev_in(body: str) -> str:
     from agora.event import parse_post
     return parse_post(body)["event"]["prev"]
@@ -11292,6 +11385,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("대조: 못 읽은 축은 초록이 아니다", _case_triple_check_fails_closed_on_unreadable_axis, None),
     ("리허설: 반쪽 명부면 안 쓴다",   _case_rehearsal_stops_on_partial_roster, None),
     ("읽기: 전건 읽기는 끝난다",      _case_full_fetch_terminates, None),
+    ("하네스: killer 가 먼저 초록이어야 한다", _case_mutation_harness_needs_a_green_killer, None),
+    ("하네스: 변이 앵커가 대상을 겨눈다",   _case_mutation_anchors_still_aim_at_something, None),
 )
 
 
@@ -11374,6 +11469,15 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "        if over:",
      "        if False:",
      "읽기: 전건 읽기는 끝난다"),
+    # ── 하네스 자신(codex 3R · master 승인 2026-09-09) ─────────────────────
+    # ★하네스가 자기 결함을 재는 자리다: baseline 게이트를 지우면 빨간 killer 의 KILLED 가
+    #   다시 공짜가 된다. 그 자유를 되돌리는 변이가 **적색이어야** 게이트가 산 것이다.
+    # ⚠찾을 문자열은 **두 줄 이상**이어야 한다: 한 줄이면 이 등록 줄 자신이 두 번째 일치가 되어
+    #   하네스가 「대상이 2곳」으로 NOT-APPLIED 를 낸다(이 저장소가 이미 아는 함정).
+    ("M370-red-killer-counts-as-killed", "agora/selftest.py",
+     "            if not killer_green(killer):\n                rows.append({\"mutation\": mid, \"result\": \"NOT-APPLIED\",\n                             \"why\": \"killer 가 변이 전부터 실패한다(측정 실패 — KILLED 가 공짜다)\",",
+     "            if False:\n                rows.append({\"mutation\": mid, \"result\": \"NOT-APPLIED\",\n                             \"why\": \"killer 가 변이 전부터 실패한다(측정 실패 — KILLED 가 공짜다)\",",
+     "하네스: killer 가 먼저 초록이어야 한다"),
     ("M362-resolution-skips-local-round-gate", "agora/tools.py",
      '    if state.get("state") != "r3":',
      '    if False:',
@@ -13026,6 +13130,24 @@ def _recover_leftover() -> dict[str, Any] | None:
 
 def _run_mutations() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    # ★★**빨간 killer 는 무엇이든 죽인다**(codex 3R · 2026-09-09 · master 승인).
+    #   하네스는 「변이를 넣었더니 killer 가 실패했다」를 KILLED 로 적는데, killer 가
+    #   **변이 이전부터** 실패하고 있었다면 그 KILLED 는 **공짜로 얻은 것**이다 —
+    #   그 그물이 그 축을 본다는 증거가 전혀 아니다.
+    #   실증: codex 샌드박스는 localhost bind 를 막아 socket 의존 killer 셋이 baseline 부터
+    #   빨갰고, 하네스는 그 셋을 아무 표시 없이 KILLED 로 셌다. 「측정 실패」와 「잡았다」가
+    #   한 칸에 뭉쳐 있으면 수치 전체가 의심받는다.
+    # ⇒ 변이 **전에** killer 가 깨끗한 트리에서 통과하는지 먼저 잰다. 못 통과하면 그 변이는
+    #   KILLED 가 아니라 **NOT-APPLIED(측정 실패)** 다 — 실패와 같은 급으로 보고한다.
+    # ★비용 완화(master 지정): killer 이름당 **한 번만** 재고 캐시한다. 변이마다 다시 돌리면
+    #   하네스가 두 배로 느려지고, 느린 하네스는 잘려서 소스에 변이를 남긴다(이미 겪었다).
+    baseline: dict[str, bool] = {}
+
+    def killer_green(name: str) -> bool:
+        if name not in baseline:
+            baseline[name] = _case_passes_in_subprocess(name)
+        return baseline[name]
+
     for mid, relpath, old, new, killer in MUTATIONS:
         path = os.path.join(_ROOT, relpath)
         with open(path, encoding="utf-8") as fh:
@@ -13040,6 +13162,19 @@ def _run_mutations() -> list[dict[str, Any]]:
         if original.count(old) != 1:
             rows.append({"mutation": mid, "result": "NOT-APPLIED",
                          "why": f"대상 문자열이 {original.count(old)}곳 — 어느 것을 쟀는지 알 수 없다",
+                         "file": relpath, "killer": killer})
+            continue
+
+        # ⑴-b **killer 가 깨끗한 트리에서 통과하는가** — 아니면 이 변이는 아무것도 못 잰다.
+        try:
+            if not killer_green(killer):
+                rows.append({"mutation": mid, "result": "NOT-APPLIED",
+                             "why": "killer 가 변이 전부터 실패한다(측정 실패 — KILLED 가 공짜다)",
+                             "file": relpath, "killer": killer})
+                continue
+        except subprocess.TimeoutExpired:
+            rows.append({"mutation": mid, "result": "NOT-APPLIED",
+                         "why": "killer baseline 이 시간 안에 안 끝났다(측정 실패)",
                          "file": relpath, "killer": killer})
             continue
 
