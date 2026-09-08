@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any, Callable
 
@@ -72,6 +73,13 @@ COMMANDS: dict[str, dict[str, Any]] = {
     #   도구가 아니라 운영 동작으로 둔다(§4 도구 11종 동결 문면 불변 · MCP 표면 11종 유지).
     "delegate-chair": {"core": False, "built": True,  "slice": "S7-3"},
     "abort":          {"core": False, "built": True,  "slice": "S7-3"},
+    # ★계약 확장 7(master 판정 2026-09-09 `[master#696731a8]` B안) — **설치 점검**.
+    #   ⚠`selftest` 와 재는 것이 다르다: `selftest` 는 **개발 트리 전용 하네스**다
+    #     (케이스·뮤테이션이 `tests/`·`docs/`·`.appbuild/` 를 연다 — 배포 꾸러미에는 그것들이 없다).
+    #     그래서 꾸러미 안의 `selftest` 는 **정직하게 거절**하고, 「내 기계의 설치가 성립하는가」는
+    #     이 명령이 진다(여섯 축 · 전부 읽기 전용 · 미측정을 통과로 세지 않는다).
+    #   도구가 아니다: MCP 표면에 올리지 않는다(대리인이 자기 설치를 점검할 일은 없다).
+    "selfcheck":      {"core": False, "built": True,  "slice": "S8-4"},
 }
 
 # MCP 에 노출하지 않는 것 — 정본 = 설계 §4 「(CLI만)」 행(예외 계수는 그 한 곳에만 · J-7 2026-09-02).
@@ -81,7 +89,9 @@ MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
                         # 계약 확장 5(2026-09-05) — 가입·명부 운영. 설치가 부르고 대리인은 못 부른다.
                         "register", "sync-roster", "whoami",
                         # 계약 확장 6(2026-09-06) — 운영자 체크포인트 발행.
-                        "checkpoint"})
+                        "checkpoint",
+                        # 계약 확장 7(2026-09-09) — 설치 점검. 대리인이 자기 설치를 볼 일은 없다.
+                        "selfcheck"})
 
 # ── 역할별 노출표(설계 §5 「수신 격리」 H-3 · NFR-2) ─────────────────────────
 # ★**여기가 「도구 목록」의 단일 출처다.** 대리인 브리프(S6-3 `brief-reader.md`)는 이 표를
@@ -311,6 +321,33 @@ def _value(key: str, raw: str) -> Any:
     return raw
 
 
+# `selftest` 가 개발 트리에서만 도는 근거가 되는 두 자리. ★한 자리로 판정하지 않는다 —
+# 하나만 보면 그 하나가 사라지는 날 검사가 조용히 「꾸러미다」로 넘어간다.
+DEV_TREE_MARKERS = ("tests/fake_relay.py", ".appbuild")
+
+
+def _require_dev_tree(root: str | None = None) -> None:
+    """`selftest` 는 **개발 트리 전용**이다(master 판정 2026-09-09 `[master#696731a8]` ①).
+
+    ★왜 이 문이 필요한가: `selftest` 의 케이스와 뮤테이션은 `tests/`·`docs/`·`.appbuild/`
+      까지 연다. 배포 꾸러미에는 그것들이 없으므로 **없는 파일을 열다 죽었다**(실측 rc=2 ·
+      추적정보만 나왔다). 죽는 것과 「여기서는 안 돈다」를 말하는 것은 다르다.
+    ★판정은 **두 표지가 모두 없을 때만** 「꾸러미」다. 하나만 없으면 그것은 꾸러미가 아니라
+      **망가진 개발 트리**이고, 그때는 통과시켜 원래대로 시끄럽게 죽게 둔다 —
+      반쪽 트리를 조용히 「꾸러미니까 넘어감」으로 처리하면 그 순간 이 문이 검사를 끄는 손잡이가 된다.
+    """
+    root = root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    present = [m for m in DEV_TREE_MARKERS if os.path.exists(os.path.join(root, m))]
+    if present:
+        return
+    raise AgoraError(
+        errors.PRECONDITION,
+        "이 꾸러미에는 개발 트리가 없어 selftest 는 여기서 돌지 않는다."
+        " 설치 점검은 agora selfcheck 로 한다.",
+        {"reason": "not_a_dev_tree", "설치_점검": "agora selfcheck"},
+    )
+
+
 def dispatch(name: str, args: argparse.Namespace) -> Any:
     meta = COMMANDS.get(name)
     if meta is None:
@@ -323,7 +360,11 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
             "이 서브커맨드는 아직 구현되지 않았다",
             {"reason": "slice_not_built", "command": name, "slice": meta["slice"]},
         )
+    if name == "selfcheck":
+        from agora import selfcheck as sc
+        return sc.main(list(args.rest) if hasattr(args, "rest") else [])
     if name == "selftest":
+        _require_dev_tree()
         from agora import selftest as st
         return st.run()
     if name == "keygen":
@@ -413,6 +454,13 @@ def main(argv: list[str] | None = None) -> int:
         # 일반 실패 1로 끝낸다. 계약 코드에 두 뜻을 싣지 않는다.
         if isinstance(result, dict) and result.get("ok") is False:
             return 1
+        # `selfcheck` 도 계약 오류가 아니라 **점검 결과**를 낸다. 종료 코드를 판정 칸에서 읽는다 —
+        # 판정과 종료 코드가 서로 다른 곳에서 정해지면 언젠가 둘이 갈리고, 그때 기계는 종료 코드를 믿는다.
+        # ★0(전축 통과) · 1(실패 있음) · 3(실패는 없고 미측정 있음) — 3 을 0 으로 접지 않는다.
+        if isinstance(result, dict) and isinstance(result.get("판정"), dict):
+            rc = result["판정"].get("종료코드")
+            if isinstance(rc, int):
+                return rc
         return errors.OK
     except AgoraError as e:
         print(e.to_json(), file=sys.stderr)

@@ -18,7 +18,7 @@ import json
 import os
 from typing import Any
 
-from agora import errors, roster
+from agora import __version__, errors, roster
 from agora.contract_open import CHECKPOINT_PURPOSE, REGISTER_PURPOSE
 from agora.errors import AgoraError
 from agora.keygen import KEY_NAME
@@ -376,6 +376,10 @@ def whoami(*, directory: str | None = None) -> dict[str, Any]:
             "note": ("켜져 있으면 현재 구현에서는 모든 발신이 code 3 으로 거부된다"
                      " — 승인자 배선은 v1.1(도구가 「승인 대기」 반환)"),
         },
+        # ★판본을 여기 둔다 — 참가자가 화면 사진으로 회신하는 명령이 이것 하나뿐이라,
+        #   판본이 여기 없으면 「어느 클라이언트에서 난 일인가」를 물을 자리가 사라진다.
+        #   ⚠이름이 `c` 로 시작해 승인 게이트(`a`) 다음 자리다 — 첫 칸은 그대로 게이트다.
+        "client_version": __version__,
         "config_dir": directory,
         "joined_rooms": {"count": len(joined), "rooms": sorted(joined)},
         "participant": {"id": doc["id"], "display_name": doc["display_name"],

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,11 @@ from agora.errors import AgoraError
 from agora.event import canonical_bytes
 
 KEY_ENV = "AGORA_SIGNING_KEY"
+
+# 설치 점검 서명 프로브가 서명하는 바이트의 고정 접두(`selfcheck`).
+# ★계약 문서(canonical JSON)와 **겹치지 않는 모양**이어야 한다 — 겹치면 점검용 서명이
+#   진짜 문서의 서명으로 재사용될 수 있다. JSON 은 `{` 로 시작하므로 이 접두와 절대 안 겹친다.
+PROBE_PREFIX = b"agora-selfcheck-probe-v1:"
 
 
 def _signing_key_path() -> str:
@@ -169,6 +175,21 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
         raise AgoraError(errors.ARGUMENT,
                          "호출자는 서명 키를 지정할 수 없다",
                          {"hint": KEY_ENV})
+    if "probe" in request:
+        # ★설치 점검용 서명 프로브(`agora selfcheck`). 재는 것은 **서명이 되는가** 하나다:
+        #   환경이 키 자리를 알려 줬는가 · 그 파일이 있는가 · 잠기지 않았는가 · 서명 도구가
+        #   `-Y sign` 을 아는가. 이 넷이 참가자가 실제로 막히는 자리다.
+        # ★서명 대상을 **계약 문서가 아닌 바이트**로 둔다 — canonical JSON 이 아니라 고정 접두
+        #   + 난수다. 그래서 이 서명은 이벤트로도 등록으로도 체크포인트로도 **재사용될 수 없다.**
+        #   (계약 문서를 프로브로 쓰면 점검 한 번이 재사용 가능한 소유 증명을 하나 만들어 낸다.)
+        nonce = (request.get("probe") or {}).get("nonce")
+        if type(nonce) is not str or not re.fullmatch(r"[0-9a-f]{32}", nonce):
+            raise AgoraError(errors.ARGUMENT, "probe nonce 는 32자리 hex 여야 한다",
+                             {"got": type(nonce).__name__})
+        raw = PROBE_PREFIX + nonce.encode("ascii")
+        signature = sign_bytes(raw, _signing_key_path())
+        return {"signature": signature, "namespace": SIGN_NAMESPACE,
+                "kind_of_request": "probe"}
     if "register" in request:
         # ★등록 소유 증명(릴레이 계약 3-1) — 이벤트가 아니라서 kind 검사가 없다. 그 대신
         #   **칸 집합을 닫아** 이벤트가 이 문으로 새지 못하게 한다.

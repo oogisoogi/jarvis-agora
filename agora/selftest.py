@@ -4459,11 +4459,23 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     #   나머지 축의 수치 전체가 의심받는다(측정기를 재는 축이다).
     # ★r8(codex 6R) — 게이트의 「미측정은 통과가 아니다」가 **코드로 성립하는가**(주석은 검사가 아니다).
     "하네스무결성": ("M370-red-killer-counts-as-killed", "M381-missing-base-branch-passes"),
+    # ★09-09 신설 — **설치 점검**(`selfcheck`). 이 축이 비면 「돌려 보니 초록이더라」가
+    #   아무것도 뜻하지 않는다: 초록은 고장이 없을 때의 기본값이기 때문이다.
+    #   그래서 아홉 자리 전부 「고장을 심었는데도 초록인가」를 겨눈다.
+    #   ⚠번호는 F-1 2차 병합(origin/main 7f626c6)과 겹쳐 **재조준했다**(M382~M390).
+    "설치점검": ("M382-selfcheck-signing-never-fails", "M383-selfcheck-accepts-a-missing-relay",
+                 "M384-selfcheck-ignores-changed-files",
+                 "M385-selfcheck-counts-no-manifest-as-pass",
+                 "M386-selftest-runs-anywhere",
+                 # 이종 검증(agy·codex R1)이 연 자리 — 「초록인데 아무것도 안 재는」 네 곳.
+                 "M387-selfcheck-empty-table-passes", "M388-selfcheck-one-way-sweep",
+                 "M389-selfcheck-ignores-who-signed",
+                 "M390-selfcheck-axis-explosion-escapes"),
 }
 
 
 def _case_s8_axes_have_nets() -> None:
-    """S8 의 17축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한·하네스무결성)도 같은 방식으로 덮인다."""
+    """S8 의 18축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한·하네스무결성·설치점검)도 같은 방식으로 덮인다."""
     _axes_have_nets(S8_AXES, "S8")
 
 
@@ -5761,7 +5773,10 @@ def _case_local_commands_are_not_tools() -> None:
              "register", "sync-roster", "whoami",
              # 계약 확장 6(2026-09-06) — 운영자 체크포인트 발행. 대리인 손에 「지금 명부가
              # 정본이다」라고 서명하는 힘을 쥐어 주지 않는다.
-             "checkpoint"}
+             "checkpoint",
+             # 계약 확장 7(2026-09-09) — 설치 점검. 대리인이 자기 설치를 들여다볼 일은 없고,
+             # 도구로 올리면 이 명령의 상세(설정 폴더 경로·명부 해시)가 방으로 나갈 길이 생긴다.
+             "selfcheck"}
     if cli.MCP_EXEMPT != frozenset(local):
         raise AssertionError(f"예외 목록: {sorted(cli.MCP_EXEMPT)}")
     if local & set(tools.CORE_TOOLS):
@@ -6207,10 +6222,19 @@ def _case_matrix_keeps_k1_unrun() -> None:
     text = _doc("README.md")
     if "지원 매트릭스" not in text:
         raise AssertionError("매트릭스가 없다")
-    if "K-1" not in text or "미실행" not in text:
-        raise AssertionError("K-1 미실행 고지가 매트릭스에 없다")
-    if "이 줄을 지우지 마라" not in text:
-        raise AssertionError("삭제 금지 표시가 없다 — 다음 사람이 정리해 버린다")
+    # ★세 표식이 **한 줄 안에** 있어야 한다(2026-09-09 봉합).
+    #   전에는 문서 어디에든 있으면 통과였다. 그래서 다른 절이 「K-1」을 한 번 언급하고
+    #   또 다른 줄이 「미실행」을 갖고 있으면, **매트릭스의 그 칸을 통째로 지워도 초록**이었다 —
+    #   실제로 그렇게 뚫렸다(문서 표에 RUN-WINDOWS 안내 한 줄을 더했더니 M175 가 살아남았다).
+    #   ⇒ 그물은 **자기가 지키는 줄에 묶여 있어야** 한다. 같은 낱말을 쓰는 다른 줄이 대신 서 주면
+    #     그 순간 이 검사는 문서의 다른 자리를 재고 있는 것이다.
+    row = [ln for ln in text.splitlines()
+           if "K-1" in ln and "미실행" in ln and "이 줄을 지우지 마라" in ln]
+    if not row:
+        raise AssertionError("K-1 미실행 고지가 **한 줄로** 매트릭스에 없다"
+                             " — 세 표식(K-1·미실행·삭제 금지)이 같은 줄에 있어야 한다")
+    if "Windows" not in row[0]:
+        raise AssertionError(f"그 줄이 윈도우 칸이 아니다: {row[0][:60]}")
     for need in ("8.2", "3.11", "2.40"):
         if need not in text:
             raise AssertionError(f"최소 버전이 빠졌다: {need}")
@@ -9399,6 +9423,185 @@ def _onboard_dir() -> str:
     return d
 
 
+# ── 설치 점검(`selfcheck`) — master 판정 2026-09-09 `[master#696731a8]` ③ ────────
+# ★세 케이스가 전부 **고장을 실제로 심고** 그 축이 붉어지는지 본다. 「돌려 보니 초록이더라」는
+#   이 명령에 대해 아무것도 증명하지 않는다 — 초록은 고장이 없을 때의 기본값이기 때문이다.
+# ★심은 고장은 **되돌리고, 되돌아왔는지를 단언한다.** 안 그러면 다음 케이스가 남의 고장을 잰다.
+
+def _selfcheck_dir() -> str:
+    """`selfcheck` 가 볼 설정 폴더 — 설치기가 만드는 것과 같은 모양(키·신원·설정·명부)."""
+    import json as _json
+    import tempfile
+    d = _onboard_dir()                      # 키 + participant.json + 권한까지 실물 그대로
+    with open(os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+        _json.dump({"transport": "relay",
+                    "relay": {"url": "http://127.0.0.1:1", "timeout_seconds": 2}}, fh)
+    os.chmod(os.path.join(d, "config.json"), 0o600)
+    for name in ("allowed_signers", "revoked_keys", "operators"):
+        with open(os.path.join(d, name), "w", encoding="utf-8") as fh:
+            fh.write("# selfcheck fixture\n")
+    del tempfile
+    return d
+
+
+def _selfcheck_run(directory: str, root: str | None = None):
+    """상대에 물어보지 않고 돌린다(`relay=False`) — 이 케이스들이 재는 것은 릴레이가 아니다."""
+    from agora import selfcheck as sc
+    env_before = os.environ.get("AGORA_SIGNING_KEY")
+    os.environ["AGORA_SIGNING_KEY"] = os.path.join(directory, "id_ed25519")
+    try:
+        return sc.run(directory=directory, root=root, relay=False)
+    finally:
+        if env_before is None:
+            os.environ.pop("AGORA_SIGNING_KEY", None)
+        else:
+            os.environ["AGORA_SIGNING_KEY"] = env_before
+
+
+def _case_selfcheck_reports_a_key_that_cannot_sign() -> None:
+    """서명 열쇠를 못 쓰게 만들면 **서명 축이 붉어진다**(뮤턴트 ①).
+
+    ★「파일이 있다」로 재면 이 고장을 못 잡는다 — 여기서 망가뜨리는 것은 **내용**이고
+      파일은 그대로 있다. 실제로 서명해 보는 축만이 이것을 본다.
+    """
+    d = _selfcheck_dir()
+    key = os.path.join(d, "id_ed25519")
+    with open(key, "rb") as fh:
+        original = fh.read()
+    before = _selfcheck_run(d)
+    if before["축"]["서명_키"]["결과"] != "통과":
+        raise AssertionError(f"고장 심기 전부터 붉다: {before['축']['서명_키']}")
+    try:
+        with open(key, "wb") as fh:
+            fh.write(b"-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-key\n")
+        os.chmod(key, 0o600)
+        after = _selfcheck_run(d)
+    finally:
+        with open(key, "wb") as fh:
+            fh.write(original)
+        os.chmod(key, 0o600)
+    if after["축"]["서명_키"]["결과"] != "실패":
+        raise AssertionError(f"서명 못 하는 열쇠를 통과로 센다: {after['축']['서명_키']}")
+    if after["판정"]["종료코드"] != 1:
+        raise AssertionError(f"실패가 있는데 종료코드가 1이 아니다: {after['판정']}")
+    # 원복 확인 — 심은 고장이 남으면 다음 케이스가 남의 고장을 잰다.
+    with open(key, "rb") as fh:
+        if fh.read() != original:
+            raise AssertionError("열쇠가 원래대로 안 돌아왔다")
+    if _selfcheck_run(d)["축"]["서명_키"]["결과"] != "통과":
+        raise AssertionError("원복 뒤에도 붉다")
+
+
+def _case_selfcheck_reports_a_broken_relay_address() -> None:
+    """릴레이 주소를 지우면 **운반층 축이 붉어진다**(뮤턴트 ②)."""
+    import json as _json
+    d = _selfcheck_dir()
+    cfg_path = os.path.join(d, "config.json")
+    with open(cfg_path, encoding="utf-8") as fh:
+        original = fh.read()
+    before = _selfcheck_run(d)
+    if before["축"]["운반층_해석"]["결과"] != "통과":
+        raise AssertionError(f"고장 심기 전부터 붉다: {before['축']['운반층_해석']}")
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            _json.dump({"transport": "relay", "relay": {"timeout_seconds": 2}}, fh)
+        os.chmod(cfg_path, 0o600)
+        after = _selfcheck_run(d)
+    finally:
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            fh.write(original)
+        os.chmod(cfg_path, 0o600)
+    if after["축"]["운반층_해석"]["결과"] != "실패":
+        raise AssertionError(f"주소 없는 설정을 통과로 센다: {after['축']['운반층_해석']}")
+    with open(cfg_path, encoding="utf-8") as fh:
+        if fh.read() != original:
+            raise AssertionError("설정이 원래대로 안 돌아왔다")
+
+
+def _case_selfcheck_catches_a_tampered_package_file() -> None:
+    """꾸러미 파일을 한 글자 고치면 **무결성 축이 붉어진다**(뮤턴트 ③).
+
+    ★표가 없을 때를 **통과가 아니라 미측정**으로 세는지도 여기서 함께 본다 —
+      「표가 없으면 통과」였다면 표를 지우는 것이 이 축을 끄는 방법이 된다.
+    """
+    import hashlib
+    import json as _json
+    import shutil
+    import tempfile
+    from agora import selfcheck as sc
+    d = _selfcheck_dir()
+    root = tempfile.mkdtemp(prefix="agora-pkg-")
+    victim_rel = "config/allow-domains.txt"
+    os.makedirs(os.path.join(root, "config"), exist_ok=True)
+    victim = os.path.join(root, victim_rel)
+    shutil.copy(os.path.join(_ROOT, victim_rel), victim)
+    with open(victim, "rb") as fh:
+        original = fh.read()
+    manifest = os.path.join(root, sc.MANIFEST_NAME)
+
+    # 표가 없는 상태 = 미측정(통과 아님)
+    if sc.check_package(root)["결과"] != "미측정":
+        raise AssertionError("표가 없는데 미측정이 아니다")
+
+    with open(manifest, "w", encoding="utf-8") as fh:
+        _json.dump({"version": "test",
+                    "files": {victim_rel: hashlib.sha256(original).hexdigest()}}, fh)
+    if sc.check_package(root)["결과"] != "통과":
+        raise AssertionError("고장 심기 전부터 붉다")
+    try:
+        with open(victim, "wb") as fh:
+            fh.write(original + b"# tampered\n")
+        row = sc.check_package(root)
+        if row["결과"] != "실패":
+            raise AssertionError(f"변조된 파일을 통과로 센다: {row}")
+        if row["상세"]["달라진_파일"] != [victim_rel]:
+            raise AssertionError(f"어느 파일이 달라졌는지 못 짚는다: {row['상세']}")
+    finally:
+        with open(victim, "wb") as fh:
+            fh.write(original)
+    with open(victim, "rb") as fh:
+        if fh.read() != original:
+            raise AssertionError("파일이 원래대로 안 돌아왔다")
+    if sc.check_package(root)["결과"] != "통과":
+        raise AssertionError("원복 뒤에도 붉다")
+    shutil.rmtree(root, ignore_errors=True)
+    del d
+
+
+def _case_selftest_refuses_outside_a_dev_tree() -> None:
+    """꾸러미 안에서는 `selftest` 가 **정직하게 거절**한다(master 판정 ①).
+
+    ★죽는 것과 거절하는 것은 다르다 — 전에는 없는 파일을 열다 추적정보만 남기고 죽었다.
+    ★표지가 **하나만** 없으면 그것은 꾸러미가 아니라 망가진 개발 트리다. 그때는 거절하지 않는다 —
+      거절하면 이 문이 검사를 끄는 손잡이가 된다.
+    """
+    import tempfile
+    from agora import cli as cli_mod
+    from agora.errors import AgoraError as _AgoraError
+    empty = tempfile.mkdtemp(prefix="agora-nodev-")
+    try:
+        cli_mod._require_dev_tree(empty)
+    except _AgoraError as e:
+        if e.detail.get("reason") != "not_a_dev_tree":
+            raise AssertionError(f"거절 사유가 다르다: {e.detail}") from None
+        if "selfcheck" not in e.message:
+            raise AssertionError(f"다음에 할 일을 안 적는다: {e.message}") from None
+    else:
+        raise AssertionError("개발 트리가 아닌데 통과시킨다")
+    # 표지가 하나만 있어도 개발 트리로 본다(반쪽 트리는 시끄럽게 죽게 둔다).
+    for marker in cli_mod.DEV_TREE_MARKERS:
+        half = tempfile.mkdtemp(prefix="agora-half-")
+        target = os.path.join(half, marker)
+        os.makedirs(os.path.dirname(target) or half, exist_ok=True)
+        if marker.endswith(".py"):
+            open(target, "w").close()
+        else:
+            os.makedirs(target, exist_ok=True)
+        cli_mod._require_dev_tree(half)      # 예외가 나면 그 자체가 실패다
+    # 이 저장소는 개발 트리다.
+    cli_mod._require_dev_tree(_ROOT)
+
+
 def _case_relay_body_code_wins_over_status() -> None:
     """실패 **본문의 `code` 가 정본이다** — HTTP 상태와 갈리면 code 가 이긴다(계약 §3-0).
 
@@ -11662,6 +11865,11 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("등록: 증명 없이 안 보낸다",     _case_register_refuses_to_send_without_proof, None),
     ("등록: purpose 값이 고정",       _case_register_purpose_value_is_pinned, None),
     ("릴레이: 쓰기 소진은 8",         _case_relay_exhausted_write_is_unknown, None),
+    # ── 설치 점검(2026-09-09 · master 판정 `[master#696731a8]`) ──────────────
+    ("점검: 못 쓰는 열쇠는 실패",     _case_selfcheck_reports_a_key_that_cannot_sign, None),
+    ("점검: 주소 훼손은 실패",        _case_selfcheck_reports_a_broken_relay_address, None),
+    ("점검: 변조된 꾸러미는 실패",    _case_selfcheck_catches_a_tampered_package_file, None),
+    ("점검: 꾸러미에선 selftest 거절", _case_selftest_refuses_outside_a_dev_tree, None),
     ("릴레이: 표식은 위조 불가",      _case_relay_retry_marker_cannot_be_forged, None),
     ("릴레이: 멱등 200·재사용 422",   _case_relay_idempotent_two_hundred_and_reuse_conflict, None),
     ("명부: 체크포인트 서명 검증",    _case_checkpoint_signature_is_verified, None),
@@ -11706,6 +11914,29 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
 # ── 뮤테이션 ────────────────────────────────────────────────────────────────
 # (id, 파일, 찾을 문자열, 바꿀 문자열, 이 변이를 잡아야 하는 케이스 이름)
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+    # ── 설치 점검(2026-09-09 · master 판정 `[master#696731a8]` ③) ─────────────
+    # ★네 자리 전부 「고장을 심었는데 초록이 나오는가」를 겨눈다. 케이스가 고장을 심는 것과
+    #   그 심은 고장을 **판정이 실제로 읽는 것**은 다른 일이고, 뮤턴트만이 그 차이를 드러낸다.
+    ("M382-selfcheck-signing-never-fails", "agora/selfcheck.py",
+     '        return _row(FAIL, {"code": e.code, "message": e.message, "detail": e.detail,\n                           "env": KEY_ENV},\n                    "설치 한 줄을 다시 돌려라 — 서명 열쇠와 그 자리를 설치가 마련한다.")',
+     '        return _row(PASS, {"code": e.code})',
+     "점검: 못 쓰는 열쇠는 실패"),
+    ("M383-selfcheck-accepts-a-missing-relay", "agora/selfcheck.py",
+     '    if transport == "relay" and not url:',
+     '    if False:',
+     "점검: 주소 훼손은 실패"),
+    ("M384-selfcheck-ignores-changed-files", "agora/selfcheck.py",
+     '    if missing or changed:',
+     '    if missing:',
+     "점검: 변조된 꾸러미는 실패"),
+    ("M385-selfcheck-counts-no-manifest-as-pass", "agora/selfcheck.py",
+     '        return _row(UNMEASURED, {"why": "내용물 표가 없다 — 개발 트리이거나 꾸러미가 아니다",\n                                 "file": MANIFEST_NAME})',
+     '        return _row(PASS, {"file": MANIFEST_NAME})',
+     "점검: 변조된 꾸러미는 실패"),
+    ("M386-selftest-runs-anywhere", "agora/cli.py",
+     '    if present:\n        return',
+     '    if True:\n        return',
+     "점검: 꾸러미에선 selftest 거절"),
     # ── S8 릴레이 운반층(2026-09-05) ────────────────────────────────────────
     # ── r2 릴레이 계약 확정본 대조(2026-09-05 · docs/RELAY.md@b2ca815) ──────
     ("M342-cli-drops-positional", "agora/cli.py",

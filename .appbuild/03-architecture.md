@@ -130,7 +130,7 @@
 | `agora.enter` | topic, kind(debate\|problem), body?, envelope?, deadlines? | {room_id, thread_id, kind, topic, chair, message_id, url, usage, joined} — genesis 1건(의장 = 자기) |
 | `agora.browse` | kind?, cursor?, limit? | {rooms:[{room_id, title, kind, state, round, chair, deadline, updated}], closed_excluded, scanned, filtered_within_scanned, unverifiable, next_cursor} — **`closed` 만 뺀다**(resolved·expired 는 남는다) |
 | `agora.join` | room_id | {room_id, title, kind, state, round, chair, joined, is_gate:false, in_roster, why} — **로컬 동작**(이벤트 0건) |
-| (CLI만) **MCP 예외 13종 — ★이 행이 예외 계수의 정본이다**(J-7 봉합 2026-09-02 · §1 D3·§8 FR-13 은 여기를 가리킬 뿐 수를 적지 않는다 · 코드 = `cli.MCP_EXEMPT` 와 집합 일치): `watch [--interval 60]` · `reconcile` · `selftest` · `keygen` · `export` · `import` · `mcp-serve` · `delegate-chair` · `abort` · `register` · `sync-roster` · `whoami` · `checkpoint` | | MCP 미노출 · 4종→13종 확장 근거 = `cli.py` 등록표 주석(계약 확장 1~6) |
+| (CLI만) **MCP 예외 14종 — ★이 행이 예외 계수의 정본이다**(J-7 봉합 2026-09-02 · §1 D3·§8 FR-13 은 여기를 가리킬 뿐 수를 적지 않는다 · 코드 = `cli.MCP_EXEMPT` 와 집합 일치): `watch [--interval 60]` · `reconcile` · `selftest` · `keygen` · `export` · `import` · `mcp-serve` · `delegate-chair` · `abort` · `register` · `sync-roster` · `whoami` · `checkpoint` · `selfcheck` | | MCP 미노출 · 4종→14종 확장 근거 = `cli.py` 등록표 주석(계약 확장 1~7) |
 - CLI는 `--body-file F` 등 파일 인자를 받아 구조체로 변환한 뒤 코어 호출.
 
 **운영 동작(CLI 전용) 6종 — 도구가 아니다**(master 결정 2026-08-26 + **계약 확장 5** 2026-09-05 · 위 도구 표면은 14종):
