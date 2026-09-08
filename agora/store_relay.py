@@ -54,6 +54,22 @@ ROSTER_FILES = ("allowed_signers", "revoked_keys", "operators")
 ROOMS_LIMIT_MAX = 100
 EVENTS_LIMIT_MAX = 200
 
+# 릴레이가 이벤트에서 **파생해 주는** 칸(계약 §3-3). 상태의 근거가 아니라 **대조 축**이다.
+# ★손으로 적어 둔다: 통째 넘김(`dict(data)`)으로 두면 계약이 좁아져도 아무 일도 안 일어나고,
+#   넓어지면 우리가 모르는 칸이 대조에 끼어든다. 이름을 적으면 **계약이 움직일 때 이 줄이 움직인다.**
+_DERIVED_ROOM_FIELDS = ("state", "round", "state_hash", "close_reason", "chair",
+                        "type", "requester", "events_counted")
+_DERIVED_ROOM_LIST_FIELDS = ("state", "round", "closed", "answered")
+
+# 전건 읽기의 **종료 상한**(codex 2R LOW · 2026-09-09). 「같은 커서 반복」 검사는 상대가
+# **매번 새 커서**를 주면 안 걸린다 — 빈 페이지를 무한히 주거나, 읽는 속도보다 원장이 빨리
+# 자라면 호출이 끝나지 않는다. ⇒ 페이지·이벤트·시간 셋 다에 상한을 둔다.
+# ★셋을 다 두는 이유: 페이지만 막으면 한 페이지에 다 담아 오는 상대에게 못 걸리고,
+#   이벤트만 막으면 빈 페이지를 무한히 주는 상대에게 못 걸린다. 시간은 그 둘의 그물이다.
+FETCH_MAX_PAGES = 500
+FETCH_MAX_EVENTS = 50_000
+FETCH_MAX_SECONDS = 120.0
+
 # 실패 본문이 말할 수 있는 코드 — **닫아 둔다**(릴레이 계약 §3-7 표의 여섯 값).
 # ★열어 두면 서버가 우리 오류 계약에 없는 숫자를 밀어 넣어 `AgoraError` 생성 자체가 터진다.
 BODY_CODES: frozenset[int] = frozenset({
@@ -63,6 +79,39 @@ BODY_CODES: frozenset[int] = frozenset({
 
 # 서버가 `Retry-After` 로 아무 값이나 줄 수 있으므로 **우리 쪽 상한**을 둔다.
 RETRY_AFTER_CAP_SECONDS = 60.0
+
+
+class _PageBudget:
+    """전건 읽기가 **끝난다**는 것을 보장하는 상한(codex 2R LOW · 2026-09-09).
+
+    ★재시도(POST CAS)는 2회로 막혀 있었지만 **읽기**에는 상한이 없었다. 「같은 커서 반복」
+      검사 하나만으로는 **매번 새 커서를 주는 상대**를 못 잡는다 — 빈 페이지를 무한히 주거나
+      읽는 속도보다 원장이 빨리 자라면 이 호출은 영원히 안 끝난다. 끝나지 않는 호출은
+      오류를 내지 않으므로 **아무 경보에도 안 걸린다**(가장 나쁜 실패 모양이다).
+    ⛔초과는 **부분 결과로 접지 않는다.** 이벤트는 `prev` 로 엮여 있어서 일부만 주면 리듀서가
+      「닿지 않는 것」으로 읽는다 — 잘린 전건은 조용한 거짓이지 절반의 진실이 아니다.
+      그래서 code 7(저장층 실패 · 재시도 가능)로 **멈춘다**.
+    """
+
+    def __init__(self, room: Any) -> None:
+        self.room, self.pages, self.events = room, 0, 0
+        self.started = time.monotonic()
+
+    def tick(self, *, pages: int = 0, events: int = 0) -> None:
+        self.pages += pages
+        self.events += events
+        over = None
+        if self.pages > FETCH_MAX_PAGES:
+            over = ("pages", self.pages, FETCH_MAX_PAGES)
+        elif self.events > FETCH_MAX_EVENTS:
+            over = ("events", self.events, FETCH_MAX_EVENTS)
+        elif time.monotonic() - self.started > FETCH_MAX_SECONDS:
+            over = ("seconds", round(time.monotonic() - self.started, 1), FETCH_MAX_SECONDS)
+        if over:
+            raise AgoraError(errors.STORE, "전건 읽기가 상한을 넘었다 — 끝나지 않는 읽기를 멈춘다",
+                             {"room": self.room, "limit_hit": over[0],
+                              "value": over[1], "cap": over[2],
+                              "how": "릴레이 페이지 응답을 확인하라(빈 페이지·되풀이 커서)"})
 
 
 def _body_code(detail: Any) -> int | None:
@@ -371,10 +420,13 @@ class RelayStore:
         rows: list[dict[str, Any]] = []
         page_cursor = cursor
         seen_cursors: set[str] = set()
+        budget = _PageBudget(room)
         while True:
+            budget.tick(pages=1)
             path = (f"/rooms/{quote(str(room), safe='')}/events"
                     + _query(limit=_clamp(limit, EVENTS_LIMIT_MAX), cursor=page_cursor))
             data = self._run("GET", path)
+            budget.tick(events=len(data.get("items") or []))
             for item in data.get("items") or []:
                 rows.append({
                     "node_id": item.get("event_id") or item.get("node_id"),
@@ -407,9 +459,15 @@ class RelayStore:
         rows = []
         for item in data.get("items") or []:
             room = item.get("room_id") or item.get("number")
-            rows.append({"number": room, "node_id": item.get("node_id"),
-                         "updated_at": item.get("updated_at"),
-                         "title": item.get("title")})
+            row = {"number": room, "node_id": item.get("node_id"),
+                   "updated_at": item.get("updated_at"),
+                   "title": item.get("title")}
+            # ★목록 행에도 파생 덧칸이 온다(계약 §3-3). 방 조회에 없는 축(`state`·`round`)이
+            #   여기 있으므로, 버리면 3자 대조에서 그 축이 통째로 빈다(codex 2R HIGH).
+            for field in _DERIVED_ROOM_LIST_FIELDS:
+                if field in item:
+                    row[field] = item[field]
+            rows.append(row)
         return {"items": rows[:limit], "next_cursor": data.get("next_cursor")}
 
     def audit_events(self, *, thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
@@ -419,14 +477,23 @@ class RelayStore:
           쓰면 안 된다」). 그 경계를 흐리지 않으려고 **다른 이름의 다른 문**을 낸다 —
           이 문으로 들어온 값은 **상태를 세우는 데 쓰지 않고 대조에만 쓴다**(3자 대조 · `--verify`).
         ★이름이 갈리면 오용도 갈린다: `fetch` 를 부르는 코드가 실수로 판정을 주워 쓸 길이 없다.
+        ★★**부르는 자리가 하나 늘었다**(2026-09-09 · codex 2R CRITICAL): `core.audit_verdict` —
+          응답을 못 받은 글(code 8)이 실제로 **반영됐는지** 되묻는 자리다. 이것은 §3-5 위반이 아니다:
+          상태를 세우는 것이 아니라 **내가 방금 쓴 글의 운명**을 묻는 것이고, 같은 물음을 정상 응답
+          경로는 이미 POST 의 `verdict` 로 하고 있었다(`tools._relay_rejected`). 그 물음이 재조회
+          경로에만 없어서 **응답을 받으면 실패 · 못 받으면 rc 0** 이라는 비대칭이 남아 있었다.
+        ⛔여전히 금지: `fetch`(상태를 세우는 문)가 이 칸을 줍는 것.
         """
         rows: list[dict[str, Any]] = []
         page_cursor: str | None = None
         seen: set[str] = set()
+        budget = _PageBudget(thread_id)
         while True:
+            budget.tick(pages=1)
             path = (f"/rooms/{quote(str(thread_id), safe='')}/events"
                     + _query(limit=_clamp(limit, EVENTS_LIMIT_MAX), cursor=page_cursor))
             data = self._run("GET", path)
+            budget.tick(events=len(data.get("items") or []))
             for item in data.get("items") or []:
                 rows.append({
                     "node_id": item.get("event_id") or item.get("node_id"),
@@ -452,9 +519,20 @@ class RelayStore:
         if "closed" not in data:
             return {"closed": None, "answered": None, "closed_at": None,
                     "why": "relay_does_not_derive"}
-        return {"closed": bool(data.get("closed")),
-                "answered": bool(data.get("answered")),
-                "closed_at": data.get("closed_at")}
+        out = {"closed": bool(data.get("closed")),
+               "answered": bool(data.get("answered")),
+               "closed_at": data.get("closed_at")}
+        # ★★계약 §3-3 의 **파생 덧칸**을 그대로 넘긴다(codex 2R HIGH · 2026-09-09).
+        #   구판은 세 칸만 남기고 나머지를 버렸는데, 버린 것이 하필 **대조의 알맹이**였다:
+        #   `state_hash` 가 서로 달라도 3자 대조는 견줄 값이 없어 `mismatch: []` 를 냈고
+        #   `--verify` 가 rc 0 을 냈다. **없는 칸은 대조되지 않고, 대조되지 않는 축은 통과한다.**
+        # ★칸은 **이름으로 적어** 넘긴다(통째 넘김 금지): 계약이 움직이면 이 줄이 움직여야 하고,
+        #   안 움직이면 대조가 조용히 좁아지는 것이 아니라 **여기가 눈에 띈다**.
+        # ⚠이 값들은 여전히 **상태의 근거가 아니다**(계약 §3-5) — 대조에만 쓴다.
+        for field in _DERIVED_ROOM_FIELDS:
+            if field in data:
+                out[field] = data[field]
+        return out
 
     def project(self, *, thread_id: str, state: str,
                 answer_node_id: str | None = None,

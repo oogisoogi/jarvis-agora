@@ -3717,8 +3717,8 @@ def _case_verdict_comes_from_store_not_ledger() -> None:
     #   그래서 **다른 글이 하나 있는** 저장층에서 잰다.
     store = MockStore()
     store.inject_raw(thread_id=ev["thread_id"], body="남의 글 — 우리 이벤트가 아니다")
-    verdict = core.resolve_unknown(store=store, thread_id=ev["thread_id"],
-                                   message_id=ev["message_id"])
+    verdict, _reason = core.audit_verdict(store=store, thread_id=ev["thread_id"],
+                                          message_id=ev["message_id"])
     if verdict != core.ABSENT:
         raise AssertionError(f"운반층에 없는데 {verdict} 로 판정했다 "
                              "(원장을 봤거나, 아무 글이나 맞다고 했다)")
@@ -4415,14 +4415,15 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     "진입점": ("M322-cli-entry-rejects-flags", "M342-cli-drops-positional"),
     # ★r4 — 리허설 하네스. **기본값이 안전 쪽인가**가 이 축의 전부다.
     "리허설": ("M349-rehearsal-defaults-to-live", "M351-rehearsal-skips-missing-post",
-               "M352-rehearsal-skips-undelivered"),
+               "M352-rehearsal-skips-undelivered",
+               "M368-rehearsal-writes-with-partial-roster"),
     # ★서버가 계산해 준 판정을 **대조 축으로만** 쓰는 자리(계약 §3-2·§3-5). 여기가 비면
     #   「참고값」이 슬며시 근거가 되어도 아무도 모른다.
     "파생대조": ("M331-relay-drops-verdict",),
     # ★r5(agy 2R) — **더블이 계약을 얼마나 지키는가**. 더블이 무르면 그만큼 시험이 공허해지고,
     #   그 공백은 실물에서만 드러난다(같은 병을 이 저장소에서 네 번 겪었다).
     "더블충실도": ("M353-double-skips-category-binding", "M354-double-skips-title-binding",
-                   "M355-double-skips-skeleton"),
+                   "M355-double-skips-skeleton", "M365-double-skips-expected-state"),
     # ★서버가 답한 **상태 코드**를 위로 올리는 자리. 여기가 비면 201/200 이 한 칸에 뭉쳐
     #   「새로 적었다」와 「이미 있었다」가 구별되지 않는다(P4 에서 실제로 못 쟀다).
     "쓰기상태": ("M356-write-drops-http-status",),
@@ -4431,12 +4432,22 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     "경합반영": ("M357-write-never-retries", "M358-relay-rejection-folded-into-success",
                  "M359-blind-spot-ignored", "M360-double-never-judges-chain",
                  "M361-retry-writes-to-the-same-slot",
-                 "M362-resolution-skips-local-round-gate"),
+                 "M362-resolution-skips-local-round-gate",
+                 # ★F-1 2차(codex 2R) — 같은 병이 **다른 두 문**으로 돌아왔다:
+                 #   응답 유실 뒤 재조회(M363)와 로컬 수용에 의한 면제(M364).
+                 "M363-settle-existence-is-commitment",
+                 "M364-relay-rejection-can-return-zero"),
+    # ★r6(codex 2R) — **3자 대조가 실제로 대는가**. 이 축이 비어 있어서 상태 해시가 갈렸는데도
+    #   `mismatch: []` 가 나왔다. 못 읽은 축을 초록으로 세는 것도 여기서 잡는다.
+    "3자대조": ("M366-triple-check-drops-state-hash",
+                "M367-triple-check-swallows-read-failure"),
+    # ★r6 — **읽기도 끝나야 한다**. 쓰기 재시도만 막혀 있었고 전건 읽기는 상한이 없었다.
+    "읽기상한": ("M369-fetch-runs-without-a-cap",),
 }
 
 
 def _case_s8_axes_have_nets() -> None:
-    """S8 의 14축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영)도 같은 방식으로 덮인다."""
+    """S8 의 16축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한)도 같은 방식으로 덮인다."""
     _axes_have_nets(S8_AXES, "S8")
 
 
@@ -9986,19 +9997,36 @@ def _case_relay_rejection_is_not_success() -> None:
                 raise AssertionError(f"재시도 횟수가 안 맞는다: {e.detail}")
         else:
             raise AssertionError("두 번 밀렸는데 성공으로 보고했다")
-    # ⑴-b **다툼**: 릴레이는 밀렸다는데 **우리 사슬에는 들어와 있다** — 정본은 우리 리듀서다(계약 §3-5).
-    #    ⇒ 성공으로 보고하되 **다툼을 숨기지 않는다**(agy 1R 지적 3 · 수용).
+    # ⑴-b **다툼**: 릴레이는 반영을 거부했는데 **우리 사슬에는 들어와 있다.**
+    #    ★★이 칸의 판정이 **뒤집혔다**(master 2026-09-09 · codex 2R HIGH). 이력을 지우지 않고 적는다:
+    #      · 구 계약(agy 1R 2026-09-08 · 수용): 「정본은 우리 리듀서이므로 **성공**으로 보고하되
+    #        다툼을 `relay_verdict_disputed` 로 실어 올린다」 — 거짓 실패를 막으려는 판정이었다.
+    #      · 그 분기가 연 창(codex 재현): **로컬 설정이 릴레이보다 느슨하면 상시로 열린다.**
+    #        로컬 `posts_per_round` 가 크면 릴레이는 `budget_exceeded` 로 격리하는데 우리는 받아들여
+    #        **rc 0** 이 난다. 게다가 `say()` 는 반환값에서 그 다툼 칸을 **떼어내고** 있었다 —
+    #        「숨기지 않는다」던 장치가 공개 도구 경계에서 사라졌다.
+    #      · 신 계약(현행): **릴레이 `valid:false` 는 언제나 비영 종료**다. 번호는 새로 만들지 않는다
+    #        (재시도 가능 = 9 · 그 밖 = 3). 거짓 실패 걱정은 **없애는 대신 드러내서** 답한다:
+    #        `detail.accepted_by_us` 가 「우리는 받았다」를 말한다.
+    #    ⇒ 여기서 재는 것: rc 3 **그리고** detail 이 그 다툼을 실제로 담는가(번호만 보는 스크립트의
+    #      한계를 detail 이 닫았는가). 둘을 함께 안 재면 「번호는 맞는데 근거가 없는」 실패가 지나간다.
     with _relay_env() as (ctx, relay, _url):
         room = _relay_room(ctx)
-        relay.verdict = {"accepted_to_ledger": True, "reducer": "stale",
-                         "reason": "lost_race"}
-        said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="다툼"))
-        if not said.get("message_id"):
-            raise AssertionError("우리 사슬에 든 글을 실패로 보고했다(거짓 실패)")
-        reduced = tools._reduce(ctx, room)
-        if not any(e["event"]["message_id"] == said["message_id"]
-                   for e in (reduced.get("events") or [])):
-            raise AssertionError("성공이라 했는데 우리 사슬에 없다")
+        relay.verdict = {"accepted_to_ledger": True, "reducer": "quarantined",
+                         "reason": "budget_exceeded", "state_hash": None}
+        try:
+            _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="다툼"))
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT:
+                raise AssertionError(f"릴레이가 격리했는데 3 이 아니다: {e.code}") from None
+            detail = e.detail or {}
+            if detail.get("reason") != "budget_exceeded":
+                raise AssertionError(f"거부 사유를 안 실었다: {detail}")
+            if detail.get("accepted_by_us") is not True:
+                raise AssertionError(
+                    f"우리 사슬에는 들어와 있는데 그 다툼을 안 실었다: {detail}")
+        else:
+            raise AssertionError("릴레이가 반영을 거부했는데 성공으로 보고했다(rc 0)")
     # ⑵ **우리 리듀서가 이미 아는 무효**는 보내기 전에 막는다(로컬 겹 · 남의 원장을 안 더럽힌다).
     #    ★2026-09-08 실물이 이 자리를 열었다: 하네스가 r2 에서 권고안을 냈고 **글이 나갔다.**
     #      릴레이가 `bad_transition` 을 돌려줘서 알았을 뿐, 그 칸이 없었으면 **우리 리듀서가 격리한
@@ -10089,6 +10117,223 @@ def _case_double_judges_the_chain() -> None:
         # 밀린 close 는 방을 닫지 못한다(09-06 실물이 그랬다 · `closed:false`).
         if ctx.store.thread_status(thread_id=room).get("closed") is not False:
             raise AssertionError("밀린 글이 파생 상태를 바꿨다")
+
+
+def _case_existence_is_not_commitment() -> None:
+    """응답 유실 뒤 재조회는 **적혀 있는가**가 아니라 **반영됐는가**를 묻는다(codex 2R CRITICAL).
+
+    ★★F-1 은 「접수 ≠ 반영」이었다. 그 봉합 뒤에도 **같은 병이 다른 문으로** 남아 있었다:
+      POST 가 원장에 적재됐는데 `lost_race` 로 밀렸고, 그 응답을 못 받아 code 8 이 되면,
+      재조회가 **본문에 message_id 가 보인다는 이유만으로** `committed` 를 냈다 — rc 0.
+      릴레이 원장은 append-only 라 **밀린 글도 그대로 남는다.** 존재는 반영의 증거가 아니다.
+    ★그래서 재조회는 `fetch`(계약상 판정 칸을 버리는 문)가 아니라 **대조 전용 읽기**로 한다.
+    """
+    from agora import core
+    mid = "0" * 32
+    body = '{"message_id":"%s"}' % mid
+    row = {"node_id": "ev_0000000000000009", "body": body,
+           "created_at": "2026-09-09T00:00:00.000Z", "is_genesis": False}
+
+    class _Rejected:
+        def fetch(self, *, thread_id: str, **_: Any) -> dict[str, Any]:
+            return {"items": [dict(row)], "next_cursor": None}
+
+        def audit_events(self, *, thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
+            return [dict(row, valid=False, quarantined=False, stale=True, reason="lost_race")]
+
+    class _Accepted(_Rejected):
+        def audit_events(self, *, thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
+            return [dict(row, valid=True, quarantined=False, stale=False, reason=None)]
+
+    verdict, reason = core.audit_verdict(store=_Rejected(), thread_id="t1", message_id=mid)
+    if verdict != core.REJECTED or reason != "lost_race":
+        raise AssertionError(f"밀린 글을 {verdict}/{reason} 로 판정했다(원장에 있다 ≠ 적용됐다)")
+    ledger = _r43_ledger()
+    settled = core.settle_unknown(store=_Rejected(), ledger=ledger,
+                                  event={"thread_id": "t1", "message_id": mid},
+                                  event_hash="a" * 64)
+    if settled["verdict"] != core.REJECTED or settled["ledger_row"] is not None:
+        raise AssertionError(f"반영 안 된 글을 원장에 적었다: {settled}")
+    # ★**대조군**: 받아들여진 글까지 막으면 그것은 봉합이 아니라 고장이다.
+    if core.audit_verdict(store=_Accepted(), thread_id="t1",
+                          message_id=mid)[0] != core.COMMITTED:
+        raise AssertionError("릴레이가 받아들인 글을 committed 로 안 냈다")
+
+
+def _case_double_judges_expected_state() -> None:
+    """더블이 **CAS 를 실제로 판정한다** — `expected_state` 가 틀리면 `stale_expected_state`.
+
+    ★★F-1 의 핵심 계약을 시험하는 상대가 **그 계약을 안 보고 있었다**(codex 2R HIGH):
+      더블은 `prev == head` 만 봤고, `expected_state="definitely-wrong"` 을 넣어도 `valid:true` 였다.
+      실물은 `expected_state != stateHash(state)` 를 격리한다 — 즉 CAS 시험이 **실물보다 느슨한
+      상대**를 쓰고 있었다. 더블이 못 내는 판정은 시험이 비어 있다(같은 병의 여섯 번째 판).
+    ★대조군을 함께 둔다: 맞는 자리에 쓴 글까지 막으면 리허설 전건이 붉어진다(과잉 차단).
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        # ★**대조군을 먼저 태운다** — 자리도 상태도 맞으면 통과해야 한다. 순서가 중요하다:
+        #   변조한 글을 먼저 넣으면 그 글은 서명이 깨져 **우리 리듀서 쪽에서만** 다른 이유로
+        #   걸리고, 두 리듀서의 머리가 갈려 대조군이 엉뚱한 사유로 죽는다(측정 실패).
+        ok = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="맞는 글"))
+        if not ok.get("message_id"):
+            raise AssertionError("맞는 자리의 글까지 막혔다(과잉 차단)")
+        good = _competing_post(ctx, room, f["key_b"], "operator-b", "맞는 자리")
+        stale = good.replace(_expected_in(good), "definitely-wrong", 1)
+        row = relay.append_event(thread_id=room, category="debate", title="",
+                                 body=stale, is_genesis=False)
+        if (row.get("valid"), row.get("reason")) != (False, "stale_expected_state"):
+            raise AssertionError(f"틀린 expected_state 를 격리 안 했다: {row}")
+        if not row.get("quarantined"):
+            raise AssertionError(f"전이에서 걸린 글은 stale 이 아니라 격리다: {row}")
+
+
+def _expected_in(body: str) -> str:
+    from agora.event import parse_post
+    return parse_post(body)["event"]["expected_state"]
+
+
+def _triple_check_fn() -> Any:
+    """리허설 하네스의 3자 대조 — 파일에서 직접 읽어 온다(`tools/` 는 패키지가 아니다)."""
+    import importlib.util
+    path = os.path.join(_ROOT, "tools", "rehearsal.py")
+    spec = importlib.util.spec_from_file_location("rehearsal_probe", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _case_triple_check_compares_derived_axes() -> None:
+    """3자 대조가 **상태 해시까지 실제로 댄다**(codex 2R HIGH).
+
+    ★어댑터가 릴레이의 파생 칸을 버리고, 대조는 없는 칸을 조용히 건너뛰었다. 그래서
+      상태 해시가 서로 달라도 `mismatch: []` 가 나왔다 — `--verify` 의 rc 0 이 아무것도
+      뜻하지 않게 된다. **없는 칸은 대조되지 않고, 대조되지 않는 축은 언제나 통과한다.**
+    """
+    rehearsal = _triple_check_fn()
+
+    class _Store:
+        def audit_events(self, *, thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
+            return [{"node_id": "ev_0000000000000001", "valid": True, "reason": None}]
+
+        def thread_status(self, *, thread_id: str) -> dict[str, Any]:
+            return {"closed": False, "answered": False, "closed_at": None,
+                    "state": "r3", "round": 3, "state_hash": "SERVER"}
+
+        def list_threads(self, **_: Any) -> dict[str, Any]:
+            return {"items": [], "next_cursor": None}
+
+    from agora import tools as _t
+    saved = _t._reduce
+    _t._reduce = lambda c, t: {"state": "r3", "round": 3, "state_hash": "CLIENT",
+                               "solved_by": None, "close_reason": None, "head": "h",
+                               "quarantined": [], "stale": []}
+    try:
+        out = rehearsal.triple_check(object(), _Store(), "t1")
+    finally:
+        _t._reduce = saved
+    if not any("state_hash" in m for m in out["mismatch"]):
+        raise AssertionError(f"상태 해시가 갈렸는데 대조가 침묵했다: {out['mismatch']}")
+
+
+def _case_triple_check_fails_closed_on_unreadable_axis() -> None:
+    """대조 축을 **못 읽은 것은 초록이 아니다** — fail-closed(codex 2R HIGH).
+
+    ★구판은 목록 실패를 `"unavailable"` 이라 적어 두고 지나갔다. 그러면 「축이 일치했다」와
+      「축을 못 봤다」가 같은 rc 0 이 된다. `--verify` 의 rc 0 은 **원장이 그렇다고 말했다**는
+      뜻이어야 한다 — 안 재고 낸 초록은 그 뜻을 무너뜨린다.
+    """
+    rehearsal = _triple_check_fn()
+
+    class _Store:
+        def audit_events(self, *, thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
+            return [{"node_id": "ev_0000000000000001", "valid": True, "reason": None}]
+
+        def thread_status(self, *, thread_id: str) -> dict[str, Any]:
+            return {"closed": False, "answered": False, "closed_at": None}
+
+        def list_threads(self, **_: Any) -> dict[str, Any]:
+            raise AgoraError(errors.STORE, "목록을 못 받았다", None)
+
+    from agora import tools as _t
+    saved = _t._reduce
+    _t._reduce = lambda c, t: {"state": "r3", "round": 3, "state_hash": "CLIENT",
+                               "solved_by": None, "close_reason": None, "head": "h",
+                               "quarantined": [], "stale": []}
+    try:
+        out = rehearsal.triple_check(object(), _Store(), "t1")
+    finally:
+        _t._reduce = saved
+    if not any("list_threads" in m for m in out["mismatch"]):
+        raise AssertionError(f"파생 축을 못 읽었는데 mismatch 로 안 셌다: {out['mismatch']}")
+
+
+def _case_rehearsal_stops_on_partial_roster() -> None:
+    """명부 동기화가 하나라도 실패하면 **POST 0건**으로 멈춘다(codex 2R MEDIUM).
+
+    ★★F-1 의 뿌리가 **반쪽 명부**였다(의장 사본에 뒤에 온 둘이 없어 그들의 발언이 격리됐다).
+      등재 실패에는 중단문이 있었는데 sync 실패에는 없었다 — 그래서 하네스는 **자기가 재려는
+      결함을 스스로 만들 수 있었다.** genesis 에는 CAS 도 눈먼구간 검사도 안 걸리므로 이 자리가
+      마지막 문이다.
+    """
+    rehearsal = _triple_check_fn()
+    calls = {"n": 0}
+    saved = rehearsal.onboard.sync_roster
+
+    def _boom(**_kw: Any) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise AgoraError(errors.STORE, "명부 교체가 반쪽만 됐다",
+                             {"reason": "partial_replacement"})
+        return {"ok": True}
+
+    rehearsal.onboard.sync_roster = _boom
+    try:
+        # ★★하네스의 진행 표는 **stdout 으로 나간다.** selftest 의 stdout 은 JSON 한 덩어리여야
+        #   하고(게이트가 그것을 파싱한다), 여기서 새어 나가면 **검사기가 고장난 것과 통과한 것이
+        #   구별되지 않는다** — 이 저장소가 이미 아는 형태다(2026-08-25 S5-3 의 「Extra data」).
+        #   그래서 재는 동안 출력을 가둔다. 판정은 반환된 표(rows)로만 한다.
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = rehearsal.run(live=False, out_path=os.devnull)
+    finally:
+        rehearsal.onboard.sync_roster = saved
+    wrote = [r["step"] for r in out["rows"]
+             if r["step"].startswith(("enter", "say", "advance", "resolve", "close"))]
+    if wrote:
+        raise AssertionError(f"반쪽 명부인데 쓰기로 진행했다: {wrote}")
+
+
+def _case_full_fetch_terminates() -> None:
+    """전건 읽기에 **종료 상한**이 있다(codex 2R LOW).
+
+    ★쓰기 재시도는 2회로 막혀 있었지만 읽기에는 상한이 없었다. 「같은 커서 반복」 검사 하나로는
+      **매번 새 커서를 주는 상대**를 못 잡는다 — 끝나지 않는 호출은 오류를 안 내므로 아무 경보에도
+      안 걸린다. ⛔부분 결과로 접지 않는다: 이벤트는 `prev` 로 엮여 있어 잘린 전건은 조용한 거짓이다.
+    """
+    from agora.store_relay import RelayStore
+    for name in ("fetch", "audit_events"):
+        store = RelayStore("http://127.0.0.1:1/", sleep=lambda _s: None)
+        state = {"n": 0}
+
+        def _endless(method: str, path: str, **_kw: Any) -> dict[str, Any]:
+            state["n"] += 1
+            if state["n"] > 5000:
+                raise AssertionError(f"{name}: 5000 번을 불렀는데 상한이 안 걸렸다")
+            return {"items": [{"event_id": "ev_%016d" % state["n"], "body": "{}",
+                               "created_at": "2026-09-09T00:00:00.000Z"}],
+                    "next_cursor": "c%d" % state["n"]}
+
+        store._run = _endless
+        try:
+            getattr(store, name)(thread_id="t1")
+        except AgoraError as e:
+            if e.code != errors.STORE:
+                raise AssertionError(f"{name}: 상한 초과가 7 이 아니다: {e.code}") from None
+        else:
+            raise AssertionError(f"{name}: 끝없이 페이지를 받는데 조용히 성공했다")
 
 
 def _prev_in(body: str) -> str:
@@ -11037,6 +11282,13 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("더블: 증명은 그 키의 것인가",   _case_double_binds_proof_to_its_key, None),
     ("더블: 결박을 실제로 댄다",     _case_double_binds_request_args_to_signature, None),
     ("S8: 8축이 그물을 갖는다",       _case_s8_axes_have_nets, None),
+    # ── F-1 봉합 2차(codex 2R BLOCK · 2026-09-09) ──────────────────────────
+    ("불명: 원장에 있음은 적용됨이 아니다", _case_existence_is_not_commitment, None),
+    ("더블: CAS 를 실제로 판정한다",  _case_double_judges_expected_state, None),
+    ("대조: 파생 축을 실제로 댄다",   _case_triple_check_compares_derived_axes, None),
+    ("대조: 못 읽은 축은 초록이 아니다", _case_triple_check_fails_closed_on_unreadable_axis, None),
+    ("리허설: 반쪽 명부면 안 쓴다",   _case_rehearsal_stops_on_partial_roster, None),
+    ("읽기: 전건 읽기는 끝난다",      _case_full_fetch_terminates, None),
 )
 
 
@@ -11085,9 +11337,40 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        blind = []',
      "명부: 못 읽는 글이면 안 쓴다"),
     ("M360-double-never-judges-chain", "tests/fake_relay.py",
-     '        reason = "lost_race" if prev in room["hashes"] else "unreachable"\n        return {"valid": False, "stale": True, "reason": reason}',
-     '        return {"valid": True, "stale": False, "reason": None}',
+     '            reason = "lost_race" if prev in room["hashes"] else "unreachable"\n            return {"valid": False, "stale": True, "quarantined": False, "reason": reason}',
+     '            return {"valid": True, "stale": False, "quarantined": False, "reason": None}',
      "더블: 사슬 판정을 낸다"),
+    # ── F-1 봉합 2차(codex 2R BLOCK · 2026-09-09) — 여섯 결함 각각에 그물을 박는다 ─────────
+    # ★변이는 **결함을 되살리는 모양**으로 적는다: 되살렸을 때 붉어지지 않으면 그 봉합은
+    #   시험되지 않은 것이다(「검사가 그것을 재는가」를 재는 것이 뮤테이션의 일이다).
+    ("M363-settle-existence-is-commitment", "agora/core.py",
+     '            if row.get("valid") is False:\n                return REJECTED, row.get("reason")',
+     '            if False:\n                return REJECTED, row.get("reason")',
+     "불명: 원장에 있음은 적용됨이 아니다"),
+    ("M364-relay-rejection-can-return-zero", "agora/tools.py",
+     "        if rejected.get(\"reason\") not in RETRYABLE_RELAY_REASONS or attempt == attempts - 1:",
+     "        if False:",
+     "쓰기: 접수는 반영이 아니다"),
+    ("M365-double-skips-expected-state", "tests/fake_relay.py",
+     "        if state is not None and not _expected_state_ok(body, state):",
+     "        if False:",
+     "더블: CAS 를 실제로 판정한다"),
+    ("M366-triple-check-drops-state-hash", "tools/rehearsal.py",
+     '    for field in ("closed", "answered", "state", "round", "state_hash", "close_reason"):',
+     '    for field in ("closed", "answered"):',
+     "대조: 파생 축을 실제로 댄다"),
+    ("M367-triple-check-swallows-read-failure", "tools/rehearsal.py",
+     '        mismatch.append(f"릴레이 방 목록(list_threads)을 못 읽었다(fail-closed): "\n                        f"{type(e).__name__}: {e}")',
+     '        pass',
+     "대조: 못 읽은 축은 초록이 아니다"),
+    ("M368-rehearsal-writes-with-partial-roster", "tools/rehearsal.py",
+     '        if any(r["step"].startswith("sync-roster") and r["code"] != 0 for r in rec.rows):',
+     "        if False:",
+     "리허설: 반쪽 명부면 안 쓴다"),
+    ("M369-fetch-runs-without-a-cap", "agora/store_relay.py",
+     "        if over:",
+     "        if False:",
+     "읽기: 전건 읽기는 끝난다"),
     ("M362-resolution-skips-local-round-gate", "agora/tools.py",
      '    if state.get("state") != "r3":',
      '    if False:',
@@ -11573,8 +11856,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if False:\n        return None",
      "불명: 두 번 정산해도 1행"),
     ("M104-settle-assumes-committed", "agora/core.py",
-     "    verdict = resolve_unknown(store=store, thread_id=event[\"thread_id\"],\n                              message_id=event[\"message_id\"])",
-     '    verdict = COMMITTED',
+     "    verdict, reason = audit_verdict(store=store, thread_id=event[\"thread_id\"],\n                                    message_id=event[\"message_id\"])",
+     '    verdict, reason = COMMITTED, None',
      "불명: 없으면 안 적는다"),
     ("M105-resolve-matches-anything", "agora/core.py",
      '        if message_id in (row.get("body") or ""):',

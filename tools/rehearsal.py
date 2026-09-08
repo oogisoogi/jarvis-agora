@@ -157,6 +157,15 @@ def run(*, live: bool = False, relay_url: str | None = None,
                      lambda d=d: onboard.sync_roster(directory=d, relay_url=url, yes=True))
             ctx = tools.context_from_config(d)
             ctxs[pid], stores[pid] = ctx, ctx.store
+        if any(r["step"].startswith("sync-roster") and r["code"] != 0 for r in rec.rows):
+            # ★★**명부가 반쪽이면 그 다음은 재는 시늉이다**(codex 2R MEDIUM · 2026-09-09).
+            #   등재 실패에는 중단문이 있었는데 sync 실패에는 없었다 — 그런데 F-1 의 뿌리가
+            #   바로 **반쪽 명부**였다(의장 사본에 뒤에 온 둘이 없어 그들의 발언이 격리됐다).
+            #   ⇒ 부분 명부로 방을 열면 이 하네스는 **자기가 재려는 결함을 스스로 만든다.**
+            #   ⚠genesis 에는 CAS 도 `_blind_spot` 도 안 걸린다(견줄 앞 상태가 없다) —
+            #     그래서 이 자리가 마지막 문이다. 여기서 안 막으면 아무도 안 막는다.
+            print("  ⛔명부 동기화 실패 — POST 0건으로 멈춘다(표만 낸다).", flush=True)
+            return _finish(rec, started_at, live, url, None, out_path, workdir, participants)
 
         chair = participants[0]
         _as(dirs[chair])
@@ -295,11 +304,23 @@ def triple_check(ctx: Any, store: Any, room: str) -> dict[str, Any]:
     rows = _relay_rows(store, room)
     invalid = _invalid_rows(rows)
     local = _local_state(ctx, room)
-    derived = store.thread_status(thread_id=room) if hasattr(store, "thread_status") else {}
-    derived = dict(derived or {})
+    mismatch: list[str] = []
+    # ★★대조 축을 **못 읽는 것은 초록이 아니다**(codex 2R HIGH · 2026-09-09). 구판은 목록
+    #   실패를 `"unavailable"` 이라고 적어 두고 그대로 지나갔다 — 그러면 「축이 일치했다」와
+    #   「축을 못 봤다」가 같은 rc 0 이 된다. `--verify` 의 rc 0 은 **원장이 그렇다고 말했다**는
+    #   뜻이어야 하므로, 읽기 실패는 fail-closed 로 **mismatch 에 센다.**
+    try:
+        derived = dict(store.thread_status(thread_id=room) or {}) \
+            if hasattr(store, "thread_status") else {}
+    except Exception as e:       # noqa: BLE001 — 못 읽었다는 사실 자체가 판정이다
+        derived = {}
+        mismatch.append(f"릴레이 파생 상태를 못 읽었다(fail-closed): {type(e).__name__}: {e}")
+    if derived.get("why") == "relay_does_not_derive":
+        # ★상대가 파생을 **안 하는** 것과 우리가 **못 읽은** 것은 다른 사건이지만, 대조에
+        #   미치는 영향은 같다: 견줄 축이 없다. 3자 대조가 2자 대조로 조용히 줄어드는 것을 막는다.
+        mismatch.append("릴레이가 상태를 파생하지 않는다 — 3자 대조의 한 축이 비었다")
     # ★방 목록 행에는 파생 `state`·`round` 가 더 있다(계약 §3-3). 방 조회에 없는 칸이라
     #   따로 주워 와 **댈 수 있는 축을 다 댄다**(agy 1R 지적 5 · 부분 수용).
-    #   ⚠없으면 없는 대로 둔다 — 없는 칸을 지어내 대조하면 그 초록은 거짓이다.
     try:
         for item in (store.list_threads(limit=100) or {}).get("items") or []:
             if str(item.get("number") or item.get("room_id") or "") == room:
@@ -307,14 +328,20 @@ def triple_check(ctx: Any, store: Any, room: str) -> dict[str, Any]:
                     if field in item and field not in derived:
                         derived[field] = item[field]
                 break
-    except Exception:            # noqa: BLE001 — 목록을 못 받아도 대조 자체는 계속한다
+    except Exception as e:       # noqa: BLE001 — 목록을 못 받은 것도 **미측정**이다
         derived.setdefault("list_threads", "unavailable")
-    mismatch: list[str] = []
-    for field in ("closed", "answered", "state", "round"):
+        mismatch.append(f"릴레이 방 목록(list_threads)을 못 읽었다(fail-closed): "
+                        f"{type(e).__name__}: {e}")
+    # ★`state_hash` 를 **여기 넣는 것이 이 봉합의 알맹이다**(codex 2R HIGH). 구판은 이 값을
+    #   양쪽 다 **출력만** 하고 대조하지 않았다 — 서로 다른 역사가 같은 이름·라운드에 이를 수
+    #   있으므로(그래서 해시에 head 가 들어간다) 이 축이 빠지면 대조가 가장 중요한 것을 놓친다.
+    for field in ("closed", "answered", "state", "round", "state_hash", "close_reason"):
         theirs = derived.get(field)
-        if theirs is None or field not in local:
+        if field not in derived or field not in local:
             continue            # 상대가 안 파생하는 칸은 **대조하지 않는다**(모른다 ≠ 같다)
         ours = local[field]
+        if theirs is None and ours is None:
+            continue
         same = (bool(theirs) == bool(ours)) if field in ("closed", "answered") \
             else (theirs == ours)
         if not same:

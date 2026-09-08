@@ -105,7 +105,10 @@ class FakeRelay:
             room = {"room_id": room_id, "category": category, "title": title,
                     "created_at": now_iso(), "updated_at": now_iso(), "events": [],
                     # ★사슬 상태 — 계약 §5 규칙 2(정렬·경합)를 더블에서도 **실제로** 돌린다.
-                    "head": None, "hashes": set()}
+                    "head": None, "hashes": set(),
+                    # ★전이 상태 — `expected_state` 를 판정하려면 **해시 대상 8칸**이 필요하다
+                    #   (계약 §2-1 · reducer 의 `_state_hash`). genesis 에서 세워진다.
+                    "state": None, "post_ids": set()}
             self.rooms[room_id] = room
         return room
 
@@ -132,7 +135,7 @@ class FakeRelay:
                 return dict(row, existing=True)   # ★멱등 — 새 행을 만들지 않는다(200)
         self.counter += 1
         digest = _event_hash_of(body)
-        row = {"event_id": f"EV_{self.counter}", "created_at": now_iso(),
+        row = {"event_id": _event_id_of(self.counter), "created_at": now_iso(),
                "body": body, "is_genesis": bool(is_genesis), "message_id": message_id,
                "hash": digest}
         row.update(self._chain_verdict(room, body, digest, is_genesis))
@@ -148,38 +151,59 @@ class FakeRelay:
 
     def _chain_verdict(self, room: dict[str, Any], body: str, digest: str,
                        is_genesis: bool) -> dict[str, Any]:
-        """사슬 판정 — 계약 §5 규칙 2 를 **더블에서도 실제로 돌린다**(F-1 봉합 ⓓ).
+        """사슬 판정 + **전이 판정** — 계약 §5 규칙 2 와 CAS 를 더블에서도 실제로 돌린다(F-1 봉합 ⓓ).
 
         ★★09-06 실물 리허설이 이 자리에서 깨졌다: 실물은 `lost_race`·`unreachable` 을 냈는데
           **더블은 그런 판정을 낸 적이 없다** — 그래서 하네스는 22/22 초록이었고,
-          같은 절차가 실물에서 네 건 격리됐다. ★더블이 못 내는 판정은 시험이 비어 있다
-          (09-05 서명 미검사 · 09-06 결박 미검사에 이은 **같은 병의 다섯 번째 판**).
-        ★규칙은 발명하지 않고 계약에서 옮긴다:
-          · `prev` 가 **지금 머리**면 = 유효 · 머리를 전진시킨다.
-          · `prev` 가 **이미 아는 해시**(머리가 아닌)면 = 그 자리는 남이 먼저 차지했다 → `lost_race`.
-            (도착순이 곧 승부다 — 먼저 온 것이 이긴다. 더블은 순차라 이 규칙이 그대로 성립한다.)
-          · `prev` 를 **모르면** = 끊긴 곳에 매달렸다 → `unreachable`.
-          · 둘 다 **`stale` 이지 격리가 아니다**(계약 §5 규칙 2 원문) — 원장에는 남는다.
-        ⚠`vote` 는 머리를 전진시키지 않는다(계약 §5 규칙 5). 그 규칙까지 옮긴다.
+          같은 절차가 실물에서 네 건 격리됐다. ★더블이 못 내는 판정은 시험이 비어 있다.
+        ★★그리고 그 봉합이 **절반이었다**(codex 2R HIGH · 2026-09-09): 사슬(`prev`)만 보고
+          **`expected_state` 는 안 봤다.** 실물은 `prev` 가 맞아도 `expected_state != stateHash(state)`
+          면 `stale_expected_state` 로 격리한다 — 즉 **이 티켓이 고치는 CAS 그 자체를 더블이
+          판정하지 않고 있었다.** 「definitely-wrong」을 넣어도 더블은 `valid:true` 를 줬다.
+          ⇒ F-1 의 핵심 시험이 **실물보다 느슨한 상대**를 쓰고 있었다.
+
+        판정은 두 단이다(실물 `relay/src/lib/reducer.ts` 의 2단·3단 그대로):
+          **2단(사슬)** — `prev` 가 지금 머리면 이긴다 · 아는 해시면 `lost_race` · 모르면 `unreachable`.
+            둘 다 `stale` 이지 격리가 아니다(계약 §5 규칙 2 원문).
+          **3단(전이)** — 이긴 글에 대해 `expected_state == stateHash(state)` 를 본다.
+            어긋나면 `stale_expected_state` 로 **격리**하고, ⚠**머리는 전진시킨다**
+            (실물 `reject()` 가 그렇게 한다 — 안 그러면 한 사람이 이벤트 하나로 방을 영구
+            동결시킬 수 있다. L-1 교착 봉합).
+        ⚠`vote` 는 머리를 전진시키지 않는다(계약 §5 규칙 5).
+        ⚠**여기서 안 재는 것**(정직): 예산·라운드·반론 대상 같은 **상태를 안 바꾸는** 전이 규칙은
+          판정하지 않는다. 해시 8칸에 영향이 없어 `expected_state` 대조를 흐리지 않기 때문이다.
+          그 축은 `CONTRACT_COVERAGE` 표에 「판정 안 함」으로 적혀 있다.
         """
         if not self.chain_verdicts:
-            return {"valid": True, "stale": False, "reason": None}
+            return {"valid": True, "stale": False, "quarantined": False, "reason": None}
         if room["head"] is None:
             # 첫 글이 사슬의 시작이다. ⚠`is_genesis` 만 보고 무조건 받으면 **genesis 가 둘인 방**이
             #   생긴다(agy 1R 지적 4 · 수용) — 이미 머리가 있으면 아래 규칙으로 떨어져야 한다.
             room["head"], _ = digest, room["hashes"].add(digest)
-            return {"valid": True, "stale": False, "reason": None}
+            room["state"] = _genesis_state(body, digest)
+            return {"valid": True, "stale": False, "quarantined": False, "reason": None}
         prev = _prev_of(body)
-        if prev == room["head"]:
-            room["hashes"].add(digest)
-            if _kind_of(body) != "vote":
-                # vote 는 머리를 안 옮긴다(계약 §5 규칙 5).
-                # ⚠문자열 검색으로 재면 **본문에 그 글자가 든 발언**까지 vote 로 읽는다
-                #   (agy 1R 지적 4 · 수용) — 파싱해서 `kind` 칸을 본다.
-                room["head"] = digest
-            return {"valid": True, "stale": False, "reason": None}
-        reason = "lost_race" if prev in room["hashes"] else "unreachable"
-        return {"valid": False, "stale": True, "reason": reason}
+        if prev != room["head"]:
+            reason = "lost_race" if prev in room["hashes"] else "unreachable"
+            return {"valid": False, "stale": True, "quarantined": False, "reason": reason}
+        room["hashes"].add(digest)
+        state = room["state"]
+        if state is not None and not _expected_state_ok(body, state):
+            # ★격리해도 사슬은 지나갔다 — 머리를 전진시킨다(실물 reject() 와 같다).
+            room["head"] = digest
+            return {"valid": False, "stale": False, "quarantined": True,
+                    "reason": "stale_expected_state"}
+        kind = _kind_of(body)
+        if state is not None:
+            _apply_transition(room, body, kind)
+        if kind != "vote":
+            # vote 는 머리를 안 옮긴다(계약 §5 규칙 5).
+            # ⚠문자열 검색으로 재면 **본문에 그 글자가 든 발언**까지 vote 로 읽는다
+            #   (agy 1R 지적 4 · 수용) — 파싱해서 `kind` 칸을 본다.
+            room["head"] = digest
+        if state is not None:
+            state["head"] = room["head"]
+        return {"valid": True, "stale": False, "quarantined": False, "reason": None}
 
     def derived(self, room_id: str) -> dict[str, Any]:
         """서버가 이벤트에서 파생한 상태 — **클라 reducer 와 독립적으로** 계산한다.
@@ -200,7 +224,18 @@ class FakeRelay:
                 closed, closed_at = True, row["created_at"]
             if '"kind":"answer_selected"' in _compact(body):
                 answered = True
-        return {"closed": closed, "answered": answered, "closed_at": closed_at}
+        out = {"closed": closed, "answered": answered, "closed_at": closed_at}
+        # ★파생 덧칸(계약 §3-3) — 실물이 주는 축을 더블도 준다. 안 주면 3자 대조가 **더블 상대로는
+        #   한 번도 안 도는 갈래**를 갖게 되고, 어댑터가 그 칸을 버려도(codex 2R HIGH) 리허설은
+        #   초록이다. 값은 **더블이 계약에서 옮겨 적은 전이 규칙**으로 만든 것이라, 우리 리듀서와
+        #   갈리면 리허설이 그 자리에서 붉어진다 — 그 붉음이 두 구현의 등가 증명이다.
+        state = (self.rooms.get(room_id) or {}).get("state")
+        if state:
+            out.update({"state": state["state"], "round": state["round"],
+                        "state_hash": _state_hash(state),
+                        "close_reason": state["close_reason"], "chair": state["chair"],
+                        "type": state["type"], "requester": state["requester"]})
+        return out
 
 
 class _Conflict(Exception):
@@ -420,6 +455,163 @@ def _signature_matches(raw: bytes, signature: str, *,
         return verified.returncode == 0
 
 
+# ── 계약에서 옮겨 적은 전이 규칙(PROTOCOL v1 · `agora/reducer.py` · `relay/src/lib/reducer.ts`) ──
+# ★★**우리 모듈에서 import 하지 않는다.** `agora.reducer.apply` 를 부르면 「우리 계산으로 우리
+#   계산을 재는」 대조가 되어 더블의 존재 이유가 사라진다(이 파일의 `_EVENT_SKELETON`·
+#   `CONTRACT_CODES`·`_roster_digest` 가 같은 규율로 손으로 적혀 있다).
+#   계약이 바뀌면 이 줄들이 바뀌어야 하고, **안 바꾸면 리허설이 붉어진다** — 그 붉음이 신호다.
+_DEBATE_ROUNDS = ("r0", "r1", "r2", "r3")
+_EXPIRED = "expired"
+# 상태 해시가 덮는 8칸 — 순서는 무관하다(canonical 이 키를 정렬한다). **머리가 들어 있다**:
+# 안 넣으면 「같은 결론에 이른 서로 다른 역사」가 같은 해시가 되고 CAS 에 창이 생긴다.
+_HASH_FIELDS = ("type", "state", "round", "chair", "requester", "solved_by",
+                "close_reason", "head")
+
+
+def _state_hash(state: dict[str, Any]) -> str:
+    """상태 해시 — 다음 이벤트의 `expected_state` 가 가리키는 값(계약 §2-1)."""
+    snapshot = {k: state.get(k) for k in _HASH_FIELDS}
+    return _sha256_text(json.dumps(snapshot, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":")))
+
+
+def _event_of(body: str) -> dict[str, Any]:
+    from agora.event import parse_post
+    try:
+        return parse_post(body)["event"]
+    except Exception:            # noqa: BLE001 — 우리 서식이 아니면 사슬 밖이다
+        return {}
+
+
+def _genesis_state(body: str, digest: str) -> dict[str, Any] | None:
+    """사슬의 첫 글에서 상태를 세운다. 우리 서식이 아니면 **상태가 없다**(지어내지 않는다)."""
+    event = _event_of(body)
+    payload = event.get("payload") if type(event.get("payload")) is dict else None
+    if not event or payload is None or event.get("kind") != "genesis":
+        return None
+    gtype = payload.get("type")
+    return {"type": gtype,
+            "state": "r0" if gtype == "debate" else "open",
+            "round": 0 if gtype == "debate" else None,
+            "chair": payload.get("chair") or event.get("from"),
+            "requester": event.get("from"),
+            "solved_by": None, "close_reason": None, "head": digest}
+
+
+def _event_id_of(seq: int) -> str:
+    """고정폭 단조 식별자 — 계약이 정한 서식(`ev_%016d` · 실물 `relay/src/lib/store.ts`).
+
+    ★자릿수가 곧 계약이다: 리듀서의 동률 규칙이 **문자열 사전순**이라 폭이 흔들리면 순서가 뒤집힌다.
+      구판 더블은 `EV_1` 을 썼고, 그래서 클라이언트의 도착순 비교(`_arrived_after` 의 고정폭
+      정규식)가 더블 상대로는 **한 번도 안 걸렸다** — 실물에서만 도는 갈래가 무검증이었다.
+    """
+    return "ev_" + str(seq).zfill(16)
+
+
+def _expected_state_ok(body: str, state: dict[str, Any]) -> bool:
+    """CAS — `expected_state` 가 **지금 상태의 해시**인가(계약 §2-1 · 실물 reducer 3단 첫 검사).
+
+    ★만료 관대함도 함께 옮긴다: 만료된 스레드를 되살리러 쓰는 사람은 **만료가 반영된 상태**를
+      보고 쓴다. ⚠더블은 마감 시각을 재지 않으므로 이 관대함이 **실물보다 넓다** — 넓은 쪽으로
+      틀리는 것은 거짓 적색을 안 만든다(대신 이 축의 미탐 하나를 남긴다 · 표에 적어 둔다).
+    """
+    seen = _event_of(body).get("expected_state")
+    if seen == _state_hash(state):
+        return True
+    return seen == _state_hash({**state, "state": _EXPIRED})
+
+
+def _apply_transition(room: dict[str, Any], body: str, kind: str | None) -> None:
+    """상태 해시 8칸을 바꾸는 전이만 적용한다 — 나머지 전이 규칙은 판정하지 않는다(표 참조).
+
+    ★권한 조건(의장·의뢰자·운영자)은 **함께** 옮긴다: 안 옮기면 남이 낸 `advance` 로 더블의
+      라운드만 움직여 이후 전건이 `stale_expected_state` 가 된다(거짓 적색의 홍수).
+    """
+    state, event = room["state"], _event_of(body)
+    payload = event.get("payload") if type(event.get("payload")) is dict else {}
+    who = event.get("from")
+    if kind == "post":
+        if event.get("message_id"):
+            room["post_ids"].add(event["message_id"])
+        return
+    if kind == "advance":
+        if who == state["chair"] and payload.get("from_round") == state["round"]:
+            to_round = payload.get("to_round")
+            if type(to_round) is int and 0 <= to_round < len(_DEBATE_ROUNDS):
+                state["round"], state["state"] = to_round, _DEBATE_ROUNDS[to_round]
+    elif kind == "resolution":
+        if who == state["chair"] and state["state"] == "r3":
+            state["state"] = "resolved"
+    elif kind == "answer_selected":
+        if who == state["requester"] and payload.get("post_message_id") in room["post_ids"]:
+            state["state"], state["solved_by"] = "solved", payload.get("post_message_id")
+    elif kind == "close":
+        if who in (state["chair"], state["requester"]):
+            state["state"], state["close_reason"] = "closed", payload.get("reason")
+    elif kind == "delegate_chair":
+        if who == state["chair"]:
+            state["chair"] = payload.get("new_chair")
+
+
+def verdict_of_row(row: dict[str, Any], room: dict[str, Any]) -> dict[str, Any]:
+    """POST 응답의 참고용 파생 판정 — **계약이 정한 칸 이름**을 쓴다(실물 `index.ts`).
+
+    ★구판은 `state_hash_at_that_point` 라는 **더블에만 있는 이름**을 썼다. 클라이언트가 그 이름을
+      읽고 있었으므로, 실물을 상대할 때 그 칸은 **언제나 비어 있었다** — 그리고 아무도 몰랐다
+      (없는 칸은 오류를 안 낸다). 이름이 갈리면 「값이 없다」와 「상대가 안 줬다」가 안 갈린다.
+    """
+    reducer_said = ("accepted" if row.get("valid") is not False
+                    else "quarantined" if row.get("quarantined") else "stale")
+    state = room.get("state")
+    return {"accepted_to_ledger": True, "reducer": reducer_said,
+            "reason": row.get("reason"),
+            "state_hash": _state_hash(state) if state else None}
+
+
+# ── 이 더블이 **무엇을 판정하고 무엇을 안 하는가**(계약 파싱 대조표) ────────────────────────
+# ★★구판은 여기에 산문 한 줄을 뒀다: 「9종 스키마 검증과 스크럽 백스톱은 여전히 없다」.
+#   그 문장은 정직했지만 **셀 수 없었다** — 무엇이 덮였는지, 새 구멍이 생겼는지 아무도 못 잰다
+#   (codex 2R 지적). 표로 바꾸면 시험이 표를 읽고, 표가 줄어들면 그 자리가 붉어진다.
+# ⚠`judged=False` 는 결함이 아니라 **경계의 선언**이다. 보이지 않는 억제는 미탐과 구별되지 않으므로,
+#   안 재는 축도 **이유와 함께** 여기 남는다.
+CONTRACT_COVERAGE: tuple[dict[str, Any], ...] = (
+    {"check": "§3-2/1 본문 크기 상한(64KiB)", "where": "_event_gate",
+     "judged": True, "why": "한 건만 보고 답할 수 있다"},
+    {"check": "§2-1 봉투 뼈대 11칸", "where": "_event_gate",
+     "judged": True, "why": "계약이 이름을 준 칸을 손으로 옮겨 적었다"},
+    {"check": "§3-2/4 요청 인자 == 서명된 값(결박)", "where": "_event_gate",
+     "judged": True, "why": "title 은 서명 밖이라 방에 적힌 값과 댄다"},
+    {"check": "§3-2 서명이 이 참가자의 것인가", "where": "_event_verdict",
+     "judged": True, "why": "명부 원문으로 독립 검증한다"},
+    {"check": "§3-2 message_id 재사용(같은 id·다른 내용)", "where": "append_event",
+     "judged": True, "why": "멱등 200 과 충돌 422 를 가른다"},
+    {"check": "§5 규칙 2 사슬 경합(lost_race·unreachable)", "where": "_chain_verdict",
+     "judged": True, "why": "도착순 승부를 순차 더블에서 그대로 잰다"},
+    {"check": "§2-1 CAS — expected_state == stateHash(state)", "where": "_expected_state_ok",
+     "judged": True, "why": "F-1 의 핵심 계약. 상태 해시 8칸을 계약에서 옮겨 적어 판정한다"},
+    {"check": "§5 규칙 5 vote 는 머리를 안 옮긴다", "where": "_chain_verdict",
+     "judged": True, "why": "안 옮기면 state_hash 가 갈려 3자 대조가 깨진다"},
+    {"check": "전이 권한(의장·의뢰자 · advance/resolution/answer_selected/close/delegate_chair)",
+     "where": "_apply_transition", "judged": True,
+     "why": "상태 해시 8칸을 바꾸는 전이라 안 재면 이후 전건이 거짓 적색이 된다"},
+    {"check": "§3-1 등록 소유 증명 서명", "where": "POST /register",
+     "judged": True, "why": "require_proof 스위치로 켜고 끈다"},
+    {"check": "§3-6b 체크포인트(운영자·서명·해시 정합)", "where": "POST /participants/checkpoint",
+     "judged": True, "why": "403·401·409 를 각각 가른다"},
+    {"check": "kind 9종 payload 닫힌 스키마", "where": "—", "judged": False,
+     "why": "agora.schema 를 부르면 자기 대조가 된다. 클라 조립 결함은 실물에서 422 로 터진다"},
+    {"check": "§3-2/7 스크럽 백스톱", "where": "—", "judged": False,
+     "why": "agora.scrub 을 부르면 자기 대조가 된다. 클라 쪽 게이트가 막고 있다"},
+    {"check": "운영자 abort · 만료 중 운영자 대리 위임", "where": "—", "judged": False,
+     "why": "더블은 운영자 명부를 전이 단계에서 안 본다 — 그 전이는 리허설 절차에 없다"},
+    {"check": "예산(posts_per_round·max_chars) · 라운드 밖 발언 · 반론 대상 필수",
+     "where": "—", "judged": False,
+     "why": "상태 해시 8칸을 안 바꾸므로 CAS 대조를 흐리지 않는다. 판정은 실물·우리 리듀서가 한다"},
+    {"check": "마감·만료 시각 판정", "where": "_expected_state_ok", "judged": False,
+     "why": "시각을 안 재고 만료 상태 해시를 **무조건** 한 번 더 허용한다 — 실물보다 넓다(미탐 1)"},
+)
+
+
 def _kind_of(body: str) -> str | None:
     from agora.event import parse_post
     try:
@@ -579,16 +771,20 @@ class _Handler(BaseHTTPRequestHandler):
             for row in room["events"]:
                 item = {k: v for k, v in row.items()
                         if k not in ("message_id", "hash", "existing",
-                                     "valid", "stale", "reason")}
+                                     "valid", "stale", "quarantined", "reason")}
                 # 파생 판정 덧칸(계약 §3-5) — `lie_valid` 면 격리감에도 참을 적는다.
                 if not (row.get("message_id") or self.relay.lie_valid):
                     # 우리 서식이 아닌 글 = 격리(자격 없음)
                     item.update({"valid": False, "quarantined": True,
                                  "stale": False, "reason": "permission"})
                 elif row.get("valid") is False and not self.relay.lie_valid:
-                    # 밀린 글 = **격리가 아니라 stale** 이다(계약 §5 규칙 2 원문)
-                    item.update({"valid": False, "quarantined": False,
-                                 "stale": True, "reason": row.get("reason")})
+                    # ★경합에 진 글 = **격리가 아니라 stale**(계약 §5 규칙 2 원문) ·
+                    #   전이에서 걸린 글(`stale_expected_state` 등) = **격리**다.
+                    #   두 사건을 한 칸에 뭉치면 처방이 갈린다(자리를 다시 잡으면 되는가 아닌가).
+                    item.update({"valid": False,
+                                 "quarantined": bool(row.get("quarantined")),
+                                 "stale": not row.get("quarantined"),
+                                 "reason": row.get("reason")})
                 else:
                     item.update({"valid": True, "quarantined": False,
                                  "stale": False, "reason": None})
@@ -651,10 +847,8 @@ class _Handler(BaseHTTPRequestHandler):
             elif row.get("valid") is False:
                 # ★**받았지만 반영 안 했다**를 그 자리에서 말한다(계약 §5 「이 칸이 새로 얻는 것」).
                 #   구판 더블은 이 칸을 만든 적이 없어 클라이언트의 rc 0 이 초록으로 보였다.
-                out["verdict"] = {"accepted_to_ledger": True, "reducer": "stale",
-                                  "reason": row.get("reason"),
-                                  "state_hash_at_that_point": self.relay.rooms.get(
-                                      payload.get("thread_id"), {}).get("head")}
+                out["verdict"] = verdict_of_row(
+                    row, self.relay.rooms.get(payload.get("thread_id"), {}))
             self._send(200 if row.get("existing") else 201, out)   # 멱등은 200 이다
             return
         if url.path == "/participants/checkpoint":

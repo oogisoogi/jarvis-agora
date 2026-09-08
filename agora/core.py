@@ -168,19 +168,39 @@ def declare_scrub(event: dict[str, Any], config_dir: str | None = None) -> dict[
 
 COMMITTED = "committed"
 ABSENT = "absent"
+REJECTED = "rejected"
 
 
-def resolve_unknown(*, store: Any, thread_id: str, message_id: str) -> str:
-    """재조회해서 실제로 올라갔는지 판정한다.
+def audit_verdict(*, store: Any, thread_id: str,
+                  message_id: str) -> tuple[str, str | None]:
+    """재조회해서 실제로 **반영됐는지** 판정한다.
 
-    ★판정 근거는 **운반층에 그 message_id 가 실재하는가** 하나뿐이다.
-      우리 기록(원장)으로 판정하면 「보냈다고 적었으니 갔을 것」이라는 순환이 된다.
+    ★판정 근거는 **운반층**이다 — 우리 기록(원장)으로 판정하면 「보냈다고 적었으니 갔을
+      것」이라는 순환이 된다.
+    ★★그러나 **「적혀 있다」는 「반영됐다」가 아니다**(codex 2R CRITICAL · 2026-09-09).
+      릴레이 원장은 append-only 라 격리된 글도 그대로 남는다. 그래서 본문에 `message_id`
+      가 보인다는 것만으로 `committed` 를 내면, 경합에서 진 글(`lost_race`)이 응답 유실
+      뒤에 **성공으로 둔갑한다** — F-1 이 막으려던 바로 그 형태가 다른 문으로 돌아온다.
+      재현: POST 적재 → `valid:false` → 응답 유실(code 8) → 재조회 → rc 0.
+    ⇒ **대조 전용 읽기**(`audit_events`)로 릴레이의 파생 판정까지 읽고, `valid:false` 면
+      `REJECTED` + 사유를 돌려준다. 부르는 쪽이 그 사유로 재시도할지 멈출지 가른다.
+    ⚠`audit_events` 가 없는 운반층(GitHub·목)에는 **릴레이 판정이라는 개념 자체가 없다** —
+      그때만 예전처럼 존재로 판정한다. 있는데 못 읽으면 그 오류는 그대로 올라간다
+      (읽기 실패를 「없음」으로 접지 않는다 — fail-closed).
     """
+    if hasattr(store, "audit_events"):
+        for row in store.audit_events(thread_id=thread_id):
+            if message_id not in (row.get("body") or ""):
+                continue
+            if row.get("valid") is False:
+                return REJECTED, row.get("reason")
+            return COMMITTED, None
+        return ABSENT, None
     rows = store.fetch(thread_id=thread_id)["items"]
     for row in rows:
         if message_id in (row.get("body") or ""):
-            return COMMITTED
-    return ABSENT
+            return COMMITTED, None
+    return ABSENT, None
 
 
 def record_sent(*, ledger: Any, event: dict[str, Any], event_hash: str,
@@ -200,10 +220,13 @@ def record_sent(*, ledger: Any, event: dict[str, Any], event_hash: str,
 def settle_unknown(*, store: Any, ledger: Any, event: dict[str, Any],
                    event_hash: str) -> dict[str, Any]:
     """code 8 을 만난 뒤의 마무리 — 재조회로 판정하고, 저장됐을 때만 원장에 남긴다."""
-    verdict = resolve_unknown(store=store, thread_id=event["thread_id"],
-                              message_id=event["message_id"])
+    verdict, reason = audit_verdict(store=store, thread_id=event["thread_id"],
+                                    message_id=event["message_id"])
     row = None
     if verdict == COMMITTED:
         row = record_sent(ledger=ledger, event=event, event_hash=event_hash,
                           node_id=None)
-    return {"verdict": verdict, "ledger_row": row}
+    # ★`REJECTED` 는 원장에 안 적는다. 「보냈다」고 적으면 그 줄은 **반영된 글과 구별되지
+    #   않고**, 다음 사람이 원장을 근거로 「이미 했다」를 읽는다. 릴레이 원장에는 그 글이
+    #   남아 있고(append-only) 그 사실은 `reason` 으로 올라간다 — 우리 줄은 안 만든다.
+    return {"verdict": verdict, "reason": reason, "ledger_row": row}

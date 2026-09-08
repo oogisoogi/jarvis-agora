@@ -133,8 +133,12 @@ def _relay_rejected(out: dict[str, Any]) -> dict[str, Any] | None:
     reason = verdict.get("reason")
     if reducer_said in (None, "", "accepted", "valid") and not reason:
         return None
+    # ★칸 이름은 **계약이 정한 것**을 쓴다: 실물 POST 응답의 verdict 는 `state_hash` 다
+    #   (relay/src/index.ts). 더블만 `state_hash_at_that_point` 를 쓰고 있었고, 그래서 이 칸은
+    #   **실물을 상대할 때 언제나 비어 있었다**(codex 2R · 계약 불일치). 이름이 갈리면
+    #   「값이 없다」와 「상대가 안 줬다」가 구별되지 않는다.
     return {"reducer": reducer_said, "reason": reason,
-            "state_hash_at_that_point": verdict.get("state_hash_at_that_point")}
+            "state_hash": verdict.get("state_hash")}
 
 
 def _blind_spot(reduced: dict[str, Any]) -> list[dict[str, Any]]:
@@ -278,17 +282,18 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
         rejected = _relay_rejected(out)
         if not rejected:
             break
-        if not is_genesis and _accepted_by_us(ctx, thread_id, event["message_id"]):
-            # ★★**정본은 우리 리듀서다**(계약 §3-5 · agy 1R 지적 3 · 수용). 릴레이가 「반영 안 했다」고
-            #   해도 **우리 사슬에 실제로 들어와 있으면** 그것은 반영된 것이다. 여기서 실패를 던지면
-            #   원장에는 멀쩡히 있는 글을 사람에게 「실패」라고 말하게 된다(= 거짓 실패).
-            #   ⚠그 대신 **다툼을 숨기지 않는다**: 판정을 결과에 실어 올려 대조가 그것을 본다.
-            #   ⚠이 안전망이 F-1 을 되돌리지 않는 이유: 눈먼 구간은 **쓰기 전에** 막았다
-            #     (`_blind_spot`). 못 보는 글에게 진 상태에서는 이 확인 자체에 도달하지 않는다.
-            out["relay_verdict_disputed"] = rejected
-            break
         if rejected.get("reason") not in RETRYABLE_RELAY_REASONS or attempt == attempts - 1:
             # ★**접수됐다고 성공이 아니다.** 사유를 그대로 얹어 실패로 올린다.
+            # ★★**우리 사슬이 받았다는 것은 면제 사유가 아니다**(codex 2R HIGH · 2026-09-09 ·
+            #   구판의 `_accepted_by_us` 우회를 여기서 걷어낸다). 구판은 agy 1R 의 「거짓 실패」
+            #   지적을 받아 「우리 리듀서가 받았으면 성공」으로 접었는데, 그 분기가 **로컬 설정이
+            #   릴레이보다 느슨한 모든 경우**에 상시로 열려 있었다: 로컬 `posts_per_round` 가 크면
+            #   릴레이는 `budget_exceeded` 로 격리하고 우리는 받아들여 **rc 0** 이 난다.
+            #   ⇒ 「원장에 있음 ≠ 적용됨」은 어느 쪽 리듀서를 정본으로 삼든 참이다. 상대가 반영을
+            #     거부한 글은 **그 상대의 방에서는 없는 글**이고, 대화는 그 방에서 일어난다.
+            # ★agy 1R 의 걱정(거짓 실패)은 **없애는 대신 드러내서** 답한다: 우리 사슬이 받았는지를
+            #   `accepted_by_us` 로 실어 올린다. 사람은 「릴레이가 거부 · 우리는 수용」이라는
+            #   **다툼 그 자체**를 보고 판단한다 — 조용히 성공으로 접는 것과는 다른 일이다.
             code = (errors.STATE_CONFLICT
                     if rejected.get("reason") in RETRYABLE_RELAY_REASONS
                     else errors.GATE_REJECT)
@@ -297,6 +302,8 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
                               "reducer": rejected.get("reducer"),
                               "message_id": event["message_id"],
                               "attempts": attempt + 1,
+                              "accepted_by_us": (not is_genesis) and _accepted_by_us(
+                                  ctx, thread_id, event["message_id"]),
                               "how": "read 로 다시 보고 그 자리에서 다시 써라"})
     out["usage"] = usage_of(event)
     return out
@@ -338,6 +345,20 @@ def _settle_unknown(ctx: Context, event: dict[str, Any],
                           "settle_error": {"code": se.code, "message": se.message,
                                            "detail": se.detail}},
                          retryable=False if known else None) from None
+    if settled["verdict"] == core.REJECTED:
+        # ★★**원장에 있음 ≠ 적용됨**(codex 2R CRITICAL · 2026-09-09). 재조회에서 릴레이가
+        #   `valid:false` 라고 답했다 — 글은 그쪽 원장에 남았지만 **반영되지 않았다.**
+        #   ⇒ 성공으로 접지 않고, 정상 응답을 받았을 때와 **같은 문**으로 보낸다:
+        #     `relay_verdict` 를 실어 올려 `_publish` 의 거부 처리(재시도 가능한 사유면
+        #     자리를 다시 잡고, 아니면 비영 종료)가 그대로 돌게 한다.
+        #   ★같은 문으로 보내는 것이 핵심이다 — 여기서 따로 판정하면 두 경로가 갈라지고,
+        #     갈라진 경로 중 하나는 언젠가 다시 rc 0 을 낸다(이 결함이 정확히 그것이었다).
+        return {"message_id": event["message_id"],
+                "hash": (err.detail or {}).get("event_hash"),
+                "settled": core.REJECTED, "ledger_row": None,
+                "node_id": None, "url": None,
+                "relay_verdict": {"accepted_to_ledger": True, "reducer": "stale",
+                                  "reason": settled.get("reason"), "state_hash": None}}
     if settled["verdict"] != core.COMMITTED:
         raise AgoraError(errors.STORE, "저장되지 않았다 — 재조회로 확인했다",
                          {"settled": settled["verdict"],

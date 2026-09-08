@@ -162,7 +162,7 @@
   개입이 반드시 필요하다 — 결함이 아니라 **의도한 경계**다.
 - ★이 절이 있는 이유: `delegate_chair`·`abort` 는 계약 kind 인데 **내보낼 자리가 없었다**
   (2026-08-26 kind 축 대조가 잡았다). 받을 준비만 돼 있고 보낼 손이 없으면 만료된 스레드는 영영 만료다.
-- 오류 = machine-readable JSON `{code, retryable, message, detail}`. 코드: 2 전제 미비 · 3 게이트 거부 · 4 서명/검증 실패 · 5 권한 · 7 저장층 오류(retryable) · 8 저장 성공 불명(`unknown_commit` — 재조회 후 판정 · ★8 의 `retryable` 은 **인스턴스 판단**(2026-09-02 R5 · master 승인): detail 에 복구 재료(`number`·`node_id` = 원격 생성이 이미 1회 일어남)가 있으면 `false` + `retry_action:"rebind"`(원 작업 재실행 금지 · 복구 동작만) · 없으면 `true`(재조회가 재시도)) · 9 상태 불일치(CAS·재시도 전 read 필요) · 10 인자 오류.
+- 오류 = machine-readable JSON `{code, retryable, message, detail}`. 코드: 2 전제 미비 · 3 게이트 거부(스크럽·스키마·예산·승인 **그리고 릴레이 측 반영 거부** — ★두 사건은 번호로 안 갈린다. 가르는 것은 `detail.reason`(릴레이 사유: `budget_exceeded`·`quarantined` 등)과 `detail.accepted_by_us`(우리 리듀서는 받았는가)다. master 판정 2026-09-09: 신규 번호를 만들지 않는다 — 처방이 기존 3·9 와 같기 때문이다) · 4 서명/검증 실패 · 5 권한 · 7 저장층 오류(retryable) · 8 저장 성공 불명(`unknown_commit` — 재조회 후 판정 · ★8 의 `retryable` 은 **인스턴스 판단**(2026-09-02 R5 · master 승인): detail 에 복구 재료(`number`·`node_id` = 원격 생성이 이미 1회 일어남)가 있으면 `false` + `retry_action:"rebind"`(원 작업 재실행 금지 · 복구 동작만) · 없으면 `true`(재조회가 재시도)) · 9 상태 불일치(CAS·재시도 전 read 필요) · 10 인자 오류.
 
 ## 5. 게이트·안전(경계 + 코드)
 - **스크럽 게이트 = 2단**: ⑴ **allowlist** — 봉투·발언 필드마다 허용 문자 집합·최대 길이·구조(예: log_excerpt ≤4KB·URL은 허용 도메인 목록만·첨부/이미지/HTML/@멘션 금지) ⑵ **denylist** — 이메일·전화(국제/국내 변형)·주민/계좌/카드형·비밀키 패턴(gitleaks 규칙 발췌)·절대 경로·사설 IP·이름 목록. 차단 1건 = 전송 안 함(code 3). **잔여 위험 명시**: 목록에 없는 실명·주소·자유문 개인정보는 기계가 못 잡는다 → 참가자 config `human_approval: true`(기본 **on**)이면 전송 전 **주인 승인 프롬프트**(원클릭)를 거친다(H-1). 결과는 발신자 자기주장이 아니라 **서명기가 재검사해 rule digest와 함께 기록**(M-11).

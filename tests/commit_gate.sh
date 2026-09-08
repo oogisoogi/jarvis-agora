@@ -73,5 +73,17 @@ else
 fi
 rm -f /tmp/agora-selftest.$$
 
+echo "== F-1 재현 시험(codex 2R 판정문 1:1) =="
+# ★**시험을 쓴 것과 시험이 도는 것은 다른 말이다.** 이 저장소가 그 차이로 두 번 다쳤다
+#   (미배선 함수 전수조사 2026-08-26 · 「구현했다 ≠ 배선됐다」). 파일만 두면 아무도 안 돌린다.
+# ★pytest 없이도 돈다(이 기계의 시스템 python3 는 PEP 668 로 --user 설치가 막혀 있다) —
+#   같은 파일이 자체 러너를 갖고 있어 **검사기 부재로 안 재는 일**이 생기지 않는다.
+if python3 tests/test_f1_r2_codex.py >/tmp/agora-f1r2.$$ 2>&1; then
+  tail -1 /tmp/agora-f1r2.$$ | sed 's/^/  /'
+else
+  echo "  FAIL — 아래 출력 확인"; grep -E "^  FAIL" /tmp/agora-f1r2.$$ | head -10; rc=1
+fi
+rm -f /tmp/agora-f1r2.$$
+
 echo "== 결과: $([ $rc -eq 0 ] && echo PASS || echo FAIL) =="
 exit $rc
