@@ -53,6 +53,7 @@ class FakeRelay:
                  page_size: int = 0, preempt_identity: bool = True,
                  require_proof: bool = True, opaque_cursor: bool = False,
                  protocol_codes: bool = True, lie_valid: bool = False,
+                 chain_verdicts: bool = True,
                  checkpoint: dict[str, Any] | None = None,
                  checkpoint_404: bool = False, verdict: dict[str, Any] | None = None,
                  retry_after: str | None = None,
@@ -80,6 +81,14 @@ class FakeRelay:
         # ★서명 검증을 끄는 스위치 — 「검증을 안 하는 서버」를 재는 자리(우리 reducer 가 정본임을
         #   보이는 케이스가 그것을 쓴다). 기본은 **계약대로 검증한다**.
         self.verify_events = verify_events
+        # ★사슬 판정(경합·닿지 않음) 스위치. 기본은 **계약대로 판정한다** — 끄는 쪽이 특수 상황이다
+        #   (「판정을 안 하는 서버」 = 09-06 이전의 우리 더블이 그 상태였다).
+        self.chain_verdicts = chain_verdicts
+        # ★**경합을 시험이 만들 수 있게** 하는 자리: 다음 `POST /events` **직전**에 이 글을 먼저
+        #   적는다(= 남이 그 자리를 먼저 차지한다). 실물에서는 밀리초 창이라 재현이 안 되므로,
+        #   더블이 그 창을 **결정론으로** 연다. **줄 세운 순서대로 한 건씩** 쓰이고 사라진다 —
+        #   재시도까지 밀리는 상황(= 두 번 진다)을 재려면 두 건이 필요하기 때문이다.
+        self.race_queue: list[str] = []
         self.seen_queries: list[str] = []    # 서버가 실제로 읽은 질의 — 인코딩 시험이 본다
         self.rooms: dict[str, dict[str, Any]] = {}
         self.registered: dict[str, dict[str, str]] = {}
@@ -94,7 +103,9 @@ class FakeRelay:
         room = self.rooms.get(room_id)
         if room is None:
             room = {"room_id": room_id, "category": category, "title": title,
-                    "created_at": now_iso(), "updated_at": now_iso(), "events": []}
+                    "created_at": now_iso(), "updated_at": now_iso(), "events": [],
+                    # ★사슬 상태 — 계약 §5 규칙 2(정렬·경합)를 더블에서도 **실제로** 돌린다.
+                    "head": None, "hashes": set()}
             self.rooms[room_id] = room
         return room
 
@@ -120,9 +131,11 @@ class FakeRelay:
                     raise _Conflict(message_id)   # 같은 id·다른 내용 = 다른 글이다(422/3)
                 return dict(row, existing=True)   # ★멱등 — 새 행을 만들지 않는다(200)
         self.counter += 1
+        digest = _event_hash_of(body)
         row = {"event_id": f"EV_{self.counter}", "created_at": now_iso(),
                "body": body, "is_genesis": bool(is_genesis), "message_id": message_id,
-               "hash": _event_hash_of(body)}
+               "hash": digest}
+        row.update(self._chain_verdict(room, body, digest, is_genesis))
         room["events"].append(row)
         if self.refresh_updated_at:
             room["updated_at"] = row["created_at"]
@@ -132,6 +145,41 @@ class FakeRelay:
         """우리 서식이 아닌 글을 심는다(웹에서 손으로 쓴 댓글에 해당)."""
         return self.append_event(thread_id=room_id, category="debate", title="",
                                  body=body, is_genesis=False)
+
+    def _chain_verdict(self, room: dict[str, Any], body: str, digest: str,
+                       is_genesis: bool) -> dict[str, Any]:
+        """사슬 판정 — 계약 §5 규칙 2 를 **더블에서도 실제로 돌린다**(F-1 봉합 ⓓ).
+
+        ★★09-06 실물 리허설이 이 자리에서 깨졌다: 실물은 `lost_race`·`unreachable` 을 냈는데
+          **더블은 그런 판정을 낸 적이 없다** — 그래서 하네스는 22/22 초록이었고,
+          같은 절차가 실물에서 네 건 격리됐다. ★더블이 못 내는 판정은 시험이 비어 있다
+          (09-05 서명 미검사 · 09-06 결박 미검사에 이은 **같은 병의 다섯 번째 판**).
+        ★규칙은 발명하지 않고 계약에서 옮긴다:
+          · `prev` 가 **지금 머리**면 = 유효 · 머리를 전진시킨다.
+          · `prev` 가 **이미 아는 해시**(머리가 아닌)면 = 그 자리는 남이 먼저 차지했다 → `lost_race`.
+            (도착순이 곧 승부다 — 먼저 온 것이 이긴다. 더블은 순차라 이 규칙이 그대로 성립한다.)
+          · `prev` 를 **모르면** = 끊긴 곳에 매달렸다 → `unreachable`.
+          · 둘 다 **`stale` 이지 격리가 아니다**(계약 §5 규칙 2 원문) — 원장에는 남는다.
+        ⚠`vote` 는 머리를 전진시키지 않는다(계약 §5 규칙 5). 그 규칙까지 옮긴다.
+        """
+        if not self.chain_verdicts:
+            return {"valid": True, "stale": False, "reason": None}
+        if room["head"] is None:
+            # 첫 글이 사슬의 시작이다. ⚠`is_genesis` 만 보고 무조건 받으면 **genesis 가 둘인 방**이
+            #   생긴다(agy 1R 지적 4 · 수용) — 이미 머리가 있으면 아래 규칙으로 떨어져야 한다.
+            room["head"], _ = digest, room["hashes"].add(digest)
+            return {"valid": True, "stale": False, "reason": None}
+        prev = _prev_of(body)
+        if prev == room["head"]:
+            room["hashes"].add(digest)
+            if _kind_of(body) != "vote":
+                # vote 는 머리를 안 옮긴다(계약 §5 규칙 5).
+                # ⚠문자열 검색으로 재면 **본문에 그 글자가 든 발언**까지 vote 로 읽는다
+                #   (agy 1R 지적 4 · 수용) — 파싱해서 `kind` 칸을 본다.
+                room["head"] = digest
+            return {"valid": True, "stale": False, "reason": None}
+        reason = "lost_race" if prev in room["hashes"] else "unreachable"
+        return {"valid": False, "stale": True, "reason": reason}
 
     def derived(self, room_id: str) -> dict[str, Any]:
         """서버가 이벤트에서 파생한 상태 — **클라 reducer 와 독립적으로** 계산한다.
@@ -143,6 +191,10 @@ class FakeRelay:
         closed = answered = False
         closed_at = None
         for row in room["events"]:
+            if row.get("valid") is False:
+                # ★밀린 글은 상태를 안 바꾼다 — 실물이 그렇게 답한다(09-06: close 가 unreachable 이라
+                #   `closed:false` 였다). 여기서 세면 더블만 방을 닫고 시험이 또 공허해진다.
+                continue
             body = row.get("body") or ""
             if '"kind":"close"' in _compact(body):
                 closed, closed_at = True, row["created_at"]
@@ -368,6 +420,22 @@ def _signature_matches(raw: bytes, signature: str, *,
         return verified.returncode == 0
 
 
+def _kind_of(body: str) -> str | None:
+    from agora.event import parse_post
+    try:
+        return parse_post(body)["event"].get("kind")
+    except Exception:            # noqa: BLE001 — 우리 서식이 아니면 kind 도 없다
+        return None
+
+
+def _prev_of(body: str) -> str | None:
+    from agora.event import parse_post
+    try:
+        return parse_post(body)["event"].get("prev")
+    except Exception:            # noqa: BLE001 — 우리 서식이 아니면 사슬 밖이다
+        return None
+
+
 def _message_id_of(body: str) -> str | None:
     from agora.event import parse_post
     try:
@@ -510,13 +578,20 @@ class _Handler(BaseHTTPRequestHandler):
             rows = []
             for row in room["events"]:
                 item = {k: v for k, v in row.items()
-                        if k not in ("message_id", "hash", "existing")}
+                        if k not in ("message_id", "hash", "existing",
+                                     "valid", "stale", "reason")}
                 # 파생 판정 덧칸(계약 §3-5) — `lie_valid` 면 격리감에도 참을 적는다.
-                item.update({"valid": True, "quarantined": False,
-                             "stale": False, "reason": None}
-                            if (row.get("message_id") or self.relay.lie_valid)
-                            else {"valid": False, "quarantined": True,
-                                  "stale": False, "reason": "permission"})
+                if not (row.get("message_id") or self.relay.lie_valid):
+                    # 우리 서식이 아닌 글 = 격리(자격 없음)
+                    item.update({"valid": False, "quarantined": True,
+                                 "stale": False, "reason": "permission"})
+                elif row.get("valid") is False and not self.relay.lie_valid:
+                    # 밀린 글 = **격리가 아니라 stale** 이다(계약 §5 규칙 2 원문)
+                    item.update({"valid": False, "quarantined": False,
+                                 "stale": True, "reason": row.get("reason")})
+                else:
+                    item.update({"valid": True, "quarantined": False,
+                                 "stale": False, "reason": None})
                 rows.append(item)
             page = self._page(rows, query, high=200, default=100)
             if page is not None:
@@ -542,6 +617,12 @@ class _Handler(BaseHTTPRequestHandler):
             #   지나갔다 — **실물은 401(principal_mismatch)로 거부한다**(2026-09-06 라이브 실측).
             #   ⇒ 더블이 계약을 덜 지키면 그만큼 시험이 공허해진다. 같은 병의 세 번째 판이다.
             # 계약 §3-2 검사 1(크기)·3 일부(뼈대)·4(결박)·5(genesis 정합)
+            if self.relay.race_queue:
+                # 남이 먼저 그 자리를 차지한다(계약 §5 규칙 2 = 도착순 승부).
+                racer = self.relay.race_queue.pop(0)
+                self.relay.append_event(thread_id=payload.get("thread_id", ""),
+                                        category=payload.get("category", ""), title="",
+                                        body=racer, is_genesis=False)
             gate = _event_gate(payload, self.relay.rooms)
             if gate:
                 self._fail(gate[0], gate[1], **gate[2])
@@ -567,6 +648,13 @@ class _Handler(BaseHTTPRequestHandler):
                    "created_at": row["created_at"]}
             if self.relay.verdict is not None:
                 out["verdict"] = self.relay.verdict     # 참고용 파생 판정(계약 §3-2·§5)
+            elif row.get("valid") is False:
+                # ★**받았지만 반영 안 했다**를 그 자리에서 말한다(계약 §5 「이 칸이 새로 얻는 것」).
+                #   구판 더블은 이 칸을 만든 적이 없어 클라이언트의 rc 0 이 초록으로 보였다.
+                out["verdict"] = {"accepted_to_ledger": True, "reducer": "stale",
+                                  "reason": row.get("reason"),
+                                  "state_hash_at_that_point": self.relay.rooms.get(
+                                      payload.get("thread_id"), {}).get("head")}
             self._send(200 if row.get("existing") else 201, out)   # 멱등은 200 이다
             return
         if url.path == "/participants/checkpoint":

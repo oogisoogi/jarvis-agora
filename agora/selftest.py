@@ -236,7 +236,9 @@ def _fixtures() -> dict[str, Any]:
     else:
         d = tempfile.mkdtemp(prefix="agora-selftest-")
         atexit.register(shutil.rmtree, d, True)
-    for name in ("a", "b"):
+    # ★"c" = **어느 명부에도 안 넣는 키**. 「우리 명부 밖 서명자」를 재는 자리가 필요하다
+    #   (F-1 의 뿌리 = 낡은 사본이 만드는 눈먼 구간 · 2026-09-08).
+    for name in ("a", "b", "c"):
         if os.path.exists(os.path.join(d, name)):
             continue
         sp.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "fixture",
@@ -257,6 +259,7 @@ def _fixtures() -> dict[str, Any]:
     with open(notkey, "w", encoding="utf-8") as fh:
         fh.write("이건 키가 아니다\n")
     _FIX.update({"dir": d, "key_a": os.path.join(d, "a"), "key_b": os.path.join(d, "b"),
+                 "key_c": os.path.join(d, "c"),
                  "roster": roster, "roster_ab": roster_ab, "notkey": notkey, "empty_roster": os.path.join(d, "none")})
     return _FIX
 
@@ -4423,11 +4426,17 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     # ★서버가 답한 **상태 코드**를 위로 올리는 자리. 여기가 비면 201/200 이 한 칸에 뭉쳐
     #   「새로 적었다」와 「이미 있었다」가 구별되지 않는다(P4 에서 실제로 못 쟀다).
     "쓰기상태": ("M356-write-drops-http-status",),
+    # ★09-06 실물이 연 축 — **접수와 반영은 다르다**. 여기가 비어 있어서 하네스가 22/22 초록인데
+    #   원장에는 네 건이 밀려 있었다(F-1). 세 겹을 다 잰다: 클라 재시도 · 판정 읽기 · 더블의 판정 능력.
+    "경합반영": ("M357-write-never-retries", "M358-relay-rejection-folded-into-success",
+                 "M359-blind-spot-ignored", "M360-double-never-judges-chain",
+                 "M361-retry-writes-to-the-same-slot",
+                 "M362-resolution-skips-local-round-gate"),
 }
 
 
 def _case_s8_axes_have_nets() -> None:
-    """S8 의 13축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태)도 같은 방식으로 덮인다."""
+    """S8 의 14축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영)도 같은 방식으로 덮인다."""
     _axes_have_nets(S8_AXES, "S8")
 
 
@@ -5234,11 +5243,19 @@ def _case_tool_mark_solved_requires_requester() -> None:
 
 
 def _case_tool_resolution_needs_forbidden_mark() -> None:
-    """권고에 **집행 금지 표식**이 없으면 게이트 거부(NFR-8 · code 3)."""
+    """권고에 **집행 금지 표식**이 없으면 게이트 거부(NFR-8 · code 3).
+
+    ★2026-09-08 추가: 권고안에 **라운드 로컬 겹**이 생겼다(r3 에서만) — 그래서 이 케이스도
+      먼저 r3 까지 전진시킨다. ⚠규칙이 하나 생기면 **그 규칙을 몰랐던 시험이 붉어진다**:
+      그 붉음은 고장이 아니라 「이 시험이 어느 상태를 전제했는지」를 드러낸 것이다.
+      (전에는 r0 에서 권고안을 냈고 그것이 통과했다 — 그 자체가 오늘 실물이 잡은 결함이다.)
+    """
     from agora import tools
     f = _fixtures()
     ctx = _tools_ctx()
     tid = _tools_thread(ctx)
+    for target in (1, 2, 3):
+        _with_key(f["key_a"], lambda t=target: tools.advance(ctx, thread_id=tid, to_round=t))
     try:
         _with_key(f["key_a"], lambda: tools.resolve(
             ctx, thread_id=tid, summary="가짜 요약", dissent=[],
@@ -9476,9 +9493,14 @@ def _case_relay_verdict_is_reported_not_obeyed() -> None:
     f = _fixtures()
     verdict = {"accepted_to_ledger": True, "reducer": "quarantined",
                "reason": "stale_expected_state"}
-    with _relay_env(verdict=verdict, idempotent=False) as (ctx, relay, _url):
+    with _relay_env(idempotent=False) as (ctx, relay, _url):
         room = _relay_room(ctx)
         _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 마디"))
+        # ★★**층이 갈린다**(2026-09-08 F-1 봉합에서 명시적으로 갈랐다): 판정을 **싣는** 것은
+        #   어댑터의 일이고, 그것을 **실패로 올리는** 것은 도구의 일이다. 그래서 판정 주입은
+        #   여기서부터 켠다 — 위의 `say` 까지 켜 두면 도구가(옳게) 실패해 이 케이스의 주제가
+        #   가려진다. 도구 층의 규율은 「쓰기: 접수는 반영이 아니다」가 따로 잰다.
+        relay.verdict = verdict
         # ★어댑터 층에서 잰다. 도구 반환은 칸을 **추리므로**(`say` 는 message_id·url·usage 만)
         #   여기서 도구를 재면 「어댑터가 버렸다」와 「도구가 안 실었다」가 구별되지 않는다.
         #   ⚠도구 표면에 이 칸을 노출할지는 별개 결정이다 — 계약이 무시를 허용한다(§3-2).
@@ -9879,6 +9901,199 @@ def _case_cli_takes_documented_positional() -> None:
         with open(os.path.join(_ROOT, path), encoding="utf-8") as fh:
             if "agora join <room" not in fh.read():
                 raise AssertionError(f"문서가 자리 인자 서식을 안 적었다: {path}")
+
+
+def _competing_post(ctx: Any, room: str, key_path: str, who: str, body: str,
+                    prev: str | None = None) -> str:
+    """**남이 그 자리를 차지하는 글**을 만들되 올리지는 않는다 — 더블에 건네 경합을 만든다.
+
+    ★실물의 경합 창은 밀리초라 시험이 재현할 수 없다. 그래서 더블이 그 창을 결정론으로 연다
+      (`inject_before_next_event`) — 그러려면 **미리 서명된 글 한 건**이 필요하다.
+    """
+    from agora import core, sign, tools as _t
+    from agora.event import new_id, render_post
+    from agora.ledger import now_iso
+    state, head, expected = _t._head_and_state(ctx, room)
+    prev = prev or head
+    event = {"v": 1, "kind": "post", "thread_id": room, "message_id": new_id(),
+             "prev": prev, "expected_state": expected, "from": who,
+             "roster": _t._roster_digest(ctx), "ts": now_iso(),
+             "payload": {"round": state["round"] or 0, "body": body}}
+    core.declare_scrub(event, config_dir=ctx.config_dir)
+    signed = _with_key(key_path, lambda: sign.sign_event(event, config_dir=ctx.config_dir))
+    return render_post(event, signed["signature"])
+
+
+def _case_write_retries_after_lost_race() -> None:
+    """경합에서 밀리면 **자리를 다시 잡아 한 번 더 쓴다**(F-1 봉합 ⓐ · 브리프 §2).
+
+    ★09-06 실물: 의장의 advance 가 `lost_race` 로 격리됐는데 클라이언트는 rc 0 이었다.
+      이제는 ⑴릴레이가 「반영 안 했다」고 하면 그것을 **실패로 읽고** ⑵**우리 리듀서로**
+      자리를 다시 계산해 재서명·재전송한다. ⚠자리는 릴레이가 아니라 우리가 정한다(계약 §3-5).
+    ★재시도는 **한 번**이다 — 자동 반복은 남의 원장에 같은 글을 쌓는다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        racer = _competing_post(ctx, room, f["key_b"], "operator-b", "내가 먼저 쓴다")
+        relay.race_queue = [racer]
+        said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="나중에 도착"))
+        if not said.get("message_id"):
+            raise AssertionError(f"밀린 뒤 재시도가 성립하지 않았다: {said}")
+        rows = ctx.store.audit_events(thread_id=room)
+        invalid = [r for r in rows if r.get("valid") is False]
+        # ★밀린 글은 **지워지지 않는다** — 원장은 append-only 이고, 그것이 「내 글이 왜 안 보이나」에
+        #   답할 수 있게 하는 바로 그 설계다(계약 §5). 재시도의 성과는 「밀린 글이 사라지는 것」이
+        #   아니라 **뒤에 유효한 한 건이 서는 것**이다.
+        if len(rows) != 4:
+            raise AssertionError(f"원장이 넷(발제·경합·밀린 첫 시도·재전송)이 아니다: {len(rows)}")
+        if [r.get("reason") for r in invalid] != ["lost_race"]:
+            raise AssertionError(f"밀린 것이 첫 시도 하나가 아니다: {invalid}")
+        if rows[-1].get("valid") is not True:
+            raise AssertionError(f"재전송본이 유효하지 않다: {rows[-1]}")
+        # ★재전송본은 **경합자의 뒤에** 붙어야 한다 — 앞자리에 다시 쓰면 또 밀린다.
+        reduced = tools._reduce(ctx, room)
+        last = (reduced.get("events") or [])[-1]
+        if last["from"] != "operator-a" or last["event"]["payload"]["body"] != "나중에 도착":
+            raise AssertionError(f"재전송본이 사슬 끝이 아니다: {last.get('from')}")
+
+
+def _case_relay_rejection_is_not_success() -> None:
+    """**접수(2xx)와 반영은 다르다** — 릴레이가 반영 안 했다고 하면 rc≠0(F-1 봉합 ⓑ).
+
+    ★두 갈래를 다 잰다: ⑴다시 써 볼 값어치가 있는 사유(`lost_race`)인데 **두 번째도 밀리면** 실패 ·
+      ⑵자리를 바꿔도 그대로인 사유(격리)는 **재시도 없이** 실패. 사유는 그대로 실어 올린다.
+    """
+    from agora import tools
+    f = _fixtures()
+    # ⑴ **두 번 다 밀린다** — 재시도한 자리까지 남이 먼저 차지한다. 무한 재시도 없이 실패로 올린다.
+    import tests.fake_relay as _fr                     # 사슬 해시 계산(서버가 쓰는 그 규칙)
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        first = _competing_post(ctx, room, f["key_b"], "operator-b", "첫 자리를 차지한다")
+        second = _competing_post(ctx, room, f["key_b"], "operator-b", "다음 자리도 차지한다",
+                                 prev=_fr._event_hash_of(first))
+        relay.race_queue = [first, second]
+        try:
+            _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="두 번 밀린다"))
+        except AgoraError as e:
+            if e.code != errors.STATE_CONFLICT:
+                raise AssertionError(f"두 번 밀렸는데 9 가 아니다: {e.code}") from None
+            if (e.detail or {}).get("reason") != "lost_race":
+                raise AssertionError(f"사유를 안 실었다: {e.detail}")
+            if (e.detail or {}).get("attempts") != 2:
+                raise AssertionError(f"재시도 횟수가 안 맞는다: {e.detail}")
+        else:
+            raise AssertionError("두 번 밀렸는데 성공으로 보고했다")
+    # ⑴-b **다툼**: 릴레이는 밀렸다는데 **우리 사슬에는 들어와 있다** — 정본은 우리 리듀서다(계약 §3-5).
+    #    ⇒ 성공으로 보고하되 **다툼을 숨기지 않는다**(agy 1R 지적 3 · 수용).
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        relay.verdict = {"accepted_to_ledger": True, "reducer": "stale",
+                         "reason": "lost_race"}
+        said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="다툼"))
+        if not said.get("message_id"):
+            raise AssertionError("우리 사슬에 든 글을 실패로 보고했다(거짓 실패)")
+        reduced = tools._reduce(ctx, room)
+        if not any(e["event"]["message_id"] == said["message_id"]
+                   for e in (reduced.get("events") or [])):
+            raise AssertionError("성공이라 했는데 우리 사슬에 없다")
+    # ⑵ **우리 리듀서가 이미 아는 무효**는 보내기 전에 막는다(로컬 겹 · 남의 원장을 안 더럽힌다).
+    #    ★2026-09-08 실물이 이 자리를 열었다: 하네스가 r2 에서 권고안을 냈고 **글이 나갔다.**
+    #      릴레이가 `bad_transition` 을 돌려줘서 알았을 뿐, 그 칸이 없었으면 **우리 리듀서가 격리한
+    #      글을 성공으로 보고**했을 것이다.
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        before = len(relay.rooms[room]["events"])
+        try:
+            _with_key(f["key_a"], lambda: tools.resolve(
+                ctx, thread_id=room, summary="아직 r0 인데 수렴한다",
+                dissent=[], recommended_actions=[{"text": "하지 마라",
+                                                 "execution": "forbidden"}]))
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT:
+                raise AssertionError(f"라운드 밖 권고안이 3 이 아니다: {e.code}") from None
+            if (e.detail or {}).get("reason") != "bad_transition":
+                raise AssertionError(f"사유를 안 실었다: {e.detail}")
+        else:
+            raise AssertionError("r3 이 아닌데 권고안을 냈다")
+        if len(relay.rooms[room]["events"]) != before:
+            raise AssertionError("보내기 전에 막아야 하는데 **글이 나갔다**")
+
+
+def _case_unreadable_events_block_the_write() -> None:
+    """**우리가 못 읽는 글**이 있으면 쓰지 않는다 — F-1 의 뿌리(명부 사본이 낡음).
+
+    ★★09-06 원장이 증명한다: 같은 방 이벤트 셋의 `roster` digest 가 셋 다 달랐다
+      (`8501f9…`·`e4b640…`·`0ca385…`). 의장의 사본에는 뒤에 등재된 둘이 없었고, 그래서 두 사람의
+      발언이 `unsigned` 로 격리됐다 — **의장의 세계에서는 CAS 가 정합이었다.**
+    ⇒ 자기가 못 보는 글에게 지는 것은 경합이 아니라 **눈이 먼 것**이다. 그때는 쓰지 않고
+      「명부를 받아라」라고 말한다(fail-closed). 재시도로는 절대 안 풀린다.
+    ⚠`BAD`(변조)는 여기 안 든다 — 명부를 받아 와도 안 사라지는 다른 사건이다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        # 남(=우리 명부 밖 키)이 그 자리에 글을 하나 올려 둔다.
+        stranger = _competing_post(ctx, room, f["key_c"], "operator-c", "명부 밖 참가자의 글")
+        relay.append_event(thread_id=room, category="debate", title="",
+                           body=stranger, is_genesis=False)
+        try:
+            _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="눈 감고 쓴다"))
+        except AgoraError as e:
+            if e.code != errors.PRECONDITION:
+                raise AssertionError(f"눈먼 쓰기가 2 가 아니다: {e.code}") from None
+            if (e.detail or {}).get("reason") != "roster_stale_unknown_signers":
+                raise AssertionError(f"사유가 다르다: {e.detail}")
+            if (e.detail or {}).get("unreadable") != 1:
+                raise AssertionError(f"못 읽는 글 계수가 틀렸다: {e.detail}")
+        else:
+            raise AssertionError("못 읽는 글이 있는데 그대로 썼다")
+
+
+def _case_double_judges_the_chain() -> None:
+    """더블이 **사슬 판정**을 낸다 — `lost_race` 와 `unreachable`(F-1 봉합 ⓓ).
+
+    ★09-06 이 이 자리에서 깨졌다: 실물은 네 건을 밀어냈는데 **더블은 그런 판정을 낸 적이 없어**
+      하네스가 22/22 초록이었다. ★더블이 못 내는 판정은 시험이 비어 있다 —
+      09-05 서명 미검사 · 09-06 결박 미검사에 이은 **같은 병의 다섯 번째 판**이다.
+    ★그리고 밀린 글은 **격리가 아니라 stale** 이고, 파생 상태(닫힘)를 바꾸지 못한다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        racer = _competing_post(ctx, room, f["key_b"], "operator-b", "먼저 온 글")
+        loser = _competing_post(ctx, room, f["key_b"], "operator-b", "같은 자리에 나중")
+        relay.append_event(thread_id=room, category="debate", title="",
+                           body=racer, is_genesis=False)
+        relay.append_event(thread_id=room, category="debate", title="",
+                           body=loser, is_genesis=False)
+        rows = ctx.store.audit_events(thread_id=room)
+        verdicts = [(r.get("valid"), r.get("reason"), r.get("stale"),
+                     r.get("quarantined")) for r in rows]
+        if verdicts[-1] != (False, "lost_race", True, False):
+            raise AssertionError(f"같은 자리 둘째가 lost_race 가 아니다: {verdicts}")
+        if verdicts[-2][0] is not True:
+            raise AssertionError(f"먼저 온 글이 유효가 아니다: {verdicts}")
+        # 닿지 않는 곳에 매달린 글 = unreachable
+        orphan = _competing_post(ctx, room, f["key_b"], "operator-b", "끊긴 곳에 매달림")
+        orphan = orphan.replace(_prev_in(orphan), "f" * 64, 1)
+        relay.append_event(thread_id=room, category="debate", title="",
+                           body=orphan, is_genesis=False)
+        rows = ctx.store.audit_events(thread_id=room)
+        if (rows[-1].get("valid"), rows[-1].get("reason")) != (False, "unreachable"):
+            raise AssertionError(f"닿지 않는 글이 unreachable 이 아니다: {rows[-1]}")
+        # 밀린 close 는 방을 닫지 못한다(09-06 실물이 그랬다 · `closed:false`).
+        if ctx.store.thread_status(thread_id=room).get("closed") is not False:
+            raise AssertionError("밀린 글이 파생 상태를 바꿨다")
+
+
+def _prev_in(body: str) -> str:
+    from agora.event import parse_post
+    return parse_post(body)["event"]["prev"]
 
 
 def _case_write_result_carries_http_status() -> None:
@@ -10814,6 +11029,10 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("리허설: 하네스가 완주한다",     _case_rehearsal_harness_completes, None),
     ("계약: RELAY.md 와 대조",        _case_contract_parity_with_relay_doc, None),
     ("릴레이: 쓰기는 상태를 싣는다",  _case_write_result_carries_http_status, None),
+    ("경합: 밀리면 자리를 다시 잡는다", _case_write_retries_after_lost_race, None),
+    ("쓰기: 접수는 반영이 아니다",     _case_relay_rejection_is_not_success, None),
+    ("명부: 못 읽는 글이면 안 쓴다",   _case_unreadable_events_block_the_write, None),
+    ("더블: 사슬 판정을 낸다",        _case_double_judges_the_chain, None),
     ("리허설: 영수증을 안 건너뛴다",  _case_rehearsal_does_not_skip_the_receipt, None),
     ("더블: 증명은 그 키의 것인가",   _case_double_binds_proof_to_its_key, None),
     ("더블: 결박을 실제로 댄다",     _case_double_binds_request_args_to_signature, None),
@@ -10852,6 +11071,31 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if now and doc["signed_at"] > _plus_hours(now, FUTURE_GRACE_HOURS):',
      '    if False:',
      "명부: 체크포인트 서명 검증"),
+    # ★F-1 봉합(2026-09-08 · agora-client-cas-refresh) — 밀린 글을 성공으로 접던 자리.
+    ("M357-write-never-retries", "agora/tools.py",
+     '    attempts = 1 if is_genesis else 2',
+     '    attempts = 1',
+     "경합: 밀리면 자리를 다시 잡는다"),
+    ("M358-relay-rejection-folded-into-success", "agora/tools.py",
+     '    if reducer_said in (None, "", "accepted", "valid") and not reason:\n        return None',
+     '    if True:\n        return None',
+     "쓰기: 접수는 반영이 아니다"),
+    ("M359-blind-spot-ignored", "agora/tools.py",
+     '        blind = _blind_spot(fresh)',
+     '        blind = []',
+     "명부: 못 읽는 글이면 안 쓴다"),
+    ("M360-double-never-judges-chain", "tests/fake_relay.py",
+     '        reason = "lost_race" if prev in room["hashes"] else "unreachable"\n        return {"valid": False, "stale": True, "reason": reason}',
+     '        return {"valid": True, "stale": False, "reason": None}',
+     "더블: 사슬 판정을 낸다"),
+    ("M362-resolution-skips-local-round-gate", "agora/tools.py",
+     '    if state.get("state") != "r3":',
+     '    if False:',
+     "쓰기: 접수는 반영이 아니다"),
+    ("M361-retry-writes-to-the-same-slot", "agora/tools.py",
+     '            prev, expected_state = state["head"], state["state_hash"]',
+     '            pass',
+     "경합: 밀리면 자리를 다시 잡는다"),
     # ★P4 후속(2026-09-06 · master 채택) — 쓰기 결과의 응답 상태.
     ("M356-write-drops-http-status", "agora/store_relay.py",
      '    return {**body, "status": status}',
@@ -10962,8 +11206,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if False:\n            row["relay_verdict"] = out["verdict"]',
      "릴레이: verdict 는 참고값"),
     ("M332-relay-filters-server-invalid", "agora/store_relay.py",
-     '            for item in data.get("items") or []:\n                rows.append({',
-     '            for item in data.get("items") or []:\n                if item.get("valid") is False:\n                    continue\n                rows.append({',
+     '            for item in data.get("items") or []:\n                rows.append({\n                    "node_id": item.get("event_id") or item.get("node_id"),\n                    "thread_id": thread_id or room,',
+     '            for item in data.get("items") or []:\n                if item.get("valid") is False:\n                    continue\n                rows.append({\n                    "node_id": item.get("event_id") or item.get("node_id"),\n                    "thread_id": thread_id or room,',
      "릴레이: 서버 valid 에 안 기댄다"),
     ("M333-relay-register-without-proof", "agora/store_relay.py",
      '        if not signature:\n            raise AgoraError(errors.PRECONDITION,',
@@ -11895,7 +12139,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "배선: 쓰기 직전 CAS"),
     # ★「부르기는 하는데 아까 본 값과 아까 본 값을 견주는」 판본 — 검사하는 시늉.
     ("M201-cas-compares-with-itself", "agora/tools.py",
-     "        reducer.require_state(_reduce(ctx, thread_id), expected_state)",
+     "        reducer.require_state(fresh, expected_state)",
      '        reducer.require_state({"state_hash": expected_state}, expected_state)',
      "배선: 쓰기 직전 CAS"),
     ("M202-say-skips-local-budget", "agora/tools.py",

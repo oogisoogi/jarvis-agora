@@ -1,0 +1,53 @@
+[리뷰 의뢰 — 엄격 제약 준수 · 지정 범위만]
+검토 범위(이 파일/함수만 · 무관 파일·repo 배회 금지):
+  ~/axdev/jarvis-agora 의
+   · agora/tools.py — `RETRYABLE_RELAY_REASONS` · `_relay_rejected` · `_blind_spot` · `_publish`(재시도 루프·cas)
+   · agora/store_relay.py — `audit_events`(대조 전용 읽기문) · `fetch`(파생 칸을 버리는 쪽)
+   · tests/fake_relay.py — `_chain_verdict` · `_prev_of` · `append_event` · `derived` · POST /events 의 verdict·주입 훅
+   · tools/rehearsal.py — 등재/명부 순서 · `triple_check` · `_triple_step` · `verify`(--verify)
+   · agora/selftest.py — 새 케이스 4(「경합: 밀리면 자리를 다시 잡는다」·「쓰기: 접수는 반영이 아니다」·
+     「명부: 못 읽는 글이면 안 쓴다」·「더블: 사슬 판정을 낸다」) · 뮤턴트 M357~M361 · `_competing_post`
+  대조 기준(읽기 전용): docs/RELAY.md §3-2·§3-5·§5(규칙 2·5) · docs/rehearsal/2026-09-06.md §F-1 ·
+     docs/rehearsal/2026-09-06-events.json(실물 원장 8건)
+  ★도구는 **파일 읽기·검색만** 써라. 셸 명령 실행 금지. 어떤 파일도 쓰지 마라(수정·생성·삭제 0).
+  ⛔라이브 릴레이(https://agora.godmeyou.kr)에 요청을 보내지 마라.
+
+[무엇을 고친 것인가]
+09-06 실물 리허설에서 하네스는 22/22 rc 0(초록)이었는데 릴레이 원장은 8건 중 **4건이 valid:false**였다
+(5번 advance = `lost_race` · 6·7·8 = `unreachable`). 클라이언트가 「접수(2xx)」를 「반영」으로 읽었다.
+
+★이 티켓에서 규명한 **진짜 뿌리**(원장 판독으로 확정):
+  원장을 우리 리듀서로 재생하면 4건 시점의 head/state_hash 가 릴레이와 일치한다. 그런데 밀린 advance 는
+  2건 시점 자리에 걸려 있었다. 이유 = 같은 방 이벤트 셋의 `roster` digest 가 셋 다 다르다
+  (r1 `8501f9…` · r2 `e4b640…` · r3 `0ca385…`). 하네스가 참가자마다 「등재→즉시 명부 동기」를 돌려서
+  **의장의 명부 사본에 뒤에 등재된 둘이 없었다** ⇒ 의장의 리듀서가 두 사람의 발언을 `unsigned` 로 격리 ⇒
+  **의장의 세계에서는 CAS 가 정합**이었다. 즉 「head 재동기」만으로는 안 고쳐진다 — 다시 읽어도 안 보인다.
+
+[봉합]
+1. `_blind_spot()` — 우리 머리보다 **뒤에 온** 이벤트 중 `unsigned` 로 격리된 것이 있으면 **쓰기 자체를 막는다**
+   (code 2 · `roster_stale_unknown_signers` · 「agora sync-roster」 안내). `BAD`(변조)는 제외.
+2. `_relay_rejected()` + `_publish` 재시도 1회 — 릴레이가 「반영 안 했다」고 하면 **우리 리듀서로** 자리를
+   다시 계산해 재서명·재전송. head 가 그대로면 `rejected_but_head_unchanged`, 라운드가 움직였으면 `round_moved` 로 정지.
+   두 번째도 밀리면 rc≠0(경합류 = code 9 · 격리류 = code 3 · `detail.reason` 그대로).
+3. 더블 `_chain_verdict()` — prev==head 유효 · 아는 해시면 `lost_race` · 모르면 `unreachable`(계약 §5 규칙 2) ·
+   vote 는 머리를 안 옮긴다(규칙 5) · 밀린 글은 **격리가 아니라 stale** · `derived()` 는 유효한 글만 센다.
+   경합을 결정론으로 만드는 주입 훅 1(`inject_before_next_event`).
+4. 하네스 — 「등재 전건 → 그 다음 명부 전건」으로 순서 교정 · `triple_check`(릴레이 원장 ↔ 우리 리듀서 ↔ 파생 상태)를
+   **단계로** 내장 · `--verify <room-id>`(읽기 전용 · rc 0 = 어긋남 0) · 대조 전용 읽기문 `audit_events` 신설
+   (제품 경로 `fetch` 는 파생 칸을 계속 버린다 — 계약 §3-5 경계 유지 · 배선 허용목록에 사유와 함께 등재).
+5. 실측: 케이스 401/401 PASS · 뮤테이션 361/361 KILLED · NOT-APPLIED 0. 가짜 상대 하네스 = 교정 전 실패 4(F-1 재현) → 교정 후 24/24.
+
+[특히 봐 달라는 것]
+1) `_blind_spot` 의 **판정 경계**가 옳은가. 「우리 머리보다 뒤에 온 unsigned 만 센다」가 ⑴폐기된 키의 옛 글로
+   영원히 막히는 것을 피하면서 ⑵진짜 눈먼 구간을 놓치지 않는가. 뚫리는 시나리오를 대라
+   (특히 `created_at` 을 서버가 매긴다는 점 · 머리가 genesis 일 때 · 격리 사유가 `signature` 가 아닌 다른 이름으로 오는 경우).
+2) 재시도 1회가 옳은가. 무한 재시도 금지는 동의하나, **어떤 상황에서 1회가 오히려 해로운가**(같은 글이 원장에 둘 남는 경우 등).
+   그리고 `round_moved` 판정이 `say` 이외의 kind(advance·resolve·close)에서도 맞는가(그쪽은 payload 에 round 가 없다).
+3) 릴레이 판정을 **실패로 읽는 것**과 계약 §3-5(「클라이언트는 이 칸을 상태의 근거로 쓰면 안 된다」)가 충돌하는가.
+   우리는 「상태는 우리 리듀서가 세우고, 릴레이 판정은 다시 보라는 신호로만 쓴다」로 갈랐다 — 이 분리가 코드에서 실제로 지켜지는가.
+4) 더블의 `_chain_verdict` 가 계약 §5 규칙 2 를 **정확히** 옮겼는가. 실물과 갈리는 자리(도착순·동률·vote·genesis 재전송·멱등)를 대라.
+5) `--verify` 가 정말 읽기 전용인가(경로 전수). 그리고 그 출력이 **스터디팀 시험 모임에서 판정 근거로 쓸 만한가**(빠진 칸).
+6) 새 케이스 4개가 **봉합을 실제로 재는가**, 아니면 우리 구현을 그대로 베낀 자기 대조인가. 뮤턴트 5개가 죽이는 것이 맞는가.
+7) 이 봉합으로도 **여전히 09-06 과 같은 사고가 나는 경로**가 남았는가. 남았으면 이름을 대라.
+
+리뷰 형식: [문제점] [논쟁점] [다음 단계 조언] · 각 지적에 파일:라인 · 판정 = verdict enum + evidence.

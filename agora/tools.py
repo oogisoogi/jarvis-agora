@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 from agora import ack as ack_mod
@@ -109,6 +110,95 @@ def _require_open(reduced: dict[str, Any]) -> dict[str, Any]:
 
 # ── 쓰기 공통 경로 ──────────────────────────────────────────────────────────
 
+# 릴레이가 「받았지만 반영 안 했다」고 말하는 사유 중 **다시 써 볼 값어치가 있는 것**(계약 §5-2).
+#   경합에서 진 것(`lost_race`)·상태가 어긋난 것(`stale_expected_state`)은 **자리를 다시 잡으면**
+#   같은 글이 그대로 유효해진다. 격리(권한·예산·라운드 밖)는 자리를 바꿔도 그대로라 재시도 대상이 아니다.
+RETRYABLE_RELAY_REASONS = ("lost_race", "stale_expected_state")
+
+
+def _relay_rejected(out: dict[str, Any]) -> dict[str, Any] | None:
+    """릴레이가 「반영 안 했다」고 말했는가 — **접수(2xx)와 반영을 가른다**(F-1 봉합 ⓑ).
+
+    ★09-06 리허설이 이 자리에서 깨졌다: 네 건이 `valid:false` 로 격리됐는데 클라이언트는
+      **rc 0** 을 냈다. 「접수됐다」와 「반영됐다」를 한 칸으로 읽으면, 글쓴이는 자기 글이
+      사라진 것을 **원장을 열어 보기 전에는 모른다**(GitHub 시절 실물 #4 의 재발).
+    ⚠이 값은 **참고 판정**이다(계약 §3-5: 클라이언트는 이 칸을 상태의 근거로 쓰면 안 된다).
+      그래서 우리는 이것으로 **상태를 세우지 않는다** — 「다시 보라」는 신호로만 쓰고,
+      자리를 다시 잡는 판단은 **우리 리듀서**가 한다. 실패로 올릴 때도 사유를 그대로 인용한다.
+    """
+    verdict = out.get("relay_verdict")
+    if type(verdict) is not dict:
+        return None
+    reducer_said = verdict.get("reducer")
+    reason = verdict.get("reason")
+    if reducer_said in (None, "", "accepted", "valid") and not reason:
+        return None
+    return {"reducer": reducer_said, "reason": reason,
+            "state_hash_at_that_point": verdict.get("state_hash_at_that_point")}
+
+
+def _blind_spot(reduced: dict[str, Any]) -> list[dict[str, Any]]:
+    """**우리가 못 읽는 글**이 사슬 위에 있는가 — 서명자가 우리 명부에 없는 이벤트.
+
+    ★★F-1 의 진짜 뿌리다(09-06 원장 판독 · 이 티켓에서 규명): 의장 r1 의 명부 사본이
+      r2·r3 **등재 전** 것이어서, r1 의 리듀서가 두 사람의 발언을 `unsigned` 로 격리했다.
+      그래서 r1 의 세계에서는 CAS 가 **정합이었다** — 자기가 못 보는 글에게 진 것이다.
+      원장이 그것을 그대로 보여 준다: 같은 방 이벤트 셋의 `roster` digest 가 **셋 다 다르다**
+      (`8501f9…`(r1) · `e4b640…`(r2) · `0ca385…`(r3)).
+    ⇒ 그래서 「head 를 다시 읽는다」만으로는 못 고친다. **다시 읽어도 여전히 안 보인다.**
+      보이지 않는 글이 있으면 **쓰지 않는다**(fail-closed) — 명부를 받아 오라고 말한다.
+    ⚠`BAD`(변조 정황)는 여기 안 넣는다: 그것은 낡음이 아니라 **위조**이고, 명부를 받아 와도
+      안 사라진다. 두 사건을 한 칸에 뭉치면 처방이 갈린다.
+    """
+    head_row: dict[str, Any] | None = None
+    for item in (reduced.get("events") or []):
+        if item.get("hash") == reduced.get("head"):
+            head_row = item
+            break
+    blind: list[dict[str, Any]] = []
+    for q in reduced.get("quarantined") or []:
+        if q.get("reason") != reducer.SIGNATURE:
+            continue
+        detail = q.get("detail") or {}
+        if detail.get("verdict") != "unsigned":
+            continue
+        # ★사유로 가른다(시각이 아니라): `revoked` 는 **한때 명부에 있던 키**이고 `no_signature` 는
+        #   서명이 아예 없는 글이다. 둘 다 `sync-roster` 로 안 풀리므로 여기서 세면 쓰기가 영원히 막힌다.
+        #   여기서 세는 것은 **「모르는 서명자」** 하나뿐이다 — 그것만이 「내 사본이 낡았다」의 신호다.
+        if detail.get("why") in ("revoked", "no_signature"):
+            continue
+        # ★우리 머리보다 **뒤에 온 것**만 센다(앞의 것은 지금 쓰는 자리를 못 건드린다).
+        #   ⚠비교 규칙은 운반층에 따라 다르다(agy 1R 지적 1 · 수용): 릴레이의 `event_id` 는 계약상
+        #   **고정폭 단조 증가**라 문자열 비교가 곧 도착 순서다(§3-2). 그 서식이 아니면(GitHub 시절)
+        #   리듀서와 **같은 정렬 규칙**(`created_at`→`node_id`)으로 떨어진다 — 여기서만 다른 규칙을
+        #   쓰면 두 곳이 갈리고, 갈린 규칙은 언젠가 서로를 반박한다.
+        if head_row is not None and not _arrived_after(q, head_row):
+            continue
+        blind.append({"node_id": q.get("node_id"), "created_at": q.get("created_at")})
+    return blind
+
+
+_FIXED_WIDTH_EVENT_ID = re.compile(r"^ev_[0-9]+$")
+
+
+def _arrived_after(candidate: dict[str, Any], head_row: dict[str, Any]) -> bool:
+    """도착 순서 비교 — 릴레이면 `event_id`(고정폭 단조), 아니면 리듀서의 정렬 규칙."""
+    left, right = str(candidate.get("node_id") or ""), str(head_row.get("node_id") or "")
+    if _FIXED_WIDTH_EVENT_ID.match(left) and _FIXED_WIDTH_EVENT_ID.match(right):
+        return left > right
+    return reducer._order_key(candidate) > reducer._order_key(head_row)
+
+
+def _accepted_by_us(ctx: Context, thread_id: str, message_id: str) -> bool:
+    """**우리 리듀서가** 그 글을 사슬에 넣었는가 — 판정의 정본은 이쪽이다(계약 §3-5)."""
+    try:
+        reduced = _reduce(ctx, thread_id)
+    except AgoraError:
+        return False        # 못 읽으면 모르는 것이다 — 모르는 것을 성공으로 접지 않는다
+    return any(item.get("message_id") == message_id
+               for item in (reduced.get("events") or []))
+
+
 def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any],
              prev: str, expected_state: str, category: str, title: str = "",
              is_genesis: bool = False) -> dict[str, Any]:
@@ -129,21 +219,85 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
           그래서 검사를 **쓰기 직전으로** 민다 — 앞에서 하면 창이 열린 채로 남는다.
         ★값은 한 번 더 읽어 온다(운반층 왕복 1회 추가). 그 비용이 이 검사의 값이다 —
           「아까 본 상태」로 판정하면 검사하는 시늉만 하는 것이다.
+        ★★그리고 **못 읽는 글이 있으면 아예 쓰지 않는다**(F-1 봉합 · `_blind_spot`).
+          CAS 는 「내가 본 상태」를 지키는 장치라, **내가 못 보는 것**에는 눈이 멀어 있다.
         """
-        reducer.require_state(_reduce(ctx, thread_id), expected_state)
+        fresh = _reduce(ctx, thread_id)
+        blind = _blind_spot(fresh)
+        if blind:
+            raise AgoraError(errors.PRECONDITION,
+                             "이 방에 우리 명부로 못 읽는 글이 있다 — 먼저 명부를 받아라",
+                             {"reason": "roster_stale_unknown_signers",
+                              "unreadable": len(blind), "events": blind[:5],
+                              "how": "agora sync-roster"})
+        reducer.require_state(fresh, expected_state)
 
-    try:
-        out = core.publish_event(store=ctx.store, event=event, category=category,
-                                 title=title, is_genesis=is_genesis,
-                                 config=ctx.config, prompt=ctx.prompt,
-                                 isatty=ctx.isatty, ledger=ctx.ledger,
-                                 config_dir=ctx.config_dir,
-                                 # genesis 에는 견줄 앞 상태가 없다(K-4 · expected_state = "")
-                                 before_write=None if is_genesis else cas)
-    except AgoraError as e:
-        if e.code != errors.UNKNOWN_COMMIT:
-            raise
-        out = _settle_unknown(ctx, event, e)
+    # ★재시도는 **한 번**이다(브리프 ⓐ). 두 번째도 지면 그것은 경합이 아니라 **자리를 잘못 본 것**이라
+    #   사람이 봐야 한다 — 자동 반복은 남의 원장에 같은 글을 쌓는다.
+    attempts = 1 if is_genesis else 2
+    for attempt in range(attempts):
+        if attempt:
+            # 자리를 다시 잡는다: **우리 리듀서로** head·expected 를 새로 뽑고, 그 자리로 다시 서명한다.
+            #   ⚠릴레이가 준 사유는 「다시 보라」는 신호일 뿐, 새 자리는 우리가 계산한다(계약 §3-5).
+            fresh = _reduce(ctx, thread_id)
+            state = _require_open(fresh)
+            if (state["head"], state["state_hash"]) == (prev, expected_state):
+                raise AgoraError(errors.STATE_CONFLICT,
+                                 "릴레이는 밀렸다는데 우리 사슬은 그대로다 — 보이지 않는 글이 있다",
+                                 {"reason": "rejected_but_head_unchanged",
+                                  "relay": rejected, "expected_state": expected_state,
+                                  "how": "agora sync-roster 로 명부를 받고 read 로 다시 봐라"})
+            # 라운드가 움직였으면 **같은 글이 아니다.** 조용히 다른 라운드에 붙이지 않는다.
+            # ⚠kind 마다 라운드를 적는 칸이 다르다(agy 1R 지적 2 · 수용): 발언은 `round`,
+            #   전진은 `from_round` 다. 한 칸만 보면 `advance` 가 이 방어선을 그냥 지나가고,
+            #   낡은 `from_round` 로 재전송돼 **원장에 무의미한 실패 한 줄**을 남긴다.
+            was_round = payload.get("round")
+            if was_round is None:
+                was_round = payload.get("from_round")
+            if was_round is not None and state.get("round") != was_round:
+                raise AgoraError(errors.STATE_CONFLICT,
+                                 "그 사이 라운드가 바뀌었다 — read 후 다시 써라",
+                                 {"reason": "round_moved", "relay": rejected,
+                                  "was": was_round, "now": state.get("round")})
+            prev, expected_state = state["head"], state["state_hash"]
+            event = {**event, "message_id": new_id(), "prev": prev,
+                     "expected_state": expected_state, "ts": now_iso()}
+            core.declare_scrub(event, config_dir=ctx.config_dir)
+        try:
+            out = core.publish_event(store=ctx.store, event=event, category=category,
+                                     title=title, is_genesis=is_genesis,
+                                     config=ctx.config, prompt=ctx.prompt,
+                                     isatty=ctx.isatty, ledger=ctx.ledger,
+                                     config_dir=ctx.config_dir,
+                                     # genesis 에는 견줄 앞 상태가 없다(K-4 · expected_state = "")
+                                     before_write=None if is_genesis else cas)
+        except AgoraError as e:
+            if e.code != errors.UNKNOWN_COMMIT:
+                raise
+            out = _settle_unknown(ctx, event, e)
+        rejected = _relay_rejected(out)
+        if not rejected:
+            break
+        if not is_genesis and _accepted_by_us(ctx, thread_id, event["message_id"]):
+            # ★★**정본은 우리 리듀서다**(계약 §3-5 · agy 1R 지적 3 · 수용). 릴레이가 「반영 안 했다」고
+            #   해도 **우리 사슬에 실제로 들어와 있으면** 그것은 반영된 것이다. 여기서 실패를 던지면
+            #   원장에는 멀쩡히 있는 글을 사람에게 「실패」라고 말하게 된다(= 거짓 실패).
+            #   ⚠그 대신 **다툼을 숨기지 않는다**: 판정을 결과에 실어 올려 대조가 그것을 본다.
+            #   ⚠이 안전망이 F-1 을 되돌리지 않는 이유: 눈먼 구간은 **쓰기 전에** 막았다
+            #     (`_blind_spot`). 못 보는 글에게 진 상태에서는 이 확인 자체에 도달하지 않는다.
+            out["relay_verdict_disputed"] = rejected
+            break
+        if rejected.get("reason") not in RETRYABLE_RELAY_REASONS or attempt == attempts - 1:
+            # ★**접수됐다고 성공이 아니다.** 사유를 그대로 얹어 실패로 올린다.
+            code = (errors.STATE_CONFLICT
+                    if rejected.get("reason") in RETRYABLE_RELAY_REASONS
+                    else errors.GATE_REJECT)
+            raise AgoraError(code, "릴레이가 받기는 했지만 반영하지 않았다",
+                             {"reason": rejected.get("reason"),
+                              "reducer": rejected.get("reducer"),
+                              "message_id": event["message_id"],
+                              "attempts": attempt + 1,
+                              "how": "read 로 다시 보고 그 자리에서 다시 써라"})
     out["usage"] = usage_of(event)
     return out
 
@@ -818,6 +972,16 @@ def resolve(ctx: Context, *, thread_id: str, summary: str,
     """수렴 — 의장만. 권고에 집행 금지 표식이 없으면 스키마가 막는다(NFR-8 · code 3)."""
     state, prev, expected = _head_and_state(ctx, thread_id)
     reducer.require_chair(state, ctx.participant_id)
+    if state.get("state") != "r3":
+        # ★**로컬 겹**(예산 검사와 같은 구조 · §5): 진짜 판정은 리듀서가 하지만, 여기서 먼저 막는다.
+        #   ⚠없으면 어떻게 되는지 오늘 실물에서 봤다(2026-09-08 05:17): 하네스가 r2 에서 권고안을
+        #   냈고 **글은 나갔다.** 릴레이가 `bad_transition` 으로 격리해 줘서 알았을 뿐, 상대가
+        #   그 칸을 안 돌려줬으면 **우리 리듀서가 격리한 글을 성공으로 보고**했을 것이다.
+        #   ⇒ 남의 원장에 무효인 줄을 남기지 않는 것은 **보내기 전에** 하는 일이다.
+        raise AgoraError(errors.GATE_REJECT,
+                         "권고안은 r3 에서만 낼 수 있다 — 먼저 라운드를 전진시켜라",
+                         {"reason": "bad_transition", "now": state.get("state"),
+                          "want": "r3", "how": "agora advance to_round=3"})
     out = _publish(ctx, kind="resolution", thread_id=thread_id,
                    payload={"summary": summary, "dissent": dissent,
                             "recommended_actions": recommended_actions},

@@ -412,6 +412,36 @@ class RelayStore:
                          "title": item.get("title")})
         return {"items": rows[:limit], "next_cursor": data.get("next_cursor")}
 
+    def audit_events(self, *, thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """**대조 전용 읽기** — 릴레이의 파생 판정(`valid`·`quarantined`·`stale`·`reason`)까지 가져온다.
+
+        ★`fetch` 는 이 칸들을 **일부러 버린다**(계약 §3-5: 「클라이언트는 이 칸을 상태의 근거로
+          쓰면 안 된다」). 그 경계를 흐리지 않으려고 **다른 이름의 다른 문**을 낸다 —
+          이 문으로 들어온 값은 **상태를 세우는 데 쓰지 않고 대조에만 쓴다**(3자 대조 · `--verify`).
+        ★이름이 갈리면 오용도 갈린다: `fetch` 를 부르는 코드가 실수로 판정을 주워 쓸 길이 없다.
+        """
+        rows: list[dict[str, Any]] = []
+        page_cursor: str | None = None
+        seen: set[str] = set()
+        while True:
+            path = (f"/rooms/{quote(str(thread_id), safe='')}/events"
+                    + _query(limit=_clamp(limit, EVENTS_LIMIT_MAX), cursor=page_cursor))
+            data = self._run("GET", path)
+            for item in data.get("items") or []:
+                rows.append({
+                    "node_id": item.get("event_id") or item.get("node_id"),
+                    "created_at": item.get("created_at"),
+                    "body": item.get("body") or "",
+                    "is_genesis": bool(item.get("is_genesis")),
+                    "valid": item.get("valid"), "quarantined": item.get("quarantined"),
+                    "stale": item.get("stale"), "reason": item.get("reason"),
+                })
+            page_cursor = data.get("next_cursor")
+            if not page_cursor or page_cursor in seen:
+                break
+            seen.add(page_cursor)
+        return rows
+
     def thread_status(self, *, thread_id: str) -> dict[str, Any]:
         """릴레이가 **이벤트에서 파생한** 상태 — 우리 reducer 와 대조하는 축이다.
 
