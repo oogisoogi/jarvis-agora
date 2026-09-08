@@ -72,16 +72,19 @@ def test_a_audit_verdict_must_not_call_rejected_row_committed() -> None:
             # 대조 전용 읽기 = 릴레이가 준 파생 판정까지 온다(계약 §3-5).
             return [dict(row, valid=False, quarantined=False, stale=True, reason="lost_race")]
 
-    verdict, reason = core.audit_verdict(store=Store(), thread_id="t1", message_id=mid)
-    assert verdict != core.COMMITTED, (
-        f"원장에 있다는 이유만으로 {verdict!r} 로 판정했다 — 릴레이는 valid:false 라고 했다")
-    assert verdict == core.REJECTED and reason == "lost_race"
+    audited = core.audit_verdict(store=Store(), thread_id="t1", message_id=mid)
+    assert audited["verdict"] != core.COMMITTED, (
+        f"원장에 있다는 이유만으로 {audited['verdict']!r} 로 판정했다 — 릴레이는 valid:false 라고 했다")
+    assert audited["verdict"] == core.REJECTED and audited["reason"] == "lost_race"
+    # ★근거줄은 **릴레이가 말한 분류**여야 한다(master 승인 2026-09-09).
+    assert audited["reducer"] == "stale", audited
 
     settled = core.settle_unknown(store=Store(), ledger=(led := _Ledger()),
                                   event={"thread_id": "t1", "message_id": mid},
                                   event_hash="h")
     assert settled["verdict"] == core.REJECTED
     assert settled.get("reason") == "lost_race"
+    assert settled.get("reducer") == "stale"
     assert led.rows == [], "반영 안 된 글을 원장에 「보냈다」고 적었다"
 
 
@@ -98,8 +101,81 @@ def test_a2_audit_verdict_stays_committed_when_relay_accepted() -> None:
         def audit_events(self, *, thread_id: str, limit: int = 200) -> list[dict[str, object]]:
             return [dict(row, valid=True, quarantined=False, stale=False, reason=None)]
 
-    assert core.audit_verdict(store=Store(), thread_id="t1",
-                              message_id=mid) == (core.COMMITTED, None)
+    assert core.audit_verdict(store=Store(), thread_id="t1", message_id=mid) == {
+        "verdict": core.COMMITTED, "reason": None, "reducer": "accepted"}
+
+
+def test_a3_missing_relay_verdict_is_not_success() -> None:
+    """**판정이 없으면 성공이 아니다**(codex 3R CRITICAL).
+
+    첫 판은 `valid is False` 만 거부로 보고 나머지를 committed 로 접었다 — `valid` 칸이
+    빠졌거나 null 인 응답이 조용히 성공이 됐다. 「반영됐다」와 「상대가 말하지 않았다」는 다르다.
+    """
+    mid = new_id()
+    row = {"node_id": "ev_0000000000000007", "body": f'{{"message_id":"{mid}"}}',
+           "created_at": "2026-09-09T00:00:00.000Z", "is_genesis": False}
+    for label, extra in (("칸 부재", {}), ("null", {"valid": None})):
+        class Store:
+            def fetch(self, *, thread_id: str, **_: object) -> dict[str, object]:
+                return {"items": [dict(row)], "next_cursor": None}
+
+            def audit_events(self, *, thread_id: str,
+                             limit: int = 200) -> list[dict[str, object]]:
+                return [dict(row, **extra)]
+
+        try:
+            out = core.audit_verdict(store=Store(), thread_id="t1", message_id=mid)
+        except AgoraError as e:
+            assert (e.detail or {}).get("reason") == "relay_verdict_missing", (label, e.detail)
+            continue
+        raise AssertionError(f"{label}: 판정이 없는데 {out!r} 로 접었다")
+
+
+def test_a4_evidence_line_carries_the_relay_classification() -> None:
+    """근거줄은 **릴레이가 말한 분류**여야 한다(master 승인 2026-09-09).
+
+    ★판정(재시도 여부)은 `reason` 이 진다 — 그래서 분류를 "stale" 로 못박아도 **결과는 옳다.**
+      그러나 사람이 읽는 근거가 사실과 달라지고, 틀린 근거 위의 감사는 감사가 아니다.
+    """
+    mid = new_id()
+    row = {"node_id": "ev_0000000000000007", "body": f'{{"message_id":"{mid}"}}',
+           "created_at": "2026-09-09T00:00:00.000Z", "is_genesis": False}
+
+    class Quarantined:
+        def audit_events(self, *, thread_id: str,
+                         limit: int = 200) -> list[dict[str, object]]:
+            return [dict(row, valid=False, quarantined=True, stale=False,
+                         reason="budget_exceeded")]
+
+    audited = core.audit_verdict(store=Quarantined(), thread_id="t1", message_id=mid)
+    assert audited["reducer"] == "quarantined", audited
+    assert audited["reason"] == "budget_exceeded", audited
+
+    class Neither:
+        def audit_events(self, *, thread_id: str,
+                         limit: int = 200) -> list[dict[str, object]]:
+            return [dict(row, valid=False, quarantined=False, stale=False, reason=None)]
+
+    # 둘 다 아니면 **지어내지 않는다** — 실물도 그 자리에 unknown 을 쓴다.
+    assert core.audit_verdict(store=Neither(), thread_id="t1",
+                              message_id=mid)["reducer"] == "unknown"
+
+
+def test_a5_unmeasurable_chain_is_not_a_rejection() -> None:
+    """「우리도 거부했다」와 「읽지 못해 모른다」를 한 값으로 뭉치지 않는다(codex 3R LOW)."""
+    tmp = tempfile.mkdtemp(prefix="agora-t-a5-")
+    ctx = _ctx_for_publish(tmp)
+    saved = tools._reduce
+    try:
+        tools._reduce = lambda c, t: (_ for _ in ()).throw(
+            AgoraError(errors.STORE, "못 읽는다", None))
+        assert tools._accepted_by_us(ctx, "t1", "m") is None
+        tools._reduce = lambda c, t: {"events": []}
+        assert tools._accepted_by_us(ctx, "t1", "m") is False
+        tools._reduce = lambda c, t: {"events": [{"message_id": "m"}]}
+        assert tools._accepted_by_us(ctx, "t1", "m") is True
+    finally:
+        tools._reduce = saved
 
 
 # ── [HIGH-1] 정상 응답에서도 relay valid:false 를 rc 0 으로 덮는 분기 ────────
@@ -256,17 +332,102 @@ def test_d2_fake_relay_contract_shapes() -> None:
     assert "state_hash" in verdict and "state_hash_at_that_point" not in verdict, verdict
 
 
+# 더블이 판정한다고 **선언한** 축의 정확한 목록. ★`len(table) >= 8` 로 재면 표의 **절반을
+# 지워도 통과한다**(codex 3R MEDIUM 재현). 개수가 아니라 **무엇이 있는가**를 못박는다.
+# ⚠줄이려면 이 목록을 함께 줄여야 하고, 그때 「무엇을 포기했는지」가 diff 에 남는다.
+_JUDGED_AXES = (
+    "본문 크기 상한", "봉투 뼈대 11칸", "요청 인자 == 서명된 값", "서명이 이 참가자의 것인가",
+    "message_id 재사용", "사슬 경합", "expected_state == stateHash(state)",
+    "vote 는 머리를 안 옮긴다", "전이 권한", "사슬 자리 소유", "post_ids 시드",
+    "만료 판정", "등록 소유 증명 서명", "체크포인트",
+)
+_UNJUDGED_AXES = (
+    "kind 9종 payload 닫힌 스키마", "스크럽 백스톱", "만료 중 운영자 대리 의장 위임",
+    "예산", 
+)
+
+
 def test_d3_fake_relay_declares_what_it_judges() -> None:
-    """「무엇을 판정하고 무엇을 안 하는가」가 **표로** 있어야 한다 — 자기고지 한 줄로는 못 센다."""
+    """「무엇을 판정하고 무엇을 안 하는가」가 **표로** 있어야 한다 — 자기고지 한 줄로는 못 센다.
+
+    ★★그리고 표는 **정확히** 단언해야 한다(codex 3R MEDIUM): 개수만 재면 절반을 지워도 통과하고,
+      그러면 「무엇을 판정하는가」라는 표의 존재 이유가 사라진다. 축이 사라지면 여기가 붉어진다.
+    """
     mod = _fake_relay_module()
     table = mod.CONTRACT_COVERAGE
-    assert isinstance(table, tuple) and len(table) >= 8
+    assert isinstance(table, tuple)
     for row in table:
         assert set(row) == {"check", "where", "judged", "why"}, row
         assert isinstance(row["judged"], bool)
-    assert any(r["judged"] for r in table) and any(not r["judged"] for r in table), \
-        "전부 참이거나 전부 거짓인 표는 아무것도 안 가른다"
-    assert any("expected_state" in r["check"] for r in table if r["judged"])
+        assert row["why"].strip(), f"사유 없는 행은 경계 선언이 아니다: {row}"
+        assert (row["where"] != "—") == row["judged"], \
+            f"판정한다면서 자리가 없거나, 안 하면서 자리가 적혀 있다: {row}"
+    judged = [r["check"] for r in table if r["judged"]]
+    unjudged = [r["check"] for r in table if not r["judged"]]
+    for want in _JUDGED_AXES:
+        assert any(want in c for c in judged), f"판정한다고 선언된 축이 사라졌다: {want}"
+    for want in _UNJUDGED_AXES:
+        assert any(want in c for c in unjudged), f"경계 선언이 사라졌다: {want}"
+    assert len(judged) == len(_JUDGED_AXES), (len(judged), judged)
+    assert len(unjudged) == len(_UNJUDGED_AXES), (len(unjudged), unjudged)
+
+
+def test_d4_double_matches_reducer_on_the_transitions_it_claims() -> None:
+    """더블이 「판정한다」고 적은 전이 축에서 **실물·우리 리듀서와 같은 답**을 내는가.
+
+    ★codex 3R 이 네 입력에서 갈라짐을 보였다. 그 네 입력을 그대로 시험으로 세운다 —
+      「25단계 완주」는 **한 경로의 등가성**만 보이지 전이기 전체를 보이지 않는다.
+    """
+    mod = _fake_relay_module()
+
+    def room(ops: str = ""):
+        relay = mod.FakeRelay()
+        relay.roster_text["operators"] = ops
+        gen = {"v": 1, "kind": "genesis", "thread_id": "t1", "message_id": new_id(),
+               "prev": "", "expected_state": "", "from": "alice", "roster": "r0",
+               "scrub": {"rules": "b0", "blocked": False, "redacted": []},
+               "ts": "2026-09-09T00:00:00.000Z",
+               "payload": {"type": "debate", "topic": "t", "chair": "alice"}}
+        relay.append_event(thread_id="t1", category="debate", title="t",
+                           body=render_post(gen), is_genesis=True)
+        return relay, gen, event_hash(gen)
+
+    def put(relay, kind, prev, expected, payload, frm="alice"):
+        return relay.append_event(thread_id="t1", category="debate", title="", body=_body(
+            kind=kind, prev=prev, expected_state=expected, payload=payload,
+            **{"from": frm}), is_genesis=False)
+
+    # ⑴ vote 는 머리를 안 옮기지만 **그 자리는 찼다** — 뒤에 온 같은 prev 는 진다.
+    relay, gen, head = room()
+    sh = mod._state_hash(relay.rooms["t1"]["state"])
+    put(relay, "vote", head, sh, {"choice": "a"})
+    row = put(relay, "post", head, sh, {"round": 0, "body": "x"})
+    assert (row["valid"], row["reason"]) == (False, "lost_race"), row
+
+    # ⑵ 권한에서 걸린 전이는 **격리**다(상태만 안 바뀌는 것이 아니다).
+    relay, gen, head = room()
+    sh = mod._state_hash(relay.rooms["t1"]["state"])
+    row = put(relay, "advance", head, sh, {"from_round": 0, "to_round": 1}, frm="mallory")
+    assert (row["valid"], row["quarantined"], row["reason"]) == (False, True, "permission"), row
+
+    # ⑶ 운영자도 방을 닫는다.
+    relay, gen, head = room(ops="op1\n")
+    sh = mod._state_hash(relay.rooms["t1"]["state"])
+    put(relay, "close", head, sh, {"reason": "solved"}, frm="op1")
+    assert relay.rooms["t1"]["state"]["state"] == "closed", relay.rooms["t1"]["state"]
+
+    # ⑷ genesis 는 답 후보다(우리 리듀서가 post_ids 를 그렇게 시드한다).
+    relay, gen, head = room()
+    sh = mod._state_hash(relay.rooms["t1"]["state"])
+    put(relay, "answer_selected", head, sh, {"post_message_id": gen["message_id"]})
+    assert relay.rooms["t1"]["state"]["state"] == "solved", relay.rooms["t1"]["state"]
+
+    # ⑸ 마감이 없으면 만료 해시는 통하지 않는다(넓게 뚫린 문을 닫는다).
+    relay, gen, head = room()
+    st = relay.rooms["t1"]["state"]
+    row = put(relay, "post", head, mod._state_hash({**st, "state": "expired"}),
+              {"round": 0, "body": "x"})
+    assert (row["valid"], row["reason"]) == (False, "stale_expected_state"), row
 
 
 # ── [MEDIUM] roster 동기화 실패 뒤에도 하네스가 쓰기로 진행 ─────────────────

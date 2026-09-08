@@ -172,7 +172,7 @@ REJECTED = "rejected"
 
 
 def audit_verdict(*, store: Any, thread_id: str,
-                  message_id: str) -> tuple[str, str | None]:
+                  message_id: str) -> dict[str, Any]:
     """재조회해서 실제로 **반영됐는지** 판정한다.
 
     ★판정 근거는 **운반층**이다 — 우리 기록(원장)으로 판정하면 「보냈다고 적었으니 갔을
@@ -187,20 +187,55 @@ def audit_verdict(*, store: Any, thread_id: str,
     ⚠`audit_events` 가 없는 운반층(GitHub·목)에는 **릴레이 판정이라는 개념 자체가 없다** —
       그때만 예전처럼 존재로 판정한다. 있는데 못 읽으면 그 오류는 그대로 올라간다
       (읽기 실패를 「없음」으로 접지 않는다 — fail-closed).
+    ★★돌려주는 것에 **분류(`reducer`)를 함께 싣는다**(master 승인 2026-09-09). 사유만 싣고
+      분류를 「stale」로 못박아 두면 **판정은 맞는데 사람이 읽는 근거 줄이 틀린다** — 릴레이가
+      「격리했다」고 답한 것을 우리가 「밀렸다」로 옮겨 적게 된다. 재시도 여부는 `reason` 이 지므로
+      결과는 옳지만, 근거가 틀린 보고는 사람 감사를 무의미하게 만든다.
+      분류 어휘는 실물 POST verdict 와 **같은 것**을 쓴다(`relay/src/index.ts`):
+      accepted · quarantined · stale · unknown. 어휘가 갈리면 같은 사건이 경로마다 다른 이름을 얻는다.
     """
     if hasattr(store, "audit_events"):
         for row in store.audit_events(thread_id=thread_id):
             if message_id not in (row.get("body") or ""):
                 continue
+            if row.get("valid") is True:
+                return {"verdict": COMMITTED, "reason": None, "reducer": "accepted"}
             if row.get("valid") is False:
-                return REJECTED, row.get("reason")
-            return COMMITTED, None
-        return ABSENT, None
+                return {"verdict": REJECTED, "reason": row.get("reason"),
+                        "reducer": _reducer_said(row)}
+            # ★★**판정이 없으면 성공이 아니다**(codex 3R CRITICAL · 2026-09-09). 첫 판은
+            #   `valid is False` 만 거부로 보고 **나머지를 전부 committed 로 접었다** — 그래서
+            #   `valid` 칸이 빠졌거나 null 인 응답이 조용히 성공이 됐다. 그것은 「반영됐다」가
+            #   아니라 **「상대가 말하지 않았다」**이고, 두 사건을 한 칸에 뭉치면 이 티켓이
+            #   고치려던 병이 그 자리에서 되살아난다.
+            # ★실물 릴레이는 이 칸을 **언제나 불린으로** 준다(relay/src/index.ts 의 이벤트 목록
+            #   `valid: acceptedIds.has(id)`) — 그러므로 부재·null 은 계약 위반이거나 다른 상대다.
+            #   어느 쪽이든 **판정 없이 성공으로 접을 근거가 없다.**
+            raise AgoraError(errors.STORE,
+                             "릴레이가 이 글의 반영 여부를 말하지 않았다 — 판정 없이 성공으로 접지 않는다",
+                             {"reason": "relay_verdict_missing", "thread_id": thread_id,
+                              "message_id": message_id, "node_id": row.get("node_id"),
+                              "how": "릴레이 이벤트 목록이 valid 칸을 주는지 확인하라"})
+        return {"verdict": ABSENT, "reason": None, "reducer": None}
     rows = store.fetch(thread_id=thread_id)["items"]
     for row in rows:
         if message_id in (row.get("body") or ""):
-            return COMMITTED, None
-    return ABSENT, None
+            return {"verdict": COMMITTED, "reason": None, "reducer": None}
+    return {"verdict": ABSENT, "reason": None, "reducer": None}
+
+
+def _reducer_said(row: dict[str, Any]) -> str:
+    """대조 행의 분류 — 실물 POST verdict 와 **같은 어휘**로 옮긴다(계약 §3-5).
+
+    ★두 사건을 가른다: `quarantined` 는 절차에서 걸린 것(자리를 바꿔도 그대로) ·
+      `stale` 은 경합에서 밀린 것(자리를 다시 잡으면 유효해진다). 한 칸에 뭉치면 처방이 갈린다.
+    ★둘 다 아닌데 무효면 `unknown` 이다 — 지어내지 않는다(실물도 그 자리에 unknown 을 쓴다).
+    """
+    if row.get("quarantined"):
+        return "quarantined"
+    if row.get("stale"):
+        return "stale"
+    return "unknown"
 
 
 def record_sent(*, ledger: Any, event: dict[str, Any], event_hash: str,
@@ -220,8 +255,9 @@ def record_sent(*, ledger: Any, event: dict[str, Any], event_hash: str,
 def settle_unknown(*, store: Any, ledger: Any, event: dict[str, Any],
                    event_hash: str) -> dict[str, Any]:
     """code 8 을 만난 뒤의 마무리 — 재조회로 판정하고, 저장됐을 때만 원장에 남긴다."""
-    verdict, reason = audit_verdict(store=store, thread_id=event["thread_id"],
-                                    message_id=event["message_id"])
+    audited = audit_verdict(store=store, thread_id=event["thread_id"],
+                            message_id=event["message_id"])
+    verdict, reason = audited["verdict"], audited["reason"]
     row = None
     if verdict == COMMITTED:
         row = record_sent(ledger=ledger, event=event, event_hash=event_hash,
@@ -229,4 +265,5 @@ def settle_unknown(*, store: Any, ledger: Any, event: dict[str, Any],
     # ★`REJECTED` 는 원장에 안 적는다. 「보냈다」고 적으면 그 줄은 **반영된 글과 구별되지
     #   않고**, 다음 사람이 원장을 근거로 「이미 했다」를 읽는다. 릴레이 원장에는 그 글이
     #   남아 있고(append-only) 그 사실은 `reason` 으로 올라간다 — 우리 줄은 안 만든다.
-    return {"verdict": verdict, "reason": reason, "ledger_row": row}
+    return {"verdict": verdict, "reason": reason,
+            "reducer": audited["reducer"], "ledger_row": row}

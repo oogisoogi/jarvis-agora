@@ -193,12 +193,20 @@ def _arrived_after(candidate: dict[str, Any], head_row: dict[str, Any]) -> bool:
     return reducer._order_key(candidate) > reducer._order_key(head_row)
 
 
-def _accepted_by_us(ctx: Context, thread_id: str, message_id: str) -> bool:
-    """**우리 리듀서가** 그 글을 사슬에 넣었는가 — 판정의 정본은 이쪽이다(계약 §3-5)."""
+def _accepted_by_us(ctx: Context, thread_id: str, message_id: str) -> bool | None:
+    """**우리 리듀서가** 그 글을 사슬에 넣었는가 — 판정의 정본은 이쪽이다(계약 §3-5).
+
+    ★★답은 **셋**이다(codex 3R LOW · 2026-09-09): 들어왔다(True) · 안 들어왔다(False) ·
+      **못 쟀다**(None). 첫 판은 못 읽은 것을 `False` 로 접었는데, 그러면 보고서의
+      `accepted_by_us:false` 가 「우리도 거부했다」와 「읽지 못해 모른다」 **두 사건**을 가리킨다.
+      사람은 그 줄을 보고 다툼의 크기를 판단하는데, 두 사건은 처방이 정반대다
+      (전자는 그 글을 버리면 되고, 후자는 **먼저 읽을 수 있게 만들어야** 한다).
+    ★「못 쟀음」을 거짓으로 채우지 않는다 — 비어 있는 칸이 채워지는 순간이 위험한 순간이다.
+    """
     try:
         reduced = _reduce(ctx, thread_id)
     except AgoraError:
-        return False        # 못 읽으면 모르는 것이다 — 모르는 것을 성공으로 접지 않는다
+        return None         # 못 읽으면 **모르는 것**이다 — 모름을 거부로도 성공으로도 접지 않는다
     return any(item.get("message_id") == message_id
                for item in (reduced.get("events") or []))
 
@@ -302,7 +310,9 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
                               "reducer": rejected.get("reducer"),
                               "message_id": event["message_id"],
                               "attempts": attempt + 1,
-                              "accepted_by_us": (not is_genesis) and _accepted_by_us(
+                              # ★3값 그대로 싣는다(True·False·None=못 쟀음). genesis 는 견줄
+                              #   앞 사슬이 없어 이 물음이 성립하지 않으므로 None 이다.
+                              "accepted_by_us": None if is_genesis else _accepted_by_us(
                                   ctx, thread_id, event["message_id"]),
                               "how": "read 로 다시 보고 그 자리에서 다시 써라"})
     out["usage"] = usage_of(event)
@@ -357,12 +367,36 @@ def _settle_unknown(ctx: Context, event: dict[str, Any],
                 "hash": (err.detail or {}).get("event_hash"),
                 "settled": core.REJECTED, "ledger_row": None,
                 "node_id": None, "url": None,
-                "relay_verdict": {"accepted_to_ledger": True, "reducer": "stale",
+                # ★분류를 **릴레이가 말한 대로** 적는다(master 승인 2026-09-09). 여기 "stale" 을
+                #   못박아 두면 릴레이가 격리한 글이 「밀렸다」로 보고된다 — 재시도 여부는 `reason` 이
+                #   지므로 판정은 옳지만, 사람이 읽는 근거 줄이 사실과 다르다.
+                "relay_verdict": {"accepted_to_ledger": True,
+                                  "reducer": settled.get("reducer") or "unknown",
                                   "reason": settled.get("reason"), "state_hash": None}}
     if settled["verdict"] != core.COMMITTED:
         raise AgoraError(errors.STORE, "저장되지 않았다 — 재조회로 확인했다",
                          {"settled": settled["verdict"],
                           "message_id": event["message_id"]}) from None
+    # ★★**「운반층에 있다」는 아직 「적용됐다」가 아니다**(codex 3R CRITICAL 1b · 2026-09-09).
+    #   릴레이 상대라면 위에서 그쪽 판정까지 봤지만, `audit_events` 가 없는 운반층(GitHub·목)에는
+    #   그 판정 자체가 없어 **존재만으로** committed 가 된다. 그런데 「원장에 있음 ≠ 적용됨」은
+    #   운반층에 딸린 명제가 아니다 — **우리 리듀서가** 그 글을 사슬에 넣었는지가 정본이다.
+    #   ⇒ 폴백이 이 티켓의 원 결함을 다시 여는 것을 여기서 막는다.
+    #   ⚠못 읽으면(None) 성공으로도 실패로도 접지 않는다: 원래의 code 8(불명)로 되돌린다.
+    mine = _accepted_by_us(ctx, event["thread_id"], event["message_id"])
+    if mine is False:
+        raise AgoraError(errors.STATE_CONFLICT,
+                         "운반층에는 있는데 우리 사슬에는 없다 — 남이 그 자리를 차지했다",
+                         {"reason": "not_in_our_chain",
+                          "message_id": event["message_id"],
+                          "settled": core.COMMITTED,
+                          "how": "read 로 다시 보고 그 자리에서 다시 써라"}) from None
+    if mine is None:
+        raise AgoraError(errors.UNKNOWN_COMMIT,
+                         "저장은 확인했지만 우리 사슬을 읽지 못했다 — 판정을 미룬다",
+                         {**dict(err.detail or {}),
+                          "settled": core.COMMITTED,
+                          "reason": "chain_unreadable_after_settle"}) from None
     # 올라가 있었다. 다만 **응답을 못 받았으므로 node_id·url 은 없다** — 없는 것을 지어내지 않는다.
     return {"message_id": event["message_id"],
             "hash": (err.detail or {}).get("event_hash"),

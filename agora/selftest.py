@@ -3717,8 +3717,8 @@ def _case_verdict_comes_from_store_not_ledger() -> None:
     #   그래서 **다른 글이 하나 있는** 저장층에서 잰다.
     store = MockStore()
     store.inject_raw(thread_id=ev["thread_id"], body="남의 글 — 우리 이벤트가 아니다")
-    verdict, _reason = core.audit_verdict(store=store, thread_id=ev["thread_id"],
-                                          message_id=ev["message_id"])
+    verdict = core.audit_verdict(store=store, thread_id=ev["thread_id"],
+                                 message_id=ev["message_id"])["verdict"]
     if verdict != core.ABSENT:
         raise AssertionError(f"운반층에 없는데 {verdict} 로 판정했다 "
                              "(원장을 봤거나, 아무 글이나 맞다고 했다)")
@@ -10145,9 +10145,12 @@ def _case_existence_is_not_commitment() -> None:
         def audit_events(self, *, thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
             return [dict(row, valid=True, quarantined=False, stale=False, reason=None)]
 
-    verdict, reason = core.audit_verdict(store=_Rejected(), thread_id="t1", message_id=mid)
-    if verdict != core.REJECTED or reason != "lost_race":
-        raise AssertionError(f"밀린 글을 {verdict}/{reason} 로 판정했다(원장에 있다 ≠ 적용됐다)")
+    audited = core.audit_verdict(store=_Rejected(), thread_id="t1", message_id=mid)
+    if audited["verdict"] != core.REJECTED or audited["reason"] != "lost_race":
+        raise AssertionError(f"밀린 글을 {audited} 로 판정했다(원장에 있다 ≠ 적용됐다)")
+    # ★근거줄은 릴레이가 말한 분류여야 한다(master 승인 2026-09-09).
+    if audited["reducer"] != "stale":
+        raise AssertionError(f"근거줄이 릴레이 분류와 다르다: {audited}")
     ledger = _r43_ledger()
     settled = core.settle_unknown(store=_Rejected(), ledger=ledger,
                                   event={"thread_id": "t1", "message_id": mid},
@@ -10156,7 +10159,7 @@ def _case_existence_is_not_commitment() -> None:
         raise AssertionError(f"반영 안 된 글을 원장에 적었다: {settled}")
     # ★**대조군**: 받아들여진 글까지 막으면 그것은 봉합이 아니라 고장이다.
     if core.audit_verdict(store=_Accepted(), thread_id="t1",
-                          message_id=mid)[0] != core.COMMITTED:
+                          message_id=mid)["verdict"] != core.COMMITTED:
         raise AssertionError("릴레이가 받아들인 글을 committed 로 안 냈다")
 
 
@@ -11337,22 +11340,22 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        blind = []',
      "명부: 못 읽는 글이면 안 쓴다"),
     ("M360-double-never-judges-chain", "tests/fake_relay.py",
-     '            reason = "lost_race" if prev in room["hashes"] else "unreachable"\n            return {"valid": False, "stale": True, "quarantined": False, "reason": reason}',
+     '            reason = "lost_race" if (prev in room["hashes"]\n                                     or prev in room["claimed_prevs"]) else "unreachable"\n            return {"valid": False, "stale": True, "quarantined": False, "reason": reason}',
      '            return {"valid": True, "stale": False, "quarantined": False, "reason": None}',
      "더블: 사슬 판정을 낸다"),
     # ── F-1 봉합 2차(codex 2R BLOCK · 2026-09-09) — 여섯 결함 각각에 그물을 박는다 ─────────
     # ★변이는 **결함을 되살리는 모양**으로 적는다: 되살렸을 때 붉어지지 않으면 그 봉합은
     #   시험되지 않은 것이다(「검사가 그것을 재는가」를 재는 것이 뮤테이션의 일이다).
     ("M363-settle-existence-is-commitment", "agora/core.py",
-     '            if row.get("valid") is False:\n                return REJECTED, row.get("reason")',
-     '            if False:\n                return REJECTED, row.get("reason")',
+     '            if row.get("valid") is False:\n                return {"verdict": REJECTED, "reason": row.get("reason"),',
+     '            if False:\n                return {"verdict": REJECTED, "reason": row.get("reason"),',
      "불명: 원장에 있음은 적용됨이 아니다"),
     ("M364-relay-rejection-can-return-zero", "agora/tools.py",
      "        if rejected.get(\"reason\") not in RETRYABLE_RELAY_REASONS or attempt == attempts - 1:",
      "        if False:",
      "쓰기: 접수는 반영이 아니다"),
     ("M365-double-skips-expected-state", "tests/fake_relay.py",
-     "        if state is not None and not _expected_state_ok(body, state):",
+     "        if state is not None and not _expected_state_ok(body, state,\n                                                        state.get(\"_deadlines\")):",
      "        if False:",
      "더블: CAS 를 실제로 판정한다"),
     ("M366-triple-check-drops-state-hash", "tools/rehearsal.py",
@@ -11856,8 +11859,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if False:\n        return None",
      "불명: 두 번 정산해도 1행"),
     ("M104-settle-assumes-committed", "agora/core.py",
-     "    verdict, reason = audit_verdict(store=store, thread_id=event[\"thread_id\"],\n                                    message_id=event[\"message_id\"])",
-     '    verdict, reason = COMMITTED, None',
+     "    audited = audit_verdict(store=store, thread_id=event[\"thread_id\"],\n                            message_id=event[\"message_id\"])",
+     '    audited = {\"verdict\": COMMITTED, \"reason\": None, \"reducer\": None}',
      "불명: 없으면 안 적는다"),
     ("M105-resolve-matches-anything", "agora/core.py",
      '        if message_id in (row.get("body") or ""):',

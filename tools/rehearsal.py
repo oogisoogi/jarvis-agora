@@ -292,6 +292,12 @@ def _local_state(ctx: Any, room: str) -> dict[str, Any]:
             "stale": len(reduced.get("stale") or [])}
 
 
+# 상대가 파생을 한다고 답했으면 **반드시 와야 하는 축**(계약 §3-3 · 실물 relay/src/index.ts).
+# ★`close_reason` 은 값이 null 일 수 있으므로 **칸의 존재**만 요구한다 — 값 요구와 존재 요구를
+#   뭉치면 정상적으로 안 닫힌 방이 상시 적색이 된다.
+_REQUIRED_DERIVED_AXES = ("state", "round", "state_hash", "close_reason")
+
+
 def triple_check(ctx: Any, store: Any, room: str) -> dict[str, Any]:
     """3자 대조 — **릴레이 원장 · 우리 기록 · 파생 상태**를 한자리에서 댄다(브리프 ⓒ·ⓕ).
 
@@ -335,6 +341,16 @@ def triple_check(ctx: Any, store: Any, room: str) -> dict[str, Any]:
     # ★`state_hash` 를 **여기 넣는 것이 이 봉합의 알맹이다**(codex 2R HIGH). 구판은 이 값을
     #   양쪽 다 **출력만** 하고 대조하지 않았다 — 서로 다른 역사가 같은 이름·라운드에 이를 수
     #   있으므로(그래서 해시에 head 가 들어간다) 이 축이 빠지면 대조가 가장 중요한 것을 놓친다.
+    # ★★그리고 **축이 하나만 빠져도 mismatch 다**(codex 3R HIGH · 2026-09-09). 2차 판은
+    #   예외와 `relay_does_not_derive` 만 fail-closed 로 다뤘고, **개별 칸 누락은 계속 건너뛰었다** —
+    #   그래서 `state_hash` 한 칸만 빠진 응답에서 로컬이 CLIENT·상대가 부재인데 `mismatch: []`
+    #   가 나왔다. 「상대가 안 파생한다」와 「이번 응답에 그 칸이 없다」는 다른 사건이고,
+    #   후자는 **계약 위반이거나 우리가 잘못 읽은 것**이라 조용히 넘길 자리가 아니다.
+    # ⇒ 상대가 파생을 **한다고 답한 이상**(closed 칸이 왔다) 필수 축은 전부 와야 한다.
+    if derived:
+        for field in _REQUIRED_DERIVED_AXES:
+            if field not in derived:
+                mismatch.append(f"{field}: 릴레이가 이 파생 축을 안 줬다(fail-closed)")
     for field in ("closed", "answered", "state", "round", "state_hash", "close_reason"):
         theirs = derived.get(field)
         if field not in derived or field not in local:

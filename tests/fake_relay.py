@@ -105,7 +105,7 @@ class FakeRelay:
             room = {"room_id": room_id, "category": category, "title": title,
                     "created_at": now_iso(), "updated_at": now_iso(), "events": [],
                     # ★사슬 상태 — 계약 §5 규칙 2(정렬·경합)를 더블에서도 **실제로** 돌린다.
-                    "head": None, "hashes": set(),
+                    "head": None, "hashes": set(), "claimed_prevs": set(),
                     # ★전이 상태 — `expected_state` 를 판정하려면 **해시 대상 8칸**이 필요하다
                     #   (계약 §2-1 · reducer 의 `_state_hash`). genesis 에서 세워진다.
                     "state": None, "post_ids": set()}
@@ -181,21 +181,45 @@ class FakeRelay:
             #   생긴다(agy 1R 지적 4 · 수용) — 이미 머리가 있으면 아래 규칙으로 떨어져야 한다.
             room["head"], _ = digest, room["hashes"].add(digest)
             room["state"] = _genesis_state(body, digest)
+            # ★genesis 의 message_id 는 **처음부터 post_ids 안에 있다**(우리 리듀서·실물이
+            #   `{chain[0].message_id}` 로 시드한다). 안 넣으면 genesis 를 답으로 고르는
+            #   `answer_selected` 에서 더블만 상태를 안 바꿔 두 구현이 갈린다(codex 3R HIGH).
+            gid = _event_of(body).get("message_id")
+            if gid:
+                room["post_ids"].add(gid)
             return {"valid": True, "stale": False, "quarantined": False, "reason": None}
         prev = _prev_of(body)
-        if prev != room["head"]:
-            reason = "lost_race" if prev in room["hashes"] else "unreachable"
+        if prev != room["head"] or prev in room["claimed_prevs"]:
+            # ★★**자리를 차지하는 것은 head 가 아니라 `prev` 다**(codex 3R HIGH · 2026-09-09).
+            #   2차 판은 `prev == head` 만 봤는데, `vote` 는 head 를 안 옮기므로(계약 §5 규칙 5)
+            #   vote 뒤에 온 글이 **같은 자리를 다시 차지할 수 있었다** — 더블은 valid,
+            #   우리 리듀서·실물은 `lost_race`. 실물의 2단(사슬)은 같은 `prev` 를 가진 것들 중
+            #   **먼저 온 하나만** 사슬에 넣기 때문이다. 그 규칙을 여기 옮겨 적는다.
+            reason = "lost_race" if (prev in room["hashes"]
+                                     or prev in room["claimed_prevs"]) else "unreachable"
             return {"valid": False, "stale": True, "quarantined": False, "reason": reason}
         room["hashes"].add(digest)
+        room["claimed_prevs"].add(prev)
         state = room["state"]
-        if state is not None and not _expected_state_ok(body, state):
+        if state is not None and not _expected_state_ok(body, state,
+                                                        state.get("_deadlines")):
             # ★격리해도 사슬은 지나갔다 — 머리를 전진시킨다(실물 reject() 와 같다).
             room["head"] = digest
             return {"valid": False, "stale": False, "quarantined": True,
                     "reason": "stale_expected_state"}
         kind = _kind_of(body)
         if state is not None:
-            _apply_transition(room, body, kind)
+            denied = _apply_transition(room, body, kind, self.roster_text.get("operators", ""))
+            if denied:
+                # ★★**권한에서 걸린 글은 「유효」가 아니다**(codex 3R HIGH · 2026-09-09).
+                #   2차 판은 권한 조건을 보고 **상태 변경만 건너뛰었다** — 그래서 더블은
+                #   `valid:true` 를 내고 실물은 격리했다. 게다가 CONTRACT_COVERAGE 는 그 축을
+                #   `judged:True` 라 적고 있었으므로 **표까지 거짓말을 하고 있었다.**
+                #   실물처럼 격리하고, 실물처럼 **머리는 전진시킨다**(reject() 와 같다).
+                room["head"] = digest
+                state["head"] = digest
+                return {"valid": False, "stale": False, "quarantined": True,
+                        "reason": denied}
         if kind != "vote":
             # vote 는 머리를 안 옮긴다(계약 §5 규칙 5).
             # ⚠문자열 검색으로 재면 **본문에 그 글자가 든 발언**까지 vote 로 읽는다
@@ -462,6 +486,7 @@ def _signature_matches(raw: bytes, signature: str, *,
 #   계약이 바뀌면 이 줄들이 바뀌어야 하고, **안 바꾸면 리허설이 붉어진다** — 그 붉음이 신호다.
 _DEBATE_ROUNDS = ("r0", "r1", "r2", "r3")
 _EXPIRED = "expired"
+_EXPIRED_GRACE_SECONDS = 300
 # 상태 해시가 덮는 8칸 — 순서는 무관하다(canonical 이 키를 정렬한다). **머리가 들어 있다**:
 # 안 넣으면 「같은 결론에 이른 서로 다른 역사」가 같은 해시가 되고 CAS 에 창이 생긴다.
 _HASH_FIELDS = ("type", "state", "round", "chair", "requester", "solved_by",
@@ -491,6 +516,8 @@ def _genesis_state(body: str, digest: str) -> dict[str, Any] | None:
         return None
     gtype = payload.get("type")
     return {"type": gtype,
+            # ★마감표는 상태 해시 8칸에 없지만 **만료 판정의 재료**다 — 따로 들고 간다.
+            "_deadlines": payload.get("deadlines") or {},
             "state": "r0" if gtype == "debate" else "open",
             "round": 0 if gtype == "debate" else None,
             "chair": payload.get("chair") or event.get("from"),
@@ -508,49 +535,98 @@ def _event_id_of(seq: int) -> str:
     return "ev_" + str(seq).zfill(16)
 
 
-def _expected_state_ok(body: str, state: dict[str, Any]) -> bool:
+def _expected_state_ok(body: str, state: dict[str, Any],
+                       room_deadlines: dict[str, Any] | None = None) -> bool:
     """CAS — `expected_state` 가 **지금 상태의 해시**인가(계약 §2-1 · 실물 reducer 3단 첫 검사).
 
-    ★만료 관대함도 함께 옮긴다: 만료된 스레드를 되살리러 쓰는 사람은 **만료가 반영된 상태**를
-      보고 쓴다. ⚠더블은 마감 시각을 재지 않으므로 이 관대함이 **실물보다 넓다** — 넓은 쪽으로
-      틀리는 것은 거짓 적색을 안 만든다(대신 이 축의 미탐 하나를 남긴다 · 표에 적어 둔다).
+    ★★**만료 관대함은 실제 마감을 재서만 준다**(codex 3R HIGH · 2026-09-09). 2차 판은 마감을
+      안 재면서 만료 상태 해시를 **무조건** 한 번 더 허용했다 — 실물보다 넓게 뚫린 문이라,
+      만료가 아닌데 만료 해시를 들고 온 글을 더블만 통과시켰다. 넓게 틀리는 것은 거짓 적색을
+      안 만드는 대신 **그 축의 시험을 통째로 비운다.** 마감은 genesis payload 에 있으니 잰다.
     """
     seen = _event_of(body).get("expected_state")
     if seen == _state_hash(state):
         return True
+    if not _expired_now(room_deadlines, state):
+        return False
     return seen == _state_hash({**state, "state": _EXPIRED})
 
 
-def _apply_transition(room: dict[str, Any], body: str, kind: str | None) -> None:
-    """상태 해시 8칸을 바꾸는 전이만 적용한다 — 나머지 전이 규칙은 판정하지 않는다(표 참조).
+def _expired_now(deadlines: dict[str, Any], state: dict[str, Any]) -> bool:
+    """계약의 만료 판정 — debate 의 라운드 상태에 마감이 있고 **그 시각이 지났는가**.
 
-    ★권한 조건(의장·의뢰자·운영자)은 **함께** 옮긴다: 안 옮기면 남이 낸 `advance` 로 더블의
-      라운드만 움직여 이후 전건이 `stale_expected_state` 가 된다(거짓 적색의 홍수).
+    ★유예(grace)까지 옮긴다: 실물이 유예를 두는데 더블이 안 두면 경계에서 두 구현이 갈린다.
+    """
+    import datetime
+    if state.get("type") != "debate" or state.get("state") not in _DEBATE_ROUNDS:
+        return False
+    due = (deadlines or {}).get(state.get("state"))
+    if not due:
+        return False
+    try:
+        t = datetime.datetime.fromisoformat(str(due).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now.timestamp() > t.timestamp() + _EXPIRED_GRACE_SECONDS
+
+
+def _apply_transition(room: dict[str, Any], body: str, kind: str | None,
+                      operators_text: str = "") -> str | None:
+    """상태 해시 8칸을 바꾸는 전이를 적용한다. **거부하면 사유를 돌려준다**(= 격리).
+
+    ★★2차 판은 권한 조건을 보고 **상태 변경만 건너뛰었다.** 그래서 남이 낸 `advance` 가
+      더블에서는 `valid:true` 인데 실물에서는 `permission` 격리였다 — 두 구현이 갈렸고,
+      `CONTRACT_COVERAGE` 의 `judged:True` 도 그만큼 거짓이었다(codex 3R HIGH · 2026-09-09).
+      ⇒ 실물 `reducer.reject()` 와 같은 어휘로 **사유를 돌려주고** 부르는 쪽이 격리한다.
+    ★사유 어휘는 계약에서 옮긴다: permission · bad_transition · unknown_target.
+    ⚠여기서 재지 **않는** 것: 예산·라운드 밖 발언·반론 대상(상태 해시 8칸을 안 바꾼다).
+      표에 `judged:False` 로 적혀 있다.
     """
     state, event = room["state"], _event_of(body)
     payload = event.get("payload") if type(event.get("payload")) is dict else {}
     who = event.get("from")
+    operators = {ln.strip() for ln in operators_text.splitlines()
+                 if ln.strip() and not ln.lstrip().startswith("#")}
     if kind == "post":
         if event.get("message_id"):
             room["post_ids"].add(event["message_id"])
-        return
+        return None
     if kind == "advance":
-        if who == state["chair"] and payload.get("from_round") == state["round"]:
-            to_round = payload.get("to_round")
-            if type(to_round) is int and 0 <= to_round < len(_DEBATE_ROUNDS):
-                state["round"], state["state"] = to_round, _DEBATE_ROUNDS[to_round]
+        if who != state["chair"]:
+            return "permission"
+        if payload.get("from_round") != state["round"]:
+            return "bad_transition"
+        to_round = payload.get("to_round")
+        if type(to_round) is not int or not 0 <= to_round < len(_DEBATE_ROUNDS):
+            return "bad_transition"
+        state["round"], state["state"] = to_round, _DEBATE_ROUNDS[to_round]
     elif kind == "resolution":
-        if who == state["chair"] and state["state"] == "r3":
-            state["state"] = "resolved"
+        if who != state["chair"]:
+            return "permission"
+        if state["state"] != "r3":
+            return "bad_transition"
+        state["state"] = "resolved"
     elif kind == "answer_selected":
-        if who == state["requester"] and payload.get("post_message_id") in room["post_ids"]:
-            state["state"], state["solved_by"] = "solved", payload.get("post_message_id")
+        if who != state["requester"]:
+            return "permission"
+        if payload.get("post_message_id") not in room["post_ids"]:
+            return "unknown_target"
+        state["state"], state["solved_by"] = "solved", payload.get("post_message_id")
     elif kind == "close":
-        if who in (state["chair"], state["requester"]):
-            state["state"], state["close_reason"] = "closed", payload.get("reason")
+        # ★운영자도 닫을 수 있다(계약 §6). 2차 판이 이 갈래를 빠뜨려 더블만 방을 안 닫았다.
+        if who not in (state["chair"], state["requester"]) and who not in operators:
+            return "permission"
+        state["state"], state["close_reason"] = "closed", payload.get("reason")
+    elif kind == "abort":
+        if who not in operators:
+            return "permission"
+        state["state"], state["close_reason"] = "closed", "aborted"
     elif kind == "delegate_chair":
-        if who == state["chair"]:
-            state["chair"] = payload.get("new_chair")
+        if who != state["chair"]:
+            return "permission"
+        state["chair"] = payload.get("new_chair")
+    return None
 
 
 def verdict_of_row(row: dict[str, Any], room: dict[str, Any]) -> dict[str, Any]:
@@ -591,9 +667,17 @@ CONTRACT_COVERAGE: tuple[dict[str, Any], ...] = (
      "judged": True, "why": "F-1 의 핵심 계약. 상태 해시 8칸을 계약에서 옮겨 적어 판정한다"},
     {"check": "§5 규칙 5 vote 는 머리를 안 옮긴다", "where": "_chain_verdict",
      "judged": True, "why": "안 옮기면 state_hash 가 갈려 3자 대조가 깨진다"},
-    {"check": "전이 권한(의장·의뢰자 · advance/resolution/answer_selected/close/delegate_chair)",
+    {"check": "전이 권한(의장·의뢰자·운영자 · advance/resolution/answer_selected/close/abort/delegate_chair)",
      "where": "_apply_transition", "judged": True,
-     "why": "상태 해시 8칸을 바꾸는 전이라 안 재면 이후 전건이 거짓 적색이 된다"},
+     "why": "거부하면 실물처럼 permission 격리를 낸다 — 상태 변경만 건너뛰면 더블이 valid:true 를 내 두 구현이 갈린다"},
+    {"check": "§5 규칙 2 사슬 자리 소유(같은 prev 는 하나만) — vote 뒤에도 자리는 찼다",
+     "where": "_chain_verdict claimed_prevs", "judged": True,
+     "why": "vote 는 head 를 안 옮기므로 head 만 보면 같은 자리를 두 번 내준다"},
+    {"check": "answer_selected 대상 후보에 genesis 포함(post_ids 시드)",
+     "where": "_chain_verdict", "judged": True,
+     "why": "실물·우리 리듀서가 chain[0].message_id 로 시드한다 — 안 넣으면 그 입력에서 갈린다"},
+    {"check": "만료 판정(마감 경과 + 유예 300초)", "where": "_expired_now", "judged": True,
+     "why": "안 재면서 만료 해시를 무조건 허용하면 실물보다 넓게 뚫려 그 축의 시험이 빈다"},
     {"check": "§3-1 등록 소유 증명 서명", "where": "POST /register",
      "judged": True, "why": "require_proof 스위치로 켜고 끈다"},
     {"check": "§3-6b 체크포인트(운영자·서명·해시 정합)", "where": "POST /participants/checkpoint",
@@ -602,13 +686,11 @@ CONTRACT_COVERAGE: tuple[dict[str, Any], ...] = (
      "why": "agora.schema 를 부르면 자기 대조가 된다. 클라 조립 결함은 실물에서 422 로 터진다"},
     {"check": "§3-2/7 스크럽 백스톱", "where": "—", "judged": False,
      "why": "agora.scrub 을 부르면 자기 대조가 된다. 클라 쪽 게이트가 막고 있다"},
-    {"check": "운영자 abort · 만료 중 운영자 대리 위임", "where": "—", "judged": False,
-     "why": "더블은 운영자 명부를 전이 단계에서 안 본다 — 그 전이는 리허설 절차에 없다"},
+    {"check": "만료 중 운영자 대리 의장 위임", "where": "—", "judged": False,
+     "why": "만료 조건이 걸린 갈래다. 더블은 위임에서 운영자를 안 보므로 그 조합만 실물보다 좁다"},
     {"check": "예산(posts_per_round·max_chars) · 라운드 밖 발언 · 반론 대상 필수",
      "where": "—", "judged": False,
      "why": "상태 해시 8칸을 안 바꾸므로 CAS 대조를 흐리지 않는다. 판정은 실물·우리 리듀서가 한다"},
-    {"check": "마감·만료 시각 판정", "where": "_expected_state_ok", "judged": False,
-     "why": "시각을 안 재고 만료 상태 해시를 **무조건** 한 번 더 허용한다 — 실물보다 넓다(미탐 1)"},
 )
 
 
