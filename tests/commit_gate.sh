@@ -73,7 +73,7 @@ else
 fi
 rm -f /tmp/agora-selftest.$$
 
-echo "== F-1 재현 시험(codex 2R·4R 판정문 1:1) =="
+echo "== F-1 재현 시험(codex 2R·4R·5R 판정문 1:1) =="
 # ★**시험을 쓴 것과 시험이 도는 것은 다른 말이다.** 이 저장소가 그 차이로 두 번 다쳤다
 #   (미배선 함수 전수조사 2026-08-26 · 「구현했다 ≠ 배선됐다」). 파일만 두면 아무도 안 돌린다.
 # ★pytest 없이도 돈다(이 기계의 시스템 python3 는 PEP 668 로 --user 설치가 막혀 있다) —
@@ -88,27 +88,9 @@ rm -f /tmp/agora-f1r2.$$
 echo "== 공백 위생(우리가 건드린 줄만) =="
 # ★codex 4R LOW 가 이 자리에서 났다: `git diff --check` 가 exit 2 였는데 **아무 게이트도 안 봤다.**
 #   손으로 재는 검사는 안 재게 된다 — 그래서 도구에 싣는다.
-# ★범위를 「우리가 건드린 줄」로 한정한다: 저장소 전수로 재면 예전 파일·이미지가 걸려
-#   경보가 상시 붉어지고, 상시 붉은 경보는 곧 안 보는 경보다(해소 조건 없는 경보 금지).
-ws_rc=0
-ws_check() {   # $1 = 사람이 읽는 이름 · 나머지 = git diff 인자
-  label="$1"; shift
-  out=$(git diff --check "$@" 2>/dev/null)
-  if [ -n "$out" ]; then
-    echo "  위반 [$label]:"; echo "$out" | sed 's/^/    /' | head -10
-    ws_rc=1
-  fi
-}
-ws_check "작업트리"
-ws_check "staged" --cached
-base=$(git merge-base HEAD main 2>/dev/null)
-if [ -n "$base" ]; then
-  ws_check "커밋 $base..HEAD" "$base..HEAD"
-else
-  # ★못 잰 칸은 통과가 아니다 — 무엇을 못 쟀는지 적는다.
-  echo "  ⚠main 을 못 찾아 커밋 범위는 미측정(작업트리·staged 만 쟀다)"
-fi
-[ "$ws_rc" -eq 0 ] && echo "  clean" || rc=1
+# ★검사 논리는 `tests/ws_hygiene.sh` 로 뺐다(codex 5R LOW): 인라인 함수는 **따로 잴 수 없어서**
+#   「미측정을 통과로 세지 않는다」가 주장으로만 남는다. 독립 스크립트라야 시험이 그 주장을 실측한다.
+bash tests/ws_hygiene.sh || rc=1
 
 echo "== 결과: $([ $rc -eq 0 ] && echo PASS || echo FAIL) =="
 exit $rc

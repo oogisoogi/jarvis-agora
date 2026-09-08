@@ -336,6 +336,12 @@ def _seed_room(relay) -> tuple[str, str]:
     return "t1", event_hash(gen)
 
 
+def _now_iso() -> str:
+    """리듀서에 넣을 **지금** — 실물은 시각을 주입받는다(프로세스 시계를 몰래 읽지 않는다)."""
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def _double_kit(mod: object) -> tuple:
     """더블 방을 세우고 글을 얹는 두 도우미 — **D 계열과 4R 시험이 함께 쓴다.**
 
@@ -407,6 +413,8 @@ _JUDGED_AXES = (
     "만료 판정", "등록 소유 증명 서명", "체크포인트",
     # ★codex 4R HIGH — 「무엇을 판정하는가」에 유형 경계가 없어서, 시험이 잘못된 동작을 고정했다.
     "유형별 허용 kind", "after_close",
+    # ★codex 5R HIGH — 수용 여부만 맞고 **상태**가 갈린 두 축.
+    "만료 전이", "knowhow 종결 사유 제한",
 )
 _UNJUDGED_AXES = (
     "kind 9종 payload 닫힌 스키마", "스크럽 백스톱", "만료 중 운영자 대리 의장 위임",
@@ -566,6 +574,19 @@ def test_h2_double_enforces_per_type_allowed_kinds() -> None:
                             operators=frozenset({"op1"}))
     assert [q["reason"] for q in oracle["quarantined"]] == ["after_close"], oracle
 
+    # ★★**두 문이 동시에 참인 입력**을 못박는다(codex 5R MEDIUM). 위까지는 「열린 방의 금지 kind」와
+    #   「닫힌 방의 허용 kind」만 재서, `_gate_denial` 의 **순서를 뒤집어도 통과**했다 —
+    #   순서 자체가 계약인데(실물은 after_close 를 먼저 본다) 그 축이 비어 있었다.
+    #   ⇒ 닫힌 `debate` 방의 `answer_selected`(유형 밖 kind)는 반드시 `after_close` 여야 한다.
+    both = put(relay, "answer_selected", late["hash"],
+               mod._state_hash(relay.rooms["t1"]["state"]),
+               {"post_message_id": gen["message_id"]})
+    assert (both["valid"], both["reason"]) == (False, "after_close"), \
+        f"닫힘·유형 밖이 동시에 참인데 {both['reason']} 를 냈다(계약 순서는 after_close 가 먼저)"
+    oracle = _reduce_bodies([render_post(gen), closed["body"], late["body"], both["body"]],
+                            operators=frozenset({"op1"}))
+    assert [q["reason"] for q in oracle["quarantined"]] == ["after_close", "after_close"], oracle
+
 
 def test_h3_audit_events_fail_closed_on_repeated_cursor() -> None:
     """반복 cursor 는 `fetch` 와 **같은 문으로** 죽는다 — code 7(codex 4R HIGH).
@@ -633,11 +654,100 @@ def test_m4_expiry_is_measured_in_both_directions() -> None:
         assert row["valid"] is expired, (offset, expired, row)
         if not expired:
             assert row["reason"] == "stale_expected_state", row
+        # ★★**수용 여부만 재면 상태는 안 잰다**(codex 5R HIGH): 마감이 지난 방을 더블은
+        #   `r0` 에 남겨 뒀는데 리듀서는 `expired` 로 갔고, `valid` 만 보던 이 시험은 통과했다.
+        #   ⇒ 보고 상태와 **상태 해시**를 리듀서와 견준다. 그것이 3자 대조가 실제로 대는 값이다.
+        seen = relay.derived("t1")
+        # ⚠거부된 글도 **오라클에 먹인다**: 실물은 거부해도 사슬은 지나갔다고 보고
+        #   `state["head"]` 를 옮긴다(reject()) — 안 먹이면 머리가 갈려 대조가 엉뚱하게 붉어진다.
+        oracle = _reduce_bodies([render_post(gen), row["body"]], now=_now_iso())
+        assert seen["state"] == oracle["state"] == ("expired" if expired else "r0"), \
+            (offset, seen["state"], oracle["state"])
+        assert seen["state_hash"] == oracle["state_hash"], \
+            (offset, seen["state_hash"][:8], oracle["state_hash"][:8])
         # ★대조군 — 만료든 아니든 **지금 상태의 해시**는 언제나 통한다(과잉 차단 방지).
         relay2, gen2, head2 = room(deadlines={"r0": at(offset)})
         st2 = relay2.rooms["t1"]["state"]
         ok = put(relay2, "post", head2, mod._state_hash(st2), {"round": 0, "body": "x"})
         assert ok["valid"] is True, (offset, ok)
+
+
+# ── codex 5R(2026-09-09 · REVISE) 재현 프로브 승격 ──────────────────────────
+# ★★5R 의 두 HIGH 는 **「수용은 맞고 상태가 갈렸다」**의 판본이다: 더블이 글을 받아들이는지는
+#   맞췄는데 **그 뒤의 상태**가 실물과 달랐다. ⇒ 수용 여부만 재는 시험은 상태 축을 안 잰다.
+
+
+def test_i1_double_keeps_knowhow_close_reasons() -> None:
+    """`knowhow` 는 종결 사유가 **둘뿐**이다(계약 §6 · codex 5R HIGH).
+
+    ★구판 더블은 아무 사유나 받아 방을 닫았고 리듀서는 `bad_transition` 으로 격리했다 —
+      `solved` 하나로 갈렸다. ★유형별 제약을 한 곳만 옮기면 나머지가 그대로 구멍이고,
+      그 구멍은 더블이 **받아 주는** 쪽이라 로컬은 언제나 초록이다.
+    """
+    mod = _fake_relay_module()
+    room, put = _double_kit(mod)
+    for reason in ("solved", *sorted(reducer.KNOWHOW_CLOSE_REASONS)):
+        allowed = reason in reducer.KNOWHOW_CLOSE_REASONS
+        relay, gen, head = room(gtype="knowhow")
+        row = put(relay, "close", head, mod._state_hash(relay.rooms["t1"]["state"]),
+                  {"reason": reason}, gtype="knowhow")
+        oracle = _reduce_bodies([render_post(gen), row["body"]])
+        assert row["valid"] is allowed, (reason, row)
+        assert (oracle["state"] == "closed") is allowed, (reason, oracle["state"])
+        assert [q["reason"] for q in oracle["quarantined"]] == \
+            ([] if allowed else ["bad_transition"]), (reason, oracle["quarantined"])
+        assert row["reason"] == (None if allowed else "bad_transition"), (reason, row)
+
+
+def test_i2_transport_head_and_state_head_are_different_things() -> None:
+    """`vote` 는 상태 머리를 안 옮기지만 **사슬은 잇는다**(codex 5R MEDIUM).
+
+    ★★실물 `order()` 는 `by_prev` 로 엮으므로 vote 의 해시를 `prev` 로 삼은 글이 사슬에 이어지고,
+      `apply()` 는 vote 에서 `continue` 해 `state["head"]` 를 안 옮긴다(계약 §5 규칙 5).
+      구판 더블은 이 둘을 **한 칸**으로 써서 vote 뒤의 정상 후속 글을 `lost_race` 로 밀어냈다.
+    ★한 칸으로 쓰면 둘 중 하나는 반드시 틀린다 — 3R 은 「자리 소유」쪽을 고쳤고(`claimed_prevs`),
+      이 쪽이 남아 있었다. **대조군**으로 그 3R 봉합이 살아 있는지도 함께 잰다.
+    """
+    mod = _fake_relay_module()
+    room, put = _double_kit(mod)
+    relay, gen, head = room()
+    before = mod._state_hash(relay.rooms["t1"]["state"])
+    vote = put(relay, "vote", head, before, {"choice": "a"})
+    assert vote["valid"] is True, vote
+    assert relay.rooms["t1"]["state"]["head"] == head, "vote 가 상태의 머리를 옮겼다"
+    assert relay.rooms["t1"]["head"] == vote["hash"], "vote 가 사슬의 머리를 안 옮겼다"
+    after = put(relay, "post", vote["hash"], before, {"round": 0, "body": "x"})
+    assert (after["valid"], after["reason"]) == (True, None), \
+        f"vote 뒤 정상 후속 글을 밀어냈다: {after}"
+    oracle = _reduce_bodies([render_post(gen), vote["body"], after["body"]])
+    assert len(oracle["events"]) == 3 and not oracle["stale"] and not oracle["quarantined"], \
+        oracle
+    # 대조군 — 이미 찬 자리(genesis)를 다시 claim 하면 여전히 진다(3R 봉합).
+    relay2, _g2, head2 = room()
+    sh2 = mod._state_hash(relay2.rooms["t1"]["state"])
+    put(relay2, "vote", head2, sh2, {"choice": "a"})
+    dup = put(relay2, "post", head2, sh2, {"round": 0, "body": "x"})
+    assert (dup["valid"], dup["reason"]) == (False, "lost_race"), dup
+
+
+def test_i3_whitespace_gate_treats_unmeasured_as_failure() -> None:
+    """공백 검사는 **측정 실패를 통과로 세지 않는다**(codex 5R LOW).
+
+    ★구판은 `git diff --check` 의 종료 코드를 버리고 stdout 유무만 봤다 — 없는 ref(rc 128)는
+      **출력이 비어 clean 으로 읽힌다.** 검사기가 고장난 것과 깨끗한 것은 다른 사건이다.
+    ★그리고 그 논리를 게이트 안 인라인 함수로 두면 **따로 잴 수 없다** — 그래서
+      `tests/ws_hygiene.sh` 로 뺐고, 이 시험이 없는 ref 를 넣어 그 주장을 실측한다.
+    """
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = os.path.join(root, "tests", "ws_hygiene.sh")
+    assert os.access(script, os.X_OK), "검사 스크립트가 실행 가능해야 한다"
+    bad = subprocess.run(["bash", script, "definitely-missing-ref"],
+                         cwd=root, capture_output=True, text=True)
+    assert bad.returncode != 0, f"없는 ref 를 통과시켰다: {bad.stdout!r}"
+    assert "미측정" in bad.stdout, f"측정 실패를 위반과 구별해 말하지 않았다: {bad.stdout!r}"
+    ok = subprocess.run(["bash", script], cwd=root, capture_output=True, text=True)
+    assert ok.returncode == 0, f"깨끗한 트리를 위반으로 봤다: {ok.stdout!r}"
 
 
 # ── [MEDIUM] roster 동기화 실패 뒤에도 하네스가 쓰기로 진행 ─────────────────

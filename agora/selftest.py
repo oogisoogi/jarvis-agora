@@ -4426,7 +4426,11 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                    "M355-double-skips-skeleton", "M365-double-skips-expected-state",
                    # ★codex 4R — 더블이 무른 세 자리: 머리 하나만 옮김 · 유형 경계 없음 · 만료 미측정.
                    "M371-double-freezes-the-room", "M372-double-ignores-type-boundary",
-                   "M374-double-never-expires"),
+                   "M374-double-never-expires",
+                   # ★codex 5R — 수용은 맞는데 **상태**가 갈린 자리들 + 두 머리 혼용 + 게이트 순서.
+                   "M375-double-never-transitions-to-expired",
+                   "M376-double-closes-knowhow-with-any-reason",
+                   "M377-double-conflates-the-two-heads", "M378-gate-order-reversed"),
     # ★서버가 답한 **상태 코드**를 위로 올리는 자리. 여기가 비면 201/200 이 한 칸에 뭉쳐
     #   「새로 적었다」와 「이미 있었다」가 구별되지 않는다(P4 에서 실제로 못 쟀다).
     "쓰기상태": ("M356-write-drops-http-status",),
@@ -10334,6 +10338,16 @@ def _case_double_enforces_type_kind_boundary() -> None:
                        {"round": 0, "body": "x"})
     if (late.get("valid"), late.get("reason")) != (False, "after_close"):
         raise AssertionError(f"닫힌 방에 온 글을 받았다: {late}")
+    # ★★**두 문이 동시에 참인 입력**을 못박는다(codex 5R MEDIUM). 위까지는 「열린 방의 금지 kind」와
+    #   「닫힌 방의 허용 kind」만 재서 `_gate_denial` 의 **순서를 뒤집어도 통과**했다 —
+    #   순서 자체가 계약이다(실물은 `after_close` 를 먼저 본다). ★조건 둘을 따로만 재면
+    #   그 둘의 **순서**는 아무도 안 재고, 순서는 사유 어휘를 바꾼다.
+    both = _double_put(relay, "answer_selected", late["hash"],
+                       fake._state_hash(relay.rooms["t1"]["state"]),
+                       {"post_message_id": "x" * 32})
+    if (both.get("valid"), both.get("reason")) != (False, "after_close"):
+        raise AssertionError(f"닫힘·유형 밖이 동시에 참인데 {both.get('reason')} 를 냈다 "
+                             "(계약 순서는 after_close 가 먼저)")
 
 
 def _case_double_measures_expiry_both_ways() -> None:
@@ -10361,6 +10375,80 @@ def _case_double_measures_expiry_both_ways() -> None:
         if row.get("valid") is not expired:
             raise AssertionError(f"마감 {offset}초: 만료 해시 수용이 {row.get('valid')}"
                                  f"(기대 {expired})")
+        # ★★**수용 여부만 재면 상태는 안 잰다**(codex 5R HIGH): 마감이 지난 방을 더블은 `r0` 에
+        #   남겨 뒀는데 실물·우리 리듀서는 `expired` 로 간다 — 상태 해시가 갈리고, 3자 대조의
+        #   그 축은 **거짓 초록**이 된다. 만료는 이벤트가 아니라 시간이 만드는 상태라
+        #   사슬에 안 남으므로, **보고 경계**에서 입혀야 두 구현이 같아진다.
+        want = "expired" if expired else "r0"
+        seen = relay.derived("t1")
+        if seen.get("state") != want:
+            raise AssertionError(f"마감 {offset}초: 보고 상태 {seen.get('state')}(기대 {want})")
+        if seen.get("state_hash") != fake._state_hash({**st, "state": want}):
+            raise AssertionError(f"마감 {offset}초: 보고 상태해시가 그 상태의 해시가 아니다")
+
+
+def _case_double_keeps_knowhow_close_reasons() -> None:
+    """`knowhow` 는 종결 사유가 **둘뿐**이다 — 그 제약도 더블에 있어야 한다(codex 5R HIGH).
+
+    ★★구판 더블은 아무 사유나 받아 방을 닫았고, 실물·우리 리듀서는 `bad_transition` 으로
+      격리했다(`solved` 하나로 갈렸다). ★유형별 제약을 **한 곳만** 옮기면 나머지가 그대로 구멍이고,
+      그 구멍은 더블이 「받아 주는」 쪽이라 로컬은 언제나 초록이다.
+    ★기대값은 우리 리듀서의 표에서 온다 — 두 벌이 갈리면 여기가 붉어진다.
+    """
+    from agora.reducer import KNOWHOW_CLOSE_REASONS
+    fake = _fake_relay()
+    if fake._KNOWHOW_CLOSE_REASONS != KNOWHOW_CLOSE_REASONS:
+        raise AssertionError(f"더블의 종결 사유 표가 계약과 갈렸다: "
+                             f"{sorted(fake._KNOWHOW_CLOSE_REASONS)} vs "
+                             f"{sorted(KNOWHOW_CLOSE_REASONS)}")
+    for reason in ("solved", *sorted(KNOWHOW_CLOSE_REASONS)):
+        allowed = reason in KNOWHOW_CLOSE_REASONS
+        relay, _gen, head = _double_room(fake, gtype="knowhow")
+        row = _double_put(relay, "close", head,
+                          fake._state_hash(relay.rooms["t1"]["state"]),
+                          {"reason": reason}, gtype="knowhow")
+        if row.get("valid") is not allowed:
+            raise AssertionError(f"knowhow close(reason={reason}) 를 "
+                                 f"{row.get('valid')} 로 판정했다(기대 {allowed})")
+        if not allowed and row.get("reason") != "bad_transition":
+            raise AssertionError(f"사유 밖 종결이 {row.get('reason')} 다(bad_transition 이어야 한다)")
+        closed = relay.rooms["t1"]["state"]["state"] == "closed"
+        if closed is not allowed:
+            raise AssertionError(f"reason={reason}: 방 닫힘 {closed}(기대 {allowed})")
+
+
+def _case_double_separates_transport_head_from_state_head() -> None:
+    """머리는 **둘이고 뜻이 다르다** — vote 는 상태 머리를 안 옮기지만 사슬은 잇는다(5R MEDIUM).
+
+    ★★실물 `order()` 는 `by_prev` 로 사슬을 엮으므로 **vote 의 해시를 `prev` 로 삼은 글이 사슬에
+      이어진다**(genesis → vote → post 셋 다 수용). 반면 `apply()` 는 vote 에서 `continue` 해
+      `state["head"]` 를 안 옮긴다(계약 §5 규칙 5). 구판 더블은 이 둘을 한 칸으로 써서
+      **vote 뒤의 정상 후속 글을 `lost_race` 로 밀어냈다.**
+    ★한 칸으로 쓰면 둘 중 하나는 반드시 틀린다: 3R 은 「자리 소유」쪽을 고쳤고(`claimed_prevs`),
+      이 쪽이 남아 있었다. **같은 이름이 두 뜻을 가리키면 판정이 흔들린다.**
+    ★대조군을 함께 둔다 — vote 가 이미 차지한 자리(genesis)를 다시 claim 하면 여전히 `lost_race` 다.
+    """
+    fake = _fake_relay()
+    relay, _gen, head = _double_room(fake)
+    before = fake._state_hash(relay.rooms["t1"]["state"])
+    vote = _double_put(relay, "vote", head, before, {"choice": "a"})
+    if vote.get("valid") is not True:
+        raise AssertionError(f"vote 가 거부됐다: {vote}")
+    if relay.rooms["t1"]["state"]["head"] != head:
+        raise AssertionError("vote 가 상태의 머리를 옮겼다(계약 §5 규칙 5)")
+    if relay.rooms["t1"]["head"] != vote["hash"]:
+        raise AssertionError("vote 가 운반 사슬의 머리를 안 옮겼다(사슬은 이어진다)")
+    # ★vote 의 해시에 매달린 정상 글 — 상태 해시는 **vote 전 그대로**다(머리가 안 갔으니까).
+    after = _double_put(relay, "post", vote["hash"], before, {"round": 0, "body": "x"})
+    if (after.get("valid"), after.get("reason")) != (True, None):
+        raise AssertionError(f"vote 뒤 정상 후속 글을 밀어냈다: {after}")
+    # 대조군: 이미 찬 자리를 다시 claim 하면 진다(3R 봉합이 그대로 살아 있는가).
+    relay2, _g2, head2 = _double_room(fake)
+    sh2 = fake._state_hash(relay2.rooms["t1"]["state"])
+    _double_put(relay2, "vote", head2, sh2, {"choice": "a"})
+    dup = _double_put(relay2, "post", head2, sh2, {"round": 0, "body": "x"})
+    if (dup.get("valid"), dup.get("reason")) != (False, "lost_race"):
+        raise AssertionError(f"이미 찬 자리를 다시 내줬다: {dup}")
 
 
 def _case_audit_read_fails_closed_on_repeated_cursor() -> None:
@@ -11559,6 +11647,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("더블: 유형 경계를 지킨다",      _case_double_enforces_type_kind_boundary, None),
     ("더블: 만료를 양쪽으로 잰다",    _case_double_measures_expiry_both_ways, None),
     ("대조읽기: 부분 결과로 안 끝난다", _case_audit_read_fails_closed_on_repeated_cursor, None),
+    # ── F-1 봉합 5차(codex 5R REVISE · 2026-09-09) ─────────────────────────
+    ("더블: knowhow 종결 사유를 지킨다", _case_double_keeps_knowhow_close_reasons, None),
+    ("더블: 두 머리는 뜻이 다르다", _case_double_separates_transport_head_from_state_head, None),
 )
 
 
@@ -11667,6 +11758,23 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if state.get("type") != "debate" or state.get("state") not in _DEBATE_ROUNDS:\n        return False',
      '    if True:\n        return False',
      "더블: 만료를 양쪽으로 잰다"),
+    # ── F-1 봉합 5차(codex 5R REVISE · 2026-09-09) — 「수용은 맞고 상태가 갈린다」 ────────
+    ("M375-double-never-transitions-to-expired", "tests/fake_relay.py",
+     '    if _expired_now(state.get("_deadlines"), state):\n        return {**state, "state": _EXPIRED}',
+     '    if False:\n        return {**state, "state": _EXPIRED}',
+     "더블: 만료를 양쪽으로 잰다"),
+    ("M376-double-closes-knowhow-with-any-reason", "tests/fake_relay.py",
+     '        if state.get("type") == "knowhow" and \\\n                payload.get("reason") not in _KNOWHOW_CLOSE_REASONS:\n            return "bad_transition"',
+     '        if False:\n            return "bad_transition"',
+     "더블: knowhow 종결 사유를 지킨다"),
+    ("M377-double-conflates-the-two-heads", "tests/fake_relay.py",
+     '        if state is not None and kind != "vote":\n            state["head"] = digest\n        room["head"] = digest',
+     '        if kind != "vote":\n            room["head"] = digest\n        if state is not None:\n            state["head"] = room["head"]',
+     "더블: 두 머리는 뜻이 다르다"),
+    ("M378-gate-order-reversed", "tests/fake_relay.py",
+     '    if state.get("state") == "closed":\n        return "after_close"\n    allowed = _ALLOWED_KINDS.get(state.get("type"))\n    if allowed is not None and kind not in allowed:\n        return "kind_not_allowed"',
+     '    allowed = _ALLOWED_KINDS.get(state.get("type"))\n    if allowed is not None and kind not in allowed:\n        return "kind_not_allowed"\n    if state.get("state") == "closed":\n        return "after_close"',
+     "더블: 유형 경계를 지킨다"),
     ("M362-resolution-skips-local-round-gate", "agora/tools.py",
      '    if state.get("state") != "r3":',
      '    if False:',

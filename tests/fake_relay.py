@@ -239,13 +239,20 @@ class FakeRelay:
                 state["head"] = digest
                 return {"valid": False, "stale": False, "quarantined": True,
                         "reason": denied}
-        if kind != "vote":
-            # vote 는 머리를 안 옮긴다(계약 §5 규칙 5).
-            # ⚠문자열 검색으로 재면 **본문에 그 글자가 든 발언**까지 vote 로 읽는다
-            #   (agy 1R 지적 4 · 수용) — 파싱해서 `kind` 칸을 본다.
-            room["head"] = digest
-        if state is not None:
-            state["head"] = room["head"]
+        # ★★**머리는 둘이고, 뜻이 다르다**(codex 5R MEDIUM · 2026-09-09).
+        #   ⑴**운반 사슬의 머리**(`room["head"]`)는 **언제나** 간다 — `vote` 도 사슬에 자리를
+        #     남긴다. 실물 `order()` 는 `by_prev` 로 엮으므로 **vote 의 해시를 `prev` 로 삼은 글이
+        #     사슬에 이어진다**(genesis → vote → post 셋 다 수용).
+        #   ⑵**상태의 머리**(`state["head"]`)는 `vote` 에서 **안 간다**(계약 §5 규칙 5 ·
+        #     실물 `apply()` 가 vote 에서 `continue` 해 `state["head"] = hash` 를 건너뛴다).
+        #   구판은 이 둘을 한 칸으로 써서, vote 뒤에 온 **정상 후속 글**을 `lost_race` 로 밀어냈다
+        #   (리듀서는 3건 전부 수용). ★한 칸으로 쓰면 둘 중 하나는 반드시 틀린다 —
+        #   3R 은 「자리 소유」쪽을 고쳤고(그건 맞다 · `claimed_prevs`), 이 쪽이 남아 있었다.
+        # ⚠kind 는 파싱해서 본다 — 문자열 검색으로 재면 **본문에 그 글자가 든 발언**까지
+        #   vote 로 읽는다(agy 1R 지적 4 · 수용).
+        if state is not None and kind != "vote":
+            state["head"] = digest
+        room["head"] = digest
         return {"valid": True, "stale": False, "quarantined": False, "reason": None}
 
     def derived(self, room_id: str) -> dict[str, Any]:
@@ -272,7 +279,9 @@ class FakeRelay:
         #   한 번도 안 도는 갈래**를 갖게 되고, 어댑터가 그 칸을 버려도(codex 2R HIGH) 리허설은
         #   초록이다. 값은 **더블이 계약에서 옮겨 적은 전이 규칙**으로 만든 것이라, 우리 리듀서와
         #   갈리면 리허설이 그 자리에서 붉어진다 — 그 붉음이 두 구현의 등가 증명이다.
-        state = (self.rooms.get(room_id) or {}).get("state")
+        # ★**보고 경계에서 만료를 입힌다**(codex 5R HIGH) — 저장된 상태는 라운드 그대로 두고
+        #   밖으로 나가는 상태·상태해시만 실물의 「루프 뒤 만료 전이」를 반영한다.
+        state = _effective_state(self.rooms.get(room_id) or {})
         if state:
             out.update({"state": state["state"], "round": state["round"],
                         "state_hash": _state_hash(state),
@@ -601,6 +610,29 @@ _ALLOWED_KINDS: dict[str, frozenset[str]] = {
 }
 
 
+# `knowhow` 의 종결 사유 — 계약 §6 에서 옮겨 적는다(실물과 같은 두 값).
+_KNOWHOW_CLOSE_REASONS: frozenset[str] = frozenset({"superseded", "archived"})
+
+
+def _effective_state(room: dict[str, Any]) -> dict[str, Any] | None:
+    """**밖으로 보이는 상태** — 실물의 「루프 뒤 만료 전이」를 더블에서도 낸다(계약 §2-3 ④).
+
+    ★★구판은 만료를 `_expected_state_ok` 의 관대함으로만 알고 있었고, **상태 자체는 절대
+      만료로 가지 않았다**(codex 5R HIGH): 마감이 지난 방에 정상 글을 넣으면 더블은
+      `state:r0`, 실물·우리 리듀서는 `state:expired` — **상태 해시가 갈렸다.** 새로 넣은
+      만료 시험이 `valid` 만 봐서 그 어긋남을 통과시켰다(★수용 여부만 재면 상태는 안 잰다).
+    ★저장된 상태는 **라운드 상태 그대로** 둔다: 실물도 그렇게 하고(만료는 이벤트가 아니라
+      시간이 만드는 상태라 사슬에 남지 않는다), 다음 글의 CAS 는 그 둘 **모두**를 인정한다
+      (`_expected_state_ok`). ⇒ 입히는 자리는 **보고 경계 한 곳**뿐이다.
+    """
+    state = room.get("state")
+    if not state:
+        return None
+    if _expired_now(state.get("_deadlines"), state):
+        return {**state, "state": _EXPIRED}
+    return state
+
+
 def _gate_denial(state: dict[str, Any], kind: str | None) -> str | None:
     """전이 **앞의 두 문** — 닫힌 방인가 · 이 유형이 받는 kind 인가(실물 reducer 3단 2·3 검사).
 
@@ -663,6 +695,13 @@ def _apply_transition(room: dict[str, Any], body: str, kind: str | None,
         # ★운영자도 닫을 수 있다(계약 §6). 2차 판이 이 갈래를 빠뜨려 더블만 방을 안 닫았다.
         if who not in (state["chair"], state["requester"]) and who not in operators:
             return "permission"
+        # ★★`knowhow` 는 종결 사유가 **두 개뿐**이다(계약 §6 · `agora/reducer.py:589` ·
+        #   `relay/src/lib/reducer.ts:398`). 구판 더블은 아무 사유나 받아 방을 닫았고,
+        #   실물·우리 리듀서는 `bad_transition` 으로 격리했다 — `solved` 하나로 갈렸다
+        #   (codex 5R HIGH). ★유형별 제약을 한 곳만 옮기면 나머지가 그대로 구멍이다.
+        if state.get("type") == "knowhow" and \
+                payload.get("reason") not in _KNOWHOW_CLOSE_REASONS:
+            return "bad_transition"
         state["state"], state["close_reason"] = "closed", payload.get("reason")
     elif kind == "abort":
         if who not in operators:
@@ -684,7 +723,9 @@ def verdict_of_row(row: dict[str, Any], room: dict[str, Any]) -> dict[str, Any]:
     """
     reducer_said = ("accepted" if row.get("valid") is not False
                     else "quarantined" if row.get("quarantined") else "stale")
-    state = room.get("state")
+    # ★`derived()` 와 **같은 상태**를 보고한다(만료 입힌 것) — 두 문이 다른 상태를 말하면
+    #   클라이언트는 어느 쪽을 믿어야 할지 모른다(codex 5R HIGH 의 같은 축).
+    state = _effective_state(room)
     return {"accepted_to_ledger": True, "reducer": reducer_said,
             "reason": row.get("reason"),
             "state_hash": _state_hash(state) if state else None}
@@ -724,6 +765,11 @@ CONTRACT_COVERAGE: tuple[dict[str, Any], ...] = (
      "why": "실물·우리 리듀서가 chain[0].message_id 로 시드한다 — 안 넣으면 그 입력에서 갈린다"},
     {"check": "만료 판정(마감 경과 + 유예 300초)", "where": "_expired_now", "judged": True,
      "why": "안 재면서 만료 해시를 무조건 허용하면 실물보다 넓게 뚫려 그 축의 시험이 빈다"},
+    {"check": "만료 전이(루프 뒤 · 보고 상태·상태해시에 반영)", "where": "_effective_state",
+     "judged": True,
+     "why": "수용 여부만 맞고 상태가 갈리면 3자 대조의 state_hash 축이 통째로 거짓 초록이 된다"},
+    {"check": "§6 knowhow 종결 사유 제한(superseded·archived)", "where": "_apply_transition",
+     "judged": True, "why": "solved 로 닫으면 실물은 bad_transition 인데 더블만 방을 닫았다"},
     {"check": "§6 유형별 허용 kind(kind_not_allowed)", "where": "_gate_denial", "judged": True,
      "why": "debate 방의 answer_selected 를 더블만 solved 로 받아 시험이 잘못된 동작을 정답으로 고정했다"},
     {"check": "닫힌 방에 온 글(after_close)", "where": "_gate_denial", "judged": True,
