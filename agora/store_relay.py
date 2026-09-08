@@ -504,8 +504,19 @@ class RelayStore:
                     "stale": item.get("stale"), "reason": item.get("reason"),
                 })
             page_cursor = data.get("next_cursor")
-            if not page_cursor or page_cursor in seen:
+            if not page_cursor:
                 break
+            # ★★**부분 결과는 대조에서 가장 위험한 값이다**(codex 4R HIGH · 2026-09-09).
+            #   구판은 반복 커서를 그냥 `break` 해 **오류 없이 앞 두 페이지만** 돌려줬다.
+            #   그 값을 받는 자리가 `triple_check`(3자 대조)와 `audit_verdict`(응답 유실 뒤
+            #   재조회)인데, 둘 다 **없는 행을 「없음」으로 읽는다** — 세 번째 페이지에 있던
+            #   `valid:false` 가 사라지고 대조는 `invalid:0 · mismatch:[]` 로 초록,
+            #   재조회는 「내 글이 안 보이니 안 적혔다」로 갈린다.
+            #   ⇒ `fetch` 와 **같은 문으로** 죽는다(code 7). 자르는 판단은 읽는 쪽이 아니라
+            #   부르는 쪽의 몫이고, 여기서는 **모른다고 말하는 것이 옳다.**
+            if page_cursor in seen:
+                raise AgoraError(errors.STORE, "릴레이가 같은 커서를 되풀이한다",
+                                 {"room": thread_id, "where": "audit_events"})
             seen.add(page_cursor)
         return rows
 

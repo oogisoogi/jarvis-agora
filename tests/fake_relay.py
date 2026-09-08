@@ -204,11 +204,30 @@ class FakeRelay:
         if state is not None and not _expected_state_ok(body, state,
                                                         state.get("_deadlines")):
             # ★격리해도 사슬은 지나갔다 — 머리를 전진시킨다(실물 reject() 와 같다).
-            room["head"] = digest
+            # ★★**머리는 둘이다**(codex 4R HIGH · 2026-09-09): 운반 `head` 만 옮기고
+            #   `state["head"]` 를 두면 다음 글의 `expected_state`(= 상태 해시 8칸 · **머리 포함**)가
+            #   영원히 어긋나 **정상 글이 연쇄 거부**된다. 실물 `reject()` 는 `state.head` 를 옮긴다
+            #   (`agora/reducer.py:482` · `relay/src/lib/reducer.ts:286`) — 안 옮기면 한 사람이
+            #   이벤트 하나로 방을 영구 동결시킬 수 있다(L-1 교착이 정확히 그 병이었다).
+            #   ⇒ 「거부해도 자리는 지나갔다」는 **두 머리 모두에** 적용된다.
+            room["head"] = state["head"] = digest
             return {"valid": False, "stale": False, "quarantined": True,
                     "reason": "stale_expected_state"}
         kind = _kind_of(body)
         if state is not None:
+            gate = _gate_denial(state, kind)
+            if gate:
+                # ★★**유형 경계와 마감은 전이보다 먼저다**(codex 4R HIGH · 2026-09-09).
+                #   구판은 이 문이 없어서 `debate` 방에 `answer_selected` 를 넣으면 더블이
+                #   `valid:true`·`state:solved` 를 냈다 — 실물·우리 리듀서는 `kind_not_allowed`
+                #   격리다. 그리고 D4 가 **그 잘못된 동작을 정답으로 고정**하고 있었다.
+                #   ★공허한 시험보다 나쁘다: 공허한 시험은 아무것도 막지 않지만, 잘못을
+                #   고정한 시험은 **바로잡는 쪽을 붉게 만든다**(실제로 codex 가 옳은 게이트를
+                #   넣자 D4 가 실패했다).
+                #   격리하고 **머리는 둘 다 전진**시킨다(실물 reject() 와 같다).
+                room["head"] = state["head"] = digest
+                return {"valid": False, "stale": False, "quarantined": True,
+                        "reason": gate}
             denied = _apply_transition(room, body, kind, self.roster_text.get("operators", ""))
             if denied:
                 # ★★**권한에서 걸린 글은 「유효」가 아니다**(codex 3R HIGH · 2026-09-09).
@@ -571,6 +590,33 @@ def _expired_now(deadlines: dict[str, Any], state: dict[str, Any]) -> bool:
     return now.timestamp() > t.timestamp() + _EXPIRED_GRACE_SECONDS
 
 
+# 유형 → 그 유형이 받는 kind — **계약 §6 에서 손으로 옮겨 적는다**(`agora/reducer.ALLOWED_KINDS`
+# ·실물 `relay/src/lib/reducer.ts` 와 같은 표). ⛔`agora.reducer` 를 import 해서 쓰면 대조가
+# 자기 자신과의 대조가 되어 아무것도 못 잡는다 — 두 벌을 두고, 갈리면 `test_d4` 가 붉어진다.
+_ALLOWED_KINDS: dict[str, frozenset[str]] = {
+    "problem": frozenset({"post", "answer_selected", "close", "vote", "abort"}),
+    "knowhow": frozenset({"post", "close", "vote", "abort"}),
+    "debate": frozenset({"post", "advance", "resolution", "close", "delegate_chair",
+                         "vote", "abort"}),
+}
+
+
+def _gate_denial(state: dict[str, Any], kind: str | None) -> str | None:
+    """전이 **앞의 두 문** — 닫힌 방인가 · 이 유형이 받는 kind 인가(실물 reducer 3단 2·3 검사).
+
+    ★순서가 계약이다: 실물은 `after_close` 를 먼저 보고 그다음 `kind_not_allowed` 를 본다.
+      뒤집으면 닫힌 방에 유형 밖 kind 를 넣었을 때 **두 구현이 다른 사유**를 낸다.
+    ⚠모르는 유형(`_ALLOWED_KINDS` 에 없는 type)은 여기서 판정하지 않는다 — 실물은 그 자리에서
+      죽고(닫힌 표), 유형 값 자체는 계약 §2-1 스키마 문이 막는다. 없는 사실을 지어내지 않는다.
+    """
+    if state.get("state") == "closed":
+        return "after_close"
+    allowed = _ALLOWED_KINDS.get(state.get("type"))
+    if allowed is not None and kind not in allowed:
+        return "kind_not_allowed"
+    return None
+
+
 def _apply_transition(room: dict[str, Any], body: str, kind: str | None,
                       operators_text: str = "") -> str | None:
     """상태 해시 8칸을 바꾸는 전이를 적용한다. **거부하면 사유를 돌려준다**(= 격리).
@@ -678,6 +724,10 @@ CONTRACT_COVERAGE: tuple[dict[str, Any], ...] = (
      "why": "실물·우리 리듀서가 chain[0].message_id 로 시드한다 — 안 넣으면 그 입력에서 갈린다"},
     {"check": "만료 판정(마감 경과 + 유예 300초)", "where": "_expired_now", "judged": True,
      "why": "안 재면서 만료 해시를 무조건 허용하면 실물보다 넓게 뚫려 그 축의 시험이 빈다"},
+    {"check": "§6 유형별 허용 kind(kind_not_allowed)", "where": "_gate_denial", "judged": True,
+     "why": "debate 방의 answer_selected 를 더블만 solved 로 받아 시험이 잘못된 동작을 정답으로 고정했다"},
+    {"check": "닫힌 방에 온 글(after_close)", "where": "_gate_denial", "judged": True,
+     "why": "kind 문과 같은 계약 단락의 앞 문이다 — 하나만 옮기면 닫힌 방에서 두 구현이 갈린다"},
     {"check": "§3-1 등록 소유 증명 서명", "where": "POST /register",
      "judged": True, "why": "require_proof 스위치로 켜고 끈다"},
     {"check": "§3-6b 체크포인트(운영자·서명·해시 정합)", "where": "POST /participants/checkpoint",

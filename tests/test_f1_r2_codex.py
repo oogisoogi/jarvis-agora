@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agora import core, errors, reducer, tools           # noqa: E402
 from agora.errors import AgoraError                       # noqa: E402
 from agora.event import event_hash, new_id, render_post    # noqa: E402
+from agora.event import parse_post as reducer_parse         # noqa: E402
 
 
 # ── 공통 도우미 ─────────────────────────────────────────────────────────────
@@ -50,6 +51,37 @@ class _Ledger:
     def append(self, **row: object) -> dict[str, object]:
         self.rows.append(row)
         return row
+
+
+def _reduce_bodies(bodies: list[str], *, operators: frozenset[str] = frozenset(),
+                   now: str | None = None) -> dict[str, object]:
+    """**우리 리듀서를 오라클로 세운다** — 같은 본문 묶음을 `order()+apply()` 에 먹인다.
+
+    ★★왜 이것이 필요한가(codex 4R HIGH · 이 파일이 실제로 낸 사고): D4 ⑷ 는 `debate` 방에
+      `answer_selected` 를 넣고 「더블이 solved 를 낸다」를 정답으로 적어 뒀다. 실물·우리
+      리듀서는 그 kind 를 problem 전용으로 보고 `kind_not_allowed` 로 격리한다 —
+      ⇒ 시험이 **잘못된 동작을 정답으로 고정**했고, 옳은 게이트를 넣는 쪽이 붉어졌다.
+      **공허한 시험보다 나쁘다.** 원인은 하나다: 기대값을 **내 머리에서** 적고 리듀서에
+      물어보지 않았다. 그래서 이제 D 계열은 기대값을 **리듀서에서 받아 온다.**
+    ⛔`collect()` 는 지나간다(서명·명부 검증은 이 축의 관심이 아니고, 시험이 그 준비에
+      매달리면 정작 전이 축을 못 잰다). 판정 경로는 `order()+apply()` 로 실물과 같다.
+    ⚠예산은 넉넉히 준다 — 예산은 더블이 판정 안 한다고 표에 적힌 축이라 대조를 흐린다.
+    """
+    from agora.contract_open import GENESIS_PREV
+    valid = []
+    for i, body in enumerate(bodies):
+        parsed = reducer_parse(body)
+        ev = parsed["event"]
+        valid.append({"node_id": f"ev_{i:016d}",
+                      "created_at": f"2026-09-09T00:00:{i:02d}.000Z",
+                      "event": ev, "canonical": parsed.get("canonical", body),
+                      "hash": event_hash(ev), "kind": ev["kind"], "from": ev["from"],
+                      "message_id": ev["message_id"], "prev": ev["prev"] or GENESIS_PREV,
+                      "fingerprint": None, "roster_stale": False, "scrub_recheck": False})
+    ordered = reducer.order({"thread_id": "t1", "valid": valid,
+                             "quarantined": [], "stale": []})
+    return reducer.apply(ordered, operators=operators, now=now,
+                         budget={"posts_per_round": 99, "max_chars_per_round": 99999})
 
 
 # ── [CRITICAL] 응답 유실 뒤 valid:false 를 「존재함 = committed」로 오판 ──────
@@ -304,6 +336,39 @@ def _seed_room(relay) -> tuple[str, str]:
     return "t1", event_hash(gen)
 
 
+def _double_kit(mod: object) -> tuple:
+    """더블 방을 세우고 글을 얹는 두 도우미 — **D 계열과 4R 시험이 함께 쓴다.**
+
+    ★D4 안에만 두면 새 시험이 같은 것을 다시 적게 되고, 그때 **유형·마감 같은 인자가 한쪽에만**
+      생겨 두 벌이 조용히 갈린다(이 파일이 이미 그 사고를 냈다 — D4 ⑷ 가 debate 방을 썼다).
+    """
+    def room(gtype: str = "debate", ops: str = "",
+             deadlines: dict | None = None) -> tuple:
+        relay = mod.FakeRelay()                          # type: ignore[attr-defined]
+        relay.roster_text["operators"] = ops
+        payload: dict = {"type": gtype, "topic": "t"}
+        if gtype == "debate":
+            payload["chair"] = "alice"
+        if deadlines is not None:
+            payload["deadlines"] = deadlines
+        gen = {"v": 1, "kind": "genesis", "thread_id": "t1", "message_id": new_id(),
+               "prev": "", "expected_state": "", "from": "alice", "roster": "r0",
+               "scrub": {"rules": "b0", "blocked": False, "redacted": []},
+               "ts": "2026-09-09T00:00:00.000Z", "payload": payload}
+        relay.append_event(thread_id="t1", category=gtype, title="t",
+                           body=render_post(gen), is_genesis=True)
+        return relay, gen, event_hash(gen)
+
+    def put(relay: object, kind: str, prev: str, expected: str, payload: dict,
+            frm: str = "alice", gtype: str = "debate") -> dict:
+        return relay.append_event(                       # type: ignore[attr-defined]
+            thread_id="t1", category=gtype, title="", body=_body(
+                kind=kind, prev=prev, expected_state=expected, payload=payload,
+                **{"from": frm}), is_genesis=False)
+
+    return room, put
+
+
 def test_d1_fake_relay_must_reject_wrong_expected_state() -> None:
     """`prev` 는 맞는데 `expected_state` 가 틀린 글 — 실물은 `stale_expected_state` 로 격리한다."""
     mod = _fake_relay_module()
@@ -340,10 +405,12 @@ _JUDGED_AXES = (
     "message_id 재사용", "사슬 경합", "expected_state == stateHash(state)",
     "vote 는 머리를 안 옮긴다", "전이 권한", "사슬 자리 소유", "post_ids 시드",
     "만료 판정", "등록 소유 증명 서명", "체크포인트",
+    # ★codex 4R HIGH — 「무엇을 판정하는가」에 유형 경계가 없어서, 시험이 잘못된 동작을 고정했다.
+    "유형별 허용 kind", "after_close",
 )
 _UNJUDGED_AXES = (
     "kind 9종 payload 닫힌 스키마", "스크럽 백스톱", "만료 중 운영자 대리 의장 위임",
-    "예산", 
+    "예산",
 )
 
 
@@ -380,22 +447,7 @@ def test_d4_double_matches_reducer_on_the_transitions_it_claims() -> None:
     """
     mod = _fake_relay_module()
 
-    def room(ops: str = ""):
-        relay = mod.FakeRelay()
-        relay.roster_text["operators"] = ops
-        gen = {"v": 1, "kind": "genesis", "thread_id": "t1", "message_id": new_id(),
-               "prev": "", "expected_state": "", "from": "alice", "roster": "r0",
-               "scrub": {"rules": "b0", "blocked": False, "redacted": []},
-               "ts": "2026-09-09T00:00:00.000Z",
-               "payload": {"type": "debate", "topic": "t", "chair": "alice"}}
-        relay.append_event(thread_id="t1", category="debate", title="t",
-                           body=render_post(gen), is_genesis=True)
-        return relay, gen, event_hash(gen)
-
-    def put(relay, kind, prev, expected, payload, frm="alice"):
-        return relay.append_event(thread_id="t1", category="debate", title="", body=_body(
-            kind=kind, prev=prev, expected_state=expected, payload=payload,
-            **{"from": frm}), is_genesis=False)
+    room, put = _double_kit(mod)
 
     # ⑴ vote 는 머리를 안 옮기지만 **그 자리는 찼다** — 뒤에 온 같은 prev 는 진다.
     relay, gen, head = room()
@@ -417,17 +469,175 @@ def test_d4_double_matches_reducer_on_the_transitions_it_claims() -> None:
     assert relay.rooms["t1"]["state"]["state"] == "closed", relay.rooms["t1"]["state"]
 
     # ⑷ genesis 는 답 후보다(우리 리듀서가 post_ids 를 그렇게 시드한다).
-    relay, gen, head = room()
+    # ★★**방을 problem 으로 고쳤다**(codex 4R HIGH · 2026-09-09). 구판은 이 검사를 `debate`
+    #   방에서 했는데 `answer_selected` 는 **problem 전용**이다(계약 §6) — 실물·우리 리듀서는
+    #   `kind_not_allowed` 로 격리하고, 그 시절 더블은 유형을 안 봐서 `solved` 를 냈다.
+    #   ⇒ 이 시험은 **더블만 내는 답을 정답으로 고정**하고 있었다. 기대값을 이제 리듀서에서 받는다.
+    relay, gen, head = room(gtype="problem")
     sh = mod._state_hash(relay.rooms["t1"]["state"])
-    put(relay, "answer_selected", head, sh, {"post_message_id": gen["message_id"]})
+    ab = put(relay, "answer_selected", head, sh, {"post_message_id": gen["message_id"]},
+             gtype="problem")["body"]
     assert relay.rooms["t1"]["state"]["state"] == "solved", relay.rooms["t1"]["state"]
+    oracle = _reduce_bodies([render_post(gen), ab])
+    assert (oracle["state"], oracle["quarantined"]) == ("solved", []), oracle
 
-    # ⑸ 마감이 없으면 만료 해시는 통하지 않는다(넓게 뚫린 문을 닫는다).
+    # ⑸ 만료는 **양쪽으로** 잰다 — 아래 test_m4 가 마감 전/후를 같이 댄다.
+    #    여기서는 「마감이 없으면 만료 해시가 안 통한다」만 본다(넓게 뚫린 문).
     relay, gen, head = room()
     st = relay.rooms["t1"]["state"]
     row = put(relay, "post", head, mod._state_hash({**st, "state": "expired"}),
               {"round": 0, "body": "x"})
     assert (row["valid"], row["reason"]) == (False, "stale_expected_state"), row
+
+
+# ── codex 4R(2026-09-09 · REVISE) 재현 프로브 승격 ──────────────────────────
+# ★★4R 의 세 HIGH 는 **전부 「봉합이 절반이었다」**의 판본이다: ⑴머리를 하나만 옮겼다
+#   ⑵유형 경계를 안 옮겼다 ⑶ 두 문 중 한 문만 fail-closed 로 만들었다.
+#   ⇒ 같은 규칙을 두 자리에 적어야 할 때, **한 자리만 적으면 시험은 초록이고 실물은 갈린다.**
+
+
+def test_h1_double_advances_state_head_after_cas_quarantine() -> None:
+    """CAS 격리 뒤 **다음 정상 글이 통해야** 한다(codex 4R HIGH · fake_relay.py 격리 분기).
+
+    ★★구판은 운반 `head` 만 옮기고 `state["head"]` 를 genesis 에 뒀다. 상태 해시 8칸에는
+      **머리가 들어 있으므로**, 다음 사람이 실물 기준으로 옳게 계산한 `expected_state` 가
+      영원히 어긋나 **정상 글이 연쇄 거부**된다 — 한 사람의 이벤트 하나로 방이 동결된다
+      (L-1 교착과 같은 병이고, 실물 `reject()` 는 두 머리를 함께 옮겨 그것을 막는다).
+    ★D1·D4 는 **첫 거부만** 봤기 때문에 이 결함을 못 잡았다. 그래서 이 시험은 **거부 다음 글**을 본다.
+    """
+    mod = _fake_relay_module()
+    room, put = _double_kit(mod)
+    relay, gen, head = room()
+    gb = render_post(gen)
+
+    bad = put(relay, "post", head, "definitely-wrong", {"round": 0, "body": "x"})
+    assert (bad["valid"], bad["reason"]) == (False, "stale_expected_state"), bad
+    # ★두 머리가 함께 갔는가 — 이것이 다음 글의 `expected_state` 를 결정한다.
+    state = relay.rooms["t1"]["state"]
+    assert relay.rooms["t1"]["head"] == state["head"] == bad["hash"], \
+        f"격리 뒤 머리가 갈렸다(운반 {relay.rooms['t1']['head'][:8]} vs 상태 {state['head'][:8]})"
+
+    # ★기대값은 **우리 리듀서에서 받아 온다** — 격리된 글까지 먹인 뒤의 상태 해시다.
+    oracle = _reduce_bodies([gb, bad["body"]])
+    assert oracle["state_hash"] == mod._state_hash(state), \
+        f"격리 뒤 상태 해시가 두 구현에서 갈렸다: {oracle['state_hash'][:8]} vs {mod._state_hash(state)[:8]}"
+    good = put(relay, "post", bad["hash"], oracle["state_hash"], {"round": 0, "body": "y"})
+    assert (good["valid"], good["reason"]) == (True, None), \
+        f"격리 뒤 정상 글이 연쇄 거부됐다(방이 동결된다): {good}"
+    after = _reduce_bodies([gb, bad["body"], good["body"]])
+    assert len(after["events"]) == 2 and len(after["quarantined"]) == 1, after
+
+
+def test_h2_double_enforces_per_type_allowed_kinds() -> None:
+    """유형이 안 받는 kind 는 **격리**다 — `debate` 방의 `answer_selected`(codex 4R HIGH).
+
+    ★★이 자리의 구판 시험(D4 ⑷)은 **공허한 것을 넘어 잘못된 동작을 정답으로 고정**했다:
+      더블이 유형을 안 봐서 `solved` 를 냈고, 시험은 그것을 기대값으로 적었다 —
+      옳은 게이트를 넣은 쪽이 붉어졌다(codex 가 실제로 그 프로브에서 D4 실패를 봤다).
+    ★그래서 이 시험은 **두 구현에 같은 입력을 넣고 답을 견준다.** 기대값을 손으로 적지 않는다.
+    """
+    mod = _fake_relay_module()
+    room, put = _double_kit(mod)
+    for gtype, want in (("debate", "kind_not_allowed"), ("problem", None)):
+        relay, gen, head = room(gtype=gtype)
+        sh = mod._state_hash(relay.rooms["t1"]["state"])
+        row = put(relay, "answer_selected", head, sh,
+                  {"post_message_id": gen["message_id"]}, gtype=gtype)
+        oracle = _reduce_bodies([render_post(gen), row["body"]])
+        reasons = [q["reason"] for q in oracle["quarantined"]]
+        assert reasons == ([want] if want else []), (gtype, reasons)
+        assert row["reason"] == want, f"{gtype}: 더블 {row['reason']} · 리듀서 {want}"
+        if want:
+            assert (row["valid"], row["quarantined"]) == (False, True), row
+            # ★거부돼도 자리는 지나갔다 — 두 머리 모두.
+            assert relay.rooms["t1"]["head"] == relay.rooms["t1"]["state"]["head"], row
+        else:
+            assert row["valid"] is True, row
+
+    # ★닫힌 방은 그 앞 문이다(같은 계약 단락) — 하나만 옮기면 그 자리에서 갈린다.
+    relay, gen, head = room(ops="op1\n")
+    sh = mod._state_hash(relay.rooms["t1"]["state"])
+    closed = put(relay, "close", head, sh, {"reason": "solved"}, frm="op1")
+    assert closed["valid"] is True, closed
+    late = put(relay, "post", closed["hash"],
+               mod._state_hash(relay.rooms["t1"]["state"]), {"round": 0, "body": "x"})
+    assert (late["valid"], late["reason"]) == (False, "after_close"), late
+    oracle = _reduce_bodies([render_post(gen), closed["body"], late["body"]],
+                            operators=frozenset({"op1"}))
+    assert [q["reason"] for q in oracle["quarantined"]] == ["after_close"], oracle
+
+
+def test_h3_audit_events_fail_closed_on_repeated_cursor() -> None:
+    """반복 cursor 는 `fetch` 와 **같은 문으로** 죽는다 — code 7(codex 4R HIGH).
+
+    ★★구판은 `audit_events` 만 조용히 `break` 해 **부분 결과**를 냈다. 그 값을 받는 자리가
+      3자 대조와 응답 유실 재조회인데, 둘 다 **없는 행을 「없음」으로 읽는다** —
+      뒤 페이지의 `valid:false` 가 사라지고 대조는 `invalid:0 · mismatch:[]` 로 초록이 된다.
+      ⇒ 같은 위험을 두 문 중 한 문에만 막으면, 막지 않은 문이 곧 그 축의 구멍이다.
+    """
+    from agora.store_relay import RelayStore
+    pages = [
+        {"items": [{"event_id": "ev_0000000000000001", "body": "a", "valid": True}],
+         "next_cursor": "c1"},
+        {"items": [{"event_id": "ev_0000000000000002", "body": "b", "valid": True}],
+         "next_cursor": "c1"},                      # ★같은 커서 — 서버가 제자리를 돈다
+        {"items": [{"event_id": "ev_0000000000000003", "body": "c", "valid": False,
+                    "reason": "lost_race"}], "next_cursor": None},
+    ]
+
+    def store() -> object:
+        st = RelayStore.__new__(RelayStore)
+        seen = {"n": 0}
+
+        def run(method: str, path: str, **kw: object) -> dict:
+            page = pages[min(seen["n"], len(pages) - 1)]
+            seen["n"] += 1
+            return page
+
+        st._run = run                                # type: ignore[attr-defined]
+        return st
+
+    for name in ("audit_events", "fetch"):
+        try:
+            getattr(store(), name)(thread_id="t1")
+        except AgoraError as e:
+            assert e.code == errors.STORE, (name, e.code)
+        else:
+            raise AssertionError(f"{name}: 반복 커서를 부분 결과로 삼켰다(모른다고 말해야 한다)")
+
+
+def test_m4_expiry_is_measured_in_both_directions() -> None:
+    """만료 판정은 **양쪽으로** 잰다 — 마감 전은 거부 · 마감 후는 수용(codex 4R MEDIUM).
+
+    ★★구판은 「마감 없음 → 만료 해시 거부」라는 **음성 입력만** 재서, `_expired_now` 를
+      `return False` 로 무력화한 뮤턴트가 살아남았다. ★음성만 재는 검사는 「그 판정이 있다」를
+      증명하지 않는다 — 판정을 통째로 지워도 음성은 그대로 음성이다.
+    ★경계는 **유예(300초) 양쪽**에서 잰다: 유예 안이면 아직 만료가 아니고, 유예를 넘으면 만료다.
+      한쪽만 재면 유예를 지운 뮤턴트가 산다.
+    """
+    import datetime
+    mod = _fake_relay_module()
+    room, put = _double_kit(mod)
+
+    def at(offset: int) -> str:
+        t = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=offset)
+        return t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    for offset, expired in ((-3600, True), (-60, False), (3600, False)):
+        relay, gen, head = room(deadlines={"r0": at(offset)})
+        st = relay.rooms["t1"]["state"]
+        assert mod._expired_now(st["_deadlines"], st) is expired, (offset, expired)
+        # 만료 상태의 해시를 들고 온 글 — 실제로 만료일 때만 통해야 한다.
+        row = put(relay, "post", head, mod._state_hash({**st, "state": "expired"}),
+                  {"round": 0, "body": "x"})
+        assert row["valid"] is expired, (offset, expired, row)
+        if not expired:
+            assert row["reason"] == "stale_expected_state", row
+        # ★대조군 — 만료든 아니든 **지금 상태의 해시**는 언제나 통한다(과잉 차단 방지).
+        relay2, gen2, head2 = room(deadlines={"r0": at(offset)})
+        st2 = relay2.rooms["t1"]["state"]
+        ok = put(relay2, "post", head2, mod._state_hash(st2), {"round": 0, "body": "x"})
+        assert ok["valid"] is True, (offset, ok)
 
 
 # ── [MEDIUM] roster 동기화 실패 뒤에도 하네스가 쓰기로 진행 ─────────────────
