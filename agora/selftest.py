@@ -4423,7 +4423,10 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     # ★r5(agy 2R) — **더블이 계약을 얼마나 지키는가**. 더블이 무르면 그만큼 시험이 공허해지고,
     #   그 공백은 실물에서만 드러난다(같은 병을 이 저장소에서 네 번 겪었다).
     "더블충실도": ("M353-double-skips-category-binding", "M354-double-skips-title-binding",
-                   "M355-double-skips-skeleton", "M365-double-skips-expected-state"),
+                   "M355-double-skips-skeleton", "M365-double-skips-expected-state",
+                   # ★codex 4R — 더블이 무른 세 자리: 머리 하나만 옮김 · 유형 경계 없음 · 만료 미측정.
+                   "M371-double-freezes-the-room", "M372-double-ignores-type-boundary",
+                   "M374-double-never-expires"),
     # ★서버가 답한 **상태 코드**를 위로 올리는 자리. 여기가 비면 201/200 이 한 칸에 뭉쳐
     #   「새로 적었다」와 「이미 있었다」가 구별되지 않는다(P4 에서 실제로 못 쟀다).
     "쓰기상태": ("M356-write-drops-http-status",),
@@ -4440,7 +4443,9 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     # ★r6(codex 2R) — **3자 대조가 실제로 대는가**. 이 축이 비어 있어서 상태 해시가 갈렸는데도
     #   `mismatch: []` 가 나왔다. 못 읽은 축을 초록으로 세는 것도 여기서 잡는다.
     "3자대조": ("M366-triple-check-drops-state-hash",
-                "M367-triple-check-swallows-read-failure"),
+                "M367-triple-check-swallows-read-failure",
+                # ★codex 4R — 대조가 읽는 문이 **부분 결과**를 주면 없는 행이 「없음」이 된다.
+                "M373-audit-read-truncates-on-repeat"),
     # ★r6 — **읽기도 끝나야 한다**. 쓰기 재시도만 막혀 있었고 전건 읽기는 상한이 없었다.
     "읽기상한": ("M369-fetch-runs-without-a-cap",),
     # ★r7(codex 3R) — **하네스 자신**. 빨간 killer 의 KILLED 는 공짜라, 이 축이 비면
@@ -10237,6 +10242,168 @@ def _expected_in(body: str) -> str:
     return parse_post(body)["event"]["expected_state"]
 
 
+# ── codex 4R(2026-09-09 · REVISE) — 「봉합이 절반이었다」의 세 판본 ──────────────
+# ★★이 축의 셋은 **소켓 없이** 돈다(더블 모듈을 직접 부른다). 왜 그렇게 짰나: codex 는 샌드박스
+#   localhost bind 금지로 M364·M365·M368 을 `NOT-APPLIED` 로 남겼다 — **못 잰 축은 초록이 아니다.**
+#   판정 논리를 재는 데 서버가 필요 없으면 서버를 쓰지 않는다(측정 가능성도 설계다).
+
+def _double_room(fake: Any, gtype: str = "debate", ops: str = "",
+                 deadlines: dict[str, Any] | None = None) -> tuple:
+    """더블 방 하나를 세운다(소켓 없이 · 서식은 계약 §2-1 뼈대 11칸을 손으로 적는다)."""
+    from agora.event import event_hash, new_id, render_post
+    relay = fake.FakeRelay()
+    relay.roster_text["operators"] = ops
+    payload: dict[str, Any] = {"type": gtype, "topic": "t"}
+    if gtype == "debate":
+        payload["chair"] = "alice"
+    if deadlines is not None:
+        payload["deadlines"] = deadlines
+    gen = {"v": 1, "kind": "genesis", "thread_id": "t1", "message_id": new_id(),
+           "prev": "", "expected_state": "", "from": "alice", "roster": "r0",
+           "scrub": {"rules": "b0", "blocked": False, "redacted": []},
+           "ts": "2026-09-09T00:00:00.000Z", "payload": payload}
+    relay.append_event(thread_id="t1", category=gtype, title="t",
+                       body=render_post(gen), is_genesis=True)
+    return relay, gen, event_hash(gen)
+
+
+def _double_put(relay: Any, kind: str, prev: str, expected: str,
+                payload: dict[str, Any], frm: str = "alice",
+                gtype: str = "debate") -> dict[str, Any]:
+    from agora.event import new_id, render_post
+    event = {"v": 1, "kind": kind, "thread_id": "t1", "message_id": new_id(),
+             "prev": prev, "expected_state": expected, "from": frm, "roster": "r0",
+             "scrub": {"rules": "b0", "blocked": False, "redacted": []},
+             "ts": "2026-09-09T00:00:01.000Z", "payload": payload}
+    return relay.append_event(thread_id="t1", category=gtype, title="",
+                              body=render_post(event), is_genesis=False)
+
+
+def _case_double_advances_both_heads_on_quarantine() -> None:
+    """CAS 격리 뒤 **다음 정상 글이 통한다** — 머리는 둘이고 둘 다 간다(codex 4R HIGH).
+
+    ★★상태 해시 8칸에는 **머리가 들어 있다.** 운반 `head` 만 옮기고 `state["head"]` 를 두면
+      다음 사람이 옳게 계산한 `expected_state` 가 영원히 어긋나 **정상 글이 연쇄 거부**된다 —
+      한 사람의 이벤트 하나로 방이 영구 동결된다(L-1 교착과 같은 병 · 실물 `reject()` 는
+      `state.head` 를 옮겨 그것을 막는다).
+    ★기존 D1·D4 는 **첫 거부만** 봤기 때문에 이 결함을 못 잡았다. ⇒ 여기서는 **거부 다음 글**을 본다.
+    """
+    fake = _fake_relay()
+    relay, _gen, head = _double_room(fake)
+    bad = _double_put(relay, "post", head, "definitely-wrong", {"round": 0, "body": "x"})
+    if (bad.get("valid"), bad.get("reason")) != (False, "stale_expected_state"):
+        raise AssertionError(f"틀린 expected_state 를 격리 안 했다: {bad}")
+    state = relay.rooms["t1"]["state"]
+    if relay.rooms["t1"]["head"] != state["head"] != bad["hash"]:
+        raise AssertionError(f"격리 뒤 두 머리가 갈렸다: 운반 {relay.rooms['t1']['head'][:8]} "
+                             f"· 상태 {state['head'][:8]}")
+    good = _double_put(relay, "post", bad["hash"], fake._state_hash(state),
+                       {"round": 0, "body": "y"})
+    if (good.get("valid"), good.get("reason")) != (True, None):
+        raise AssertionError(f"격리 뒤 정상 글이 연쇄 거부됐다(방이 동결된다): {good}")
+
+
+def _case_double_enforces_type_kind_boundary() -> None:
+    """유형이 안 받는 kind 는 **격리**다 — `debate` 방의 `answer_selected`(codex 4R HIGH).
+
+    ★★이 자리의 구판 시험은 공허한 것을 넘어 **잘못된 동작을 정답으로 고정**했다: 더블이
+      유형을 안 봐서 `solved` 를 냈고 시험이 그것을 기대값으로 적었다 — 옳은 게이트를 넣는
+      쪽이 붉어졌다. ★더블이 실물보다 무르면 시험이 비고, 그 무름을 고정하면 시험이 **해롭다.**
+    ★기대값은 우리 리듀서의 `ALLOWED_KINDS`(계약 §6)에서 온다. 두 벌이 갈리면 여기가 붉어진다.
+    """
+    from agora import reducer
+    fake = _fake_relay()
+    for gtype, want in (("debate", "kind_not_allowed"), ("problem", None)):
+        if (("answer_selected" in reducer.ALLOWED_KINDS[gtype]) is (want is not None)):
+            raise AssertionError(f"계약 표가 움직였다 — 기대값을 다시 세워라: {gtype}")
+        relay, gen, head = _double_room(fake, gtype=gtype)
+        sh = fake._state_hash(relay.rooms["t1"]["state"])
+        row = _double_put(relay, "answer_selected", head, sh,
+                          {"post_message_id": gen["message_id"]}, gtype=gtype)
+        if row.get("reason") != want:
+            raise AssertionError(f"{gtype}: 더블 {row.get('reason')} · 계약 {want}")
+        if want and not row.get("quarantined"):
+            raise AssertionError(f"{gtype}: 유형 밖 kind 는 격리다: {row}")
+    # ★닫힌 방은 같은 계약 단락의 **앞 문**이다 — 하나만 옮기면 그 자리에서 두 구현이 갈린다.
+    relay, _gen, head = _double_room(fake, ops="op1\n")
+    closed = _double_put(relay, "close", head,
+                         fake._state_hash(relay.rooms["t1"]["state"]),
+                         {"reason": "solved"}, frm="op1")
+    late = _double_put(relay, "post", closed["hash"],
+                       fake._state_hash(relay.rooms["t1"]["state"]),
+                       {"round": 0, "body": "x"})
+    if (late.get("valid"), late.get("reason")) != (False, "after_close"):
+        raise AssertionError(f"닫힌 방에 온 글을 받았다: {late}")
+
+
+def _case_double_measures_expiry_both_ways() -> None:
+    """만료는 **양쪽으로** 잰다 — 마감 전은 거부 · 마감 후(유예 300초 초과)는 수용(4R MEDIUM).
+
+    ★★음성 입력만 재는 검사는 「그 판정이 있다」를 증명하지 않는다: `_expired_now` 를
+      `return False` 로 지워도 음성은 그대로 음성이라 초록이었다(codex 가 그 뮤턴트로 보였다).
+    ★유예 **양쪽**을 잰다 — 한쪽만 재면 유예를 지운 변이가 산다.
+    """
+    import datetime
+    fake = _fake_relay()
+
+    def at(offset: int) -> str:
+        t = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=offset)
+        return t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    for offset, expired in ((-3600, True), (-60, False), (3600, False)):
+        relay, _gen, head = _double_room(fake, deadlines={"r0": at(offset)})
+        st = relay.rooms["t1"]["state"]
+        if fake._expired_now(st["_deadlines"], st) is not expired:
+            raise AssertionError(f"만료 판정이 마감 {offset}초에서 틀렸다(기대 {expired})")
+        row = _double_put(relay, "post", head,
+                          fake._state_hash({**st, "state": "expired"}),
+                          {"round": 0, "body": "x"})
+        if row.get("valid") is not expired:
+            raise AssertionError(f"마감 {offset}초: 만료 해시 수용이 {row.get('valid')}"
+                                 f"(기대 {expired})")
+
+
+def _case_audit_read_fails_closed_on_repeated_cursor() -> None:
+    """`audit_events` 는 반복 커서를 `fetch` 와 **같은 문으로** 죽인다 — code 7(4R HIGH).
+
+    ★★구판은 `audit_events` 만 조용히 `break` 해 **부분 결과**를 냈다. 그 값을 받는 자리가
+      3자 대조와 응답 유실 재조회인데 둘 다 **없는 행을 「없음」으로 읽는다** — 뒤 페이지의
+      `valid:false` 가 사라지고 대조는 `invalid:0 · mismatch:[]` 로 초록이 된다.
+      ⇒ 같은 위험을 두 문 중 한 문에만 막으면, 막지 않은 문이 그 축의 구멍이다.
+    """
+    from agora.store_relay import RelayStore
+    pages = [
+        {"items": [{"event_id": "ev_0000000000000001", "body": "a", "valid": True}],
+         "next_cursor": "c1"},
+        {"items": [{"event_id": "ev_0000000000000002", "body": "b", "valid": True}],
+         "next_cursor": "c1"},
+        {"items": [{"event_id": "ev_0000000000000003", "body": "c", "valid": False,
+                    "reason": "lost_race"}], "next_cursor": None},
+    ]
+
+    def store() -> Any:
+        st = RelayStore.__new__(RelayStore)
+        seen = {"n": 0}
+
+        def run(method: str, path: str, **kw: Any) -> dict[str, Any]:
+            page = pages[min(seen["n"], len(pages) - 1)]
+            seen["n"] += 1
+            return page
+
+        st._run = run
+        return st
+
+    for name in ("audit_events", "fetch"):
+        try:
+            getattr(store(), name)(thread_id="t1")
+        except AgoraError as e:
+            if e.code != errors.STORE:
+                raise AssertionError(f"{name}: 반복 커서를 code {e.code} 로 냈다(7 이어야 한다)")
+        else:
+            raise AssertionError(f"{name}: 반복 커서를 부분 결과로 삼켰다 — "
+                                 "대조가 없는 행을 「없음」으로 읽는다")
+
+
 def _triple_check_fn() -> Any:
     """리허설 하네스의 3자 대조 — 파일에서 직접 읽어 온다(`tools/` 는 패키지가 아니다)."""
     import importlib.util
@@ -11387,6 +11554,11 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("읽기: 전건 읽기는 끝난다",      _case_full_fetch_terminates, None),
     ("하네스: killer 가 먼저 초록이어야 한다", _case_mutation_harness_needs_a_green_killer, None),
     ("하네스: 변이 앵커가 대상을 겨눈다",   _case_mutation_anchors_still_aim_at_something, None),
+    # ── F-1 봉합 4차(codex 4R REVISE · 2026-09-09) ─────────────────────────
+    ("더블: 격리 뒤 두 머리가 간다",  _case_double_advances_both_heads_on_quarantine, None),
+    ("더블: 유형 경계를 지킨다",      _case_double_enforces_type_kind_boundary, None),
+    ("더블: 만료를 양쪽으로 잰다",    _case_double_measures_expiry_both_ways, None),
+    ("대조읽기: 부분 결과로 안 끝난다", _case_audit_read_fails_closed_on_repeated_cursor, None),
 )
 
 
@@ -11478,6 +11650,23 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "            if not killer_green(killer):\n                rows.append({\"mutation\": mid, \"result\": \"NOT-APPLIED\",\n                             \"why\": \"killer 가 변이 전부터 실패한다(측정 실패 — KILLED 가 공짜다)\",",
      "            if False:\n                rows.append({\"mutation\": mid, \"result\": \"NOT-APPLIED\",\n                             \"why\": \"killer 가 변이 전부터 실패한다(측정 실패 — KILLED 가 공짜다)\",",
      "하네스: killer 가 먼저 초록이어야 한다"),
+    # ── F-1 봉합 4차(codex 4R REVISE · 2026-09-09) — 「봉합이 절반이었다」 세 판본 ────────
+    ("M371-double-freezes-the-room", "tests/fake_relay.py",
+     '            room["head"] = state["head"] = digest\n            return {"valid": False, "stale": False, "quarantined": True,\n                    "reason": "stale_expected_state"}',
+     '            room["head"] = digest\n            return {"valid": False, "stale": False, "quarantined": True,\n                    "reason": "stale_expected_state"}',
+     "더블: 격리 뒤 두 머리가 간다"),
+    ("M372-double-ignores-type-boundary", "tests/fake_relay.py",
+     "            gate = _gate_denial(state, kind)\n            if gate:",
+     "            gate = None\n            if gate:",
+     "더블: 유형 경계를 지킨다"),
+    ("M373-audit-read-truncates-on-repeat", "agora/store_relay.py",
+     '            if page_cursor in seen:\n                raise AgoraError(errors.STORE, "릴레이가 같은 커서를 되풀이한다",\n                                 {"room": thread_id, "where": "audit_events"})',
+     '            if page_cursor in seen:\n                break',
+     "대조읽기: 부분 결과로 안 끝난다"),
+    ("M374-double-never-expires", "tests/fake_relay.py",
+     '    if state.get("type") != "debate" or state.get("state") not in _DEBATE_ROUNDS:\n        return False',
+     '    if True:\n        return False',
+     "더블: 만료를 양쪽으로 잰다"),
     ("M362-resolution-skips-local-round-gate", "agora/tools.py",
      '    if state.get("state") != "r3":',
      '    if False:',
@@ -11603,9 +11792,13 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if not signature:\n            raise AgoraError(errors.PRECONDITION,',
      '        if False:\n            raise AgoraError(errors.PRECONDITION,',
      "등록: 증명 없이 안 보낸다"),
+    # ⚠앵커에 `seen_cursors` 줄을 **붙여 둔다**: 2026-09-09 audit_events 를 fetch 와 같은
+    #   모양으로 fail-closed 시키자 이 세 줄이 그 파일에 **2곳**이 됐고, 하네스가
+    #   NOT-APPLIED(= 그 축 미측정)를 냈다. 겨냥한 함수만 갖는 이름(`seen_cursors`)이 있으면
+    #   앵커는 다시 유일해진다 — ★모양이 같은 코드가 는 것은 결함이 아니라 **앵커의 일이 는 것**이다.
     ("M305-relay-fetch-stops-at-first-page", "agora/store_relay.py",
-     '            page_cursor = data.get("next_cursor")\n            if not page_cursor:\n                break',
-     '            page_cursor = data.get("next_cursor")\n            if True:\n                break',
+     '            page_cursor = data.get("next_cursor")\n            if not page_cursor:\n                break\n            # ★같은 커서를 두 번 받으면 **서버가 제자리를 돈다** — 무한히 돌지 않고 멈춘다.\n            if page_cursor in seen_cursors:',
+     '            page_cursor = data.get("next_cursor")\n            if True:\n                break\n            # ★같은 커서를 두 번 받으면 **서버가 제자리를 돈다** — 무한히 돌지 않고 멈춘다.\n            if page_cursor in seen_cursors:',
      "릴레이: 페이지를 끝까지 받는다"),
     # ★2026-09-05 r2 재조준 3건(M306·M325·M326) — agy 봉합으로 `_map_status` 가 `wrap` 을 쓰게 되며
     #   조준 문자열이 사라졌다. 옮기지 않으면 그 축이 **NOT-APPLIED 로 조용히 꺼진다**(같은 형태 4번째).
