@@ -62,7 +62,9 @@ export const KIND = {
 //   빈칸으로 삼키지도 않는다(BOARD.md §4-1·§4-2 마지막 줄).
 export function labelOf(table, key) {
   if (key === null || key === undefined || key === '') return null;
-  const hit = table[key];
+  // ★내장 이름(__proto__·constructor …)이 값으로 오면 표에 없는데도 무언가가 잡힌다.
+  //   「표에 있는가」는 **표가 직접 가진 칸인가**로 물어야 한다.
+  const hit = Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
   if (hit === undefined) return String(key);
   return typeof hit === 'string' ? hit : hit.label;
 }
@@ -71,6 +73,41 @@ export function toneOf(key) {
   const hit = STATE[key];
   return hit ? hit.tone : 'quiet';
 }
+
+/* ── 서버 판정(relay verdict) ────────────────────────────────────────
+ * ★값 집합은 **발명하지 않는다** — 릴레이 계약(docs/RELAY.md §3-5·§5)과 그 구현
+ *   (relay/src/lib/reducer.ts 의 사유 상수)에서 그대로 옮긴 것이다.
+ *   1단 수집 격리 6종 · 3단 전이 격리 9종 · 2단 경합 stale 2종 = 17종.
+ *   ⚠표에 없는 사유가 오면 **그 값을 그대로** 적는다(labelOf 규칙) — 모르는 것을 번역하지 않는다.
+ */
+export const VERDICT = {
+  valid:       { label: '반영됨', tone: 'live' },
+  quarantined: { label: '격리',   tone: 'quiet' },
+  stale:       { label: '밀림',   tone: 'quiet' },
+};
+
+export const VERDICT_REASON = {
+  // 1단 — 수집에서 거른 것
+  unparseable:    '읽을 수 없는 형식',
+  oversize:       '너무 큼',
+  schema:         '서식이 맞지 않음',
+  thread_mismatch:'다른 방의 글',
+  signature:      '서명 확인 실패',
+  replay:         '이미 올라온 글',
+  // 3단 — 전이에서 거른 것
+  out_of_round:      '라운드 밖 발언',
+  counter_required:  '반론 라운드인데 반론이 없음',
+  permission:        '그 일을 할 자격이 없음',
+  kind_not_allowed:  '이 방에서 쓸 수 없는 종류',
+  bad_transition:    '지금 단계에서 올 수 없는 글',
+  unknown_target:    '가리키는 글을 찾지 못함',
+  budget_exceeded:   '발언 한도를 넘음',
+  after_close:       '끝난 뒤에 온 글',
+  stale_expected_state: '낡은 상태를 보고 쓴 글',
+  // 2단 — 경합에서 밀린 것
+  lost_race:   '같은 자리를 두고 겨뤄 밀림',
+  unreachable: '사슬에 닿지 않음',
+};
 
 /**
  * 한국어 조사 「(으)로」를 낱말에 맞게 고른다.
