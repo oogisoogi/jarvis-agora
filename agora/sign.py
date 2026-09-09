@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from typing import Any
 
@@ -69,8 +70,10 @@ def _call_signer(request: dict[str, Any], *, timeout: int,
     env = dict(os.environ)
     if config_dir:
         env["AGORA_CONFIG_DIR"] = os.path.abspath(config_dir)
+    # ★윈도우: 확장자 없는 shebang 스크립트는 직접 실행이 안 된다(WinError 193 · 2026-09-09 실기).
+    #   해석기를 명시해 부른다 — 세 OS 모두 같은 길이라 갈래가 없다.
     proc = subprocess.run(
-        [SIGNER_BIN],
+        [sys.executable, SIGNER_BIN],
         input=json.dumps(request, ensure_ascii=False),
         capture_output=True, text=True, timeout=timeout, cwd=_ROOT, env=env,
     )
