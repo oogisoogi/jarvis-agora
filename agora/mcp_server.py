@@ -120,7 +120,8 @@ def _cli_name(mcp_name: str) -> str | None:
 JSONRPC = "2.0"
 # 협상 가능한 규약 판본. 클라이언트가 보낸 값을 **되돌려 준다** — 우리가 아는 것일 때만.
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2024-11-05")
-SERVER_INFO = {"name": "agora", "version": "0.1.0"}
+from agora import __version__ as _AGORA_VERSION
+SERVER_INFO = {"name": "agora", "version": _AGORA_VERSION}  # ★코드 판본에서 파생(하드코딩 금지 · codex 1R ⑤)
 
 # JSON-RPC 가 정한 오류 코드. ★**우리 code 는 버리지 않고 `data` 에 넣는다** —
 #   규약 코드로 좁히면 「어느 계약이 막았는가」가 사라진다.

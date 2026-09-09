@@ -72,10 +72,13 @@ def _call_signer(request: dict[str, Any], *, timeout: int,
         env["AGORA_CONFIG_DIR"] = os.path.abspath(config_dir)
     # ★윈도우: 확장자 없는 shebang 스크립트는 직접 실행이 안 된다(WinError 193 · 2026-09-09 실기).
     #   해석기를 명시해 부른다 — 세 OS 모두 같은 길이라 갈래가 없다.
+    # ★인코딩도 고정한다 — 한국어 윈도우의 기본 문자셋(cp949)은 대시·이모지를 못 담아
+    #   ensure_ascii=False 본문이 서명 전에 UnicodeEncodeError 로 죽는다(codex 1R ④).
     proc = subprocess.run(
         [sys.executable, SIGNER_BIN],
         input=json.dumps(request, ensure_ascii=False),
-        capture_output=True, text=True, timeout=timeout, cwd=_ROOT, env=env,
+        capture_output=True, text=True, encoding="utf-8", errors="strict",
+        timeout=timeout, cwd=_ROOT, env=env,
     )
     if proc.returncode != 0:
         try:

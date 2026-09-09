@@ -11624,8 +11624,8 @@ def _case_cli_surface_accepts_flag_arguments() -> None:
 def _case_invite_join_brief_stands_alone() -> None:
     """초대장 1단계가 **혼자 선다** — 설치 도우미 없이도, 그리고 판본이 오르면 적색이 난다.
 
-    ★왜 이 케이스가 필요한가(2026-09-09 박사님 전제 정정): 참가자는 「이미 어떤 방법으로든
-      자비스를 깐 사람」이다. 참가 경로가 특정 설치 도우미에 묶이면 **그 도우미를 안 쓴 사람은
+    ★왜 이 케이스가 필요한가(2026-09-09 운영자 전제 정정): 참가자는 「이미 어떤 방법으로든
+      에이전트를 깐 사람」이다. 참가 경로가 특정 설치 도우미에 묶이면 **그 도우미를 안 쓴 사람은
       참가할 방법이 없다.** 그런데 그 결합은 문서에서 **한 줄 되돌리면 조용히 돌아온다** —
       그래서 규율이 아니라 여기서 잰다.
     ★★그리고 **판본 결박**이 이 케이스의 진짜 값이다: 초대장은 꾸러미 주소와 지문을 손으로 적는다.
@@ -11650,13 +11650,19 @@ def _case_invite_join_brief_stands_alone() -> None:
 
     # ⑵ 꾸러미 주소의 판본 = 지금 클라이언트 판본.
     import re
-    m = re.search(r"agora-client-([0-9][^.]*\.[^.]*\.[^.\s/]+)\.zip", head)
-    if not m:
-        raise AssertionError("1단계에 꾸러미 주소가 없다")
-    if m.group(1) != __version__:
+    #    ★문서 **전체**의 주소 전건이다(1단계 본문 + 맥·리눅스 덩어리) — 첫 자리만 보면
+    #      두 번째 주소가 옛 판본으로 남아도 초록이 된다(codex 1R ⑤ 맹점).
+    vers = re.findall(r"agora-client-([0-9][^.]*\.[^.]*\.[^.\s/]+)\.zip", text)
+    if not vers:
+        raise AssertionError("초대장에 꾸러미 주소가 없다")
+    if set(vers) != {__version__}:
         raise AssertionError(
-            f"초대장의 꾸러미 판본이 낡았다: 문서={m.group(1)} 코드={__version__} "
-            f"— 주소·지문 두 줄을 함께 갱신하라(빌더가 내는 두 줄을 그대로 옮긴다)")
+            f"초대장의 꾸러미 판본이 갈렸다: 문서={sorted(set(vers))} 코드={__version__} "
+            f"— 주소·지문 두 줄을 **모든 자리에서** 함께 갱신하라(빌더가 내는 두 줄을 그대로 옮긴다)")
+    shas = set(re.findall(r"\b[0-9a-f]{64}\b", text))
+    if len(shas) != 1:
+        raise AssertionError(
+            f"초대장의 꾸러미 지문이 한 값이 아니다({len(shas)}종) — 옛 지문이 남았다")
 
     # ⑶ 지문 한 줄과 **거절 규칙**. 지문만 있고 거절이 없으면 그 지문은 장식이다.
     if not re.search(r"\b[0-9a-f]{64}\b", head):
