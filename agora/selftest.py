@@ -8740,6 +8740,14 @@ def _case_mcp_speaks_jsonrpc_not_our_dialect() -> None:
         raise AssertionError(f"도구 능력을 안 밝힌다: {init.get('capabilities')}")
     if not (init.get("serverInfo") or {}).get("name"):
         raise AssertionError("serverInfo 가 없다")
+    from agora import __version__ as _ver
+    if (init.get("serverInfo") or {}).get("version") != _ver:
+        raise AssertionError(
+            f"serverInfo.version 이 코드 판본에서 파생되지 않는다: {init.get('serverInfo')} vs {_ver}")
+    from agora import __version__ as _ver
+    if (init.get("serverInfo") or {}).get("version") != _ver:
+        raise AssertionError(
+            f"serverInfo.version 이 코드 판본에서 파생되지 않는다: {init.get('serverInfo')} vs {_ver}")
 
     listed = [t["name"] for t in lines[1]["result"]["tools"]]
     want = sorted(cli.mcp_tool_name(n) for n in tools.CORE_TOOLS)
@@ -11663,6 +11671,14 @@ def _case_invite_join_brief_stands_alone() -> None:
     if len(shas) != 1:
         raise AssertionError(
             f"초대장의 꾸러미 지문이 한 값이 아니다({len(shas)}종) — 옛 지문이 남았다")
+    #    ★자리별 존재 — 맥·리눅스 덩어리의 `URL=`·`SHA=` 두 줄이 통째로 빠져도 위 집합 검사는
+    #      초록이 된다(codex 2R ⑤-b). 그 덩어리는 set -u 라 빠지면 사람이 그 자리에서 막힌다.
+    for need in (f"URL=https://jarvis.godmeyou.kr/install/agora-client-{__version__}.zip",
+                 "SHA=" + next(iter(shas))):
+        if need not in text:
+            raise AssertionError(f"초대장 맥·리눅스 덩어리에 이 줄이 없다: {need}")
+    if "주소 = https://jarvis.godmeyou.kr/install/agora-client-" not in head or "지문 = " not in head:
+        raise AssertionError("초대장 1단계 본문에 주소·지문 줄이 없다")
 
     # ⑶ 지문 한 줄과 **거절 규칙**. 지문만 있고 거절이 없으면 그 지문은 장식이다.
     if not re.search(r"\b[0-9a-f]{64}\b", head):

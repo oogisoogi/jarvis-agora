@@ -251,7 +251,9 @@ def _claim_mismatch(event: Any, report: dict[str, Any]) -> dict[str, Any] | None
 def main() -> int:
     # ★표준 입출력을 utf-8 로 고정한다 — 부모(sign.py)가 utf-8 로 보내고 받는다.
     #   기본 문자셋이 cp949 인 윈도우에서 둘이 갈리면 서명 본문이 조용히 깨진다.
-    for stream in (sys.stdin, sys.stdout):
+    # ★stderr 도 포함한다 — 오류 JSON(한글 message)이 cp949 로 나가면 부모의 utf-8 strict 디코드가
+    #   죽어 code 2/3/4/10 계약이 사라진다(codex 2R ④-d).
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
         reconf = getattr(stream, "reconfigure", None)
         if reconf is not None:
             reconf(encoding="utf-8", errors="strict")
