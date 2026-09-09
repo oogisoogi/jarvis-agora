@@ -11621,7 +11621,58 @@ def _case_cli_surface_accepts_flag_arguments() -> None:
             os.environ["AGORA_CONFIG_DIR"] = old_dir
 
 
+def _case_invite_join_brief_stands_alone() -> None:
+    """초대장 1단계가 **혼자 선다** — 설치 도우미 없이도, 그리고 판본이 오르면 적색이 난다.
+
+    ★왜 이 케이스가 필요한가(2026-09-09 박사님 전제 정정): 참가자는 「이미 어떤 방법으로든
+      자비스를 깐 사람」이다. 참가 경로가 특정 설치 도우미에 묶이면 **그 도우미를 안 쓴 사람은
+      참가할 방법이 없다.** 그런데 그 결합은 문서에서 **한 줄 되돌리면 조용히 돌아온다** —
+      그래서 규율이 아니라 여기서 잰다.
+    ★★그리고 **판본 결박**이 이 케이스의 진짜 값이다: 초대장은 꾸러미 주소와 지문을 손으로 적는다.
+      판본이 오르면 그 두 줄은 **낡았는데도 멀쩡해 보인다**(주소는 200 을 주지 않고, 지문은
+      아무것과도 안 맞는다). 받는 사람 화면에는 「지문이 다릅니다」만 뜨고, 그 사람은 자기가
+      뭘 잘못했는지 묻게 된다. ⇒ 주소 안의 판본이 `agora.__version__` 과 갈리면 여기서 멈춘다.
+    ⚠**이 케이스가 못 잡는 것 = 판본은 그대로인데 지문만 낡은 경우.** 꾸러미에는 이 하네스
+      파일(`agora/*.py`)이 함께 담기므로 **여기를 고치는 것만으로도 꾸러미 바이트가 바뀐다** —
+      판본을 안 올린 채 다시 게시하면 문서의 지문은 조용히 낡는다. 그 자리를 막을 손잡이는
+      아직 없다(게시본은 저장소 밖에 있고 빌드는 기계마다 같은 바이트를 보장하지 않는다).
+      ⇒ 게시할 때 **주소·지문 두 줄을 사람이 함께 옮긴다**는 규율이 여기서는 잔여로 남는다.
+    """
+    from agora import __version__
+    text = _read_text(os.path.join(_ROOT, "docs", "INVITE.md"))
+    head = text[text.index("## 여러분이 하는 일"):text.index("**2. 에이전트 창에")]
+
+    # ⑴ 설치 도우미에 묶이지 않는다. **낱말이 아니라 결합**을 겨눈다 —
+    #    「설치 점검」 같은 정당한 쓰임까지 잡으면 케이스가 곧 꺼진다.
+    for banned in ("설치기", "설치 도우미", "[11/11]", "다시 돌리기만"):
+        if banned in head:
+            raise AssertionError(f"1단계가 설치 도우미에 다시 묶였다: {banned!r}")
+
+    # ⑵ 꾸러미 주소의 판본 = 지금 클라이언트 판본.
+    import re
+    m = re.search(r"agora-client-([0-9][^.]*\.[^.]*\.[^.\s/]+)\.zip", head)
+    if not m:
+        raise AssertionError("1단계에 꾸러미 주소가 없다")
+    if m.group(1) != __version__:
+        raise AssertionError(
+            f"초대장의 꾸러미 판본이 낡았다: 문서={m.group(1)} 코드={__version__} "
+            f"— 주소·지문 두 줄을 함께 갱신하라(빌더가 내는 두 줄을 그대로 옮긴다)")
+
+    # ⑶ 지문 한 줄과 **거절 규칙**. 지문만 있고 거절이 없으면 그 지문은 장식이다.
+    if not re.search(r"\b[0-9a-f]{64}\b", head):
+        raise AssertionError("1단계에 꾸러미 지문(64자리)이 없다")
+    if "지문이 다르면" not in head or "멈춘다" not in head:
+        raise AssertionError("지문이 어긋났을 때 멈추라는 규칙이 1단계에 없다")
+
+    # ⑷ 참가에 실제로 필요한 명령이 다 있다(빠지면 그 자리에서 사람이 막힌다).
+    for need in ("keygen", "register --relay https://agora.godmeyou.kr --unattended",
+                 "sync-roster --yes", "whoami", "selfcheck"):
+        if need not in head:
+            raise AssertionError(f"1단계에 이 단계가 없다: {need!r}")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
+    ("초대: 1단계가 혼자 선다",     _case_invite_join_brief_stands_alone, None),
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
     ("bad-error-code → 10",       _case_bad_error_code,       errors.ARGUMENT),

@@ -369,7 +369,11 @@ def whoami(*, directory: str | None = None) -> dict[str, Any]:
         "participants/operators": os.path.join(directory, "operators")})
     return {
         "approval_gate": {
-            "state": "켜짐" if approval_on else "꺼짐(설치가 껐다)",
+            # ★「설치가 껐다」가 아니라 **설정이 껐다**(2026-09-09). 참가 경로가 설치 도우미에서
+            #   풀리면서 이 겹을 끄는 것은 `--unattended` 를 손으로 쓴 **그 사람**이 됐다 —
+            #   없는 행위자에게 책임을 돌리면, 끈 사람이 자기가 껐다는 것을 화면에서 못 읽는다.
+            #   (`selfcheck` 는 이미 「설정이 껐다」라고 적고 있었다 — 두 화면의 말을 맞춘다.)
+            "state": "켜짐" if approval_on else "꺼짐(설정이 껐다)",
             "why": "config.json human_approval" if not approval_on else "기본값 on",
             # ★켜져 있어도 **승인자가 배선돼 있지 않다**(RC-2 실측). 그 사실을 숨기지 않는다 —
             #   숨기면 「켜짐」이 「사람이 본다」로 읽힌다.
