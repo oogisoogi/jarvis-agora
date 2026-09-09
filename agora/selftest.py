@@ -8744,10 +8744,6 @@ def _case_mcp_speaks_jsonrpc_not_our_dialect() -> None:
     if (init.get("serverInfo") or {}).get("version") != _ver:
         raise AssertionError(
             f"serverInfo.version 이 코드 판본에서 파생되지 않는다: {init.get('serverInfo')} vs {_ver}")
-    from agora import __version__ as _ver
-    if (init.get("serverInfo") or {}).get("version") != _ver:
-        raise AssertionError(
-            f"serverInfo.version 이 코드 판본에서 파생되지 않는다: {init.get('serverInfo')} vs {_ver}")
 
     listed = [t["name"] for t in lines[1]["result"]["tools"]]
     want = sorted(cli.mcp_tool_name(n) for n in tools.CORE_TOOLS)
