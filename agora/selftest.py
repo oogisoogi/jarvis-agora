@@ -5764,6 +5764,53 @@ def _case_config_examples_match_contract() -> None:
     load(d)          # ★예시가 **그대로 통과**해야 한다(S3-3 의 봉투 서식과 같은 규율)
 
 
+def _case_windows_mode_check_uses_acl() -> None:
+    """윈도우에서는 POSIX 비트 대신 **ACL 의 SID** 로 「나만 접근」을 잰다 — 0.1.1 은 윈도우에서
+    폴더 0o777·파일 0o666(고정값)을 0o700/0o600 과 비교해 6단계가 반드시 막혔다(2026-09-10 실기).
+    셋을 잰다: ⑴공개 SID 없음 = 통과 ⑵Everyone(S-1-1-0) 있음 = PRECONDITION + public_sids
+    ⑶ACL 못 읽음 = PRECONDITION(통과 아님 · fail-closed)."""
+    import json as _json
+    import os as _os
+    import tempfile
+    from unittest import mock
+    from agora import participant
+    example = _os.path.join(_ROOT, "config", "participant.json.example")
+    with open(example, encoding="utf-8") as fh:
+        doc = _json.load(fh)
+    d = tempfile.mkdtemp(prefix="agora-win-")
+    path = _os.path.join(d, "participant.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump(doc, fh)
+    # 일부러 POSIX 비트를 「윈도우 고정값」으로 둔다 — 비트를 봤다면 여기서 막혔을 것이다.
+    _os.chmod(d, 0o777)
+    _os.chmod(path, 0o666)
+    private = ["S-1-5-21-1-2-3-1001", "S-1-5-32-544", "S-1-5-18"]
+    with mock.patch.object(participant.os, "name", "nt"), \
+         mock.patch.object(participant, "_windows_acl_sids", lambda p: list(private)):
+        participant.load(d)                                   # ⑴
+    with mock.patch.object(participant.os, "name", "nt"), \
+         mock.patch.object(participant, "_windows_acl_sids", lambda p: private + ["S-1-1-0"]):
+        try:
+            participant.load(d)
+        except AgoraError as exc:                             # ⑵
+            if exc.code != errors.PRECONDITION or exc.detail.get("public_sids") != ["S-1-1-0"]:
+                raise AssertionError(f"공개 SID 판정이 다르다: {exc.code} {exc.detail}")
+        else:
+            raise AssertionError("Everyone 이 열려 있는데 통과했다")
+
+    def _boom(p):
+        raise RuntimeError("acl unreadable")
+    with mock.patch.object(participant.os, "name", "nt"), \
+         mock.patch.object(participant, "_windows_acl_sids", _boom):
+        try:
+            participant.load(d)
+        except AgoraError as exc:                             # ⑶
+            if exc.code != errors.PRECONDITION:
+                raise AssertionError(f"ACL 판독 실패가 PRECONDITION 이 아니다: {exc.code}")
+        else:
+            raise AssertionError("ACL 을 못 읽었는데 통과했다(fail-open)")
+
+
 def _case_local_commands_are_not_tools() -> None:
     """CLI 전용 명령은 **도구 표에 없다** — 대리인 세션의 손에 운영 동작을 쥐어 주지 않는다."""
     from agora import cli, tools
@@ -11947,6 +11994,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("설정: config.json 에서 온다",   _case_config_comes_from_config_json, None),
     ("설정: 없어도 승인은 켜짐",      _case_missing_config_still_requires_approval, None),
     ("설정: 예시가 계약과 일치",      _case_config_examples_match_contract, None),
+    ("설정: 윈도우는 ACL 로 잰다",    _case_windows_mode_check_uses_acl, None),
     ("CLI: 전용 명령은 도구 아니다",  _case_local_commands_are_not_tools, None),
     ("브리프: 목록은 노출표에서",     _case_brief_tools_come_from_exposure_table, None),
     ("브리프: 공집합을 적는다",       _case_brief_says_empty_is_empty, None),

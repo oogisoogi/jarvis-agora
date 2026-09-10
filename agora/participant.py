@@ -28,7 +28,54 @@ def config_dir() -> str:
     return os.path.abspath(os.environ.get("AGORA_CONFIG_DIR") or DEFAULT_DIR)
 
 
+# ★윈도우(2026-09-10 · 운영자 노트북 실기 · 0.1.1 6단계 결함): POSIX 비트는 윈도우에서
+#   폴더 0o777 · 파일 0o666 으로 **고정**이라 0o700/0o600 을 만들 수도, 잴 수도 없다.
+#   윈도우의 「나만 접근」은 ACL 이므로 같은 뜻을 ACL 로 잰다 — 널리 알려진 SID 세 개
+#   (Everyone S-1-1-0 · BUILTIN\Users S-1-5-32-545 · Authenticated Users S-1-5-11)가
+#   접근 항목에 있으면 남이 읽을 수 있는 자리다. 이름이 아니라 SID 로 비교한다(한국어
+#   윈도우에서 그룹 이름은 번역돼 보인다). ACL 을 못 읽으면 통과시키지 않는다(fail-closed).
+_WIN_PUBLIC_SIDS = ("S-1-1-0", "S-1-5-32-545", "S-1-5-11")
+
+
+def _windows_acl_sids(path: str) -> list[str]:
+    """PowerShell Get-Acl 로 접근 항목의 SID 를 낸다(허용 항목만). 실패 = 예외."""
+    import subprocess
+    cmd = (
+        "(Get-Acl -LiteralPath '" + path.replace("'", "''") + "').Access | "
+        "Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { "
+        "try { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } "
+        "catch { $_.IdentityReference.Value } }"
+    )
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+                       capture_output=True, text=True, timeout=20)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip()[:200])
+    return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def _require_private_windows(path: str, what: str) -> None:
+    try:
+        sids = _windows_acl_sids(path)
+    except Exception as exc:  # noqa: BLE001 — 못 읽으면 통과 아님
+        raise AgoraError(
+            errors.PRECONDITION,
+            f"{what} 권한(ACL)을 확인하지 못했다",
+            {"path": os.path.basename(path), "why": str(exc)[:120]},
+        ) from exc
+    public = sorted(s for s in sids if s in _WIN_PUBLIC_SIDS)
+    if public:
+        raise AgoraError(
+            errors.PRECONDITION,
+            f"{what} 은(는) 나만 접근할 수 있어야 한다 — 다른 사용자 그룹에 열려 있다",
+            {"path": os.path.basename(path), "public_sids": public,
+             "hint": "icacls <경로> /inheritance:r /grant:r \"%USERNAME%:(OI)(CI)F\""},
+        )
+
+
 def _require_mode(path: str, want: int, what: str) -> None:
+    if os.name == "nt":
+        _require_private_windows(path, what)
+        return
     mode = stat.S_IMODE(os.stat(path).st_mode)
     if mode != want:
         raise AgoraError(

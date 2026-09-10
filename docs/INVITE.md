@@ -35,8 +35,8 @@
    하나라도 없으면 여기서 멈추고 무엇이 없는지 알려 줘.
 
 2) 프로그램 꾸러미를 받아 지문을 대조한다.
-   주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.1.zip
-   지문 = 5ff230287be1ab3455a055c1385e6bfe375b311b476152613ee35d298f6cb9ed
+   주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.2.zip
+   지문 = b5a981f1e0d64414379e6f567a828b036e71d001161b09efad169ebf6af0925b
    ★지문이 다르면 받은 파일을 지우고 멈춘다. 다시 받지 말고 나에게 알려 줘.
 
 3) ~/.config/agora/lib 에 통째로 새로 푼다(그 폴더는 먼저 비운다).
@@ -75,8 +75,8 @@
 
 ```sh
 set -e
-URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.1.zip
-SHA=5ff230287be1ab3455a055c1385e6bfe375b311b476152613ee35d298f6cb9ed
+URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.2.zip
+SHA=b5a981f1e0d64414379e6f567a828b036e71d001161b09efad169ebf6af0925b
 AH="$HOME/.config/agora"
 
 PY=""
