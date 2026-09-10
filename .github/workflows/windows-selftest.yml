@@ -159,6 +159,13 @@ jobs:
                          "relay": {"url": "https://agora.godmeyou.kr", "timeout_seconds": 30}},
                         fh, ensure_ascii=False)
           PY
+          # ★명부 3종을 **빈 서식으로** 놓는다. 실물에서는 `sync-roster` 가 릴레이에서 받아 오는데,
+          #   여기서는 우리 서버를 두드리지 않기로 했으므로 그 단계를 대신한다.
+          #   ⇒ 이 축이 재는 것은 「파일이 제자리에 있는가」뿐이고, 「명부 내용이 맞는가」는 **미측정**이다.
+          #   (2026-09-11 실측: 이것이 없으면 selfcheck 의 명부_3종 축이 정당하게 FAIL 한다.)
+          for f in allowed_signers revoked_keys operators; do
+            printf '# CI 스모크 — sync-roster 대신 놓은 빈 서식\n' > "$AGORA_CONFIG_DIR/$f"
+          done
           python bin/agora whoami
           # ★릴레이를 끄면 그 축은 **미측정(3)** 이다 — 미측정을 통과로 세지 않는다.
           #   그래서 「rc 가 3 이고 실패한 축이 0」을 판정으로 삼는다.
@@ -177,10 +184,16 @@ jobs:
           if failed:
               print(f"::error::selfcheck 실패한 축 {failed}")
               raise SystemExit(1)
-          if rc != 3 or unmeasured != ["릴레이_도달"]:
-              print(f"::error::기대는 rc=3 · 미측정=[릴레이_도달] 인데 rc={rc} · {unmeasured}")
+          # ★기대하는 미측정은 **정확히 둘**이고, 둘 다 우리가 아는 이유가 있다:
+          #   · 릴레이_도달  = 우리가 --no-relay 로 껐다(CI 가 우리 서버를 매번 두드리지 않는다)
+          #   · 꾸러미_무결성 = 여기는 **개발 트리**라 내용물 표(PACKAGE-MANIFEST.json)가 없다
+          #                     — 그 축은 참가자가 받는 **꾸러미**에서만 잴 수 있다.
+          #   ⇒ 목록이 이것과 다르면(늘어도, 줄어도) 붉어진다. 미측정을 통과로 세지 않는다.
+          want = ["꾸러미_무결성", "릴레이_도달"]
+          if rc != 3 or unmeasured != want:
+              print(f"::error::기대는 rc=3 · 미측정={want} 인데 rc={rc} · {unmeasured}")
               raise SystemExit(1)
-          print("selfcheck: 실패 0 · 미측정은 릴레이_도달 하나뿐(우리가 끈 것이다)")
+          print("selfcheck: 실패 0 · 미측정 2(둘 다 이유를 아는 것)")
           PY
 
       # ── ⑥ 잔재 칸 이관 — 노트북 실기에서 사람 손을 부른 그 자리 ────────────
