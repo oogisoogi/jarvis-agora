@@ -86,10 +86,36 @@ jobs:
           print("잠금 왕복 OK ·", _lock.backend(), "·", v)
           PY
 
-      # ── ④ selftest 전건 ─────────────────────────────────────────────────
-      - name: selftest 전건
+      # ── ④ selftest ──────────────────────────────────────────────────────
+      # ★맥은 **전건**을 돈다(개발기 게이트와 같은 것).
+      - name: selftest 전건 (맥 · 개발기 게이트와 같은 것)
+        if: runner.os != 'Windows'
         shell: bash
         run: python bin/agora selftest
+
+      # ⚠윈도우는 **전건을 못 돈다** — 그리고 그 사실을 숨기지 않는다.
+      #   이 스위트에는 POSIX 전제가 여러 축에 박혀 있다(SIGKILL 드릴 · 0o700/0o600 권한 비트 ·
+      #   유닉스 전용 신호). 그것들은 윈도우에서 「고장」이 아니라 **잴 수 없는 것**이다.
+      #   ⇒ 여기서는 **재는 것을 이름으로 밝히고**, 못 잰 수를 함께 찍는다. 미측정을 초록으로 세지 않는다.
+      #   ★목록을 손으로 적지 않고 **이름 앞머리**로 고른다 — 손 목록은 새 케이스가 늘 때 조용히 썩는다.
+      - name: selftest 부분 (윈 · 재는 축을 이름으로 밝힌다)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python - <<'PY'
+          from agora import selftest
+          FAMILIES = ("잠금:", "참가자:", "whoami:", "설정:", "초대:", "contract", "codes-")
+          picked = [n for n, _fn, _c in selftest.CASES if n.startswith(FAMILIES)]
+          skipped = len(selftest.CASES) - len(picked)
+          bad = [n for n in picked if not selftest._run_one(n)]
+          print(f"잰 것 {len(picked)} · 실패 {len(bad)} · 이 job 이 **안 잰 것** {skipped}"
+                " (POSIX 전제 축 — SIGKILL 드릴·권한 비트 등 · 맥 job 이 전건으로 잰다)")
+          for n in picked:
+              print("   ·", n)
+          if bad:
+              print("::error::윈도우에서 실패한 케이스:", bad)
+              raise SystemExit(1)
+          PY
 
       # ── ⑤ 스모크 — keygen → whoami → selfcheck ──────────────────────────
       # ★register 는 **안 한다**(실물 광장에 러너가 참가자를 만들면 그 명부를 사람이 치워야 한다).

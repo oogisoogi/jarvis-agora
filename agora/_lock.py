@@ -12,9 +12,12 @@
 
 ★세 경우를 **가른다**(뭉치면 「잠갔다」와 「못 잠갔다」가 같은 얼굴이 된다):
   · POSIX  = `fcntl.flock(fd, LOCK_EX)` — 종전과 **완전히 같은 동작**이다.
-  · 윈도우 = `msvcrt.locking(fd, LK_LOCK, 1)` — 파일의 첫 1바이트를 잠근다.
-             ⚠LK_LOCK 은 약 10초를 스스로 기다렸다가 **OSError 로 포기**한다. flock 의
-             「될 때까지 기다린다」와 뜻을 맞추려면 **다시 걸어야** 한다(아래 재시도 고리).
+  · 윈도우 = `msvcrt.locking(fd, LK_NBLCK, 1)` + **우리 손으로 기다린다**.
+             ⚠`LK_LOCK` 을 쓰면 안 된다(codex 1R [6]): 그 상수는 **한 번 부를 때마다 안에서
+             1초씩 열 번**을 기다렸다가 포기한다 — 우리가 준 상한(0.2초)을 주고도 10초가
+             걸릴 수 있고, 잘못된 fd 같은 **경합이 아닌 오류**까지 그만큼 늦게 올라온다.
+             ⇒ 막히면 즉시 돌아오는 `LK_NBLCK` 을 쓰고, 기다림은 우리가 짧게 나눠 잰다.
+             그리고 **경합 오류만 다시 건다** — 나머지 OSError 는 그 자리에서 올린다.
              영원히 매달리지는 않는다 — 상한에 닿으면 **정직하게 실패**한다. 잠그지 못한 것을
              잠근 척하는 것이 제일 나쁘다.
   · 둘 다 없음 = **경고 한 줄 + 아무것도 안 함(no-op)**. 이 경우 동시 쓰기는 막히지 않는다.
@@ -28,6 +31,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 import time
@@ -44,6 +48,15 @@ NONE = "none"
 WINDOWS_WAIT_ENV = "AGORA_LOCK_WAIT_SECONDS"
 WINDOWS_WAIT_DEFAULT = 60.0
 _WINDOWS_LOCK_BYTES = 1
+# 다시 걸기 사이의 짧은 잠. 상한을 우리가 재려면 기다림도 우리 손에 있어야 한다.
+_WINDOWS_RETRY_SLEEP = 0.05
+# ★「지금은 못 잠근다」로 읽는 오류만 다시 건다. 나머지(잘못된 fd·권한)는 기다려도 그대로다.
+#   EDEADLOCK = _locking 이 경합에서 내는 값 · EACCES = 이미 잠긴 영역.
+#   ⚠**값을 호스트 errno 표에서 고르지 마라.** 이것은 윈도우 CRT `_locking` 이 내는 값이지
+#     지금 이 기계의 값이 아니다. 맥에는 `EDEADLOCK` 이라는 이름 자체가 없어서(`EDEADLK` 뿐)
+#     이름으로만 모으면 ⑴맥에서는 임포트가 죽고(실제로 났다) ⑵이름을 맞춰 고쳐도 **맥의 11**을
+#     담게 되어 정작 윈도우의 36을 안 받는다. 그래서 이름이 있으면 그 값을, 없으면 **36**을 쓴다.
+_WINDOWS_BUSY = (getattr(errno, "EDEADLOCK", 36), errno.EACCES)
 
 _warned = False
 
@@ -138,18 +151,23 @@ def release(fh: IO[Any]) -> str:
 
 
 def _windows_lock(fh: IO[Any]) -> None:
-    """LK_LOCK 을 **될 때까지** 다시 건다 — flock 의 「기다린다」와 뜻을 맞춘다.
+    """막히면 즉시 돌아오는 잠금(`LK_NBLCK`)을 **될 때까지** 다시 건다.
 
     ★상한에 닿으면 마지막 OSError 를 그대로 올린다. 「기다리다 지쳤다」를 성공으로 바꾸면
       두 프로세스가 같은 원장에 동시에 쓴다 — 그 사고는 잠금이 없는 것보다 나쁘다.
       (없는 것은 경고라도 나오지만, 이쪽은 잠근 줄 안다.)
+    ★경합이 아닌 오류는 **한 번도 다시 걸지 않는다.** 기다려도 달라지지 않는 것을 기다리면
+      진짜 원인이 상한만큼 늦게 드러난다(codex 1R [6]).
     """
     deadline = time.monotonic() + _windows_wait_seconds()
     while True:
         fh.seek(0)
         try:
-            _MOD.locking(fh.fileno(), _MOD.LK_LOCK, _WINDOWS_LOCK_BYTES)
+            _MOD.locking(fh.fileno(), _MOD.LK_NBLCK, _WINDOWS_LOCK_BYTES)
             return
-        except OSError:
+        except OSError as exc:
+            if exc.errno not in _WINDOWS_BUSY:
+                raise
             if time.monotonic() >= deadline:
                 raise
+            time.sleep(_WINDOWS_RETRY_SLEEP)

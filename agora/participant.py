@@ -17,7 +17,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Any
 
-from agora import errors
+from agora import _lock, errors
 from agora.contract_open import PARTICIPANT_FIELDS, SIGN_NAMESPACE
 from agora.errors import AgoraError
 
@@ -36,6 +36,11 @@ CONFIG_FILENAME = "config.json"
 #   ★왜 거부 대신 이관인가: 거부는 **참가자의 손을 부른다.** 실측(2026-09-10 노트북 실기)에서
 #   사람이 편집기로 그 칸을 지워야 6단계가 넘어갔다. 우리가 적은 칸을 남이 지우게 하지 않는다.
 LEGACY_FIELDS = ("relay",)
+
+# ★잔재 `relay` 칸이 사전일 때 **허용되는 칸의 전부**(닫힌 스키마 · codex 1R [5]).
+#   바깥만 검사하면 사전 한 겹이 그대로 계약 우회로가 된다 — 「relay: {url, token}」 이
+#   조용히 통과하고 token 은 소리 없이 버려진다. 버리는 자리가 어디든 같은 병이다.
+RELAY_LEGACY_KEYS = ("url", "timeout_seconds")
 
 
 def config_dir() -> str:
@@ -128,34 +133,54 @@ def load(directory: str | None = None) -> dict[str, Any]:
                          {"missing": missing})
     extra = [k for k in doc if k not in PARTICIPANT_FIELDS]
     unknown = [k for k in extra if k not in LEGACY_FIELDS]
+    unknown += _unknown_inside_legacy(doc, extra)
     if unknown:
         # 모르는 칸을 조용히 무시하면, 언젠가 누가 여기 비밀을 넣는다.
+        # ★잔재 칸 **안쪽**도 같은 규칙이다(codex 1R [5]) — 바깥만 보면 사전 한 겹이
+        #   그대로 우회로가 된다. 「모르는 것을 조용히 버린다」는 버리는 자리가 어디든 같은 병이다.
         raise AgoraError(errors.PRECONDITION, "participant.json 에 계약 밖 칸이 있다",
-                         {"extra": unknown})
-    if extra:
-        doc = _migrate_legacy(directory, path, doc, extra)
+                         {"extra": sorted(unknown)})
+    # ★★계약 검증을 **이관보다 먼저** 끝낸다(codex 1R [2]).
+    #   거부될 파일이 파일을 고치게 두면, 남이 준 participant.json 하나로 내 config.json 의
+    #   릴레이 주소가 바뀐다 — 거부는 「아무 일도 일어나지 않았다」여야 한다.
     if doc["namespace"] != SIGN_NAMESPACE:
         raise AgoraError(errors.PRECONDITION, "namespace 불일치",
                          {"got": doc["namespace"]})
     if type(doc["operator"]) is not bool:
         raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)
+    if extra:
+        doc = _migrate_legacy(directory, path, doc, extra)
     return doc
 
 
-# ── 잔재 칸 이관(2026-09-11 · 0.1.3) ──────────────────────────────────────────
+# ── 잔재 칸 이관(2026-09-11 · 0.1.3 · codex 1R 봉합 반영) ────────────────────
 # ★순서가 계약이다: **config.json 을 먼저 쓰고, 그것이 성공했을 때만** participant.json 을 고친다.
 #   반대로 하면 이관 도중 실패했을 때 주소가 **양쪽 어디에도 없는** 상태가 만들어진다.
 # ★어느 단계에서 실패하든 **load 는 실패시키지 않는다.** 실패는 경고로 말하고, 읽어 낸 값은
 #   그대로 돌려준다 — 파일을 고치지 못한 것이 「참가자를 못 읽는 것」이 되면 F-3 을 형태만
 #   바꿔 되풀이하는 셈이다(그때도 사람 손을 부르는 것이 문제였다).
+# ★이관 전체는 **옆 파일 잠금** 아래에서 한다(codex 1R [3]). 두 프로세스가 같은 옛 파일을
+#   동시에 읽으면 뒤늦은 쪽이 **이미 정리된 파일을 백업**해 원본이 백업에서 사라진다.
+#   잠근 뒤에 **다시 읽는다** — 잠그기 전에 읽은 것은 이미 낡았을 수 있기 때문이다.
+
+
+def _unknown_inside_legacy(doc: dict[str, Any], legacy: list[str]) -> list[str]:
+    """잔재 칸 **안쪽**의 모르는 칸 이름(`relay.token` 꼴)을 낸다."""
+    out: list[str] = []
+    for name in legacy:
+        value = doc.get(name)
+        if name == "relay" and type(value) is dict:
+            out += [f"relay.{k}" for k in value if k not in RELAY_LEGACY_KEYS]
+    return out
 
 
 def _relay_patch(value: Any) -> dict[str, Any]:
     """잔재 `relay` 칸의 값을 config.json 의 모양으로 옮긴다.
 
     옛 설치기가 적은 것은 **주소 문자열**이다(`"relay": "https://…"`). 뒤에 누가 사전으로
-    적었을 경우도 받는다. 그 둘 밖의 모양은 **정체 불명**이므로 이관하지 않는다 —
-    모양을 추측해 옮기면 틀린 주소를 조용히 심는다.
+    적었을 경우도 받되 **칸은 닫혀 있다**(`RELAY_LEGACY_KEYS` — 모르는 칸은 load 가 이미 거부했다).
+    그 둘 밖의 모양은 **정체 불명**이므로 이관하지 않는다 — 모양을 추측해 옮기면 틀린 주소를
+    조용히 심는다.
     """
     from agora.store_relay import DEFAULT_TIMEOUT_SECONDS
     if type(value) is str and value.strip():
@@ -192,12 +217,74 @@ def _write_private(path: str, text: str) -> None:
         raise
 
 
+def _write_new_backup(path: str, text: str) -> str:
+    """**아무것도 덮지 않는** 백업을 만든다 — 이름이 겹치면 옆자리를 잡는다(codex 1R [3]).
+
+    ★`os.replace` 로 백업을 쓰면 같은 초에 두 번 이관될 때 앞 백업이 소리 없이 사라진다.
+      백업의 값어치는 「덮이지 않는다」는 것뿐이므로 `O_EXCL` 로 **만들어지는 것 자체를** 건다.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base = f"{path}.bak-{stamp}"
+    candidate, n = base, 2
+    while True:
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            candidate, n = f"{base}-{n}", n + 1
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return candidate
+
+
 def _migrate_legacy(directory: str, path: str, doc: dict[str, Any],
                     legacy: list[str]) -> dict[str, Any]:
-    """알려진 잔재 칸을 config.json 으로 옮기고, participant.json 을 계약대로 되돌린다."""
-    cleaned = {k: v for k, v in doc.items() if k in PARTICIPANT_FIELDS}
-    config_path = os.path.join(directory, CONFIG_FILENAME)
+    """알려진 잔재 칸을 config.json 으로 옮기고, participant.json 을 계약대로 되돌린다.
 
+    잠금을 잡지 못하면(잠글 수단이 없는 파이썬 포함) **이관을 포기하고 읽기만 살린다** —
+    잠금 없이 고치는 것보다 안 고치는 편이 낫다(다음 실행이 다시 시도한다).
+    """
+    cleaned = {k: v for k, v in doc.items() if k in PARTICIPANT_FIELDS}
+    try:
+        lock = open(path + ".lock", "a+")           # noqa: SIM115 — 아래 finally 가 닫는다
+    except OSError as exc:
+        sys.stderr.write(f"경고: 이관 잠금 파일을 열지 못했다({exc}) — 이번엔 옮기지 않는다.\n")
+        return cleaned
+    try:
+        _lock.acquire(lock)
+        try:
+            return _migrate_locked(directory, path, cleaned, legacy)
+        finally:
+            _lock.release(lock)
+    except OSError as exc:
+        sys.stderr.write(f"경고: 이관 잠금을 잡지 못했다({exc}) — 이번엔 옮기지 않는다.\n")
+        return cleaned
+    finally:
+        lock.close()
+
+
+def _migrate_locked(directory: str, path: str, cleaned: dict[str, Any],
+                    legacy: list[str]) -> dict[str, Any]:
+    """잠금을 쥔 채 하는 일. **다시 읽는 것으로 시작한다.**"""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            fresh = json.load(fh)
+    except (OSError, ValueError):
+        fresh = None
+    if type(fresh) is dict:
+        still = [k for k in fresh if k in LEGACY_FIELDS]
+        if not still:
+            # 다른 프로세스가 이미 옮겼다 — 우리가 할 일이 없다(그리고 그 파일을 백업하지 않는다).
+            return {k: v for k, v in fresh.items() if k in PARTICIPANT_FIELDS}
+        legacy = still
+        cleaned = {k: v for k, v in fresh.items() if k in PARTICIPANT_FIELDS}
+        doc: dict[str, Any] = fresh
+    else:
+        return cleaned
+
+    config_path = os.path.join(directory, CONFIG_FILENAME)
     try:
         patch = _relay_patch(doc["relay"]) if "relay" in legacy else {}
     except AgoraError as exc:
@@ -215,25 +302,36 @@ def _migrate_legacy(directory: str, path: str, doc: dict[str, Any],
             existing = loaded
         # ★이미 있는 설정이 이긴다. 잔재는 **빈 자리를 메울 때만** 쓴다 —
         #   사람이 손으로 고친 주소를 옛 설치기가 적은 값으로 덮으면 그것은 이관이 아니라 되돌림이다.
-        kept_existing = bool((existing.get("relay") or {}).get("url"))
+        # ★모양을 모르는 relay 도 「이미 있는 것」으로 본다(codex 1R [4]): 남의 설정을
+        #   우리가 이해하지 못한다는 이유로 덮어쓰지 않는다. 사전이 아니면 `.get` 이 터지므로
+        #   **타입부터** 가른다.
+        current = existing.get("relay")
+        if current is not None and type(current) is not dict:
+            sys.stderr.write(
+                f"경고: {CONFIG_FILENAME} 의 relay 모양을 모른다({type(current).__name__})"
+                " — 덮지 않고 그대로 둔다.\n")
+            kept_existing = True
+        else:
+            kept_existing = bool((current or {}).get("url"))
         merged = dict(existing)
         if patch and not kept_existing:
             merged.setdefault("transport", patch["transport"])
             merged["relay"] = patch["relay"]
-        _write_private(config_path,
-                       json.dumps(merged, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        # ★바꿀 것이 없으면 **쓰지 않는다.** 있던 설정이 이겨서 내용이 그대로인데도 다시 쓰면
+        #   남의 파일을 정렬·들여쓰기만 바꿔 건드리는 셈이고, 쓰지 않아도 될 자리에서 실패할 수 있다.
+        if merged != existing or not os.path.exists(config_path):
+            _write_private(config_path,
+                           json.dumps(merged, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     except (OSError, ValueError) as exc:
         sys.stderr.write(
             f"경고: 잔재 칸 {legacy} 을(를) {CONFIG_FILENAME} 으로 옮기지 못했다({exc}) — "
             "participant.json 은 손대지 않았다. 이 칸은 이번 실행에서 무시한다.\n")
         return cleaned
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup = path + ".bak-" + stamp
     try:
         with open(path, encoding="utf-8") as fh:
             raw = fh.read()
-        _write_private(backup, raw)
+        backup = _write_new_backup(path, raw)
         _write_private(path,
                        json.dumps(cleaned, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     except OSError as exc:

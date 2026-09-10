@@ -25,6 +25,8 @@
 
 > **필요한 것**: 이 컴퓨터에 **python3(3.11 이상)** 과 `curl`·`unzip`·`ssh-keygen` 이 있어야 합니다.
 > 없으면 이 경로로는 참가할 수 없습니다 — 그 사실을 에이전트가 그 자리에서 말해 줍니다.
+> ⚠그보다 낮은 판본(3.9·3.10)에서 돌아간 적은 있으나 **보증하지 않습니다.** 우리가 기계로
+> 매번 재는 것은 3.11 뿐이라, 그 아래에서 생기는 일은 아무도 재고 있지 않습니다.
 
 ```
 아고라에 참가하려고 한다. 아래를 순서대로 해 줘.
@@ -36,7 +38,7 @@
 
 2) 프로그램 꾸러미를 받아 지문을 대조한다.
    주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.3.zip
-   지문 = 2923000ca21f1949042c31f86f06deb196d916923c2ecac1aa07b8cc234540a5
+   지문 = 5d36642e05253d7128ffcf4521b5632826ff3da347d8a16d569632cd0ebbc066
    ★지문이 다르면 받은 파일을 지우고 멈춘다. 다시 받지 말고 나에게 알려 줘.
 
 3) ~/.config/agora/lib 에 통째로 새로 푼다(그 폴더는 먼저 비운다).
@@ -76,7 +78,7 @@
 ```sh
 set -e
 URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.3.zip
-SHA=2923000ca21f1949042c31f86f06deb196d916923c2ecac1aa07b8cc234540a5
+SHA=5d36642e05253d7128ffcf4521b5632826ff3da347d8a16d569632cd0ebbc066
 AH="$HOME/.config/agora"
 
 PY=""

@@ -544,6 +544,22 @@ def _case_namespace_single_source() -> None:
         raise AssertionError(f"namespace 리터럴 재등장: {offenders}")
 
 
+def _lock_down_for_windows(path: str) -> None:
+    """윈도우에서 「나만 접근」을 **실제로** 만든다(2026-09-11 · 윈도우 러너 도입).
+
+    ★POSIX 비트(0o700·0o600)는 윈도우에서 아무것도 바꾸지 않는다. 그래서 임시 폴더는 널리
+      알려진 그룹이 열린 채로 남고, 제품의 ACL 검사가 그것을 **정당하게** 거부한다.
+      ⇒ 제품을 무르게 하는 대신 **픽스처를 옳게 만든다** — 안내문이 사람에게 시키는 그 명령이다.
+    ★맥·리눅스에서는 아무 일도 하지 않는다(비트가 이미 그 일을 했다).
+    """
+    if os.name != "nt":
+        return
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+    grant = f"{user}:(OI)(CI)F" if os.path.isdir(path) else f"{user}:F"
+    subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", grant],
+                   capture_output=True, text=True, timeout=60)
+
+
 def _participant_dir(doc_override: dict[str, Any] | None = None,
                      file_mode: int = 0o600, dir_mode: int = 0o700) -> str:
     import json as _json
@@ -560,6 +576,8 @@ def _participant_dir(doc_override: dict[str, Any] | None = None,
         _json.dump(doc, fh)
     os.chmod(path, file_mode)
     os.chmod(d, dir_mode)
+    _lock_down_for_windows(d)
+    _lock_down_for_windows(path)
     return d
 
 
@@ -4477,13 +4495,18 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M392-lock-windows-gives-up-quietly",
                  "M393-lock-release-uses-lock-mode",
                  "M394-ledger-imports-fcntl-again",
-                 "M399-whoami-hides-the-lock"),
+                 "M399-whoami-hides-the-lock",
+                 "M400-lock-shared-not-exclusive"),
     # ★09-11 신설 — **잔재 이관**. 거부는 초록으로 보이지 않지만 **사람 손을 부른다**(실측:
     #   노트북 실기에서 사람이 편집기로 칸을 지웠다). 이 축은 「거부로 되돌아가는가」를 잰다.
     "잔재이관": ("M395-participant-legacy-rejected-again",
                  "M396-participant-unknown-field-migrated-too",
                  "M397-participant-legacy-overwrites-config",
-                 "M398-participant-migration-failure-is-fatal"),
+                 "M398-participant-migration-failure-is-fatal",
+                 "M401-participant-migrates-before-validating",
+                 "M402-participant-nested-unknown-slips",
+                 "M403-participant-overwrites-unknown-config",
+                 "M404-backup-overwrites-silently"),
 }
 
 
@@ -9484,6 +9507,9 @@ def _onboard_dir() -> str:
                     "key_fingerprint": fingerprint,
                     "namespace": contract_open.SIGN_NAMESPACE, "operator": False}, fh)
     os.chmod(path, 0o600)
+    _lock_down_for_windows(d)
+    for name in (path, key, key + ".pub"):
+        _lock_down_for_windows(name)
     return d
 
 
@@ -11814,34 +11840,45 @@ def _hidden_modules(names: dict[str, Any]) -> Any:
 class _FakeMsvcrt:
     """윈도우 `msvcrt` 의 **잠금 부분만** 흉내 낸다.
 
-    ⚠이 더블이 재는 것은 **우리 코드의 재시도·해제 순서**이지 「윈도우 커널이 정말 잠그는가」가
-      아니다. 후자는 러너(.github/workflows/windows-selftest.yml)가 실물로 잰다 — 그리고
-      더블이 무르면 시험이 공허해진다는 것을 이 저장소는 이미 네 번 겪었다.
+    ⚠이 더블이 재는 것은 **우리 코드의 재시도·해제 순서·자리**이지 「윈도우 커널이 정말
+      잠그는가」가 아니다. 후자는 러너(.github/workflows/windows-selftest.yml)가 실물로 잰다 —
+      그리고 더블이 무르면 시험이 공허해진다는 것을 이 저장소는 이미 네 번 겪었다.
+    ★codex 1R [7] 반영: **파일 위치(어느 바이트를 잠갔는가)를 함께 기록한다.** 자리를 안 보면
+      프로세스마다 다른 바이트를 잠그는 변경(= 상호배제 소멸)이 이 더블에서 초록으로 남는다.
     """
 
     LK_LOCK = 1
+    LK_NBLCK = 2
     LK_UNLCK = 0
+    BUSY_ERRNO = 36        # 윈도우 EDEADLOCK — _locking 이 경합에서 내는 값
 
-    def __init__(self, fail_times: int = 0) -> None:
-        self.calls: list[tuple[int, int]] = []
+    def __init__(self, fail_times: int = 0, error_no: int | None = None) -> None:
+        self.calls: list[tuple[int, int, int]] = []   # (mode, nbytes, 파일 위치)
         self._fail_times = fail_times
+        self._errno = error_no if error_no is not None else self.BUSY_ERRNO
+        self.owner: Any = None
 
     def locking(self, fd: int, mode: int, nbytes: int) -> None:
-        self.calls.append((mode, nbytes))
-        if mode == self.LK_LOCK:
-            tries = len([c for c in self.calls if c[0] == self.LK_LOCK])
+        import os as _os
+        self.calls.append((mode, nbytes, _os.lseek(fd, 0, 1)))
+        if mode in (self.LK_LOCK, self.LK_NBLCK):
+            tries = len([c for c in self.calls if c[0] in (self.LK_LOCK, self.LK_NBLCK)])
             if self._fail_times < 0 or tries <= self._fail_times:
-                raise OSError(36, "Resource deadlock avoided")
+                raise OSError(self._errno, "fake: 잠금 경합")
 
 
 def _case_lock_backend_is_one_of_three() -> None:
-    """잠금 수단은 **세 이름 중 하나**다 — 그리고 이 기계에서는 fcntl 이다."""
+    """잠금 수단은 **세 이름 중 하나**다.
+
+    ⚠여기서 「이 기계는 fcntl 이어야 한다」고 단정하지 않는다(codex 1R [1]). 그렇게 적으면
+      이 스위트 자체가 POSIX 전용이 되어, **윈도우에서 돌리는 순간 전건이 붉어진다** —
+      우리가 재려던 것이 정확히 「윈도우에서 서는가」인데 시험이 그것을 막는 꼴이다.
+      OS 별 기대값은 **러너의 matrix 단계**가 잰다(windows=msvcrt · macos=fcntl 단언).
+    """
     from agora import _lock
     got = _lock.backend()
     if got not in (_lock.POSIX, _lock.WINDOWS, _lock.NONE):
         raise AssertionError(f"계약 밖 잠금 수단: {got}")
-    if got != _lock.POSIX:
-        raise AssertionError(f"개발기(POSIX)인데 fcntl 이 아니다: {got}")
 
 
 def _case_lock_imports_without_fcntl() -> None:
@@ -11894,14 +11931,17 @@ def _case_lock_says_when_it_cannot_lock() -> None:
 
 
 def _case_lock_windows_waits_then_gives_up_honestly() -> None:
-    """윈도우 경로는 ⑴될 때까지 **다시 걸고** ⑵상한에 닿으면 **정직하게 실패**하고
-    ⑶풀 때는 **푸는 명령**을 쓴다.
+    """윈도우 경로는 ⑴**막히면 즉시 돌아오는 잠금**으로 다시 걸고 ⑵상한에 닿으면 정직하게
+    실패하고 ⑶풀 때는 푸는 명령을 쓰고 ⑷**언제나 첫 바이트**를 잠근다.
 
     ★⑵ 가 이 케이스의 핵심이다. 「기다리다 지쳤다」를 성공으로 바꾸면 두 프로세스가 같은
       원장에 동시에 쓴다 — 잠금이 아예 없는 것보다 나쁘다(없으면 경고라도 나온다).
+    ★⑷ 는 codex 1R [7]: 자리를 안 재면 프로세스마다 다른 바이트를 잠그는 변경이 초록으로 남고,
+      그때 상호배제는 **이름만 남는다.**
     """
     import os as _os
     import tempfile
+    import time as _time
     from agora import _lock
     path = _os.path.join(tempfile.mkdtemp(prefix="agora-lock-"), "x.lock")
 
@@ -11912,25 +11952,49 @@ def _case_lock_windows_waits_then_gives_up_honestly() -> None:
         with open(path, "a+") as fh:
             if _lock.acquire(fh) != _lock.WINDOWS:
                 raise AssertionError("윈도우 경로를 안 탔다")
-            tries = len([c for c in fake.calls if c[0] == fake.LK_LOCK])
-            if tries != 3:
-                raise AssertionError(f"두 번 막혔으면 세 번 걸어야 한다 — 실제 {tries}회")
+            attempts = [c for c in fake.calls if c[0] in (fake.LK_LOCK, fake.LK_NBLCK)]
+            if len(attempts) != 3:
+                raise AssertionError(f"두 번 막혔으면 세 번 걸어야 한다 — 실제 {len(attempts)}회")
+            if any(c[0] != fake.LK_NBLCK for c in attempts):
+                raise AssertionError(
+                    "기다리는 잠금(LK_LOCK)을 썼다 — 그것은 한 번에 10초를 삼켜 상한이 뜻을 잃는다")
+            if any((c[1], c[2]) != (1, 0) for c in attempts):
+                raise AssertionError(f"첫 바이트 1개를 안 잠갔다: {attempts}")
             _lock.release(fh)
-    if not fake.calls or fake.calls[-1][0] != fake.LK_UNLCK:
-        raise AssertionError(f"푸는 명령으로 안 풀었다: {fake.calls[-1:]}")
+    if not fake.calls or fake.calls[-1][:3] != (fake.LK_UNLCK, 1, 0):
+        raise AssertionError(f"푸는 명령으로 같은 자리를 안 풀었다: {fake.calls[-1:]}")
 
-    forever = _FakeMsvcrt(fail_times=-1)
     saved = _os.environ.get(_lock.WINDOWS_WAIT_ENV)
     _os.environ[_lock.WINDOWS_WAIT_ENV] = "0.2"
     try:
+        # ⑵ 영영 안 잠기면 상한에서 멈춘다 — 그리고 **상한 근처에서** 멈춘다.
+        forever = _FakeMsvcrt(fail_times=-1)
         with _hidden_modules({"fcntl": None, "msvcrt": forever}):
             with open(path, "a+") as fh:
+                started = _time.monotonic()
                 try:
                     _lock.acquire(fh)
                 except OSError:
                     pass            # ★이것이 옳다 — 못 잠갔으면 못 잠갔다고 한다
                 else:
                     raise AssertionError("영영 안 잠기는데 잠갔다고 했다")
+                waited = _time.monotonic() - started
+        if waited > 5:
+            raise AssertionError(f"상한 0.2초를 줬는데 {waited:.1f}초를 기다렸다")
+        # ⑸ 경합이 **아닌** 오류는 한 번도 다시 걸지 않는다(기다려도 그대로인 것을 기다리지 않는다).
+        broken = _FakeMsvcrt(fail_times=-1, error_no=9)      # EBADF
+        with _hidden_modules({"fcntl": None, "msvcrt": broken}):
+            with open(path, "a+") as fh:
+                try:
+                    _lock.acquire(fh)
+                except OSError as e:
+                    if e.errno != 9:
+                        raise AssertionError(f"다른 오류가 올라왔다: {e!r}") from None
+                else:
+                    raise AssertionError("잘못된 fd 인데 잠갔다고 했다")
+        tries = len([c for c in broken.calls if c[0] in (broken.LK_LOCK, broken.LK_NBLCK)])
+        if tries != 1:
+            raise AssertionError(f"경합이 아닌 오류를 {tries}회 다시 걸었다 — 1회여야 한다")
     finally:
         if saved is None:
             _os.environ.pop(_lock.WINDOWS_WAIT_ENV, None)
@@ -11980,6 +12044,8 @@ def _legacy_participant_dir(**extra: Any) -> str:
     with open(path, "w", encoding="utf-8") as fh:
         _json.dump(doc, fh, ensure_ascii=False)
     _os.chmod(path, 0o600)
+    _lock_down_for_windows(d)
+    _lock_down_for_windows(path)
     return d
 
 
@@ -11992,6 +12058,141 @@ def _quiet_load(directory: str) -> dict[str, Any]:
     with redirect_stderr(buf):
         doc = participant.load(directory)
     return {"doc": doc, "말": buf.getvalue()}
+
+
+def _case_lock_excludes_a_second_process() -> None:
+    """★**진짜 상호배제**를 잰다 — 잠긴 사이에 다른 **프로세스**가 못 들어온다(codex 1R [7]).
+
+    ★왜 이 케이스가 있어야 하는가: 앞의 케이스들은 「무엇을 불렀는가」를 잰다. 그런데 잠그는
+      **자리**가 틀리면(프로세스마다 다른 바이트를 잠그면) 호출 순서는 그대로인 채 상호배제만
+      사라진다 — 더블도 워크플로의 왕복도 그것을 못 본다. 두 프로세스를 실제로 세워야 드러난다.
+    """
+    import os as _os
+    import subprocess as _sp
+    import sys as _sys
+    import tempfile
+    from agora import _lock
+    d = tempfile.mkdtemp(prefix="agora-lock2-")
+    path, flag = _os.path.join(d, "x.lock"), _os.path.join(d, "got")
+    code = ("import sys; sys.path.insert(0, %r)\n"
+            "from agora import _lock\n"
+            "fh = open(%r, 'a+')\n"
+            "_lock.acquire(fh)\n"
+            "open(%r, 'w').close()\n"
+            "_lock.release(fh)\n") % (_ROOT, path, flag)
+    with open(path, "a+") as held:
+        _lock.acquire(held)
+        child = _sp.Popen([_sys.executable, "-c", code])
+        try:
+            child.wait(timeout=2)
+            raise AssertionError("내가 쥐고 있는데 남이 들어왔다 — 상호배제가 없다")
+        except _sp.TimeoutExpired:
+            pass
+        if _os.path.exists(flag):
+            raise AssertionError("잠긴 사이에 임계구역이 열렸다")
+        _lock.release(held)
+        try:
+            child.wait(timeout=20)
+        except _sp.TimeoutExpired:
+            child.kill()
+            raise AssertionError("풀었는데도 남이 못 들어온다 — 잠금이 안 풀린다") from None
+    if not _os.path.exists(flag):
+        raise AssertionError("풀린 뒤에도 임계구역에 못 들어갔다")
+
+
+def _case_participant_rejection_changes_nothing() -> None:
+    """★**거부는 아무 일도 일어나지 않았다는 뜻이다**(codex 1R [2]).
+
+    ★재현된 사고: 계약을 어긴 participant.json(namespace 불일치) 안의 relay 주소가
+      **거부되기 전에** 내 config.json 에 적혔다. 남이 건넨 파일 하나로 내가 말을 거는 곳이
+      바뀐다 — 파일은 거부됐는데 그 파일이 내 설정을 고친 것이다.
+    """
+    import os as _os
+    d = _legacy_participant_dir(relay="https://attacker.example.invalid",
+                                namespace="틀린-이름표")
+    try:
+        _quiet_load(d)
+    except AgoraError as e:
+        if _os.path.exists(_os.path.join(d, "config.json")):
+            raise AssertionError("거부하면서 config.json 을 만들었다") from None
+        if not [n for n in _os.listdir(d) if n == "participant.json"]:
+            raise AssertionError("거부하면서 참가자 파일을 치웠다") from None
+        import json as _json
+        with open(_os.path.join(d, "participant.json"), encoding="utf-8") as fh:
+            if "relay" not in _json.load(fh):
+                raise AssertionError("거부하면서 파일을 고쳤다") from None
+        if [n for n in _os.listdir(d) if n.startswith("participant.json.bak-")]:
+            raise AssertionError("거부하면서 백업을 남겼다") from None
+        raise
+    raise AssertionError("계약을 어긴 파일이 통과했다")
+
+
+def _case_participant_nested_unknown_rejected() -> None:
+    """잔재 칸 **안쪽**의 모르는 칸도 거부한다(codex 1R [5]).
+
+    ★바깥만 검사하면 사전 한 겹이 그대로 우회로다 — `relay: {url, token}` 이 통과하고
+      token 은 소리 없이 버려진다. 「모르는 것을 조용히 버린다」는 버리는 자리가 어디든 같은 병이다.
+    """
+    d = _legacy_participant_dir(relay={"url": "https://agora.godmeyou.kr", "token": "s3cret"})
+    try:
+        _quiet_load(d)
+    except AgoraError as e:
+        if (e.detail or {}).get("extra") != ["relay.token"]:
+            raise AssertionError(f"어느 칸이 문제인지 안 짚는다: {e.detail}") from None
+        raise
+    raise AssertionError("사전 안쪽의 모르는 칸이 통과했다")
+
+
+def _case_participant_keeps_config_shape_it_does_not_know() -> None:
+    """모양을 **모르는** 기존 설정은 덮지 않는다 — 그리고 그것 때문에 죽지도 않는다(codex 1R [4]).
+
+    ★사고 형태: 기존 config 의 relay 가 사전이 아니면 `.get("url")` 이 AttributeError 를 냈다.
+      그 예외는 우리가 약속한 「이관 실패는 치명이 아니다」 계약 **밖**으로 새어 나간다.
+    """
+    import json as _json
+    import os as _os
+    d = _legacy_participant_dir(relay="https://agora.godmeyou.kr")
+    with open(_os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+        _json.dump({"relay": "https://hand-written.example"}, fh, ensure_ascii=False)
+    got = _quiet_load(d)                      # ★죽지 않는다
+    if not got["doc"].get("id"):
+        raise AssertionError("모르는 모양의 설정 때문에 참가자를 못 읽었다")
+    with open(_os.path.join(d, "config.json"), encoding="utf-8") as fh:
+        if _json.load(fh) != {"relay": "https://hand-written.example"}:
+            raise AssertionError("모양을 모르는 설정을 덮었다")
+    if "덮지 않고" not in got["말"]:
+        raise AssertionError(f"덮지 않았다는 사실을 말하지 않는다: {got['말']!r}")
+
+
+def _case_participant_backup_never_overwrites() -> None:
+    """백업은 **아무것도 덮지 않는다**(codex 1R [3]).
+
+    ★백업의 값어치는 「덮이지 않는다」 하나뿐이다. 같은 초에 두 번 이관되면 이름이 겹치는데,
+      그때 앞 백업이 사라지면 relay 가 든 원본은 **어디에도 없다.**
+    ★이 케이스는 초 경계에 기대지 않는다 — 이번 초와 다음 초의 이름을 **둘 다** 미리 채워
+      어느 쪽에 떨어지든 겹치게 만든다.
+    """
+    import os as _os
+    from datetime import datetime, timedelta, timezone
+    d = _legacy_participant_dir(relay="https://agora.godmeyou.kr")
+    path = _os.path.join(d, "participant.json")
+    now = datetime.now(timezone.utc)
+    taken = []
+    for delta in (0, 1):
+        stamp = (now + timedelta(seconds=delta)).strftime("%Y%m%dT%H%M%SZ")
+        name = f"{path}.bak-{stamp}"
+        with open(name, "w", encoding="utf-8") as fh:
+            fh.write("먼저 있던 백업")
+        taken.append(name)
+    _quiet_load(d)
+    for name in taken:
+        with open(name, encoding="utf-8") as fh:
+            if fh.read() != "먼저 있던 백업":
+                raise AssertionError(f"있던 백업을 덮었다: {_os.path.basename(name)}")
+    made = [n for n in _os.listdir(d)
+            if n.startswith("participant.json.bak-") and n.endswith("-2")]
+    if len(made) != 1:
+        raise AssertionError(f"옆자리 백업을 안 만들었다: {sorted(_os.listdir(d))}")
 
 
 def _case_participant_legacy_relay_moves_to_config() -> None:
@@ -12085,7 +12286,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("잠금: 못 잠그면 말한다",     _case_lock_says_when_it_cannot_lock, None),
     ("잠금: 윈도우는 기다렸다 포기한다", _case_lock_windows_waits_then_gives_up_honestly, None),
     ("잠금: 창구는 _lock 하나",    _case_no_module_imports_fcntl_directly, None),
+    ("잠금: 남이 못 들어온다",     _case_lock_excludes_a_second_process, None),
     ("참가자: 옛 relay 칸은 이관된다", _case_participant_legacy_relay_moves_to_config, None),
+    ("참가자: 거부는 아무것도 안 바꾼다", _case_participant_rejection_changes_nothing, errors.PRECONDITION),
+    ("참가자: 안쪽 모르는 칸도 거부", _case_participant_nested_unknown_rejected, errors.PRECONDITION),
+    ("참가자: 모르는 설정은 안 덮는다", _case_participant_keeps_config_shape_it_does_not_know, None),
+    ("참가자: 백업은 안 덮는다",   _case_participant_backup_never_overwrites, None),
     ("참가자: 모르는 칸은 거부",   _case_participant_unknown_field_still_rejected, errors.PRECONDITION),
     ("참가자: 있던 설정이 이긴다", _case_participant_migration_keeps_existing_config, None),
     ("참가자: 이관 실패는 치명이 아니다", _case_participant_migration_failure_is_not_fatal, None),
@@ -12533,6 +12739,27 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     # ── 이식 잠금·잔재 이관(2026-09-11 · 0.1.3) ─────────────────────────────
     # ★여덟 자리 전부 「한 OS 에서만 나는 죽음」과 「사람 손을 부르는 거부」를 겨눈다.
     #   개발기에서는 둘 다 **초록이 기본값**이라 뮤턴트 없이는 아무것도 증명되지 않는다.
+    # ── codex 1R 봉합의 그물(2026-09-11) — 봉합이 되돌아가면 여기가 붉어진다 ──
+    ("M400-lock-shared-not-exclusive", "agora/_lock.py",
+     "        _MOD.flock(fh.fileno(), _MOD.LOCK_EX)",
+     "        _MOD.flock(fh.fileno(), _MOD.LOCK_SH)",
+     "잠금: 남이 못 들어온다"),
+    ("M401-participant-migrates-before-validating", "agora/participant.py",
+     '    if doc["namespace"] != SIGN_NAMESPACE:\n        raise AgoraError(errors.PRECONDITION, "namespace 불일치",\n                         {"got": doc["namespace"]})\n    if type(doc["operator"]) is not bool:\n        raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)\n    if extra:\n        doc = _migrate_legacy(directory, path, doc, extra)\n    return doc',
+     '    if extra:\n        doc = _migrate_legacy(directory, path, doc, extra)\n    if doc["namespace"] != SIGN_NAMESPACE:\n        raise AgoraError(errors.PRECONDITION, "namespace 불일치",\n                         {"got": doc["namespace"]})\n    if type(doc["operator"]) is not bool:\n        raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)\n    return doc',
+     "참가자: 거부는 아무것도 안 바꾼다"),
+    ("M402-participant-nested-unknown-slips", "agora/participant.py",
+     "    unknown += _unknown_inside_legacy(doc, extra)",
+     "    unknown += []",
+     "참가자: 안쪽 모르는 칸도 거부"),
+    ("M403-participant-overwrites-unknown-config", "agora/participant.py",
+     "        if current is not None and type(current) is not dict:",
+     "        if False:",
+     "참가자: 모르는 설정은 안 덮는다"),
+    ("M404-backup-overwrites-silently", "agora/participant.py",
+     "            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)",
+     "            fd = os.open(candidate, os.O_CREAT | os.O_WRONLY, 0o600)",
+     "참가자: 백업은 안 덮는다"),
     ("M399-whoami-hides-the-lock", "agora/onboard.py",
      '        "file_lock": {"backend": _lock.backend(),',
      '        "file_lock": {"backend": "fcntl",',
@@ -12542,8 +12769,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    return NONE',
      "잠금: 못 잠그면 말한다"),
     ("M392-lock-windows-gives-up-quietly", "agora/_lock.py",
-     '        except OSError:\n            if time.monotonic() >= deadline:\n                raise',
-     '        except OSError:\n            return',
+     '            if time.monotonic() >= deadline:\n                raise',
+     '            return',
      "잠금: 윈도우는 기다렸다 포기한다"),
     ("M393-lock-release-uses-lock-mode", "agora/_lock.py",
      '        _MOD.locking(fh.fileno(), _MOD.LK_UNLCK, _WINDOWS_LOCK_BYTES)',
