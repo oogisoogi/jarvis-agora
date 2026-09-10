@@ -1,0 +1,190 @@
+# 윈도우 실행 검증 — 이 프로그램이 **다른 OS 에서 서는가**를 기계가 매번 잰다
+#
+# 왜 러너인가
+#   2026-09-10 운영자 노트북 실기에서 0.1.2 가 윈도우에서 죽었다. 원인은 기능이 아니라
+#   `import fcntl` 한 줄이었다 — POSIX 전용 모듈이 **모듈 맨 위**에 있어서 그것을 가져오는
+#   명령이 전부(whoami·selfcheck·sync-roster) 임포트 시점에 죽었다.
+#   ⇒ **개발기(맥)에서는 영원히 안 보이는 결함이다.** 사람 노트북으로만 재면 그 사람이 없는
+#     날은 아무도 못 재고, 실제로 넉 달 동안 아무도 안 쟀다. 러너는 매번 깨끗한 윈도우를 준다.
+#
+# ⚠러너가 **못 보는 것** — 초록이 이것까지 보증하지 않는다(정직하게 적는다)
+#   · 실물 릴레이 왕복 — `--no-relay` 로 끈다. 우리 서버를 CI 가 매번 두드리게 두지 않는다.
+#     그래서 selfcheck 판정은 여기서 **미측정(3)** 이고, 그 사실을 아래 단계가 그대로 적는다.
+#   · 우리말 계정 이름·공백 든 사용자 폴더 — 러너 계정은 영문 `runneradmin` 이다.
+#   · 백신·화면(GUI)·설치기 전체 흐름 — 그것은 habitat 의 삭제-재설치 매트릭스와
+#     사람 손 절차서(docs/RUN-WINDOWS.md)의 몫이다. 여기서 재는 것은 **클라이언트**다.
+#
+# ★대조군(macOS)을 함께 돌리는 이유: 윈도우가 초록인데 사실은 **아무것도 안 재고** 있었을
+#   가능성을 막는다. 두 job 은 잠금 수단이 서로 **다르다고 단언**한다(msvcrt ↔ fcntl) —
+#   같은 값이 나오면 그 자리에서 붉어진다.
+name: 윈도우 실행 검증
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      # ★master 가 미는 그 브랜치다(비가역 목록 — push 집행은 master).
+      - fair/client
+    paths:
+      - 'agora/**'
+      - 'bin/**'
+      - 'tests/**'
+      - '.github/workflows/windows-selftest.yml'
+
+jobs:
+  client:
+    name: ${{ matrix.os }} — 잠금 수단·임포트·selftest·스모크
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            want_backend: msvcrt
+          - os: macos-latest
+            want_backend: fcntl
+    env:
+      PYTHONUTF8: 1
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── ① 잠금 수단이 **이 OS 의 것**인가 ────────────────────────────────
+      # ★이 단계가 이 워크플로의 앵커다. 여기서 기대값과 다르면 뒤 단계의 초록은
+      #   「윈도우에서 된다」는 뜻이 아니게 된다(무엇을 쟀는지 모르는 초록).
+      - name: 잠금 수단 실측 (기대 = ${{ matrix.want_backend }})
+        shell: bash
+        run: |
+          got="$(python -c 'from agora import _lock; print(_lock.backend())')"
+          echo "backend=$got (want=${{ matrix.want_backend }})"
+          [ "$got" = "${{ matrix.want_backend }}" ] \
+            || { echo "::error::잠금 수단이 기대와 다르다 — 이 job 의 초록은 아무것도 뜻하지 않는다"; exit 1; }
+
+      # ── ② 임포트 축 — 2026-09-10 에 실제로 죽은 자리 ──────────────────────
+      - name: 임포트 축 (fcntl 을 쓰던 세 모듈 + 진입점)
+        shell: bash
+        run: python -c "import agora.ledger, agora.spool, agora.store_github, agora.tools, agora.cli, agora.selfcheck; print('임포트 OK')"
+
+      # ── ③ 잠금이 **실제로 잠그는가** ─────────────────────────────────────
+      # ★임포트만 재면 「죽지 않는다」까지밖에 모른다. 잠그고 푸는 왕복을 한 번 돌린다.
+      - name: 잠금 왕복 (원장 append 2회 · 사슬 검증)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import tempfile
+          from agora import _lock
+          from agora.ledger import Ledger
+          lg = Ledger(tempfile.mkdtemp())
+          lg.append(direction="sent", message_id="m1", event_hash="h1", stage="sent")
+          lg.append(direction="recv", message_id="m2", event_hash="h2", stage="delivered")
+          v = lg.verify()
+          assert v["ok"] and v["rows"] == 2, v
+          print("잠금 왕복 OK ·", _lock.backend(), "·", v)
+          PY
+
+      # ── ④ selftest 전건 ─────────────────────────────────────────────────
+      - name: selftest 전건
+        shell: bash
+        run: python bin/agora selftest
+
+      # ── ⑤ 스모크 — keygen → whoami → selfcheck ──────────────────────────
+      # ★register 는 **안 한다**(실물 광장에 러너가 참가자를 만들면 그 명부를 사람이 치워야 한다).
+      #   그래서 참가자 파일은 keygen 이 만든 것을 그대로 쓰고, 운반 설정만 손으로 놓는다.
+      - name: 스모크 준비 — 설정 폴더 권한 (윈도우는 ACL 로 잠근다)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          mkdir "%RUNNER_TEMP%\agora-home"
+          icacls "%RUNNER_TEMP%\agora-home" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
+
+      - name: 스모크 준비 — 설정 폴더 권한 (맥은 비트로 잠근다)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: mkdir -p "$RUNNER_TEMP/agora-home" && chmod 700 "$RUNNER_TEMP/agora-home"
+
+      - name: 스모크 — keygen · whoami · selfcheck(--no-relay)
+        shell: bash
+        env:
+          AGORA_CONFIG_DIR: ${{ runner.temp }}/agora-home
+        run: |
+          set -e
+          export AGORA_SIGNING_KEY="$AGORA_CONFIG_DIR/id_ed25519"
+          python bin/agora keygen jarvis-ciprobe01
+          python - <<'PY'
+          import json, os
+          d = os.environ["AGORA_CONFIG_DIR"]
+          with open(os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+              json.dump({"transport": "relay",
+                         "relay": {"url": "https://agora.godmeyou.kr", "timeout_seconds": 30}},
+                        fh, ensure_ascii=False)
+          PY
+          python bin/agora whoami
+          # ★릴레이를 끄면 그 축은 **미측정(3)** 이다 — 미측정을 통과로 세지 않는다.
+          #   그래서 「rc 가 3 이고 실패한 축이 0」을 판정으로 삼는다.
+          set +e
+          out="$(python bin/agora selfcheck --no-relay)"
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" > "$RUNNER_TEMP/selfcheck.json"
+          python - "$rc" "$RUNNER_TEMP/selfcheck.json" <<'PY'
+          import json, sys
+          rc = int(sys.argv[1])
+          doc = json.load(open(sys.argv[2], encoding="utf-8"))
+          failed = doc["판정"]["실패한_축"]
+          unmeasured = doc["판정"]["미측정_축"]
+          if failed:
+              print(f"::error::selfcheck 실패한 축 {failed}")
+              raise SystemExit(1)
+          if rc != 3 or unmeasured != ["릴레이_도달"]:
+              print(f"::error::기대는 rc=3 · 미측정=[릴레이_도달] 인데 rc={rc} · {unmeasured}")
+              raise SystemExit(1)
+          print("selfcheck: 실패 0 · 미측정은 릴레이_도달 하나뿐(우리가 끈 것이다)")
+          PY
+
+      # ── ⑥ 잔재 칸 이관 — 노트북 실기에서 사람 손을 부른 그 자리 ────────────
+      - name: 잔재 칸 이관 (옛 설치기의 relay 칸 → config.json)
+        shell: bash
+        env:
+          AGORA_CONFIG_DIR: ${{ runner.temp }}/agora-legacy
+        run: |
+          set -e
+          python - <<'PY'
+          import json, os, pathlib
+          d = os.environ["AGORA_CONFIG_DIR"]
+          os.makedirs(d, mode=0o700, exist_ok=True)
+          os.chmod(d, 0o700)
+          # ★namespace 는 **계약에서 읽는다.** 여기에 값을 베껴 적으면 계약이 바뀌는 날
+          #   이 시험이 「옛 계약을 지키는지」를 재게 된다.
+          from agora.contract_open import SIGN_NAMESPACE
+          doc = {"id": "jarvis-legacyprobe", "display_name": "jarvis-legacyprobe",
+                 "key_fingerprint": "SHA256:" + "a" * 43, "namespace": SIGN_NAMESPACE,
+                 "operator": False, "relay": "https://agora.godmeyou.kr"}
+          p = pathlib.Path(d, "participant.json")
+          p.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+          os.chmod(p, 0o600)
+          PY
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # ★윈도우의 「나만 접근」은 비트가 아니라 ACL 이다(participant.py 가 SID 로 잰다).
+            #   상속을 끊고 나에게만 준다 — 이 두 줄이 곧 안내문의 hint 와 같은 명령이다.
+            icacls "$(cygpath -w "$AGORA_CONFIG_DIR")" /inheritance:r /grant:r "$USERNAME:(OI)(CI)F"
+            icacls "$(cygpath -w "$AGORA_CONFIG_DIR/participant.json")" /inheritance:r /grant:r "$USERNAME:F"
+          fi
+          python - <<'PY'
+          import json, os, pathlib
+          from agora import participant
+          d = os.environ["AGORA_CONFIG_DIR"]
+          doc = participant.load(d)                      # ★거부되지 않고 읽혀야 한다
+          assert "relay" not in doc, doc
+          cfg = json.loads(pathlib.Path(d, "config.json").read_text(encoding="utf-8"))
+          assert cfg["relay"]["url"] == "https://agora.godmeyou.kr", cfg
+          baks = sorted(pathlib.Path(d).glob("participant.json.bak-*"))
+          assert len(baks) == 1, baks
+          again = participant.load(d)                    # ★두 번째는 이관할 것이 없다
+          assert again == doc and len(sorted(pathlib.Path(d).glob("participant.json.bak-*"))) == 1
+          print("잔재 칸 이관 OK · 백업", baks[0].name)
+          PY

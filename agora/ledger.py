@@ -14,14 +14,13 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-from agora import errors
+from agora import _lock, errors
 from agora.errors import AgoraError
 
 SENT = "sent"
@@ -123,7 +122,7 @@ class Ledger:
                              {"hash_of": hash_of, "allowed": list(HASH_KINDS)})
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
         with open(self.lock_path, "a+") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            _lock.acquire(lock)
             try:
                 prev = self.last()
                 row = {
@@ -143,7 +142,7 @@ class Ledger:
                     os.fsync(fh.fileno())
                 return row
             finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                _lock.release(lock)
 
     def store_event(self, thread_id: str, message_id: str, raw: bytes) -> str:
         """이벤트 **원문**을 보관한다. 운반층에서 지워져도 여기 남는다."""

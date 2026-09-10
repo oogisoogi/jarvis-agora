@@ -21,12 +21,11 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 from typing import Any, Iterator
 
-from agora import errors
+from agora import _lock, errors
 from agora.errors import AgoraError
 from agora.ledger import now_iso
 
@@ -167,12 +166,12 @@ class Spool:
         row = {"node_id": node_id, "thread_id": thread_id, "stage": stage,
                "message_id": message_id, "ts": now_iso()}
         with open(self.lock_path, "a+") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            _lock.acquire(lock)
             try:
                 with open(self.path, "a", encoding="utf-8") as fh:
                     fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
                     fh.flush()              # ★커널까지 — SIGKILL 을 이긴다
                     self._fsync(fh.fileno())  # ★디스크까지 — 전원 손실을 겨냥한다
             finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                _lock.release(lock)
         return row

@@ -4471,6 +4471,19 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M387-selfcheck-empty-table-passes", "M388-selfcheck-one-way-sweep",
                  "M389-selfcheck-ignores-who-signed",
                  "M390-selfcheck-axis-explosion-escapes"),
+    # ★09-11 신설 — **이식 잠금**. 한 OS 에서만 나는 죽음은 개발기에서 영원히 초록이라,
+    #   이 축이 비면 「맥에서 400번 초록」이 윈도우에 대해 아무것도 말하지 않는다.
+    "이식잠금": ("M391-lock-silent-when-unavailable",
+                 "M392-lock-windows-gives-up-quietly",
+                 "M393-lock-release-uses-lock-mode",
+                 "M394-ledger-imports-fcntl-again",
+                 "M399-whoami-hides-the-lock"),
+    # ★09-11 신설 — **잔재 이관**. 거부는 초록으로 보이지 않지만 **사람 손을 부른다**(실측:
+    #   노트북 실기에서 사람이 편집기로 칸을 지웠다). 이 축은 「거부로 되돌아가는가」를 잰다.
+    "잔재이관": ("M395-participant-legacy-rejected-again",
+                 "M396-participant-unknown-field-migrated-too",
+                 "M397-participant-legacy-overwrites-config",
+                 "M398-participant-migration-failure-is-fatal"),
 }
 
 
@@ -11571,6 +11584,35 @@ def _case_sync_roster_stops_when_revocations_are_missing() -> None:
             raise AssertionError("멈췄는데 파일을 썼다")
 
 
+def _case_whoami_reports_the_lock_backend() -> None:
+    """`whoami` 는 이 기계가 **무엇으로 잠그는가**를 적는다(0.1.3).
+
+    ★왜 화면에 두는가: 잠글 수단이 없는 파이썬에서도 프로그램은 **돌아간다**(경고 한 줄 뒤
+      no-op). 그 상태는 조용해서, 화면에 없으면 사고가 난 뒤에도 아무도 그 기계가 어떤
+      상태였는지 되물을 수 없다. 참가자가 사진으로 보내는 명령은 이것 하나뿐이다.
+    """
+    from agora import _lock, onboard
+    d = _onboard_dir()
+    key = os.path.join(d, "id_ed25519")
+    with _fake_relay().serving() as (url, relay):
+        relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
+        _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True))
+    out = onboard.whoami(directory=d)
+    got = (out.get("file_lock") or {}).get("backend")
+    if got != _lock.backend():
+        raise AssertionError(f"화면의 잠금 수단이 실제와 다르다: {got} ≠ {_lock.backend()}")
+    if got not in (_lock.POSIX, _lock.WINDOWS, _lock.NONE):
+        raise AssertionError(f"계약 밖 이름: {got}")
+    # ★**정말 재서 적는가**를 잰다. 이 기계는 늘 fcntl 이라, 값을 박아 넣어도 위 두 줄은
+    #   초록이다 — 그래서 수단을 없앤 채 한 번 더 묻는다(못 잠그는 기계가 「fcntl」이라고
+    #   답하면, 그 화면은 사고 뒤에 사람을 엉뚱한 데로 보낸다).
+    with _hidden_modules({"fcntl": None, "msvcrt": None}):
+        blind = onboard.whoami(directory=d)
+    said = (blind.get("file_lock") or {}).get("backend")
+    if said != _lock.NONE:
+        raise AssertionError(f"잠글 수단이 없는데 화면은 {said!r} 라고 적는다")
+
+
 def _case_whoami_puts_the_approval_gate_first() -> None:
     """`whoami` 의 **첫 칸이 승인 게이트**다(RC-2 · master 결정 2026-09-05).
 
@@ -11736,8 +11778,317 @@ def _case_invite_join_brief_stands_alone() -> None:
             raise AssertionError(f"1단계에 이 단계가 없다: {need!r}")
 
 
+# ── 이식 잠금(0.1.3 · 2026-09-11) ────────────────────────────────────────────
+# ★이 넉 줄이 겨누는 것은 기능이 아니라 **한 OS 에서만 나는 죽음**이다. 2026-09-10 노트북
+#   실기에서 0.1.2 가 `ModuleNotFoundError: fcntl` 로 죽었고, 그 자리는 맥에서 400번을
+#   돌려도 초록이었다. ⇒ **없는 것을 만들어 재는 수밖에 없다**(모듈을 가리고 부른다).
+
+
+def _hidden_modules(names: dict[str, Any]) -> Any:
+    """sys.modules 를 잠시 갈아 끼우는 문맥 관리자(시험 전용).
+
+    ★값이 `None` 이면 그 이름의 `import` 는 ImportError 를 낸다 — 「이 파이썬에 그 모듈이
+      없다」를 **진짜로 없애지 않고** 재현하는 유일하게 싼 방법이다.
+    """
+    import contextlib
+    import sys as _sys
+
+    @contextlib.contextmanager
+    def _ctx() -> Any:
+        from agora import _lock
+        missing = object()
+        saved = {k: _sys.modules.get(k, missing) for k in names}
+        _sys.modules.update(names)
+        try:
+            yield _lock.reload_backend()
+        finally:
+            for k, v in saved.items():
+                if v is missing:
+                    _sys.modules.pop(k, None)
+                else:
+                    _sys.modules[k] = v
+            _lock.reload_backend()      # ★뒤 케이스가 가짜 수단을 물려받지 않게 되돌린다
+    return _ctx()
+
+
+class _FakeMsvcrt:
+    """윈도우 `msvcrt` 의 **잠금 부분만** 흉내 낸다.
+
+    ⚠이 더블이 재는 것은 **우리 코드의 재시도·해제 순서**이지 「윈도우 커널이 정말 잠그는가」가
+      아니다. 후자는 러너(.github/workflows/windows-selftest.yml)가 실물로 잰다 — 그리고
+      더블이 무르면 시험이 공허해진다는 것을 이 저장소는 이미 네 번 겪었다.
+    """
+
+    LK_LOCK = 1
+    LK_UNLCK = 0
+
+    def __init__(self, fail_times: int = 0) -> None:
+        self.calls: list[tuple[int, int]] = []
+        self._fail_times = fail_times
+
+    def locking(self, fd: int, mode: int, nbytes: int) -> None:
+        self.calls.append((mode, nbytes))
+        if mode == self.LK_LOCK:
+            tries = len([c for c in self.calls if c[0] == self.LK_LOCK])
+            if self._fail_times < 0 or tries <= self._fail_times:
+                raise OSError(36, "Resource deadlock avoided")
+
+
+def _case_lock_backend_is_one_of_three() -> None:
+    """잠금 수단은 **세 이름 중 하나**다 — 그리고 이 기계에서는 fcntl 이다."""
+    from agora import _lock
+    got = _lock.backend()
+    if got not in (_lock.POSIX, _lock.WINDOWS, _lock.NONE):
+        raise AssertionError(f"계약 밖 잠금 수단: {got}")
+    if got != _lock.POSIX:
+        raise AssertionError(f"개발기(POSIX)인데 fcntl 이 아니다: {got}")
+
+
+def _case_lock_imports_without_fcntl() -> None:
+    """★fcntl 이 없어도 **임포트가 죽지 않는다** — 2026-09-10 에 실제로 죽은 자리.
+
+    별도 프로세스에서 잰다. 이 프로세스에는 fcntl 이 이미 들어와 있어서, 안에서 가려도
+    「임포트 시점」을 되돌릴 수 없기 때문이다.
+    """
+    import subprocess as _sp
+    import sys as _sys
+    code = (
+        "import sys; sys.modules['fcntl'] = None; sys.modules['msvcrt'] = None\n"
+        "import agora.ledger, agora.spool, agora.store_github, agora.tools, agora.cli\n"
+        "import tempfile\n"
+        "lg = agora.ledger.Ledger(tempfile.mkdtemp())\n"
+        "lg.append(direction='sent', message_id='m1', event_hash='h1', stage='sent')\n"
+        "lg.append(direction='recv', message_id='m2', event_hash='h2', stage='delivered')\n"
+        "v = lg.verify()\n"
+        "assert v['ok'] and v['rows'] == 2, v\n"
+        "print('OK')\n"
+    )
+    r = _sp.run([_sys.executable, "-c", code], capture_output=True, text=True,
+                cwd=_ROOT, timeout=60)
+    if r.returncode != 0 or "OK" not in r.stdout:
+        raise AssertionError(f"fcntl 없이 임포트·원장 append 가 죽었다: {r.stderr.strip()[:300]}")
+
+
+def _case_lock_says_when_it_cannot_lock() -> None:
+    """잠글 수단이 하나도 없으면 **말한다**(한 번만). 조용한 no-op 은 통과가 아니다.
+
+    ★「잠갔다」와 「잠글 수단이 없었다」가 같은 얼굴이면 원장이 섞인 날 아무도 원인을 못 찾는다.
+    """
+    import io
+    import os as _os
+    import tempfile
+    from contextlib import redirect_stderr
+    from agora import _lock
+    buf = io.StringIO()
+    path = _os.path.join(tempfile.mkdtemp(prefix="agora-lock-"), "x.lock")
+    with _hidden_modules({"fcntl": None, "msvcrt": None}) as backend:
+        if backend != _lock.NONE:
+            raise AssertionError(f"둘 다 가렸는데 수단이 남아 있다: {backend}")
+        with open(path, "a+") as fh, redirect_stderr(buf):
+            if _lock.acquire(fh) != _lock.NONE or _lock.release(fh) != _lock.NONE:
+                raise AssertionError("수단이 없는데 no-op 이 아니다")
+            _lock.acquire(fh)      # 두 번째 — 경고를 되풀이하지 않는다
+    said = buf.getvalue().count("잠금 수단이 없다")
+    if said != 1:
+        raise AssertionError(f"경고가 {said}회 — 정확히 1회여야 한다(침묵도, 도배도 아니다)")
+
+
+def _case_lock_windows_waits_then_gives_up_honestly() -> None:
+    """윈도우 경로는 ⑴될 때까지 **다시 걸고** ⑵상한에 닿으면 **정직하게 실패**하고
+    ⑶풀 때는 **푸는 명령**을 쓴다.
+
+    ★⑵ 가 이 케이스의 핵심이다. 「기다리다 지쳤다」를 성공으로 바꾸면 두 프로세스가 같은
+      원장에 동시에 쓴다 — 잠금이 아예 없는 것보다 나쁘다(없으면 경고라도 나온다).
+    """
+    import os as _os
+    import tempfile
+    from agora import _lock
+    path = _os.path.join(tempfile.mkdtemp(prefix="agora-lock-"), "x.lock")
+
+    fake = _FakeMsvcrt(fail_times=2)
+    with _hidden_modules({"fcntl": None, "msvcrt": fake}) as backend:
+        if backend != _lock.WINDOWS:
+            raise AssertionError(f"msvcrt 를 놨는데 수단이 {backend}")
+        with open(path, "a+") as fh:
+            if _lock.acquire(fh) != _lock.WINDOWS:
+                raise AssertionError("윈도우 경로를 안 탔다")
+            tries = len([c for c in fake.calls if c[0] == fake.LK_LOCK])
+            if tries != 3:
+                raise AssertionError(f"두 번 막혔으면 세 번 걸어야 한다 — 실제 {tries}회")
+            _lock.release(fh)
+    if not fake.calls or fake.calls[-1][0] != fake.LK_UNLCK:
+        raise AssertionError(f"푸는 명령으로 안 풀었다: {fake.calls[-1:]}")
+
+    forever = _FakeMsvcrt(fail_times=-1)
+    saved = _os.environ.get(_lock.WINDOWS_WAIT_ENV)
+    _os.environ[_lock.WINDOWS_WAIT_ENV] = "0.2"
+    try:
+        with _hidden_modules({"fcntl": None, "msvcrt": forever}):
+            with open(path, "a+") as fh:
+                try:
+                    _lock.acquire(fh)
+                except OSError:
+                    pass            # ★이것이 옳다 — 못 잠갔으면 못 잠갔다고 한다
+                else:
+                    raise AssertionError("영영 안 잠기는데 잠갔다고 했다")
+    finally:
+        if saved is None:
+            _os.environ.pop(_lock.WINDOWS_WAIT_ENV, None)
+        else:
+            _os.environ[_lock.WINDOWS_WAIT_ENV] = saved
+
+
+def _case_no_module_imports_fcntl_directly() -> None:
+    """잠금 수단을 아는 모듈은 **`_lock.py` 하나뿐**이다.
+
+    ★한 줄이 되돌아오면(누가 편의로 `import fcntl` 을 다시 적으면) 윈도우가 다시 죽는다.
+      그 되돌림은 리뷰에서 눈에 안 띄므로 **기계가 센다.**
+    ⚠`selftest.py` 자신은 뺀다 — 이 파일은 그 문자열을 **뮤턴트 표에 인용**하고 있고,
+      인용을 위반으로 세면 검사기가 자기 그림자를 밟는다.
+    """
+    import os as _os
+    import re
+    d = _os.path.join(_ROOT, "agora")
+    offenders = []
+    for name in sorted(_os.listdir(d)):
+        if not name.endswith(".py") or name in ("_lock.py", "selftest.py"):
+            continue
+        with open(_os.path.join(d, name), encoding="utf-8") as fh:
+            src = fh.read()
+        if re.search(r"^\s*(import fcntl|from fcntl import)", src, re.M) or "fcntl." in src:
+            offenders.append(name)
+    if offenders:
+        raise AssertionError(f"잠금 수단을 직접 아는 모듈이 있다: {offenders} — 창구는 _lock.py 하나다")
+
+
+# ── 잔재 칸 이관(0.1.3 · 2026-09-11) ─────────────────────────────────────────
+
+
+def _legacy_participant_dir(**extra: Any) -> str:
+    """옛 설치기가 만든 모양의 참가자 폴더를 만든다(계약 밖 칸 포함)."""
+    import json as _json
+    import os as _os
+    import tempfile
+    from agora.contract_open import SIGN_NAMESPACE
+    d = tempfile.mkdtemp(prefix="agora-legacy-")
+    _os.chmod(d, 0o700)
+    doc = {"id": "jarvis-legacyprobe", "display_name": "jarvis-legacyprobe",
+           "key_fingerprint": "SHA256:" + "z" * 43, "namespace": SIGN_NAMESPACE,
+           "operator": False}
+    doc.update(extra)
+    path = _os.path.join(d, "participant.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump(doc, fh, ensure_ascii=False)
+    _os.chmod(path, 0o600)
+    return d
+
+
+def _quiet_load(directory: str) -> dict[str, Any]:
+    """참가자 파일을 읽되 **알림 줄을 삼킨다**(선택 아님 — 게이트가 stdout 을 JSON 으로 읽는다)."""
+    import io
+    from contextlib import redirect_stderr
+    from agora import participant
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        doc = participant.load(directory)
+    return {"doc": doc, "말": buf.getvalue()}
+
+
+def _case_participant_legacy_relay_moves_to_config() -> None:
+    """옛 설치기가 적은 `relay` 칸은 **거부가 아니라 이관**이다(참가자 손 0).
+
+    ★2026-09-10 노트북 실기에서 사람이 편집기로 그 칸을 지워야 6단계가 넘어갔다.
+      우리가 적은 칸을 남이 지우게 하지 않는다.
+    """
+    import json as _json
+    import os as _os
+    from agora.contract_open import PARTICIPANT_FIELDS
+    d = _legacy_participant_dir(relay="https://agora.godmeyou.kr")
+    first = _quiet_load(d)
+    if "relay" in first["doc"]:
+        raise AssertionError("계약 밖 칸이 그대로 올라왔다")
+    if sorted(first["doc"]) != sorted(PARTICIPANT_FIELDS):
+        raise AssertionError(f"계약 칸과 다르다: {sorted(first['doc'])}")
+    with open(_os.path.join(d, "config.json"), encoding="utf-8") as fh:
+        cfg = _json.load(fh)
+    if cfg.get("relay", {}).get("url") != "https://agora.godmeyou.kr":
+        raise AssertionError(f"주소가 config.json 으로 안 갔다: {cfg}")
+    if cfg.get("transport") != "relay":
+        raise AssertionError(f"운반층 이름이 없다: {cfg}")
+    baks = [n for n in _os.listdir(d) if n.startswith("participant.json.bak-")]
+    if len(baks) != 1:
+        raise AssertionError(f"백업이 {len(baks)}개 — 정확히 1개여야 한다")
+    with open(_os.path.join(d, "participant.json"), encoding="utf-8") as fh:
+        on_disk = _json.load(fh)
+    if "relay" in on_disk:
+        raise AssertionError("파일은 안 고쳤다 — 다음 실행에서 또 이관한다")
+    second = _quiet_load(d)
+    if second["doc"] != first["doc"] or second["말"]:
+        raise AssertionError("두 번째 실행에서도 이관이 일어났다(멱등이 아니다)")
+
+
+def _case_participant_unknown_field_still_rejected() -> None:
+    """**모르는 칸은 종전대로 거부한다.** 이관 목록은 계약을 넓히는 문이 아니다.
+
+    ★넓히는 순간, 여기에 칸 하나를 더 적는 것이 계약을 우회하는 방법이 된다
+      (그리고 언젠가 누가 여기에 비밀을 넣는다).
+    """
+    d = _legacy_participant_dir(relay="https://agora.godmeyou.kr", token="s3cret")
+    try:
+        _quiet_load(d)
+    except AgoraError as e:
+        if (e.detail or {}).get("extra") != ["token"]:
+            raise AssertionError(f"모르는 칸만 짚어야 한다: {e.detail}") from None
+        raise      # ★코드(2)는 하네스가 대조한다 — 여기서 삼키면 「무엇으로 죽었는가」가 안 재진다
+    raise AssertionError("모르는 칸이 통과했다")
+
+
+def _case_participant_migration_keeps_existing_config() -> None:
+    """이미 있는 설정이 **이긴다** — 잔재는 빈 자리를 메울 때만 쓴다.
+
+    ★사람이 손으로 고친 주소를 옛 설치기가 적은 값으로 덮으면 그것은 이관이 아니라 되돌림이다.
+    """
+    import json as _json
+    import os as _os
+    d = _legacy_participant_dir(relay="https://old.example.invalid")
+    keep = {"transport": "relay", "relay": {"url": "https://agora.godmeyou.kr",
+                                            "timeout_seconds": 30}}
+    with open(_os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+        _json.dump(keep, fh, ensure_ascii=False)
+    _quiet_load(d)
+    with open(_os.path.join(d, "config.json"), encoding="utf-8") as fh:
+        cfg = _json.load(fh)
+    if cfg["relay"]["url"] != "https://agora.godmeyou.kr":
+        raise AssertionError(f"있던 주소를 덮었다: {cfg}")
+
+
+def _case_participant_migration_failure_is_not_fatal() -> None:
+    """이관에 실패해도 **읽기는 살아 있다** — 실패는 경고로 말한다.
+
+    ★고치지 못한 것이 「참가자를 못 읽는 것」이 되면 F-3 을 형태만 바꿔 되풀이하는 셈이다
+      (그때도 문제는 사람 손을 부른다는 것이었다).
+    """
+    import os as _os
+    d = _legacy_participant_dir(relay="https://agora.godmeyou.kr")
+    _os.mkdir(_os.path.join(d, "config.json"))     # ★쓸 수 없는 자리를 만든다
+    got = _quiet_load(d)
+    if "relay" in got["doc"] or not got["doc"].get("id"):
+        raise AssertionError("이관 실패가 읽기를 망가뜨렸다")
+    if "옮기지 못했다" not in got["말"]:
+        raise AssertionError(f"실패를 말하지 않았다: {got['말']!r}")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("초대: 1단계가 혼자 선다",     _case_invite_join_brief_stands_alone, None),
+    ("잠금: 수단은 셋 중 하나",    _case_lock_backend_is_one_of_three, None),
+    ("잠금: fcntl 없이도 선다",    _case_lock_imports_without_fcntl, None),
+    ("잠금: 못 잠그면 말한다",     _case_lock_says_when_it_cannot_lock, None),
+    ("잠금: 윈도우는 기다렸다 포기한다", _case_lock_windows_waits_then_gives_up_honestly, None),
+    ("잠금: 창구는 _lock 하나",    _case_no_module_imports_fcntl_directly, None),
+    ("참가자: 옛 relay 칸은 이관된다", _case_participant_legacy_relay_moves_to_config, None),
+    ("참가자: 모르는 칸은 거부",   _case_participant_unknown_field_still_rejected, errors.PRECONDITION),
+    ("참가자: 있던 설정이 이긴다", _case_participant_migration_keeps_existing_config, None),
+    ("참가자: 이관 실패는 치명이 아니다", _case_participant_migration_failure_is_not_fatal, None),
     ("unknown-subcommand → 10",   _case_unknown_subcommand,   errors.ARGUMENT),
     ("unbuilt-subcommand → 2",    _case_unbuilt_subcommand,   errors.PRECONDITION),
     ("bad-error-code → 10",       _case_bad_error_code,       errors.ARGUMENT),
@@ -12111,6 +12462,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("명부: TOFU 뒤 변경은 확인",     _case_sync_roster_is_tofu_then_confirmed, None),
     ("명부: 폐기 목록 없으면 멈춤",   _case_sync_roster_stops_when_revocations_are_missing, None),
     ("whoami: 첫 칸이 승인 게이트",   _case_whoami_puts_the_approval_gate_first, None),
+    ("whoami: 잠금 수단을 적는다",  _case_whoami_reports_the_lock_backend, None),
     ("여정: 기존 도구를 부른다",      _case_journey_tools_call_the_existing_ones, None),
     ("CLI: 진입점이 플래그를 받는다", _case_cli_surface_accepts_flag_arguments, None),
     ("릴레이: 본문 code 가 정본",     _case_relay_body_code_wins_over_status, None),
@@ -12178,6 +12530,45 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
 # ── 뮤테이션 ────────────────────────────────────────────────────────────────
 # (id, 파일, 찾을 문자열, 바꿀 문자열, 이 변이를 잡아야 하는 케이스 이름)
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+    # ── 이식 잠금·잔재 이관(2026-09-11 · 0.1.3) ─────────────────────────────
+    # ★여덟 자리 전부 「한 OS 에서만 나는 죽음」과 「사람 손을 부르는 거부」를 겨눈다.
+    #   개발기에서는 둘 다 **초록이 기본값**이라 뮤턴트 없이는 아무것도 증명되지 않는다.
+    ("M399-whoami-hides-the-lock", "agora/onboard.py",
+     '        "file_lock": {"backend": _lock.backend(),',
+     '        "file_lock": {"backend": "fcntl",',
+     "whoami: 잠금 수단을 적는다"),
+    ("M391-lock-silent-when-unavailable", "agora/_lock.py",
+     '    _warn_once()\n    return NONE',
+     '    return NONE',
+     "잠금: 못 잠그면 말한다"),
+    ("M392-lock-windows-gives-up-quietly", "agora/_lock.py",
+     '        except OSError:\n            if time.monotonic() >= deadline:\n                raise',
+     '        except OSError:\n            return',
+     "잠금: 윈도우는 기다렸다 포기한다"),
+    ("M393-lock-release-uses-lock-mode", "agora/_lock.py",
+     '        _MOD.locking(fh.fileno(), _MOD.LK_UNLCK, _WINDOWS_LOCK_BYTES)',
+     '        _MOD.locking(fh.fileno(), _MOD.LK_LOCK, _WINDOWS_LOCK_BYTES)',
+     "잠금: 윈도우는 기다렸다 포기한다"),
+    ("M394-ledger-imports-fcntl-again", "agora/ledger.py",
+     'from agora import _lock, errors',
+     'import fcntl\nfrom agora import _lock, errors',
+     "잠금: 창구는 _lock 하나"),
+    ("M395-participant-legacy-rejected-again", "agora/participant.py",
+     '    if extra:\n        doc = _migrate_legacy(directory, path, doc, extra)',
+     '    if extra:\n        raise AgoraError(errors.PRECONDITION, "participant.json 에 계약 밖 칸이 있다",\n                         {"extra": extra})',
+     "참가자: 옛 relay 칸은 이관된다"),
+    ("M396-participant-unknown-field-migrated-too", "agora/participant.py",
+     '    unknown = [k for k in extra if k not in LEGACY_FIELDS]',
+     '    unknown = []',
+     "참가자: 모르는 칸은 거부"),
+    ("M397-participant-legacy-overwrites-config", "agora/participant.py",
+     '        if patch and not kept_existing:',
+     '        if patch:',
+     "참가자: 있던 설정이 이긴다"),
+    ("M398-participant-migration-failure-is-fatal", "agora/participant.py",
+     '    except (OSError, ValueError) as exc:',
+     '    except (OSError, ValueError) as exc:\n        raise AgoraError(errors.PRECONDITION, "이관 실패", {"why": str(exc)}) from exc',
+     "참가자: 이관 실패는 치명이 아니다"),
     # ── 설치 점검(2026-09-09 · master 판정 `[master#696731a8]` ③) ─────────────
     # ★네 자리 전부 「고장을 심었는데 초록이 나오는가」를 겨눈다. 케이스가 고장을 심는 것과
     #   그 심은 고장을 **판정이 실제로 읽는 것**은 다른 일이고, 뮤턴트만이 그 차이를 드러낸다.
@@ -12661,8 +13052,12 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    if os.path.exists(key_path):",
      "    if False:",
      "keygen: 덮어쓰기 거부 → 10"),
+    # ★앵커 재조준(2026-09-11 · 0.1.3) — 거부 줄이 둘로 갈렸다(`if unknown:` = 모르는 칸 거부 ·
+    #   `if extra:` = 알려진 잔재 칸 이관). 옛 앵커를 그대로 두면 이 뮤턴트는 **이관 줄**을 겨누게
+    #   되고 거부는 그대로라 killer 가 통과한다 — 실제로 SURVIVED 로 드러났다(전건 실행에서 잡혔다).
+    #   뜻(계약 밖 칸이 통과하는가)은 그대로 두고 조준만 옮긴다.
     ("M22-participant-extra-allowed", "agora/participant.py",
-     "    if extra:",
+     "    if unknown:",
      "    if False:",
      "participant: 계약 밖 칸 → 2"),
     ("M23-newline-not-normalized", "agora/event.py",

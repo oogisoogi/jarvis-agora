@@ -18,7 +18,7 @@ import json
 import os
 from typing import Any
 
-from agora import __version__, errors, roster
+from agora import __version__, _lock, errors, roster
 from agora.contract_open import CHECKPOINT_PURPOSE, REGISTER_PURPOSE
 from agora.errors import AgoraError
 from agora.keygen import KEY_NAME
@@ -385,6 +385,12 @@ def whoami(*, directory: str | None = None) -> dict[str, Any]:
         #   ⚠이름이 `c` 로 시작해 승인 게이트(`a`) 다음 자리다 — 첫 칸은 그대로 게이트다.
         "client_version": __version__,
         "config_dir": directory,
+        # ★이 기계가 **무엇으로 파일을 잠그는가**(0.1.3). 여기 두는 이유: 잠글 수단이 없는
+        #   파이썬(fcntl·msvcrt 둘 다 없음)에서는 동시 실행이 원장을 섞을 수 있는데, 그 사실은
+        #   경고 한 줄로 스쳐 지나간다. 참가자가 화면 사진으로 회신하는 명령이 이것 하나뿐이라
+        #   **여기 없으면 나중에 물어볼 자리가 없다**(윈도우 실기에서 실제로 물을 자리가 없었다).
+        "file_lock": {"backend": _lock.backend(),
+                      "note": "none 이면 잠글 수단이 없는 것이다 — 동시 실행이 원장을 섞을 수 있다"},
         "joined_rooms": {"count": len(joined), "rooms": sorted(joined)},
         "participant": {"id": doc["id"], "display_name": doc["display_name"],
                         "key_fingerprint": doc["key_fingerprint"],

@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import subprocess
@@ -24,7 +23,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from agora import errors
+from agora import _lock, errors
 from agora.errors import AgoraError
 
 # ★한도에 걸린 것은 **벽이 아니라 신호**다(§10). 429·403(secondary rate limit)은 「하지 마라」가
@@ -54,11 +53,11 @@ def _bindings_lock(path: str) -> Iterator[None]:
     """결박 원장의 **옆 파일**에 잠근다 — 데이터 파일 자체에 걸면 `os.replace` 가 inode 를
     갈아치워 서로 다른 파일을 잠근 두 프로세스가 동시에 쓴다."""
     with open(path + ".lock", "a+") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        _lock.acquire(lock)
         try:
             yield
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            _lock.release(lock)
 
 
 def _load_bindings(path: str | None) -> dict[str, dict[str, Any]]:
