@@ -105,13 +105,24 @@ jobs:
           python - <<'PY'
           from agora import selftest
           FAMILIES = ("잠금:", "참가자:", "whoami:", "설정:", "초대:", "contract", "codes-")
-          picked = [n for n, _fn, _c in selftest.CASES if n.startswith(FAMILIES)]
+          # ★일부러 뺀 것은 **이름과 이유를 함께** 적는다. 조용히 빠지면 「안 잰 것」이
+          #   「통과한 것」과 구별되지 않는다.
+          EXCLUDED = {
+              "잠금: 두 번째 실행은 즉시 거부된다":
+                  "제품이 아니라 **하네스 자신**의 단일 실행 잠금(죽은 pid 회수)을 잰다 —"
+                  " 윈도우의 pid 수명·os.kill(0) 의미가 달라 여기서는 다른 것을 재게 된다."
+                  " 이 축은 맥 job 이 전건으로 잰다.",
+          }
+          picked = [n for n, _fn, _c in selftest.CASES
+                    if n.startswith(FAMILIES) and n not in EXCLUDED]
           skipped = len(selftest.CASES) - len(picked)
           bad = [n for n in picked if not selftest._run_one(n)]
           print(f"잰 것 {len(picked)} · 실패 {len(bad)} · 이 job 이 **안 잰 것** {skipped}"
                 " (POSIX 전제 축 — SIGKILL 드릴·권한 비트 등 · 맥 job 이 전건으로 잰다)")
           for n in picked:
               print("   ·", n)
+          for n, why in EXCLUDED.items():
+              print(f"   [일부러 뺌] {n} — {why}")
           if bad:
               print("::error::윈도우에서 실패한 케이스:", bad)
               raise SystemExit(1)

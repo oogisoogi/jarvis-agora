@@ -11889,8 +11889,12 @@ def _case_lock_imports_without_fcntl() -> None:
     """
     import subprocess as _sp
     import sys as _sys
+    # ⚠**fcntl 만 가린다.** 함께 `msvcrt` 를 가리면 윈도우에서 이 시험이 엉뚱한 것을 잰다 —
+    #   그곳의 표준 `subprocess` 자체가 msvcrt 를 가져오므로, 우리 코드에 닿기도 전에
+    #   임포트가 죽는다(2026-09-11 러너 실측: 이 케이스만 윈도우에서 붉었다).
+    #   재려는 축은 「fcntl 이 없어도 서는가」이고, 그 축은 fcntl 하나만 가려야 정확히 드러난다.
     code = (
-        "import sys; sys.modules['fcntl'] = None; sys.modules['msvcrt'] = None\n"
+        "import sys; sys.modules['fcntl'] = None\n"
         "import agora.ledger, agora.spool, agora.store_github, agora.tools, agora.cli\n"
         "import tempfile\n"
         "lg = agora.ledger.Ledger(tempfile.mkdtemp())\n"
