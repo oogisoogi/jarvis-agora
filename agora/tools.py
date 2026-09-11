@@ -443,7 +443,14 @@ def _head_and_state(ctx: Context, thread_id: str) -> tuple[dict[str, Any], str, 
     """
     reduced = _reduce(ctx, thread_id)
     state = _require_open(reduced)
-    return state, state["head"], state["state_hash"]
+    # ★`prev` 는 **운반층 머리**(사슬의 마지막)다 — 상태 머리가 아니다.
+    #   🔴2026-09-11 사고: 여기서 상태 머리를 쓰고 있었다. `vote` 는 상태를 안 바꾸므로
+    #   상태 머리가 표 앞자리에 머무는데, 그 자리는 표가 이미 차지했다 ⇒ 다음 글이 전부
+    #   `lost_race` 로 죽는다(표 한 건이 방을 영구 동결 · 실측 재현 3/3).
+    #   계약은 처음부터 둘을 갈라 놓았다(§5 규칙 5 · codex 5R 의 F-1 시험이 그 구분을 잰다) —
+    #   갈라 놓은 것을 **부르는 쪽에서 도로 붙여 쓴 것**이 이 사고다.
+    # ⚠`expected_state` 는 그대로 **상태 해시**다(CAS 의 뜻은 안 바뀐다 · 릴레이 변경 0).
+    return state, reduced.get("chain_head") or state["head"], state["state_hash"]
 
 
 # ── 도구 11종(설계 §4 표 순서 그대로) ───────────────────────────────────────

@@ -438,6 +438,12 @@ def apply(ordered: dict[str, Any], *,
     """
     quarantined = list(ordered["quarantined"])
     chain = ordered["chain"]
+    # ★**머리는 둘이다**(계약 §5 규칙 5 · codex 5R 이 이미 못박은 구분):
+    #   ⑴**운반층 머리** = 사슬의 마지막 해시 — 다음 글이 `prev` 로 삼을 자리.
+    #   ⑵**상태 머리**(`state["head"]`) = 상태를 바꾼 마지막 이벤트 — 상태 해시(CAS)에 들어간다.
+    #   `vote` 는 상태를 안 바꾸므로 ⑵는 그대로 두고 ⑴만 지나간다. 둘을 한 칸으로 쓰면
+    #   **표 한 건이 방을 영구 동결시킨다**(2026-09-11 실측 · 다음 글이 이미 찬 자리를 가리킨다).
+    #   ⇒ 여기서 ⑴을 **이름 붙여 내보낸다**. 안 내보내면 부르는 쪽이 ⑵를 대신 쓴다(그게 그 사고였다).
     if not chain or chain[0]["kind"] != "genesis":
         # genesis 가 없으면 상태가 없다. 「빈 스레드」와 구별되게 이유를 남긴다.
         return {"thread_id": ordered["thread_id"], "state": None,
@@ -633,4 +639,5 @@ def apply(ordered: dict[str, Any], *,
                    "usage": usage, "budget": limits,
                    "stale": ordered["stale"], "quarantined": quarantined})
     result["state_hash"] = _state_hash(state)
+    result["chain_head"] = chain[-1]["hash"] if chain else None
     return result
