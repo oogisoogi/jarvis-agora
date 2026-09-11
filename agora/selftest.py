@@ -4490,10 +4490,10 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M389-selfcheck-ignores-who-signed",
                  "M390-selfcheck-axis-explosion-escapes",
                  # ★agy 1R HIGH — 점검이 **고치면** 두 번째 점검은 첫 번째와 다른 것을 잰다.
-                 "M423-selfcheck-migrates-while-checking",
+                 "M440-selfcheck-migrates-while-checking",
                  # ★윈도우 첫 실측(K-1) — 표와 **만나지 못하는** 검사는 통과도 실패도 아니다.
-                 "M418-package-check-ignores-windows-paths",
-                 "M419-manifest-keys-not-normalized"),
+                 "M435-package-check-ignores-windows-paths",
+                 "M436-manifest-keys-not-normalized"),
     # ★09-11 신설 — **이식 잠금**. 한 OS 에서만 나는 죽음은 개발기에서 영원히 초록이라,
     #   이 축이 비면 「맥에서 400번 초록」이 윈도우에 대해 아무것도 말하지 않는다.
     "이식잠금": ("M391-lock-silent-when-unavailable",
@@ -4503,9 +4503,9 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M399-whoami-hides-the-lock",
                  "M400-lock-shared-not-exclusive",
                  # ★K-1 실측 차단 — 자식에게 **무엇을 물려주는가**도 이식 잠금 축이다.
-                 "M420-powershell-inherits-module-path", "M421-pwsh-not-preferred",
+                 "M437-powershell-inherits-module-path", "M438-pwsh-not-preferred",
                  # ★agy 1R CRITICAL — 껍데기가 **한글 사용자 폴더**에서 깨지던 자리.
-                 "M422-invite-cmd-written-as-ascii"),
+                 "M439-invite-cmd-written-as-ascii"),
     # ★09-11 신설 — **잔재 이관**. 거부는 초록으로 보이지 않지만 **사람 손을 부른다**(실측:
     #   노트북 실기에서 사람이 편집기로 칸을 지웠다). 이 축은 「거부로 되돌아가는가」를 잰다.
     "잔재이관": ("M395-participant-legacy-rejected-again",
@@ -14342,29 +14342,29 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     # ── 윈도우 첫 실측(K-1 · 2026-09-11) — 한 OS 에서만 나는 죽음에 그물을 건다 ──────────
     # ★이 둘은 **맥에서 영원히 초록**인 종류다: 경로 구분자도, 물려받는 환경도 개발기에서는
     #   문제가 안 된다. 그래서 흉내 낸 상대(역슬래시 relpath · 7 용 PSModulePath)로 잰다.
-    ("M418-package-check-ignores-windows-paths", "agora/selfcheck.py",
+    ("M435-package-check-ignores-windows-paths", "agora/selfcheck.py",
      '            rel = _as_posix(os.path.relpath(os.path.join(dirpath, fn), root))',
      '            rel = os.path.relpath(os.path.join(dirpath, fn), root)',
      "점검: 윈도우 경로도 표와 만난다"),
     # ⚠앵커를 **옮겼다**(agy 1R MEDIUM 봉합 · 2026-09-11): 표 쪽 정규화를 **말하기**로 바꿨다.
     #   겨누는 것은 같다 — 표가 두 어휘를 갖게 두면 이 축은 어느 쪽도 제대로 못 잰다.
-    ("M419-manifest-keys-not-normalized", "agora/selfcheck.py",
+    ("M436-manifest-keys-not-normalized", "agora/selfcheck.py",
      '    windows_keys = sorted(k for k in files if "\\\\" in k)',
      '    windows_keys = []',
      "점검: 윈도우 경로도 표와 만난다"),
-    ("M420-powershell-inherits-module-path", "agora/participant.py",
+    ("M437-powershell-inherits-module-path", "agora/participant.py",
      '    exe = _which("powershell") or "powershell"\n    env["PSModulePath"] = _winps_51_module_path(env)',
      '    exe = _which("powershell") or "powershell"',
      "윈도우: PowerShell 자식 환경 고정"),
-    ("M423-selfcheck-migrates-while-checking", "agora/selfcheck.py",
+    ("M440-selfcheck-migrates-while-checking", "agora/selfcheck.py",
      '        doc = load(directory, migrate=False)',
      '        doc = load(directory)',
      "점검: 아무것도 쓰지 않는다"),
-    ("M422-invite-cmd-written-as-ascii", "docs/INVITE.md",
+    ("M439-invite-cmd-written-as-ascii", "docs/INVITE.md",
      '"@ | Set-Content -Encoding OEM "$AH\\bin\\agora.cmd"',
      '"@ | Set-Content -Encoding ASCII "$AH\\bin\\agora.cmd"',
      "초대장: 윈도우 덩어리가 한글 경로를 버틴다"),
-    ("M421-pwsh-not-preferred", "agora/participant.py",
+    ("M438-pwsh-not-preferred", "agora/participant.py",
      '    exe = _which("pwsh")\n    if exe:',
      '    exe = None\n    if exe:',
      "윈도우: PowerShell 자식 환경 고정"),
