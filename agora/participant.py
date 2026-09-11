@@ -106,10 +106,26 @@ def _powershell_invocation(env: dict[str, str] | None = None
             env["PSModulePath"])
 
 
+class _PowerShellFailure(RuntimeError):
+    """PowerShell 자식이 죽었다 — **진단 값을 칸으로 들고 다닌다**(agy 1R HIGH · 2026-09-11).
+
+    ★★문자열 뒤에 붙이면 **잘린다.** 앞서 우리는 `[shell] <stderr…160자> | PSModulePath=…` 로
+      이어 붙였는데, 받는 쪽(`_require_private_windows`)이 `str(exc)[:120]` 로 자르므로
+      **뒤에 붙인 모듈 경로는 사용자에게 한 번도 도달하지 못했다** — 「적었다」와 「도달한다」는
+      다른 말이고, 그 둘을 가르는 것이 이 클래스다.
+    ★칸으로 들고 다니면 자르는 쪽이 **무엇을 자를지 고를 수 있다.**
+    """
+
+    def __init__(self, message: str, *, shell: str, module_path: str) -> None:
+        super().__init__(message)
+        self.shell = shell
+        self.module_path = module_path
+
+
 def _windows_acl_sids(path: str) -> list[str]:
     """PowerShell Get-Acl 로 접근 항목의 SID 를 낸다(허용 항목만). 실패 = 예외.
 
-    ⚠예외 문면에 **어느 PowerShell·어느 모듈 경로**를 싣는다 — 그 두 값이 없으면 K-1 같은
+    ⚠실패는 **어느 PowerShell·어느 모듈 경로**를 칸으로 들고 나간다 — 그 두 값이 없으면 K-1 같은
       환경 사고가 「Get-Acl 이 실패했다」로만 보이고, 받는 사람은 고칠 데를 못 찾는다.
     """
     import subprocess
@@ -122,8 +138,8 @@ def _windows_acl_sids(path: str) -> list[str]:
     argv, env, shell_name, module_path = _powershell_invocation()
     r = subprocess.run(argv + [cmd], capture_output=True, text=True, timeout=20, env=env)
     if r.returncode != 0:
-        raise RuntimeError(f"[{shell_name}] " + (r.stderr or r.stdout).strip()[:160]
-                           + f" | PSModulePath={module_path[:160]}")
+        raise _PowerShellFailure((r.stderr or r.stdout).strip()[:200],
+                                 shell=shell_name, module_path=module_path)
     return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
 
 
@@ -131,10 +147,14 @@ def _require_private_windows(path: str, what: str) -> None:
     try:
         sids = _windows_acl_sids(path)
     except Exception as exc:  # noqa: BLE001 — 못 읽으면 통과 아님
+        # ★진단 두 값은 **자기 칸**에 넣는다. `why` 뒤에 이어 붙이면 절삭에 먹힌다(agy 1R HIGH).
+        detail = {"path": os.path.basename(path), "why": str(exc)[:160]}
+        if isinstance(exc, _PowerShellFailure):
+            detail["shell"] = exc.shell
+            detail["psmodulepath"] = exc.module_path
         raise AgoraError(
             errors.PRECONDITION,
-            f"{what} 권한(ACL)을 확인하지 못했다",
-            {"path": os.path.basename(path), "why": str(exc)[:120]},
+            f"{what} 권한(ACL)을 확인하지 못했다", detail,
         ) from exc
     public = sorted(s for s in sids if s in _WIN_PUBLIC_SIDS)
     if public:
@@ -159,7 +179,17 @@ def _require_mode(path: str, want: int, what: str) -> None:
         )
 
 
-def load(directory: str | None = None) -> dict[str, Any]:
+def load(directory: str | None = None, *, migrate: bool = True) -> dict[str, Any]:
+    """참가자 신원을 읽는다. `migrate=False` 면 **한 바이트도 쓰지 않는다.**
+
+    ★★`selfcheck` 가 이 문으로 들어오면서 「전부 읽기만 한다」가 거짓이 됐다(agy 1R HIGH ·
+      2026-09-11 실측: 잔재 `relay` 칸이 있는 폴더에서 `selfcheck` 를 돌리면 `config.json` 이
+      생기고 `participant.json` 이 고쳐지고 `.bak`·`.lock` 이 남았다).
+      ★**점검은 상태를 바꾸지 않아야 한다** — 점검이 고치면 사람은 「무엇이 원래 상태였는지」를
+      다시는 볼 수 없고, 두 번째 점검은 첫 번째와 다른 것을 잰다.
+    ⚠이관 자체는 옳다(거부는 사람 손을 부른다 · F-3). 바뀌는 것은 **누가 부를 때 하는가**뿐이다:
+      도구 경로는 그대로 이관하고, **점검 경로만** 읽고 지나간다.
+    """
     directory = directory or config_dir()
     path = os.path.join(directory, FILENAME)
     if not os.path.isdir(directory):
@@ -202,6 +232,10 @@ def load(directory: str | None = None) -> dict[str, Any]:
     if type(doc["operator"]) is not bool:
         raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)
     if extra:
+        if not migrate:
+            # ★읽기 전용으로 불렀으면 **이관하지 않고 그대로 돌려준다.**
+            #   잔재 칸이 있다는 사실은 도구 경로가 다음에 고친다(점검은 말하지 않고 고치지도 않는다).
+            return doc
         doc = _migrate_legacy(directory, path, doc, extra)
     return doc
 

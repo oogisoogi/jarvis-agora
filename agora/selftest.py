@@ -4489,6 +4489,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M387-selfcheck-empty-table-passes", "M388-selfcheck-one-way-sweep",
                  "M389-selfcheck-ignores-who-signed",
                  "M390-selfcheck-axis-explosion-escapes",
+                 # ★agy 1R HIGH — 점검이 **고치면** 두 번째 점검은 첫 번째와 다른 것을 잰다.
+                 "M423-selfcheck-migrates-while-checking",
                  # ★윈도우 첫 실측(K-1) — 표와 **만나지 못하는** 검사는 통과도 실패도 아니다.
                  "M418-package-check-ignores-windows-paths",
                  "M419-manifest-keys-not-normalized"),
@@ -4501,7 +4503,9 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M399-whoami-hides-the-lock",
                  "M400-lock-shared-not-exclusive",
                  # ★K-1 실측 차단 — 자식에게 **무엇을 물려주는가**도 이식 잠금 축이다.
-                 "M420-powershell-inherits-module-path", "M421-pwsh-not-preferred"),
+                 "M420-powershell-inherits-module-path", "M421-pwsh-not-preferred",
+                 # ★agy 1R CRITICAL — 껍데기가 **한글 사용자 폴더**에서 깨지던 자리.
+                 "M422-invite-cmd-written-as-ascii"),
     # ★09-11 신설 — **잔재 이관**. 거부는 초록으로 보이지 않지만 **사람 손을 부른다**(실측:
     #   노트북 실기에서 사람이 편집기로 칸을 지웠다). 이 축은 「거부로 되돌아가는가」를 잰다.
     "잔재이관": ("M395-participant-legacy-rejected-again",
@@ -5872,6 +5876,94 @@ def _case_windows_mode_check_uses_acl() -> None:
             raise AssertionError("ACL 을 못 읽었는데 통과했다(fail-open)")
 
 
+def _case_selfcheck_writes_nothing() -> None:
+    """점검은 **한 바이트도 쓰지 않는다**(agy 1R HIGH · 2026-09-11 실측).
+
+    ★★잔재 `relay` 칸이 있는 폴더에서 `selfcheck` 를 돌리면 `config.json` 이 생기고
+      `participant.json` 이 고쳐지고 `.bak`·`.lock` 이 남았다 — 문서는 「전부 읽기만 하고
+      아무것도 쓰지 않는다」고 적혀 있었다. ★**점검이 고치면 사람은 「무엇이 원래 상태였는지」를
+      다시는 볼 수 없고, 두 번째 점검은 첫 번째와 다른 것을 잰다.**
+    ⚠이관 자체는 옳다(거부는 사람 손을 부른다) — 바뀐 것은 **누가 부를 때 하는가**뿐이다.
+      그래서 대조군으로 **도구 경로는 여전히 이관하는지**도 함께 잰다(봉합이 기능을 끈 것이 아니다).
+    """
+    import json as _json
+    import shutil
+    import tempfile
+    from agora import participant, selfcheck as sc
+    example = os.path.join(_ROOT, "config", "participant.json.example")
+    with open(example, encoding="utf-8") as fh:
+        base = _json.load(fh)
+    base["relay"] = "https://agora.godmeyou.kr"
+
+    def seed() -> str:
+        d = tempfile.mkdtemp(prefix="agora-ro-")
+        path = os.path.join(d, "participant.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump(base, fh, ensure_ascii=False)
+        os.chmod(d, 0o700)
+        os.chmod(path, 0o600)
+        return d
+
+    d = seed()
+    try:
+        path = os.path.join(d, "participant.json")
+        before, mtime = sorted(os.listdir(d)), os.path.getmtime(path)
+        row = sc.check_participant(d)
+        if row["결과"] != "통과":
+            raise AssertionError(f"잔재 칸이 있는 신원을 점검이 거부했다: {row}")
+        after = sorted(os.listdir(d))
+        if after != before:
+            raise AssertionError(f"점검이 파일을 만들었다: {before} → {after}")
+        if os.path.getmtime(path) != mtime:
+            raise AssertionError("점검이 participant.json 을 고쳤다")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # 대조군 — **도구 경로는 여전히 이관한다**(봉합이 기능을 끈 것이 아니다).
+    # ⚠이관은 사람에게 **알림 한 줄을 stderr 로** 낸다. 게이트는 `2>&1` 로 합쳐 JSON 을 읽으므로
+    #   여기서 그 줄이 새면 **게이트가 「출력을 읽지 못했다」로 죽는다**(실제로 한 번 그랬다 —
+    #   `commit_gate.sh` 주석이 2026-08-25 에 같은 사고를 적어 뒀다).
+    #   ★시험은 자기가 재는 것 말고 아무것도 화면에 쓰지 않는다.
+    import contextlib
+    import io as _io
+    d = seed()
+    try:
+        with contextlib.redirect_stderr(_io.StringIO()), \
+             contextlib.redirect_stdout(_io.StringIO()):
+            participant.load(d)
+        if not os.path.exists(os.path.join(d, "config.json")):
+            raise AssertionError("도구 경로에서도 이관이 안 일어났다(기능을 껐다)")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _case_invite_windows_block_survives_a_korean_path() -> None:
+    """윈도우 설치 덩어리가 **한글 사용자 폴더에서 살아남는가**(agy 1R CRITICAL · 2026-09-11).
+
+    ★★`.cmd` 는 cmd.exe 가 **OEM 코드 페이지**로 읽는다. `Set-Content -Encoding ASCII` 로 쓰면
+      한글이 `?` 로 **깨진 채 저장**되고, `C:\\Users\\???\\python.exe` 를 부르는 껍데기가 남는다 —
+      실행하면 그제서야 죽는다. ★1차 실측 기계가 **정확히 한글 사용자 폴더**였다: 그때 통과한
+      것은 우리 덩어리가 아니라 테스터가 손으로 만든 껍데기였다.
+    ★두 겹으로 막는다: ⑴사용자 폴더 아래 경로는 `%USERPROFILE%` 로 되돌려 **한글이 파일에 아예
+      안 들어가게** 하고 ⑵그래도 들어갈 수 있으니 **OEM 으로 쓴다**.
+    ⚠이 검사는 문서를 읽는다 — 우리에게 윈도우가 없어서 **실행해 볼 수 없기 때문**이다.
+      「돌려 봤다」가 아니라 「이 두 표식이 문서에 있다」를 잰다. 그 차이를 여기 적어 둔다.
+    """
+    text = _doc("docs/INVITE.md")
+    block = [b for b in text.split("```") if b.startswith("powershell")]
+    if len(block) != 1:
+        raise AssertionError(f"윈도우 PowerShell 덩어리가 한 개가 아니다: {len(block)}개")
+    body = block[0]
+    if "-Encoding ASCII" in body:
+        raise AssertionError("`.cmd` 를 ASCII 로 쓴다 — 한글 사용자 폴더에서 경로가 깨진다")
+    if "-Encoding OEM" not in body:
+        raise AssertionError("`.cmd` 를 OEM(cmd.exe 가 읽는 코드 페이지)으로 쓰지 않는다")
+    if "%USERPROFILE%' + $py.Substring" not in body:
+        raise AssertionError("파이썬 경로를 %USERPROFILE% 로 되돌리지 않는다 — 한글이 파일에 들어간다")
+    if "agora.cmd" not in body:
+        raise AssertionError("윈도우 껍데기(`agora.cmd`)를 만들지 않는다")
+
+
 def _case_windows_powershell_child_gets_a_pinned_module_path() -> None:
     """윈도우 PowerShell 자식에 **무엇을 물려주는가**(윈도우 첫 실측 K-1 · 2026-09-11 · 차단).
 
@@ -5923,25 +6015,29 @@ def _case_windows_powershell_child_gets_a_pinned_module_path() -> None:
          mock.patch("subprocess.run", lambda *a, **k: _Dead()):
         try:
             participant._windows_acl_sids("C:\\x")
-        except RuntimeError as exc:
-            text = str(exc)
+        except participant._PowerShellFailure as exc:
+            failure = exc
         else:
             raise AssertionError("실패한 자식을 성공으로 읽었다")
-    if "powershell" not in text or "PSModulePath=" not in text:
-        raise AssertionError(f"어느 PowerShell·어느 모듈 경로인지 안 적었다: {text}")
+    # ★★진단은 **문자열 뒤가 아니라 칸**에 있어야 한다(agy 1R HIGH): 뒤에 이어 붙이면
+    #   받는 쪽의 절삭에 먹혀 **한 번도 도달하지 못한다**. 「적었다」와 「도달한다」는 다른 말이다.
+    if failure.shell != "powershell" or "WindowsPowerShell" not in failure.module_path:
+        raise AssertionError(f"진단 칸이 비었다: {failure.shell} {failure.module_path}")
 
     # ⑷ 그리고 그 두 값이 **사용자 화면까지** 간다(code 2 가 원인을 삼키지 않는다).
     with mock.patch.object(participant.os, "name", "nt"), \
          mock.patch.object(participant, "_windows_acl_sids",
-                           lambda p: (_ for _ in ()).throw(RuntimeError(text))):
+                           lambda p: (_ for _ in ()).throw(failure)):
         try:
             participant._require_private_windows("C:\\x", "참가자 파일")
         except AgoraError as exc:
-            why = str((exc.detail or {}).get("why", ""))
+            detail = exc.detail or {}
         else:
             raise AssertionError("ACL 을 못 읽었는데 통과했다(fail-open)")
-    if "powershell" not in why:
-        raise AssertionError(f"오류가 어느 PowerShell 인지 안 말한다: {why}")
+    # ⚠`why` 는 잘린다(그래도 된다). 잘리면 안 되는 두 값은 **자기 칸**에 있다.
+    if detail.get("shell") != "powershell" or \
+            "WindowsPowerShell" not in str(detail.get("psmodulepath")):
+        raise AssertionError(f"진단 두 칸이 사용자까지 도달하지 않는다: {detail}")
 
 
 def _case_powershell_is_spawned_through_one_door() -> None:
@@ -9856,18 +9952,29 @@ def _case_selfcheck_matches_windows_style_paths() -> None:
         def windows_relpath(*a, **k):
             return real_relpath(*a, **k).replace("/", "\\")
 
-        with mock.patch.object(os.path, "relpath", windows_relpath):
+        # ★흉내는 **구분자까지** 낸다: 윈도우는 `os.sep` 이 역슬래시이고, 우리 정규화는 그 값으로만
+        #   옮긴다 — 무조건 치환하면 POSIX 에서 합법적인 역슬래시 파일 이름이 폴더 경계로 읽혀
+        #   **리눅스에 새 오탐**이 생긴다(agy 1R MEDIUM · 윈도우 오탐을 고치려다 반대편을 깨는 셈).
+        with mock.patch.object(os.path, "relpath", windows_relpath), \
+             mock.patch.object(os, "sep", "\\"), mock.patch.object(os, "altsep", "/"):
             row = sc.check_package(root)
         if row["결과"] != "통과":
             raise AssertionError(f"윈도우식 경로에서 표와 못 만난다(오탐): {row}")
 
-        # ⑵ 표 쪽이 역슬래시 — 윈도우에서 만든 표가 들어와도 같은 사고가 반대로 나지 않는다.
+        # ⑵ 표 쪽이 역슬래시 = **실패로 말한다**(조용히 받아 주지 않는다).
+        #   ★그 표는 윈도우에서 만들어진 것이고 계약은 `/` 다. 받아 주면 다음 사람은
+        #     「표가 두 어휘를 갖는다」고 배우고, 그 순간 이 축은 어느 쪽도 제대로 못 잰다.
         write_manifest("agora\\core.py")
         row = sc.check_package(root)
-        if row["결과"] != "통과":
-            raise AssertionError(f"역슬래시로 적힌 표를 못 읽는다: {row}")
+        if row["결과"] != "실패" or "윈도우_경로_키" not in row["상세"]:
+            raise AssertionError(f"윈도우 경로로 적힌 표를 조용히 받았다: {row}")
+
+        # ⑵-b **POSIX 에서 역슬래시는 파일 이름의 일부다** — 폴더 경계로 읽으면 안 된다.
+        if sc._as_posix("foo\\bar.txt") != "foo\\bar.txt":
+            raise AssertionError("POSIX 에서 역슬래시를 폴더 경계로 읽는다(리눅스에 새 오탐)")
 
         # ⑶ **대조군** — 정규화가 축을 끈 것이 아니다: 진짜 변조는 여전히 붉다.
+        write_manifest("agora/core.py")
         with open(os.path.join(root, "agora", "core.py"), "wb") as fh:
             fh.write(body + b"# tampered\n")
         row = sc.check_package(root)
@@ -13338,6 +13445,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("점검: 윈도우 경로도 표와 만난다", _case_selfcheck_matches_windows_style_paths, None),
     ("윈도우: PowerShell 자식 환경 고정", _case_windows_powershell_child_gets_a_pinned_module_path, None),
     ("윈도우: PowerShell 문은 하나다", _case_powershell_is_spawned_through_one_door, None),
+    ("초대장: 윈도우 덩어리가 한글 경로를 버틴다", _case_invite_windows_block_survives_a_korean_path, None),
+    ("점검: 아무것도 쓰지 않는다",     _case_selfcheck_writes_nothing, None),
     ("점검: 표 밖 파일도 센다",       _case_selfcheck_counts_files_missing_from_the_table, None),
     ("점검: 누가 서명했는지 본다",    _case_selfcheck_checks_who_signed, None),
     ("점검: 축이 터져도 계속 잰다",   _case_selfcheck_keeps_measuring_when_one_axis_explodes, None),
@@ -13450,8 +13559,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "        _MOD.flock(fh.fileno(), _MOD.LOCK_SH)",
      "잠금: 남이 못 들어온다"),
     ("M401-participant-migrates-before-validating", "agora/participant.py",
-     '    if doc["namespace"] != SIGN_NAMESPACE:\n        raise AgoraError(errors.PRECONDITION, "namespace 불일치",\n                         {"got": doc["namespace"]})\n    if type(doc["operator"]) is not bool:\n        raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)\n    if extra:\n        doc = _migrate_legacy(directory, path, doc, extra)\n    return doc',
-     '    if extra:\n        doc = _migrate_legacy(directory, path, doc, extra)\n    if doc["namespace"] != SIGN_NAMESPACE:\n        raise AgoraError(errors.PRECONDITION, "namespace 불일치",\n                         {"got": doc["namespace"]})\n    if type(doc["operator"]) is not bool:\n        raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)\n    return doc',
+     '    if doc["namespace"] != SIGN_NAMESPACE:\n        raise AgoraError(errors.PRECONDITION, "namespace 불일치",\n                         {"got": doc["namespace"]})\n    if type(doc["operator"]) is not bool:\n        raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)\n    if extra:\n        if not migrate:\n            # ★읽기 전용으로 불렀으면 **이관하지 않고 그대로 돌려준다.**\n            #   잔재 칸이 있다는 사실은 도구 경로가 다음에 고친다(점검은 말하지 않고 고치지도 않는다).\n            return doc\n        doc = _migrate_legacy(directory, path, doc, extra)\n    return doc',
+     '    if extra:\n        if not migrate:\n            # ★읽기 전용으로 불렀으면 **이관하지 않고 그대로 돌려준다.**\n            #   잔재 칸이 있다는 사실은 도구 경로가 다음에 고친다(점검은 말하지 않고 고치지도 않는다).\n            return doc\n        doc = _migrate_legacy(directory, path, doc, extra)\n    if doc["namespace"] != SIGN_NAMESPACE:\n        raise AgoraError(errors.PRECONDITION, "namespace 불일치",\n                         {"got": doc["namespace"]})\n    if type(doc["operator"]) is not bool:\n        raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)\n    return doc',
      "참가자: 거부는 아무것도 안 바꾼다"),
     ("M402-participant-nested-unknown-slips", "agora/participant.py",
      "    unknown += _unknown_inside_legacy(doc, extra)",
@@ -13485,8 +13594,9 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      'from agora import _lock, errors',
      'import fcntl\nfrom agora import _lock, errors',
      "잠금: 창구는 _lock 하나"),
+    # ⚠앵커를 옮겼다(2026-09-11 · `migrate=False` 갈래가 생겼다 · agy 1R HIGH 봉합).
     ("M395-participant-legacy-rejected-again", "agora/participant.py",
-     '    if extra:\n        doc = _migrate_legacy(directory, path, doc, extra)',
+     '    if extra:\n        if not migrate:\n            # ★읽기 전용으로 불렀으면 **이관하지 않고 그대로 돌려준다.**\n            #   잔재 칸이 있다는 사실은 도구 경로가 다음에 고친다(점검은 말하지 않고 고치지도 않는다).\n            return doc\n        doc = _migrate_legacy(directory, path, doc, extra)',
      '    if extra:\n        raise AgoraError(errors.PRECONDITION, "participant.json 에 계약 밖 칸이 있다",\n                         {"extra": extra})',
      "참가자: 옛 relay 칸은 이관된다"),
     ("M396-participant-unknown-field-migrated-too", "agora/participant.py",
@@ -13685,14 +13795,24 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            rel = _as_posix(os.path.relpath(os.path.join(dirpath, fn), root))',
      '            rel = os.path.relpath(os.path.join(dirpath, fn), root)',
      "점검: 윈도우 경로도 표와 만난다"),
+    # ⚠앵커를 **옮겼다**(agy 1R MEDIUM 봉합 · 2026-09-11): 표 쪽 정규화를 **말하기**로 바꿨다.
+    #   겨누는 것은 같다 — 표가 두 어휘를 갖게 두면 이 축은 어느 쪽도 제대로 못 잰다.
     ("M419-manifest-keys-not-normalized", "agora/selfcheck.py",
-     '    files = {_as_posix(rel): want for rel, want in files.items()}',
-     '    files = dict(files)',
+     '    windows_keys = sorted(k for k in files if "\\\\" in k)',
+     '    windows_keys = []',
      "점검: 윈도우 경로도 표와 만난다"),
     ("M420-powershell-inherits-module-path", "agora/participant.py",
      '    exe = _which("powershell") or "powershell"\n    env["PSModulePath"] = _winps_51_module_path(env)',
      '    exe = _which("powershell") or "powershell"',
      "윈도우: PowerShell 자식 환경 고정"),
+    ("M423-selfcheck-migrates-while-checking", "agora/selfcheck.py",
+     '        doc = load(directory, migrate=False)',
+     '        doc = load(directory)',
+     "점검: 아무것도 쓰지 않는다"),
+    ("M422-invite-cmd-written-as-ascii", "docs/INVITE.md",
+     '"@ | Set-Content -Encoding OEM "$AH\\bin\\agora.cmd"',
+     '"@ | Set-Content -Encoding ASCII "$AH\\bin\\agora.cmd"',
+     "초대장: 윈도우 덩어리가 한글 경로를 버틴다"),
     ("M421-pwsh-not-preferred", "agora/participant.py",
      '    exe = _which("pwsh")\n    if exe:',
      '    exe = None\n    if exe:',

@@ -38,7 +38,7 @@
 
 2) 프로그램 꾸러미를 받아 지문을 대조한다.
    주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.5.zip
-   지문 = ec402b739e82de952a5c4bdd892f47afdbbd393d04aaa8458af6dcc1ff2367f1
+   지문 = 83b07f4e7eb43b06864b11179a572f19053552074b690942cc72d21cdd2126dd
    ★지문이 다르면 받은 파일을 지우고 멈춘다. 다시 받지 말고 나에게 알려 줘.
 
 3) ~/.config/agora/lib 에 통째로 새로 푼다(그 폴더는 먼저 비운다).
@@ -149,7 +149,7 @@
 ```sh
 set -e
 URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.5.zip
-SHA=ec402b739e82de952a5c4bdd892f47afdbbd393d04aaa8458af6dcc1ff2367f1
+SHA=83b07f4e7eb43b06864b11179a572f19053552074b690942cc72d21cdd2126dd
 AH="$HOME/.config/agora"
 
 PY=""
@@ -179,7 +179,7 @@ echo "놓았습니다: $AH/bin/agora ($PY)"
 ```powershell
 $ErrorActionPreference = "Stop"
 $URL = "https://jarvis.godmeyou.kr/install/agora-client-0.1.5.zip"
-$SHA = "ec402b739e82de952a5c4bdd892f47afdbbd393d04aaa8458af6dcc1ff2367f1"
+$SHA = "83b07f4e7eb43b06864b11179a572f19053552074b690942cc72d21cdd2126dd"
 $AH  = "$env:USERPROFILE\.config\agora"
 
 $py = $null
@@ -206,12 +206,19 @@ Remove-Item -Force "$AH\.client.zip"
 # 윈도우의 「나만 접근」은 권한 비트가 아니라 ACL 입니다(0o700 에 해당).
 icacls $AH /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null
 
+# 껍데기에 **한글이 들어가지 않게** 사용자 폴더 아래 경로는 %USERPROFILE% 로 되돌립니다.
+$pyCmd = if ($py.StartsWith($env:USERPROFILE)) {
+  '%USERPROFILE%' + $py.Substring($env:USERPROFILE.Length)
+} else { $py }
+
+# ⚠`.cmd` 는 cmd.exe 가 **OEM 코드 페이지**로 읽습니다. ASCII 로 쓰면 한글이 `?` 로 깨져
+#   한글 사용자 폴더에서 무조건 실패합니다(1차 실측 기계가 정확히 그 경우였습니다).
 @"
 @echo off
 set "AGORA_SIGNING_KEY=%USERPROFILE%\.config\agora\id_ed25519"
-set "PATH=$(Split-Path $py);%PATH%"
-"$py" "%USERPROFILE%\.config\agora\lib\bin\agora" %*
-"@ | Set-Content -Encoding ASCII "$AH\bin\agora.cmd"
+set "PATH=$(Split-Path $pyCmd);%PATH%"
+"$pyCmd" "%USERPROFILE%\.config\agora\lib\bin\agora" %*
+"@ | Set-Content -Encoding OEM "$AH\bin\agora.cmd"
 
 Write-Host "놓았습니다: $AH\bin\agora.cmd ($py)"
 ```
