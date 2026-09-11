@@ -4565,6 +4565,16 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     #   「틀린 일을 조용히 한다」다: 유예를 안 지키고 회차를 넘기거나, 판단하지 않았다고
     #   적어 놓고 요약을 지어내거나, 같은 자리를 두 번 하거나, 하고도 말하지 않는다.
     # ★09-11 신설 — **투표동결**. 표 한 건이 방을 얼리던 자리(두 구현 동시 봉합).
+    # ★09-11 신설 — **침묵봉합**(실사격이 두 번 밟은 자리). 여기서 잃는 것은 **아무 표시도 없다**:
+    #   루프는 돌고 exit 0 이고 화면은 깨끗한데, 못 본 글과 못 맞춘 명부가 조용히 쌓인다.
+    #   ⛔세는 것만으로는 봉합이 아니다 — **말하는 것**(통보)과 **기계가 보는 칸**(rc)까지가 봉합이다.
+    "침묵봉합": ("M504-daily-loop-swallows-unverifiable",
+                 "M505-daily-loop-counts-but-stays-silent",
+                 "M506-chair-loop-roster-failure-hidden-from-rc",
+                 "M507-chair-loop-roster-failure-not-told",
+                 "M508-chair-loop-has-no-last-resort",
+                 "M509-daily-loop-guard-drops-the-code",
+                 "M510-shelve-ignores-settled"),
     # ★09-11 신설 — **광장파생**. 「어떤 제안이 오늘 방이 되는가」를 계산이 정하는 자리.
     #   여기서 잃는 것은 조용하다: 오류 없이 **다른 제안이 열린다**. 표를 던진 사람만 알아채고,
     #   그 사람도 증명할 수 없다(규칙이 코드 한 곳에 있다는 것이 곧 증명 수단이기 때문이다).
@@ -13400,6 +13410,196 @@ def _case_daily_loop_opens_marks_and_retires() -> None:
             raise AssertionError(f"14일 지난 제안이 안 가려졌다: {shelved} · {out2['actions']}")
 
 
+def _case_graduated_proposals_are_never_shelved() -> None:
+    """[졸업]한 제안은 **[보관]되지 않는다** — 그래서 「14일 = 보관」은 **조건부**다.
+
+    ★2026-09-11 실사격이 드러낸 것: 마커 3종 중 [보관]만 못 쟀다. 이유는 결함이 아니라 **규칙 둘의
+      맞물림**이었다 — 교착 해소가 **매일 최고점 하나를 연다** ⇒ 제안이 하루 1건보다 느리게 쌓이는
+      광장에서는 14일을 버틸 제안이 **남지 않는다.**
+    ★그래서 문서가 「14일 미채택 = 보관」이라고만 적으면 **언제나 나는 일처럼 읽힌다.**
+      여기서 못박는 것은 그 조건의 뿌리다: **끝난 제안은 셈에서 빠진다.**
+    """
+    import datetime as _dt
+    pz = _plaza()
+    old_day = "2026-08-20T07:00:00Z"
+    now = _dt.datetime(2026, 9, 11, 6, 10, tzinfo=pz.KST)
+    # ★제안 id 는 **32자리 hex** 여야 한다 — 마커 정규식이 그것을 요구한다. 짧은 이름을 쓰면
+    #   마커 줄이 아예 안 읽히고 **제안으로 셈에 들어가** 시험이 엉뚱한 것을 잰다(이 케이스를 짜다 났다).
+    p1, p2, room = "1" * 32, "2" * 32, "3" * 32
+    events = [_ev("post", "a", old_day, p1, body="졸업할 제안", round=0),
+              _ev("post", "a", old_day, p2, body="아무도 안 민 제안", round=0)]
+    plaza = pz.read_plaza(events)
+    both = pz.to_shelve(plaza, now=now)
+    if sorted(both) != sorted([p1, p2]):
+        raise AssertionError(f"14일 지난 제안 둘이 다 대상이어야 한다: {both}")
+
+    graduated = pz.read_plaza(events + [
+        _ev("post", "a", "2026-08-21T07:00:00Z", "4" * 32,
+            body=pz.marker_line("졸업", p1, room))])
+    left = pz.to_shelve(graduated, now=now)
+    if p1 in left:
+        raise AssertionError("졸업한 제안이 보관 대상에 남았다 — 한 제안이 두 이름을 갖는다")
+    if len(left) != 1:
+        raise AssertionError(f"아직 안 끝난 제안은 보관돼야 한다: {left}")
+
+
+def _tmpdir(prefix: str) -> str:
+    import tempfile
+    return tempfile.mkdtemp(prefix=f"{prefix}-")
+
+
+def _offline_config_dir() -> str:
+    """망을 안 타는 최소 설정 폴더 — **서명 앞에서 멈추는** 경로를 재기 위한 것이다."""
+    import json as _json
+    from agora.contract_open import SIGN_NAMESPACE
+    d = _tmpdir("offline-config")
+    with open(os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+        _json.dump({"transport": "relay", "human_approval": False,
+                    "relay": {"url": "https://relay.example.invalid"}}, fh)
+    path = os.path.join(d, "participant.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump({"id": "operator-a", "display_name": "시험 운영자",
+                    "key_fingerprint": "SHA256:" + "a" * 43,
+                    "namespace": SIGN_NAMESPACE, "operator": False}, fh)
+    os.chmod(path, 0o600)      # 계약이 요구하는 권한 — 안 맞추면 여기서 먼저 멈춘다
+    # 명부 사본 — 내용은 상관없다(서명 앞에서 멈추므로). **없으면 그 앞에서 먼저 멈춘다.**
+    f = _fixtures()
+    with open(f["roster_ab"], encoding="utf-8") as src, \
+            open(os.path.join(d, "allowed_signers"), "w", encoding="utf-8") as dst:
+        dst.write(src.read())
+    return d
+
+
+def _stub_ctx() -> Any:
+    """설정 폴더를 안 읽는 **가짜 컨텍스트** — 배선만 재는 케이스가 실물 설정에 매이지 않게."""
+    class _Ctx:
+        config = {"relay": {"url": "https://relay.example.invalid"}}
+        config_dir = _tmpdir("stub-config")
+    return _Ctx()
+
+
+def _case_daily_loop_says_what_it_could_not_see() -> None:
+    """광장에 **명부 밖 글**이 있으면 루프가 **말한다** — 셈에서 빠진 것을 침묵으로 덮지 않는다.
+
+    ★2026-09-11 실사격이 잡은 자리: 참가자 하나의 제안 2 + 표 1 이 `not_in_roster` 로 통째로
+      빠졌는데 출력은 `ranking: [] · unreadable: 0` 이었다 — **경고 0.**
+      ⇒ 「후보가 없다」와 「후보를 못 봤다」가 **같은 화면**이었다.
+    ★라이브에서 이게 나면: 글쓴이는 원장에 있으니 올라갔다고 믿고, 보드는 「제안 없음」이라 말한다.
+      **아무도 못 본다.** 그래서 이 축은 숫자만으로는 부족하고 **통보까지** 재야 한다
+      (⛔출력만 늘리고 통보를 안 붙이면 아무도 안 읽는다).
+    """
+    import tempfile
+    from agora import tools
+    dl = _daily()
+    f = _fixtures()
+    with _relay_env() as (ctx, _relay, _url):          # noqa: F841
+        plaza_id = _relay_room(ctx, budget=_plaza_budget())
+        # ★`ctx` 는 **2인 명부**(a·b)다. 3인 명부 판으로 c 가 글을 쓰면, 같은 원장인데도
+        #   ctx 쪽에서는 **명부 밖**이라 상태에 안 들어간다 — 실사격에서 난 것과 같은 모양이다.
+        as_who = _three_party(ctx, _relay, f, _url)
+        _with_key(f["key_c"], lambda: tools.say(as_who("operator-c"), thread_id=plaza_id,
+                                                body="명부 밖 사람의 제안"))
+        state = tempfile.mkdtemp(prefix="daily-")
+        out = _with_key(f["key_a"], lambda: dl.run(ctx, state_dir=state, plaza_id=plaza_id,
+                                                   config={"per_day": 2}))
+        if not out.get("unverifiable"):
+            raise AssertionError(f"못 본 글을 안 셌다: {out}")
+        if not [line for line in out["said"] if "못 넣었다" in line]:
+            raise AssertionError(f"셌지만 **말하지 않았다** — 통보가 없다: {out['said']}")
+        # ★`unreadable`(시각을 못 읽음)과 **다른 칸**이어야 한다 — 뭉치면 처방이 다른 둘이 한 이름이 된다.
+        if out["unreadable"] != 0:
+            raise AssertionError(f"축이 섞였다: unreadable={out['unreadable']}")
+
+
+def _case_loop_scripts_name_the_missing_key() -> None:
+    """문서대로 친 사람이 **이유를 읽을 수 있다** — 계약 실패는 역추적이 아니라 계약 모양으로 나온다.
+
+    ★2026-09-11 실사격: `AGORA_SIGNING_KEY` 없이 안내대로 치니 **파이썬 역추적**이 쏟아졌다.
+      메시지는 그 안에 있었지만 첫 화면은 스택이고, 거기에는 **무엇을 해야 하는지가 없다.**
+      「오류가 났다」와 「원인을 말했다」는 다른 사건이다.
+    ★rc 도 잰다 — launchd 와 상위 스크립트가 보는 칸은 그것뿐이다.
+    """
+    import contextlib
+    import io
+    import json as _json
+    old = os.environ.pop("AGORA_SIGNING_KEY", None)
+    try:
+        # ⑴ 사람이 실제로 밟는 자리 — 키 없이 방을 열려 한다. **어느 환경변수인지까지** 대야 한다.
+        #   ★서명은 **쓰기보다 먼저**라 여기서 멈춘다 ⇒ 망을 안 탄다(시험이 네트워크에 매이면
+        #     느려지고 흔들린다 — 흔들리는 그물은 「측정 실패」로 KILLED 를 공짜로 준다).
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = _chair_loop()._guarded(["--open", "--topic", "시험",
+                                         "--dir", _offline_config_dir(),
+                                         "--state-dir", _tmpdir("guard-chair")])
+        said = err.getvalue()
+        if rc != errors.PRECONDITION:
+            raise AssertionError(f"chair_loop: rc {rc} != 2 · {said[:200]}")
+        if "AGORA_SIGNING_KEY" not in said:
+            raise AssertionError(f"chair_loop: 어느 키가 없는지 안 댄다 — {said[:200]}")
+
+        # ⑵ 최후 방어 자체 — **두 스크립트 모두** 계약 실패를 계약 모양으로 낸다.
+        #   `main` 을 직접 터뜨려 잰다: 실패 사유는 이 축이 아니고, **감싸는 자리**가 이 축이다.
+        for mod in (_chair_loop(), _daily()):
+            saved = mod.main
+
+            def boom(_argv: Any = None) -> int:
+                raise AgoraError(errors.STATE_CONFLICT, "가짜 계약 실패", {"probe": True})
+            mod.main = boom
+            try:
+                err2 = io.StringIO()
+                with contextlib.redirect_stderr(err2):
+                    rc2 = mod._guarded([])
+                text = err2.getvalue()
+            finally:
+                mod.main = saved
+            if "Traceback" in text:
+                raise AssertionError(f"{mod.__name__}: 역추적이 그대로 나온다 — 사람은 원인을 못 읽는다")
+            try:
+                doc = _json.loads(text.strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                raise AssertionError(f"{mod.__name__}: 계약 모양이 아니다 — {text[:200]}") from None
+            if rc2 != errors.STATE_CONFLICT or doc.get("code") != errors.STATE_CONFLICT:
+                raise AssertionError(f"{mod.__name__}: rc 가 계약 코드를 안 싣는다 — rc {rc2} · {doc}")
+            if not doc.get("message"):
+                raise AssertionError(f"{mod.__name__}: 이유를 안 적는다 — {doc}")
+    finally:
+        if old is not None:
+            os.environ["AGORA_SIGNING_KEY"] = old
+
+
+def _case_chair_loop_reports_roster_failure_in_rc() -> None:
+    """명부 한 줄이 실패하면 **통보 한 줄 + rc 비0** — JSON 안에만 적으면 아무도 안 읽는다.
+
+    ★2026-09-11 실측: 운영자 명부에 없어 `checkpoint` 가 code 5 로 죽는 동안에도 **rc 는 0** 이었다.
+      launchd 는 JSON 을 안 읽고 exit 만 본다 ⇒ **명부를 못 맞춘 채 도는 루프가 「정상」으로 보인다.**
+    ⛔루프 자체는 계속 돈다 — 명부 한 줄이 실패해도 이미 맡긴 방의 진행을 멈출 이유는 없다.
+      그래서 「멈췄는가」가 아니라 **「말했는가·rc 에 실었는가」**를 잰다.
+    """
+    import contextlib
+    import io
+    cl = _chair_loop()
+    told: list[str] = []
+    saved = (cl.roster_line, cl._inbox_notify, cl.run, cl.tools.context_from_config)
+    try:
+        # ★`main` 은 표준출력에 JSON 을 찍는다 — 삼키지 않으면 **selftest 자신의 출력이 깨진다**
+        #   (이 케이스를 넣자마자 게이트가 JSON 을 못 읽었다 · 2026-09-11).
+        def boom(*_a: Any, **_k: Any) -> None:
+            raise AgoraError(errors.PERMISSION, "이 참가자는 릴레이 운영자 명부에 없다")
+        cl.roster_line = boom
+        cl._inbox_notify = told.append
+        cl.run = lambda *_a, **_k: {"actions": [], "said": [], "stopped": False, "verified": []}
+        cl.tools.context_from_config = lambda *_a, **_k: _stub_ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cl.main(["--state-dir", _tmpdir("roster-rc")])
+        if rc != errors.PERMISSION:
+            raise AssertionError(f"rc 가 명부 실패를 안 싣는다: {rc}")
+        if not [line for line in told if "명부 한 줄 실패" in line]:
+            raise AssertionError(f"통보를 안 냈다: {told}")
+    finally:
+        (cl.roster_line, cl._inbox_notify, cl.run, cl.tools.context_from_config) = saved
+
+
 def _case_daily_loop_does_not_open_twice_when_the_marker_fails() -> None:
     """마커가 **실패해도** 같은 제안으로 방을 두 번 열지 않는다 — 기억(Marks)이 그 벨트다.
 
@@ -15138,6 +15338,10 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("하루 한 바퀴: 열고 적고 접는다", _case_daily_loop_opens_marks_and_retires, None),
     ("하루 한 바퀴: 마커가 실패해도 한 번",
      _case_daily_loop_does_not_open_twice_when_the_marker_fails, None),
+    ("하루 한 바퀴: 못 본 글을 말한다", _case_daily_loop_says_what_it_could_not_see, None),
+    ("배선: 키 없이도 이유를 말한다",  _case_loop_scripts_name_the_missing_key, None),
+    ("의장 루프: 명부 실패가 rc 에",   _case_chair_loop_reports_roster_failure_in_rc, None),
+    ("광장: 졸업한 제안은 안 가린다", _case_graduated_proposals_are_never_shelved, None),
     ("광장: 예산은 평생 예산이다",   _case_plaza_budget_is_a_lifetime_budget, None),
     ("참가자: 모양 틀린 relay 거부", _case_participant_relay_of_wrong_shape_is_rejected, errors.PRECONDITION),
     ("참가자: 모르는 칸은 거부",   _case_participant_unknown_field_still_rejected, errors.PRECONDITION),
@@ -15651,6 +15855,40 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if buf:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      '        if False:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      "참가 안내: 문서와 같다"),
+    # ── 침묵 봉합(2026-09-11 실사격 · 대역 M504~) ────────────────────────────
+    # ★이 축이 비면 **아무 오류도 안 난다.** 루프는 계속 돌고 exit 0 이고 화면은 깨끗한데,
+    #   못 본 글·못 맞춘 명부가 조용히 쌓인다. 실사격이 이 자리를 두 번 밟았다.
+    ("M504-daily-loop-swallows-unverifiable", "tools/daily_loop.py",
+     "    if unverifiable:",
+     "    if False:",
+     "하루 한 바퀴: 못 본 글을 말한다"),
+    # ★세기만 하고 **말하지 않는 것**도 같은 사고다 — 아무도 JSON 을 안 읽는다.
+    ("M505-daily-loop-counts-but-stays-silent", "tools/daily_loop.py",
+     '        tell(f"【아고라】 광장에서 {unverifiable}건을 상태에 못 넣었다 — 명부·서명을 봐야 한다"',
+     '        (lambda *_a: None)(f"【아고라】 광장에서 {unverifiable}건"',
+     "하루 한 바퀴: 못 본 글을 말한다"),
+    ("M506-chair-loop-roster-failure-hidden-from-rc", "tools/chair_loop.py",
+     "        return roster_rc",
+     "        return errors.OK",
+     "의장 루프: 명부 실패가 rc 에"),
+    ("M507-chair-loop-roster-failure-not-told", "tools/chair_loop.py",
+     '                _inbox_notify(f"【아고라】 명부 한 줄 실패 — code {e.code} {e.message}."',
+     '                (lambda *_a: None)(f"【아고라】 명부 한 줄 실패 — code {e.code}."',
+     "의장 루프: 명부 실패가 rc 에"),
+    # ★최후 방어가 빠지면 계약 실패가 **역추적**으로 나온다 — 메시지는 있는데 사람은 못 읽는다.
+    ("M508-chair-loop-has-no-last-resort", "tools/chair_loop.py",
+     "    try:\n        return main(argv)\n    except AgoraError as e:",
+     "    if True:\n        return main(argv)\n    try:\n        pass\n    except AgoraError as e:",
+     "배선: 키 없이도 이유를 말한다"),
+    ("M509-daily-loop-guard-drops-the-code", "tools/daily_loop.py",
+     "        return e.code",
+     "        return errors.OK",
+     "배선: 키 없이도 이유를 말한다"),
+    # ★끝난 제안을 다시 가리면 **한 제안이 두 이름**을 갖는다(졸업이면서 보관).
+    ("M510-shelve-ignores-settled", "tools/plaza.py",
+     "        if pid in done:\n            continue",
+     "        if False:\n            continue",
+     "광장: 졸업한 제안은 안 가린다"),
     # ── 광장파생(2026-09-11) — 「어떤 제안이 오늘 방이 되는가」는 판단이 아니라 계산이다 ──
     # ★이 축이 비면 **아무 오류도 안 난다.** 규칙 한 줄이 조용히 빠지고, 광장은 계속 도는데
     #   **다른 제안이 열린다** — 그리고 그 차이는 표를 던진 사람만 안다(그 사람도 증명할 수 없다).

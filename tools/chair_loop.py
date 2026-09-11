@@ -23,6 +23,7 @@ resolve 1 · close 1 · 대조 1). 그중 **사람이 정해야 하는 것은 �
     python3 tools/chair_loop.py               # 한 번 돈다(cron·launchd 가 10분마다 부른다)
     touch ~/.config/agora/chair-loop/STOP     # ★사람이 끄는 법 — 이 파일이 있으면 아무것도 안 한다
 
+    export AGORA_SIGNING_KEY=~/.config/agora/id_ed25519   # ★손으로 칠 때 필요하다(껍데기를 안 지나므로)
     python3 tools/chair_loop.py --open --topic "<주제>" --body "<발제 3줄>"   # 방 열기 + 맡기기(사람 손 1)
     python3 tools/chair_loop.py --open --plaza --topic "<광장 이름>"          # 광장 열기(큰 예산 · 안 맡긴다)
     python3 tools/chair_loop.py --manage <방 id>                              # 이미 연 방을 맡긴다
@@ -472,21 +473,51 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     try:
         roster: Any = "건너뜀(--no-roster)"
+        roster_rc = errors.OK
         if not args.no_roster and not args.dry_run:
             try:
                 roster_line(args.dir, relay_url=(ctx.config.get("relay") or {}).get("url"))
                 roster = "sync-roster → whoami → checkpoint"
             except AgoraError as e:
                 roster = f"명부 한 줄 실패: code {e.code} {e.message}"
+                # ★**적기만 하면 아무도 안 읽는다**(2026-09-11 실사격 · master 판정 [master#66674185]).
+                #   전에는 이 실패가 JSON 안에만 남고 **rc 는 0** 이었다 ⇒ launchd 는 exit 0 을 보고
+                #   「정상」이라 말한다. 그래서 「명부를 못 맞춘 채 도는 루프」가 **건강해 보인다.**
+                #   실측: 운영자 명부에 없어 checkpoint 가 code 5 로 죽는 동안에도 rc 0 이었다.
+                #   ⇒ 두 곳에 낸다: **사람에게 통보 한 줄** · **기계에 rc 비0**.
+                #   ⛔루프 자체는 계속 돈다 — 명부 한 줄이 실패해도 이미 맡긴 방의 진행은 멈출 이유가 없다.
+                roster_rc = e.code
+                _inbox_notify(f"【아고라】 명부 한 줄 실패 — code {e.code} {e.message}."
+                              " 이 판은 낡은 명부로 돌았다(사람이 봐야 한다).")
         out = run(ctx, state_dir=state_dir, notify=_inbox_notify, dry_run=args.dry_run,
                   grace_minutes=args.grace_minutes, round_minutes=args.round_minutes,
                   verify=_verify)
         out["roster"] = roster
+        out["roster_rc"] = roster_rc
         print(json.dumps(out, ensure_ascii=False, sort_keys=True, indent=2))
-        return errors.OK
+        # ★rc 는 **명부 한 줄의 결과**를 싣는다(루프가 한 일은 위 JSON 에 다 있다).
+        #   launchd 는 JSON 을 안 읽고 exit 만 본다 — 건강 판정이 볼 수 있는 자리가 여기뿐이다.
+        return roster_rc
     finally:
         os.rmdir(lock)
 
 
+def _guarded(argv: list[str] | None = None) -> int:
+    """최후 방어 — 계약 실패를 **계약 모양으로** 낸다(설계 §4).
+
+    ★왜(2026-09-11 실사격): `AGORA_SIGNING_KEY` 없이 문서대로 치면 파이썬 **역추적**이 쏟아졌다.
+      메시지는 그 안에 있었지만(「서명 키가 지정되지 않았다」) 사람이 읽는 첫 화면은 스택이고,
+      그 화면에는 **무엇을 해야 하는지가 없다.** 「오류가 났다」와 「원인을 말했다」는 다른 사건이다.
+    ★rc 는 계약 코드 그대로 낸다 — launchd·상위 스크립트가 보는 유일한 칸이다.
+    """
+    try:
+        return main(argv)
+    except AgoraError as e:
+        print(json.dumps({"code": e.code, "name": errors.NAMES.get(e.code, "error"),
+                          "message": e.message, "detail": e.detail},
+                         ensure_ascii=False), file=sys.stderr)
+        return e.code
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_guarded())

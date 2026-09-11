@@ -19,6 +19,7 @@
 
 쓰는 법
 -------
+    export AGORA_SIGNING_KEY=~/.config/agora/id_ed25519   # ★손으로 칠 때 필요하다(껍데기를 안 지나므로)
     python3 tools/daily_loop.py --plaza <광장 id> --dry-run     # 오늘 무엇을 열지 인쇄만
     python3 tools/daily_loop.py                                  # 한 바퀴(launchd 06:10)
     python3 tools/daily_loop.py --date 2026-09-14                # 날짜 노브(실사격·되돌아보기)
@@ -136,10 +137,23 @@ def run(ctx: Any, *, state_dir: str, plaza_id: str, now: datetime.datetime | Non
 
     if os.path.exists(os.path.join(state_dir, chair.STOP_FILE)):
         return {"stopped": True, "why": "STOP 파일이 있다 — 사람이 껐다", "opened": [],
-                "said": said, "actions": did}
+                "said": said, "actions": did, "unverifiable": 0}
 
     reduced = tools._reduce(ctx, plaza_id)
     plaza = plaza_rules.read_plaza(reduced.get("events") or [])
+    # ★**못 본 글을 말한다**(2026-09-11 실사격이 잡은 자리 · master 판정 [master#31af314b]).
+    #   광장에 글이 있는데 **명부 밖·서명 실패**면 리듀서가 상태에서 빼 버리고, 파생층은 그 글의
+    #   존재 자체를 모른다 ⇒ 전에는 출력이 `ranking: [] · unreadable: 0` 으로 **완벽하게 침묵했다.**
+    #   ⇒ 「후보가 없다」와 「후보를 못 봤다」가 **같은 화면**이었다.
+    #   실사격 실측: 참가자 하나의 제안 2 + 표 1 이 `not_in_roster` 로 통째로 빠졌는데 경고 0.
+    #   라이브에서 이게 나면 글쓴이는 원장에 있으니 올라갔다고 믿고 보드는 「제안 없음」이라 말한다.
+    # ⛔출력만 늘리고 통보를 안 붙이면 아무도 안 본다 — **통보까지가 봉합이다.**
+    dropped = list(reduced.get("quarantined") or [])
+    unverifiable = len(dropped)
+    if unverifiable:
+        reasons = sorted({str(q.get("reason")) for q in dropped})
+        tell(f"【아고라】 광장에서 {unverifiable}건을 상태에 못 넣었다 — 명부·서명을 봐야 한다"
+             f"({' · '.join(reasons)}). 그 글들은 이 판의 셈에서 빠졌다.")
     today = plaza_rules.day_of(now)
     sheet = plan(plaza, today=today, per_day=int(conf["per_day"]),
                  deadlock_days=int(conf["deadlock_days"]),
@@ -226,6 +240,10 @@ def run(ctx: Any, *, state_dir: str, plaza_id: str, now: datetime.datetime | Non
     return {"stopped": False, "opened": opened, "actions": did, "said": said,
             "today": str(today), "through": str(sheet["through"]),
             "deadlock": sheet["deadlock"], "unreadable": plaza["unreadable"],
+            # ★`unreadable`(시각을 못 읽은 글)과 **다른 축**이다: 이쪽은 「자격이 없어 상태에
+            #   안 들어간 글」이다. 둘을 한 칸에 뭉치면 「명부가 낡았다」와 「시각이 깨졌다」가
+            #   같은 숫자로 보이고, 처방이 다른 두 사건이 한 이름을 갖는다.
+            "unverifiable": unverifiable,
             "ranking": [{"id": r["id"], "score": str(r["score"]), "voters": r["voters"]}
                         for r in sheet["rows"][:5]]}
 
@@ -271,5 +289,22 @@ def main(argv: list[str] | None = None) -> int:
         os.rmdir(lock)
 
 
+def _guarded(argv: list[str] | None = None) -> int:
+    """최후 방어 — 계약 실패를 **계약 모양으로** 낸다(설계 §4).
+
+    ★왜(2026-09-11 실사격): `AGORA_SIGNING_KEY` 없이 문서대로 치면 파이썬 **역추적**이 쏟아졌다.
+      메시지는 그 안에 있었지만(「서명 키가 지정되지 않았다」) 사람이 읽는 첫 화면은 스택이고,
+      그 화면에는 **무엇을 해야 하는지가 없다.** 「오류가 났다」와 「원인을 말했다」는 다른 사건이다.
+    ★rc 는 계약 코드 그대로 낸다 — launchd·상위 스크립트가 보는 유일한 칸이다.
+    """
+    try:
+        return main(argv)
+    except AgoraError as e:
+        print(json.dumps({"code": e.code, "name": errors.NAMES.get(e.code, "error"),
+                          "message": e.message, "detail": e.detail},
+                         ensure_ascii=False), file=sys.stderr)
+        return e.code
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_guarded())
