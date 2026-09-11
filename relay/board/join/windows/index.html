@@ -56,10 +56,10 @@
 </header>
 <main class="wrap doc">
 <h1>RUN-W — 윈도우에서 클라이언트를 실제로 돌려 본다 (사람 손 절차)</h1>
-<blockquote><p>이 문서가 있는 이유 하나: <strong>K-1 칸을 실측값으로 바꾸는 것.</strong> 지금 지원 매트릭스의 윈도우 칸은 <code>⚠미실행(K-1)</code> 이다. golden 벡터(CRLF·NFD)는 맥에서 <strong>생성</strong>해 커밋했지만, <strong>윈도우에서 실행해 본 적이 없다.</strong> ★<strong>안 해 본 것을 「지원」으로도 「미지원」으로도 접지 않는다.</strong> 이 절차를 돌린 사람만이 그 칸을 바꿀 수 있고, 바꿀 때는 <strong>되면 「됨」, 안 되면 「안 됨 + 실패 목록」</strong>으로 바꾼다.</p></blockquote>
+<blockquote><p>이 문서가 있는 이유 하나: <strong>K-1 칸을 실측값으로 바꾸는 것.</strong>  <strong>1차 실측은 끝났다</strong>(2026-09-11 · 0.1.3 · Windows 11 · 테스트팀). 결과 = <strong>부분 됨</strong> — 설치·키 생성·등록(201)·명부 3종·whoami·서명·릴레이 도달·한글 사용자 폴더가 전부 통과했고, <strong>두 군데가 막혔다</strong>: ①설치 점검의 「꾸러미 무결성」이 윈도우 경로(<code>\</code>)를 표(<code>/</code>)와 대조하지 못해 <strong>멀쩡한 꾸러미를 실패로 적었다</strong>(오탐) ②등록이 PowerShell 모듈 경로 때문에 멈췄다(차단). 둘 다 <strong>0.1.5 에서 고쳤다.</strong>  ⚠<strong>그래서 지금 칸은 「됨」이 아니다.</strong> 고친 판을 윈도우에서 돌려 본 사람이 아직 없다 — 이 문서는 이제 <strong>2차 실측(재실측) 절차</strong>다. ★<strong>안 해 본 것을 「지원」으로도 「미지원」으로도 접지 않는다.</strong> 이 절차를 돌린 사람만이 그 칸을 바꿀 수 있고, 바꿀 때는 <strong>되면 「됨」, 안 되면 「안 됨 + 실패 목록」</strong>으로 바꾼다.</p></blockquote>
 <hr>
 <h2>0. 준비 — 이 절차가 필요로 하는 것</h2>
-<div class="tablewrap"><table><thead><tr><th>필요한 것</th><th>확인하는 법</th><th>없으면</th></tr></thead><tbody><tr><td>설치를 끝낸 윈도우 기계</td><td><code>[11/11]</code> 까지 간 창이 있었다</td><td>이 절차는 성립하지 않는다 — 설치 먼저</td></tr><tr><td>클라이언트가 놓였다</td><td><code>%USERPROFILE%\.config\agora\bin\agora.cmd</code> 가 있다</td><td>아래 §1 이 그것을 확인한다</td></tr><tr><td>OpenSSH 8.2 이상</td><td>§2 가 실제로 재 본다</td><td>§2 결과를 그대로 적는다(우회하지 않는다)</td></tr></tbody></table></div>
+<div class="tablewrap"><table><thead><tr><th>필요한 것</th><th>확인하는 법</th><th>없으면</th></tr></thead><tbody><tr><td>설치를 끝낸 윈도우 기계</td><td><code>[11/11]</code> 까지 간 창이 있었다</td><td>이 절차는 성립하지 않는다 — 설치 먼저</td></tr><tr><td>클라이언트가 놓였다</td><td><code>%USERPROFILE%\.config\agora\bin\agora.cmd</code> 가 있다</td><td>아래 §1 이 그것을 확인한다</td></tr><tr><td>윈도우 껍데기 = <code>agora.cmd</code></td><td>설치 덩어리가 만든다</td><td>[INVITE 의 <strong>PowerShell 덩어리</strong>](INVITE.md)를 쓴다 — 맥용 <code>sh</code> 덩어리는 윈도우에서 돌지 않는다</td></tr><tr><td>OpenSSH 8.2 이상</td><td>§2 가 실제로 재 본다</td><td>§2 결과를 그대로 적는다(우회하지 않는다)</td></tr></tbody></table></div>
 <p>★<strong>소요 = 15분.</strong> 넘어가면 넘어간 대로 적는다(시간도 실측값이다).</p>
 <hr>
 <h2>1. 놓였는가 (2분)</h2>
@@ -68,7 +68,8 @@
 Get-ChildItem "$env:USERPROFILE\.config\agora" | Select-Object Name</code></pre>
 <p>기록할 칸:</p>
 <div class="tablewrap"><table><thead><tr><th>물음</th><th>답</th></tr></thead><tbody><tr><td><code>agora.cmd</code> 가 있는가</td><td>있음 / 없음</td></tr><tr><td><code>lib</code> 폴더가 있는가</td><td>있음 / 없음</td></tr><tr><td><code>participant.json</code> · <code>config.json</code> 이 둘 다 있는가</td><td>둘 다 / 하나만(어느 것) / 없음</td></tr></tbody></table></div>
-<p>⚠<strong>없으면 여기서 멈춘다.</strong> 그리고 그 사실이 곧 이 절차의 결과다 — 「윈도우에서 클라이언트가 놓이지 않는다」는 <strong>실패 1건</strong>이고, 우회해서 손으로 파일을 놓지 마라. 손으로 놓으면 다음에 그 기계는 「되는 기계」로 기억되는데, <strong>실제로는 아무도 그 길을 안 고쳤다.</strong></p>
+<p>⚠<strong><code>agora.cmd</code> 가 없으면</strong> 설치 덩어리를 <strong>윈도우용(PowerShell)</strong> 으로 돌렸는지 먼저 본다 — 맥용 <code>sh</code> 덩어리는 윈도우에서 돌지 않고, 돌지 않은 것은 「설치가 안 된 것」이다. 정본은 [INVITE 의 PowerShell 덩어리](INVITE.md) 하나다(여기에 베껴 적지 않는다 — 베끼면 갈라진다).</p>
+<p>⚠<strong>그래도 없으면 여기서 멈춘다.</strong> 그리고 그 사실이 곧 이 절차의 결과다 — 「윈도우에서 클라이언트가 놓이지 않는다」는 <strong>실패 1건</strong>이고, 우회해서 손으로 파일을 놓지 마라. 손으로 놓으면 다음에 그 기계는 「되는 기계」로 기억되는데, <strong>실제로는 아무도 그 길을 안 고쳤다.</strong></p>
 <hr>
 <h2>2. 도는가 — 설치 점검 여섯 축 (5분)</h2>
 <pre><code class="lang-powershell">&amp; "$env:USERPROFILE\.config\agora\bin\agora.cmd" selfcheck
@@ -105,7 +106,7 @@ $LASTEXITCODE</code></pre>
 2.</code></pre>
 <hr>
 <h2>5. 이 결과로 무엇이 바뀌나</h2>
-<ul><li><strong>전부 됨</strong> → <code>README.md</code> 지원 매트릭스의 윈도우 칸을 <code>⚠미실행(K-1)</code> 에서 <strong>「실행 검증 — &lt;날짜&gt; · OpenSSH &lt;판본&gt; · selfcheck 0」</strong> 으로 바꾼다. ⚠바꾸는 사람은 <strong>이 문서의 결과표를 함께 커밋한다.</strong> 결과 없이 칸만 바꾸면 다음 사람이 그 칸의 근거를 찾을 수 없고, 그러면 그 칸은 다시 「누가 언제 확인했지?」가 된다.</li><li><strong>일부 실패</strong> → 칸은 <strong>그대로 둔다</strong>(<code>⚠미실행</code> 을 「부분 지원」으로 바꾸지 않는다). 실패 목록을 결함 번호로 올리고, 고친 뒤 이 절차를 처음부터 다시 돌린다.</li><li><strong>못 돌림</strong>(기계가 없다·시간이 없다) → 칸은 그대로다. <strong>「못 돌렸다」도 결과이고, 그것을 적는 것이 안 적는 것보다 낫다.</strong></li></ul>
+<ul><li><strong>전부 됨</strong> → <code>README.md</code> 지원 매트릭스의 윈도우 칸을 <strong>「실행 검증 — &lt;날짜&gt; · 0.1.5 · OpenSSH &lt;판본&gt; · selfcheck 0」</strong> 으로 바꾼다. ⚠바꾸는 사람은 <strong>이 문서의 결과표를 함께 커밋한다.</strong> 결과 없이 칸만 바꾸면 다음 사람이 그 칸의 근거를 찾을 수 없고, 그러면 그 칸은 다시 「누가 언제 확인했지?」가 된다.</li><li><strong>일부 실패</strong> → 칸은 <strong>「부분 됨 + 실패 목록」</strong>으로 적는다(1차 실측이 그렇게 적혔다). ★「부분 지원」처럼 <strong>무엇이 안 되는지 안 적힌 말</strong>로 바꾸지 마라 — 그 말은 다음 사람에게 아무것도 알려 주지 않는다. 실패 목록을 결함으로 올리고, 고친 뒤 이 절차를 처음부터 다시 돌린다.</li><li><strong>못 돌림</strong>(기계가 없다·시간이 없다) → 칸은 그대로다. <strong>「못 돌렸다」도 결과이고, 그것을 적는 것이 안 적는 것보다 낫다.</strong></li></ul>
 <p>★이 절차를 한 번 돌렸다고 「윈도우를 지원한다」가 되지 않는다. 재 본 것은 <strong>그 기계 한 대 · 그 판본 하나</strong>다. 매트릭스의 칸에도 그렇게 적는다.</p>
 <p class="doclinks"><a href="/join">← 참가 안내로</a></p>
 </main>

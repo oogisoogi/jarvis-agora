@@ -74,6 +74,20 @@ def _row(result: str, detail: dict[str, Any] | None = None,
 
 # ── ⑴ 꾸러미 무결성 ──────────────────────────────────────────────────────────
 
+def _as_posix(rel: str) -> str:
+    """경로를 **표의 어휘**로 옮긴다 — 표는 언제나 `/` 로 적힌다(꾸러미는 zip 이다).
+
+    ★★윈도우 첫 실측(K-1 · 2026-09-11)이 이 한 줄이 없어서 붉었다: 표는 `agora/…`, 걷은
+      경로는 `agora\\…` 라 **한 건도 매칭되지 않았고**, 파일·해시가 전부 같은데도
+      「표에 없는 파일 = 전부」로 나왔다. ★검사가 대상을 **못 만나는** 것은 통과도 실패도
+      아닌데 우리 표시는 그것을 **실패**라고 적었다 — 그리고 사람은 그 화면을 보고
+      꾸러미를 다시 받는다(고쳐지지 않는 일을 반복한다).
+    ⚠`os.sep` 으로 나누지 않고 역슬래시를 직접 옮긴다: 맥에서도 이 함수를 **그대로**
+      시험할 수 있어야 한다(윈도우가 없으면 못 재는 봉합은 다음 사람에게 넘기는 빚이다).
+    """
+    return rel.replace("\\", "/")
+
+
 def check_package(root: str | None = None) -> dict[str, Any]:
     """담겨 온 파일이 표와 같은가.
 
@@ -106,10 +120,17 @@ def check_package(root: str | None = None) -> dict[str, Any]:
         return _row(FAIL, {"why": "내용물 표가 비었다 — 잴 대상이 없다", "표에_적힌_파일": 0},
                     "꾸러미를 다시 받아라(설치 한 줄을 다시 돌리면 된다).")
 
+    # ★★**표의 어휘는 `/` 하나다**(윈도우 첫 실측 K-1 · 2026-09-11 · 테스트팀).
+    #   표는 `agora/core.py` 로 적히는데 윈도우에서 걷은 경로는 `agora\\core.py` 라
+    #   **한 건도 매칭되지 않았다** — 파일도 해시도 전부 같은데 이 축이 붉었다(오탐).
+    #   ⇒ 비교는 **양쪽 다 posix 로 옮긴 뒤에** 한다. 표 쪽도 옮긴다: 언젠가 윈도우에서
+    #     만든 표가 들어와도 같은 사고가 반대 방향으로 나지 않게(대칭이 아니면 반쪽 봉합이다).
+    files = {_as_posix(rel): want for rel, want in files.items()}
+
     missing: list[str] = []
     changed: list[str] = []
     for rel, want in sorted(files.items()):
-        full = os.path.join(root, rel)
+        full = os.path.join(root, *rel.split("/"))
         if not os.path.isfile(full):
             missing.append(rel)
             continue
@@ -133,7 +154,7 @@ def check_package(root: str | None = None) -> dict[str, Any]:
         for fn in filenames:
             if fn.endswith(".pyc") or fn == MANIFEST_NAME:
                 continue
-            rel = os.path.relpath(os.path.join(dirpath, fn), root)
+            rel = _as_posix(os.path.relpath(os.path.join(dirpath, fn), root))
             if rel not in files:
                 extra.append(rel)
 

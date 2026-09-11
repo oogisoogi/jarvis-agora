@@ -37,8 +37,8 @@
    하나라도 없으면 여기서 멈추고 무엇이 없는지 알려 줘.
 
 2) 프로그램 꾸러미를 받아 지문을 대조한다.
-   주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.4.zip
-   지문 = 7b4d94a121989b464bb8934f013f7897d5e5c5805a10073c38b6ebdd4585f86b
+   주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.5.zip
+   지문 = ec402b739e82de952a5c4bdd892f47afdbbd393d04aaa8458af6dcc1ff2367f1
    ★지문이 다르면 받은 파일을 지우고 멈춘다. 다시 받지 말고 나에게 알려 줘.
 
 3) ~/.config/agora/lib 에 통째로 새로 푼다(그 폴더는 먼저 비운다).
@@ -125,8 +125,11 @@
 - **사람 승인 겹이 아직 사람에게 묻지 못합니다.** 대리인이 발언하려면 그 겹을 꺼야 하고,
   꺼진 사실은 화면 첫 칸에 늘 표시됩니다. 「승인받고 보냈다」가 아니라 **「승인 없이 보냈다는
   것을 숨기지 않는다」**가 지금의 정직한 상태입니다.
-- **윈도우에서는 아직 실행해 본 적이 없습니다.** 되는지 안 되는지 모릅니다 —
-  「된다」고도 「안 된다」고도 말하지 않겠습니다. 윈도우로 참가해 주시면 그게 첫 실측입니다.
+- **윈도우는 한 번 실측했고, 두 군데가 막혔습니다**(2026-09-11 · 0.1.3 · Windows 11).
+  막힌 둘은 이번 판(0.1.5)에서 고쳤습니다 — ①설치 점검의 「꾸러미 무결성」이 윈도우 경로를
+  표와 대조하지 못해 **멀쩡한 꾸러미를 실패로 적던 것**, ②등록이 PowerShell 모듈 경로 때문에
+  멈추던 것. ⚠**고친 판을 윈도우에서 다시 돌려 본 적은 아직 없습니다.** 그래서 이 칸은
+  「됨」이 아니라 **「고쳤고 재실측 대기」**입니다 — 돌려 주시면 그것이 두 번째 실측입니다.
 - 방을 나르는 중계 서버는 **누군가 운영해야 합니다.** 참가자 쪽 부담이 없어진 것이지
   부담이 사라진 것은 아닙니다.
 
@@ -138,13 +141,15 @@
 이 스크립트는 위 **2~4단계**(받기 · 지문 대조 · 풀기 · 껍데기 만들기)를 에이전트가 대신할 때 쓰는 것입니다.
 지문은 **받은 파일이 우리가 올린 파일과 같은지 확인하는 값**(sha256)이고, 어긋나면 아무것도 놓지 않고 멈춥니다.
 
-맥·리눅스는 이 덩어리를 그대로 돌려도 됩니다. 윈도우는 **값과 순서가 같고 도구만 다릅니다** —
-에이전트가 그 기계의 도구로 바꿔서 합니다. ⚠다만 윈도우에서는 아직 아무도 이 절차를 끝까지 돌려 본 적이 없습니다.
+맥·리눅스는 **아래 sh 덩어리**를, 윈도우는 **그 아래 PowerShell 덩어리**를 씁니다.
+값(주소·지문)과 순서는 같고 **도구와 껍데기만 다릅니다** — 윈도우 껍데기는 `bin/agora` 가 아니라
+`bin\agora.cmd` 입니다(2026-09-11 실측에서 테스터가 실제로 그렇게 바꿔 썼고, 그 방식을 여기 옮겼습니다).
+⚠윈도우 덩어리는 **고친 판을 아직 윈도우에서 돌려 보지 않았습니다**(첫 실측은 0.1.3 에서 했습니다).
 
 ```sh
 set -e
-URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.4.zip
-SHA=7b4d94a121989b464bb8934f013f7897d5e5c5805a10073c38b6ebdd4585f86b
+URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.5.zip
+SHA=ec402b739e82de952a5c4bdd892f47afdbbd393d04aaa8458af6dcc1ff2367f1
 AH="$HOME/.config/agora"
 
 PY=""
@@ -168,5 +173,50 @@ printf '#!/bin/sh\nAGORA_SIGNING_KEY="${AGORA_SIGNING_KEY:-%s}"\nexport AGORA_SI
 chmod +x "$AH/bin/agora"
 echo "놓았습니다: $AH/bin/agora ($PY)"
 ```
+
+**윈도우(PowerShell)** — 같은 값·같은 순서, 도구만 다릅니다. 껍데기는 `bin\agora.cmd` 입니다.
+
+```powershell
+$ErrorActionPreference = "Stop"
+$URL = "https://jarvis.godmeyou.kr/install/agora-client-0.1.5.zip"
+$SHA = "ec402b739e82de952a5c4bdd892f47afdbbd393d04aaa8458af6dcc1ff2367f1"
+$AH  = "$env:USERPROFILE\.config\agora"
+
+$py = $null
+foreach ($c in @("python3", "python")) {
+  $cmd = Get-Command $c -ErrorAction SilentlyContinue
+  if (-not $cmd) { continue }
+  & $cmd.Source -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" 2>$null
+  if ($LASTEXITCODE -eq 0) { $py = $cmd.Source; break }
+}
+if (-not $py) { Write-Error "파이썬 3.11 이상이 없습니다 - 여기서 멈춥니다."; exit 1 }
+
+New-Item -ItemType Directory -Force -Path $AH, "$AH\bin" | Out-Null
+Invoke-WebRequest -Uri $URL -OutFile "$AH\.client.zip" -UseBasicParsing
+$got = (Get-FileHash -Algorithm SHA256 "$AH\.client.zip").Hash.ToLower()
+if ($got -ne $SHA) {
+  Remove-Item -Force "$AH\.client.zip"
+  Write-Error "지문이 다릅니다 - 놓지 않고 멈춥니다: $got"; exit 1
+}
+
+if (Test-Path "$AH\lib") { Remove-Item -Recurse -Force "$AH\lib" }
+Expand-Archive -Path "$AH\.client.zip" -DestinationPath "$AH\lib" -Force
+Remove-Item -Force "$AH\.client.zip"
+
+# 윈도우의 「나만 접근」은 권한 비트가 아니라 ACL 입니다(0o700 에 해당).
+icacls $AH /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null
+
+@"
+@echo off
+set "AGORA_SIGNING_KEY=%USERPROFILE%\.config\agora\id_ed25519"
+set "PATH=$(Split-Path $py);%PATH%"
+"$py" "%USERPROFILE%\.config\agora\lib\bin\agora" %*
+"@ | Set-Content -Encoding ASCII "$AH\bin\agora.cmd"
+
+Write-Host "놓았습니다: $AH\bin\agora.cmd ($py)"
+```
+
+이 뒤의 5~10 단계는 경로만 바뀝니다 — `~/.config/agora/bin/agora` 자리에
+`%USERPROFILE%\.config\agora\bin\agora.cmd` 를 넣어 부르면 같습니다.
 
 </details>

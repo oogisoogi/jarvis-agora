@@ -58,8 +58,60 @@ def config_dir() -> str:
 _WIN_PUBLIC_SIDS = ("S-1-1-0", "S-1-5-32-545", "S-1-5-11")
 
 
+def _which(name: str) -> str | None:
+    """실행 파일 찾기 — **시험이 갈아 끼울 수 있게** 한 겹 둔다(맥에는 둘 다 없다)."""
+    import shutil
+    return shutil.which(name)
+
+
+def _winps_51_module_path(env: dict[str, str]) -> str:
+    """Windows PowerShell 5.1 의 **기본** `PSModulePath`.
+
+    ★값을 환경에서 만든다 — `%ProgramFiles%` 는 한국어·32/64비트 기계에서 다르고, 문자열을
+      박아 두면 그 기계에서만 조용히 빗나간다. 없으면 널리 쓰이는 기본값으로 떨어진다.
+    """
+    program_files = env.get("ProgramFiles") or r"C:\Program Files"
+    system_root = env.get("SystemRoot") or r"C:\Windows"
+    # ⚠원시 문자열로 적는다 — `\v1.0` 은 보통 문자열에서 **수직 탭**이 된다
+    #   (이 파일에서 실제로 그렇게 났다 · 눈으로는 안 보이는 종류의 오류다).
+    return (program_files + r"\WindowsPowerShell\Modules;"
+            + system_root + r"\system32\WindowsPowerShell\v1.0\Modules")
+
+
+def _powershell_invocation(env: dict[str, str] | None = None
+                           ) -> tuple[list[str], dict[str, str], str, str]:
+    """윈도우에서 PowerShell 자식을 띄우는 **단 하나의 문** — (argv, env, 이름, 모듈경로).
+
+    ★★윈도우 첫 실측(K-1 · 2026-09-11 · 테스트팀)이 여기서 막혔다(등록이 code 2 로 차단):
+      **PowerShell 7 안에서 띄운 터미널이 자식에게 7용 `PSModulePath` 를 물려주는데**,
+      우리가 부른 것은 `powershell`(5.1)이었다. 5.1 이 7용 보안 모듈을 집어 로드에 실패했고
+      `Get-Acl` 이 죽었다. 테스터가 자식 환경의 `PSModulePath` 를 5.1 기본값으로 고정하니
+      그대로 통과했다 — ★**우리 코드가 아니라 물려받은 환경이 원인이었고, 우리는 그 환경을
+      물려주기만 했다.** 자식에게 무엇을 물려줄지는 부르는 쪽이 정해야 한다.
+    ⇒ ⑴`pwsh`(7)가 있으면 **그것을 먼저** 부른다: 7 용 환경을 7 이 받으면 어긋남이 없다.
+      ⑵`powershell`(5.1)을 부를 때는 `PSModulePath` 를 **5.1 기본값으로 고정**한다.
+      ⑶실패하면 **어느 PowerShell·어느 모듈 경로**였는지 말한다(code 2 뒤에 숨기지 않는다).
+    ★이 문이 하나여야 하는 이유: 자식을 띄우는 자리가 둘이 되면 한쪽만 고쳐진 채 남고,
+      그 한쪽은 **그 기계에서만** 죽는다 — 개발기에서는 영원히 초록이다.
+    """
+    env = dict(os.environ if env is None else env)
+    exe = _which("pwsh")
+    if exe:
+        # 7 은 자기 모듈 경로를 스스로 안다 — 물려받은 값을 그대로 둔다(고정이 오히려 해롭다).
+        return ([exe, "-NoProfile", "-NonInteractive", "-Command"], env, "pwsh",
+                env.get("PSModulePath", ""))
+    exe = _which("powershell") or "powershell"
+    env["PSModulePath"] = _winps_51_module_path(env)
+    return ([exe, "-NoProfile", "-NonInteractive", "-Command"], env, "powershell",
+            env["PSModulePath"])
+
+
 def _windows_acl_sids(path: str) -> list[str]:
-    """PowerShell Get-Acl 로 접근 항목의 SID 를 낸다(허용 항목만). 실패 = 예외."""
+    """PowerShell Get-Acl 로 접근 항목의 SID 를 낸다(허용 항목만). 실패 = 예외.
+
+    ⚠예외 문면에 **어느 PowerShell·어느 모듈 경로**를 싣는다 — 그 두 값이 없으면 K-1 같은
+      환경 사고가 「Get-Acl 이 실패했다」로만 보이고, 받는 사람은 고칠 데를 못 찾는다.
+    """
     import subprocess
     cmd = (
         "(Get-Acl -LiteralPath '" + path.replace("'", "''") + "').Access | "
@@ -67,10 +119,11 @@ def _windows_acl_sids(path: str) -> list[str]:
         "try { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } "
         "catch { $_.IdentityReference.Value } }"
     )
-    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
-                       capture_output=True, text=True, timeout=20)
+    argv, env, shell_name, module_path = _powershell_invocation()
+    r = subprocess.run(argv + [cmd], capture_output=True, text=True, timeout=20, env=env)
     if r.returncode != 0:
-        raise RuntimeError((r.stderr or r.stdout).strip()[:200])
+        raise RuntimeError(f"[{shell_name}] " + (r.stderr or r.stdout).strip()[:160]
+                           + f" | PSModulePath={module_path[:160]}")
     return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
 
 
