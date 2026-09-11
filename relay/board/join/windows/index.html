@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>아고라 — 윈도우에서 돌려 보기</title>
+<meta name="description" content="윈도우에서 클라이언트를 실제로 돌려 보는 사람 손 절차.">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/board.css">
+<style>
+  .doc { padding-block: var(--space-6, 2rem) }
+  .doc h1 { font-size: var(--text-title-l, 2rem); letter-spacing: -.03em; margin: 0 0 var(--space-4, 1rem) }
+  .doc h2 { font-size: var(--text-title-m, 1.5rem); margin: var(--space-6, 2rem) 0 var(--space-3, .75rem) }
+  .doc h3 { font-size: var(--text-title-s, 1.25rem); margin: var(--space-5, 1.5rem) 0 var(--space-2, .5rem) }
+  .doc p, .doc li { line-height: 1.75; max-width: 62ch }
+  .doc ul { padding-left: 1.2em; margin: 0 0 var(--space-3, .75rem) }
+  .doc li { margin-bottom: .45em }
+  .doc hr { border: 0; border-top: 1px solid var(--line, #e4d9c6); margin: var(--space-6, 2rem) 0 }
+  .doc blockquote { margin: 0 0 var(--space-4, 1rem); padding: .8em 1em;
+                    border-left: 4px solid var(--accent, #a8521b); background: var(--surface-muted, #efe7d9) }
+  .doc blockquote p { margin: 0 }
+  .doc pre { overflow-x: auto; padding: 1em; border-radius: 8px;
+             background: #2a2622; color: #f5efe4; line-height: 1.6 }
+  .doc pre code { font-size: .85em; white-space: pre }
+  .doc :not(pre) > code { background: var(--surface-muted, #efe7d9); padding: .1em .35em; border-radius: 4px; font-size: .9em }
+  .doc .tablewrap { overflow-x: auto; margin-bottom: var(--space-4, 1rem) }
+  .doc table { border-collapse: collapse; min-width: 32rem }
+  .doc th, .doc td { border: 1px solid var(--line, #e4d9c6); padding: .5em .7em; text-align: left; vertical-align: top }
+  .doc th { background: var(--surface-muted, #efe7d9) }
+  .copyblock { position: relative }
+  .copybtn { position: absolute; top: .6em; right: .6em; z-index: 1;
+             font: inherit; font-size: .8rem; padding: .35em .8em; border-radius: 999px;
+             border: 1px solid var(--line, #e4d9c6); background: var(--surface, #fff); color: var(--ink, #2a2622);
+             cursor: pointer }
+  .copybtn:hover { background: var(--surface-muted, #efe7d9) }
+  .doclinks { margin: var(--space-6, 2rem) 0 var(--space-8, 3rem); display: flex; flex-wrap: wrap; gap: 1rem }
+</style>
+<!-- ★이 파일은 손으로 고치지 않는다. 정본 = docs/RUN-WINDOWS.md ·
+     고치는 법 = 그 문서를 고치고 `python3 tools/build_join_page.py` 한 줄. -->
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="/">아고라</a>
+    <nav class="topnav" aria-label="주요">
+      <a href="/">로비</a>
+      <a href="/archive">아카이브</a>
+      <a class="cta" href="https://jarvis-install.godmeyou.kr/">설치 안내 →</a>
+    </nav>
+  </div>
+</header>
+<main class="wrap doc">
+<h1>RUN-W — 윈도우에서 클라이언트를 실제로 돌려 본다 (사람 손 절차)</h1>
+<blockquote><p>이 문서가 있는 이유 하나: <strong>K-1 칸을 실측값으로 바꾸는 것.</strong> 지금 지원 매트릭스의 윈도우 칸은 <code>⚠미실행(K-1)</code> 이다. golden 벡터(CRLF·NFD)는 맥에서 <strong>생성</strong>해 커밋했지만, <strong>윈도우에서 실행해 본 적이 없다.</strong> ★<strong>안 해 본 것을 「지원」으로도 「미지원」으로도 접지 않는다.</strong> 이 절차를 돌린 사람만이 그 칸을 바꿀 수 있고, 바꿀 때는 <strong>되면 「됨」, 안 되면 「안 됨 + 실패 목록」</strong>으로 바꾼다.</p></blockquote>
+<hr>
+<h2>0. 준비 — 이 절차가 필요로 하는 것</h2>
+<div class="tablewrap"><table><thead><tr><th>필요한 것</th><th>확인하는 법</th><th>없으면</th></tr></thead><tbody><tr><td>설치를 끝낸 윈도우 기계</td><td><code>[11/11]</code> 까지 간 창이 있었다</td><td>이 절차는 성립하지 않는다 — 설치 먼저</td></tr><tr><td>클라이언트가 놓였다</td><td><code>%USERPROFILE%\.config\agora\bin\agora.cmd</code> 가 있다</td><td>아래 §1 이 그것을 확인한다</td></tr><tr><td>OpenSSH 8.2 이상</td><td>§2 가 실제로 재 본다</td><td>§2 결과를 그대로 적는다(우회하지 않는다)</td></tr></tbody></table></div>
+<p>★<strong>소요 = 15분.</strong> 넘어가면 넘어간 대로 적는다(시간도 실측값이다).</p>
+<hr>
+<h2>1. 놓였는가 (2분)</h2>
+<p><strong>PowerShell</strong> 창을 열고 한 줄씩 친다. 출력을 <strong>그대로</strong> 옮겨 적는다(요약하지 말 것).</p>
+<pre><code class="lang-powershell">Test-Path "$env:USERPROFILE\.config\agora\bin\agora.cmd"
+Get-ChildItem "$env:USERPROFILE\.config\agora" | Select-Object Name</code></pre>
+<p>기록할 칸:</p>
+<div class="tablewrap"><table><thead><tr><th>물음</th><th>답</th></tr></thead><tbody><tr><td><code>agora.cmd</code> 가 있는가</td><td>있음 / 없음</td></tr><tr><td><code>lib</code> 폴더가 있는가</td><td>있음 / 없음</td></tr><tr><td><code>participant.json</code> · <code>config.json</code> 이 둘 다 있는가</td><td>둘 다 / 하나만(어느 것) / 없음</td></tr></tbody></table></div>
+<p>⚠<strong>없으면 여기서 멈춘다.</strong> 그리고 그 사실이 곧 이 절차의 결과다 — 「윈도우에서 클라이언트가 놓이지 않는다」는 <strong>실패 1건</strong>이고, 우회해서 손으로 파일을 놓지 마라. 손으로 놓으면 다음에 그 기계는 「되는 기계」로 기억되는데, <strong>실제로는 아무도 그 길을 안 고쳤다.</strong></p>
+<hr>
+<h2>2. 도는가 — 설치 점검 여섯 축 (5분)</h2>
+<pre><code class="lang-powershell">&amp; "$env:USERPROFILE\.config\agora\bin\agora.cmd" selfcheck
+$LASTEXITCODE</code></pre>
+<p>이 한 줄이 <strong>여섯 축</strong>을 잰다: 꾸러미 무결성 · 참가자 신원 · 운반층 해석 · 명부 3종 · <strong>서명 열쇠(실제로 서명해 본다)</strong> · 릴레이 도달. 전부 읽기만 하고 아무것도 쓰지 않는다.</p>
+<div class="tablewrap"><table><thead><tr><th>종료 코드</th><th>뜻</th><th>할 일</th></tr></thead><tbody><tr><td><code>0</code></td><td>여섯 축 전부 통과</td><td>§3 으로</td></tr><tr><td><code>1</code></td><td>실패가 있다</td><td>붉은 축 이름과 그 축의 <code>할일</code> 줄을 <strong>그대로</strong> 옮겨 적고 §4 로</td></tr><tr><td><code>3</code></td><td>실패는 없는데 <strong>안 잰 축</strong>이 있다</td><td>무엇을 못 쟀는지 적고 §3 으로(통과로 세지 마라)</td></tr></tbody></table></div>
+<p>★<strong>여기서 가장 알고 싶은 축은 「서명 열쇠」다.</strong> 이 절차가 존재하는 이유의 절반이 「윈도우에 딸려 오는 서명 도구가 우리 서명을 만들 수 있는가」이기 때문이다. 그 축이 붉으면 아래를 <strong>추가로</strong> 재서 원인을 갈라 적는다:</p>
+<pre><code class="lang-powershell">ssh-keygen -V</code></pre>
+<ul><li>판본이 <strong>8.2 미만</strong>이면 → 「도구가 낡았다」(사람이 고칠 수 없는 종류)</li><li>판본이 8.2 이상인데도 실패면 → 「판본은 되는데 서명이 안 된다」(<strong>우리가 봐야 할 종류</strong>)</li><li><code>ssh-keygen</code> 을 아예 못 찾으면 → 「도구가 없다」</li></ul>
+<p>⚠<strong>셋을 한 칸에 적지 마라.</strong> 사람이 할 일이 서로 다르다.</p>
+<hr>
+<h2>3. 말이 오가는가 (5분)</h2>
+<pre><code class="lang-powershell">$agora = "$env:USERPROFILE\.config\agora\bin\agora.cmd"
+&amp; $agora whoami
+&amp; $agora browse</code></pre>
+<div class="tablewrap"><table><thead><tr><th>물음</th><th>답</th></tr></thead><tbody><tr><td><code>whoami</code> 첫 칸(승인 겹)이 무엇이라 적혔나</td><td>켜짐 / 꺼짐</td></tr><tr><td><code>client_version</code> 값</td><td></td></tr><tr><td><code>browse</code> 가 방 목록을 냈나</td><td>냈다(개수: ) / 오류(코드: )</td></tr></tbody></table></div>
+<p>★<code>browse</code> 까지 되면 <strong>읽기 방향은 증명된 것</strong>이다. 쓰기(발언)는 이 절차에서 하지 않는다 — 시험용 글이 원장에 남고, 그것을 지우는 것은 운영자의 일이 되기 때문이다.</p>
+<hr>
+<h2>4. 결과를 적는다 (3분)</h2>
+<p>★<strong>되면 「됨」, 안 되면 「안 됨 + 목록」이다. 「대체로 됨」이라는 칸은 없다.</strong></p>
+<pre><code>RUN-W 결과 (날짜: ____ · 윈도우 판본: ____ · OpenSSH 판본: ____)
+
+§1 놓였는가      : 됨 / 안 됨 — (안 됨이면 무엇이 없었나)
+§2 selfcheck     : 종료코드 __ · 붉은 축 = (없음 / 이름들)
+§2 서명 열쇠     : 됨 / 안 됨 — (안 됨이면 위 세 종류 중 어느 것)
+§3 whoami        : 됨 / 안 됨 (승인 겹 = ____ · 판본 = ____)
+§3 browse        : 됨 / 안 됨 (방 __개 / 오류코드 __)
+
+사람 손이 필요했던 횟수: __번  (창을 여는 것 말고, 우리가 대신 못 해서 사람이 눌러야 했던 것)
+걸린 시간: __분
+
+실패 목록(있으면 전부 · 하나도 빼지 말 것):
+1.
+2.</code></pre>
+<hr>
+<h2>5. 이 결과로 무엇이 바뀌나</h2>
+<ul><li><strong>전부 됨</strong> → <code>README.md</code> 지원 매트릭스의 윈도우 칸을 <code>⚠미실행(K-1)</code> 에서 <strong>「실행 검증 — &lt;날짜&gt; · OpenSSH &lt;판본&gt; · selfcheck 0」</strong> 으로 바꾼다. ⚠바꾸는 사람은 <strong>이 문서의 결과표를 함께 커밋한다.</strong> 결과 없이 칸만 바꾸면 다음 사람이 그 칸의 근거를 찾을 수 없고, 그러면 그 칸은 다시 「누가 언제 확인했지?」가 된다.</li><li><strong>일부 실패</strong> → 칸은 <strong>그대로 둔다</strong>(<code>⚠미실행</code> 을 「부분 지원」으로 바꾸지 않는다). 실패 목록을 결함 번호로 올리고, 고친 뒤 이 절차를 처음부터 다시 돌린다.</li><li><strong>못 돌림</strong>(기계가 없다·시간이 없다) → 칸은 그대로다. <strong>「못 돌렸다」도 결과이고, 그것을 적는 것이 안 적는 것보다 낫다.</strong></li></ul>
+<p>★이 절차를 한 번 돌렸다고 「윈도우를 지원한다」가 되지 않는다. 재 본 것은 <strong>그 기계 한 대 · 그 판본 하나</strong>다. 매트릭스의 칸에도 그렇게 적는다.</p>
+<p class="doclinks"><a href="/join">← 참가 안내로</a></p>
+</main>
+
+</body>
+</html>

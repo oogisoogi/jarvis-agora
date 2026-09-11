@@ -4509,7 +4509,9 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M404-backup-overwrites-silently",
                  "M405-migration-clobbers-concurrent-config",
                  "M406-relay-of-unknown-shape-slips",
-                 "M407-publish-check-ignores-fingerprint"),
+                 "M407-publish-check-ignores-fingerprint",
+                 "M408-join-page-swallows-a-paragraph",
+                 "M409-lobby-loses-the-join-link"),
 }
 
 
@@ -12204,6 +12206,58 @@ def _publish_fixture(version: str = "9.9.9") -> tuple[str, str, str]:
     return zip_path, invite, sha
 
 
+def _case_join_page_matches_the_document() -> None:
+    """참가 안내 페이지는 **문서에서 생성된 것**이고, 글자가 문서와 같다.
+
+    ★왜 기계가 재는가: 안내를 웹에 한 번 옮겨 적으면 정본이 둘이 되고, 둘이 된 정본은 갈라진다.
+      지문·판본과 달리 **문장은 갈라져도 아무도 모른다** — 읽은 사람만 막힌다.
+    ★두 가지를 잰다: ⑴커밋된 페이지가 지금 문서로 다시 만든 것과 **같은 바이트**인가
+      (= 문서를 고치고 재생성을 잊으면 여기서 붉어진다) ⑵문서의 **모든 줄**이 페이지에 있는가
+      (= 생성기가 어떤 블록을 조용히 삼키면 붉어진다).
+    """
+    import re as _re
+    import sys as _sys
+    tools_dir = os.path.join(_ROOT, "tools")
+    if tools_dir not in _sys.path:
+        _sys.path.insert(0, tools_dir)
+    import build_join_page as bjp
+
+    # ⚠도구의 출력을 **삼켜야 한다**: selftest 의 stdout 은 JSON 한 덩어리이고, 여기에 한 줄이라도
+    #   섞이면 게이트가 「출력을 읽지 못했다」로 붉어진다(이 저장소가 2026-08-25 에 그 사고를 냈다).
+    import contextlib as _ctx
+    import io as _io
+    said = _io.StringIO()
+    with _ctx.redirect_stdout(said):
+        rc = bjp.main(["--check"])
+    if rc != 0:
+        raise AssertionError(
+            "커밋된 페이지가 문서와 다르다 — `python3 tools/build_join_page.py` 를 안 돌렸다: "
+            + said.getvalue().strip().replace("\n", " · "))
+
+    for spec in bjp.PAGES:
+        with open(os.path.join(_ROOT, str(spec["src"])), encoding="utf-8") as fh:
+            md = fh.read()
+        with open(os.path.join(_ROOT, str(spec["out"])), encoding="utf-8") as fh:
+            flat = _re.sub(r"\s+", " ", bjp.page_text(fh.read()))
+        missing = [ln for ln in bjp.plain_lines(md) if _re.sub(r"\s+", " ", ln) not in flat]
+        if missing:
+            raise AssertionError(
+                f"{spec['src']} 의 {len(missing)}줄이 페이지에 없다 — 첫 줄: {missing[0][:60]!r}")
+
+    # ⑶ 로비에서 **참가 안내로 가는 길**이 있어야 한다. 없으면 페이지가 있어도 아무도 못 찾는다.
+    #    ★「어딘가에 있다」로는 부족하다 — **머리띠(topnav)** 에 있어야 한다. 그 자리가 어느 화면에서나
+    #      보이는 유일한 자리이고, 본문 링크는 스크롤 아래로 사라진다.
+    with open(os.path.join(_ROOT, "relay", "board", "index.html"), encoding="utf-8") as fh:
+        lobby = fh.read()
+    nav = _re.search(r'(?s)<nav class="topnav".*?</nav>', lobby)
+    if not nav:
+        raise AssertionError("로비에 머리띠(topnav)가 없다 — 이 시험의 전제가 깨졌다")
+    if 'href="/join"' not in nav.group(0):
+        raise AssertionError("로비 머리띠에 /join 링크가 없다 — 안내가 있어도 사람이 못 찾는다")
+    if 'href="/join"' not in lobby.replace(nav.group(0), ""):
+        raise AssertionError("본문에도 참가 길이 하나는 있어야 한다(머리띠만으로는 읽는 흐름에서 안 보인다)")
+
+
 def _case_publish_check_binds_file_to_invite() -> None:
     """게시 게이트는 **올릴 파일**과 **초대장이 적은 것**을 묶는다(agy 2R [4] · master 판정).
 
@@ -12421,6 +12475,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("참가자: 백업은 안 덮는다",   _case_participant_backup_never_overwrites, None),
     ("참가자: 바뀐 설정은 안 덮는다", _case_participant_config_changed_midway_is_not_clobbered, None),
     ("게시: 파일과 초대장을 묶는다", _case_publish_check_binds_file_to_invite, None),
+    ("참가 안내: 문서와 같다",     _case_join_page_matches_the_document, None),
     ("참가자: 모양 틀린 relay 거부", _case_participant_relay_of_wrong_shape_is_rejected, errors.PRECONDITION),
     ("참가자: 모르는 칸은 거부",   _case_participant_unknown_field_still_rejected, errors.PRECONDITION),
     ("참가자: 있던 설정이 이긴다", _case_participant_migration_keeps_existing_config, None),
@@ -12871,6 +12926,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     #   개발기에서는 둘 다 **초록이 기본값**이라 뮤턴트 없이는 아무것도 증명되지 않는다.
     # ── codex 1R 봉합의 그물(2026-09-11) — 봉합이 되돌아가면 여기가 붉어진다 ──
     # ── agy 2R 봉합의 그물(2026-09-11) ──────────────────────────────────────
+    ("M408-join-page-swallows-a-paragraph", "tools/build_join_page.py",
+     '        if buf:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
+     '        if False:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
+     "참가 안내: 문서와 같다"),
+    ("M409-lobby-loses-the-join-link", "relay/board/index.html",
+     '<a class="cta" href="/join">참가 안내 →</a>',
+     '<a class="cta" href="/rooms">참가 안내 →</a>',
+     "참가 안내: 문서와 같다"),
     ("M407-publish-check-ignores-fingerprint", "tools/publish-check.sh",
      "elif zip_sha not in doc_shas:",
      "elif False:",
