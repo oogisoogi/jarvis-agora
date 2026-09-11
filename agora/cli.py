@@ -80,6 +80,10 @@ COMMANDS: dict[str, dict[str, Any]] = {
     #     이 명령이 진다(여섯 축 · 전부 읽기 전용 · 미측정을 통과로 세지 않는다).
     #   도구가 아니다: MCP 표면에 올리지 않는다(대리인이 자기 설치를 점검할 일은 없다).
     "selfcheck":      {"core": False, "built": True,  "slice": "S8-4"},
+    # ★계약 확장 8(발주자 결정 2026-09-11 · TICKET agora-resident-f) — **참가자 상주 방문**.
+    #   이 컴퓨터의 일정이 부르는 운영 동작이다: 「깨울 때인가」 판정(`once`) · 일정 놓기·거두기 · 끄기·켜기.
+    #   도구가 아니다: MCP 표면에 올리면 대리인 세션 손에 「나를 깨우는 일정을 바꿔라」가 쥐어진다.
+    "resident":       {"core": False, "built": True,  "slice": "S9-1"},
 }
 
 # MCP 에 노출하지 않는 것 — 정본 = 설계 §4 「(CLI만)」 행(예외 계수는 그 한 곳에만 · J-7 2026-09-02).
@@ -91,7 +95,9 @@ MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
                         # 계약 확장 6(2026-09-06) — 운영자 체크포인트 발행.
                         "checkpoint",
                         # 계약 확장 7(2026-09-09) — 설치 점검. 대리인이 자기 설치를 볼 일은 없다.
-                        "selfcheck"})
+                        "selfcheck",
+                        # 계약 확장 8(2026-09-11) — 상주 방문. 대리인을 깨우는 일정은 대리인 손에 두지 않는다.
+                        "resident"})
 
 # ── 역할별 노출표(설계 §5 「수신 격리」 H-3 · NFR-2) ─────────────────────────
 # ★**여기가 「도구 목록」의 단일 출처다.** 대리인 브리프(S6-3 `brief-reader.md`)는 이 표를
@@ -148,11 +154,11 @@ def build_parser() -> argparse.ArgumentParser:
 # ★왜 목록인가: 「숫자처럼 보이면 정수」로 하면 **제목 「2026」이 정수가 된다.**
 #   그러면 스키마가 「title 은 문자열이어야 한다」로 거절하고, 사용자는 자기가 문자열을 줬다고
 #   믿는다 — 틀린 곳과 탓하는 곳이 어긋난다. 처음 쓴 파서가 실제로 그랬다.
-INT_ARGS = frozenset({"round", "to_round", "value", "limit", "interval"})
-BOOL_ARGS = frozenset({"audit", "answered", "once", "unattended", "yes"})
+INT_ARGS = frozenset({"round", "to_round", "value", "limit", "interval", "interval_min"})
+BOOL_ARGS = frozenset({"audit", "answered", "once", "unattended", "yes", "dry_run", "print_agenda"})
 # 값 **없이** 올 수 있는 플래그(`--unattended`). 목록 밖의 `--키`는 값을 요구한다 —
 # ★아무 `--키`나 값 없이 참으로 읽으면 `--body --relay x` 가 조용히 `body=True` 가 된다.
-FLAG_ARGS = frozenset({"unattended", "yes", "once", "audit"})
+FLAG_ARGS = frozenset({"unattended", "yes", "once", "audit", "dry_run", "print_agenda"})
 # JSON 으로 읽는 칸 — **여기 없으면 문자열이다.**
 # ★「`{`·`[` 로 시작하면 JSON」으로 하면 **우리 규약이 요구하는 제목이 깨진다**:
 #   시험 글 제목은 `[selftest] …` 로 시작해야 하는데(04-tasks S7-2), 그 값이 JSON 으로 해석되어
@@ -232,6 +238,8 @@ CLI_ONLY_ARGS: dict[str, tuple[str, ...]] = {
     "reconcile":    ("thread_id", "dir"),
     "export":       ("out", "dir"),
     "import":       ("file", "dir"),
+    # ★동작마다 받는 인자는 `resident.ACTION_ARGS` 가 한 번 더 좁힌다(`status --interval-min` 거절).
+    "resident":     ("interval_min", "dry_run", "print_agenda", "dir"),
 }
 
 # 자기 파서를 갖거나 인자를 안 받는 명령 — 위 표로 재지 않는다(재면 거짓 적색이 난다).
@@ -295,6 +303,20 @@ def _run_local(name: str, rest: list[str]) -> Any:
     with open(src, encoding="utf-8") as fh:
         doc = json.load(fh)
     return export_mod.load(doc=doc, directory=_config_dir(d))
+
+
+def _run_resident(rest: list[str]) -> Any:
+    """상주 방문(계약 확장 8) — 맨 앞 맨몸 토큰이 **동작 이름**이다(`agora resident install`).
+
+    ★`checkpoint` 와 같은 모양이다. 맨몸 토큰을 동작으로 읽는 것은 이 명령과 `checkpoint` 뿐이다 —
+      규칙을 넓히면 다른 명령의 오타가 조용히 통과한다.
+    """
+    from agora import resident, tools
+    action = ""
+    if rest and not rest[0].startswith("--") and "=" not in rest[0]:
+        action, rest = rest[0], rest[1:]
+    kw = tools.normalize_args("resident", accepted_args_for("resident") or (), _kv(rest))
+    return resident.dispatch(action, kw)
 
 
 def _config_dir(explicit: str | None) -> str:
@@ -420,6 +442,8 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
         return _run_onboard(name, list(args.rest) if hasattr(args, "rest") else [])
     if name in ("delegate-chair", "abort"):
         return _run_operator(name, list(args.rest) if hasattr(args, "rest") else [])
+    if name == "resident":
+        return _run_resident(list(args.rest) if hasattr(args, "rest") else [])
     if name in ("watch", "reconcile", "export", "import"):
         return _run_local(name, list(args.rest) if hasattr(args, "rest") else [])
     if meta["core"]:

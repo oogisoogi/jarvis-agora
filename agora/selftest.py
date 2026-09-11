@@ -13127,11 +13127,13 @@ def _case_docs_commands_pass_the_parser() -> None:
     # 훑는 문서 전부. `brief-reader.md` 는 **지금은 명령이 한 줄도 없다**(읽기만 시키는 브리프) —
     # 그래도 훑는다. 언젠가 명령이 생기면 그 줄부터 재진다.
     docs = ("skills/agora-delegate/SKILL.md", "skills/agora-delegate/brief-reader.md",
-            "skills/agora-delegate/brief-writer.md", "docs/OPERATOR.md", "docs/INVITE.md")
+            "skills/agora-delegate/brief-writer.md", "docs/OPERATOR.md", "docs/INVITE.md",
+            # ★방문 규칙(0.1.6) — 깨운 에이전트가 **사람 없이** 그대로 친다. 틀린 인자는 아무도 못 본다.
+            "skills/agora-delegate/visit.md")
     # ★**명령이 반드시 있어야 하는 문서** — 여기서 0줄이면 시험이 그 문서를 못 읽고 있는 것이다
     #   (문서가 통째로 안 읽히는 것과 「명령이 없는 문서」를 구별한다).
     must_have = ("skills/agora-delegate/SKILL.md", "skills/agora-delegate/brief-writer.md",
-                 "docs/OPERATOR.md", "docs/INVITE.md")
+                 "docs/OPERATOR.md", "docs/INVITE.md", "skills/agora-delegate/visit.md")
     head = _re.compile(r"(?:^|[`\s(/])agora\s+([a-z-]+)(.*)$")
     bad: list[str] = []
     counted: dict[str, int] = {}
@@ -13494,7 +13496,422 @@ def _case_participant_migration_failure_is_not_fatal() -> None:
         raise AssertionError(f"실패를 말하지 않았다: {got['말']!r}")
 
 
+# ── 상주 방문(0.1.6 · 계약 확장 8 · 설계 AUTONOMY-DESIGN §2 F) ────────────────
+# ★재는 것 = 「깨울 때인가」의 판정과 그 둘레(끄기 · 잠금 · 상한 · 일정 파일 왕복 · whoami 한 줄).
+#   상대는 가짜 릴레이이고, **에이전트는 부르지 않는다**(깨움은 가짜 실행기가 받아 적는다).
+# ⚠못 재는 것 = 진짜 에이전트가 깨어나 무엇을 하는가(visit.md 의 효과) · 윈도우 작업 스케줄러 실기 ·
+#   진짜 launchctl 등록(이 하네스는 실행기를 갈아 끼운다 — 실물 왕복은 사람 손 실측으로 따로 적는다).
+
+def _resident_world():
+    """가짜 릴레이 + 의장(a) + 나(b) + 빈 설정 폴더 한 벌. **컨텍스트 매니저**라 나가면 서버가 죽는다."""
+    import contextlib
+    import tempfile
+    from agora import tools
+    from agora.ledger import Ledger
+    from agora.spool import Spool
+
+    @contextlib.contextmanager
+    def _open():
+        f = _fixtures()
+        with _relay_env() as (ctx_a, _relay, _url):
+            d_b = tempfile.mkdtemp(prefix="agora-resident-b-")
+            ctx_b = tools.Context(store=ctx_a.store, ledger=Ledger(d_b), spool=Spool(d_b),
+                                  allowed_signers_path=f["roster_ab"], participant_id="operator-b",
+                                  config={"human_approval": False}, config_dir=d_b)
+            home = tempfile.mkdtemp(prefix="agora-resident-home-")
+            yield ctx_a, ctx_b, home
+    return _open()
+
+
+def _resident_once(ctx_b: Any, home: str, *, agent: str | None = "/fake/claude",
+                   on_wake: Callable[[list[str]], None] | None = None,
+                   **kw: Any) -> tuple[dict[str, Any], list[list[str]]]:
+    """한 판을 돌리고 (결과, 깨운 호출들)을 낸다. ★진짜 에이전트는 부르지 않는다 — 실행기가 받아 적는다."""
+    from agora import resident
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], *, cwd: str, timeout: int, env: dict[str, str]) -> dict[str, Any]:
+        calls.append(argv)
+        if on_wake is not None:
+            on_wake(argv)
+        return {"rc": 0, "seconds": 0.0}
+
+    out = resident.once(directory=home, ctx_factory=lambda _d: ctx_b, runner=runner,
+                        which=lambda _n: agent, **kw)
+    return out, calls
+
+
+def _resident_say_as_b(ctx_b: Any, room: str, body: str = "대리인의 한 줄") -> None:
+    from agora import tools
+    f = _fixtures()
+    _with_key(f["key_b"], lambda: tools.say(ctx_b, thread_id=room, body=body))
+
+
+def _resident_advance(ctx_a: Any, room: str, to_round: int) -> None:
+    from agora import tools
+    f = _fixtures()
+    _with_key(f["key_a"], lambda: tools.advance(ctx_a, thread_id=room, to_round=to_round))
+
+
+def _resident_prompt(argv: list[str]) -> str:
+    return argv[argv.index("-p") + 1]
+
+
+def _case_resident_wakes_when_i_have_not_spoken_this_round() -> None:
+    """① 회차 1 에 내가 아직 말하지 않았다 → **깨움 1**.
+
+    ★회차 0 에서 한 말은 회차 1 의 발언이 아니다 — 그래서 일부러 회차 0 에 한 번 말해 둔다.
+      「어느 회차든 말한 적이 있으면 됐다」로 판정이 느슨해지면 여기서 붉어진다.
+    """
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        _resident_say_as_b(ctx_b, room, "회차 0 에서 한 줄")
+        _resident_advance(ctx_a, room, 1)
+        out, calls = _resident_once(ctx_b, home)
+        if out["깨움"] != 1 or len(calls) != 1:
+            raise AssertionError(f"깨워야 한다: {out['판정']} 깨움={out['깨움']} 호출={len(calls)}")
+        prompt = _resident_prompt(calls[0])
+        if room not in prompt or "회차 1" not in prompt or "목적 speak" not in prompt:
+            raise AssertionError("깨움 글에 방 id·회차·목적이 없다")
+        if "방문 규칙" not in prompt:
+            raise AssertionError("깨움 글에 방문 규칙(visit.md)이 실리지 않았다")
+        argv = calls[0]
+        allowed = argv[argv.index("--allowedTools") + 1]
+        if not allowed.startswith("Bash(") or argv[argv.index("--tools") + 1] != "Bash" \
+                or argv[argv.index("--permission-mode") + 1] != "dontAsk":
+            raise AssertionError(f"에이전트 손이 좁혀지지 않았다: {argv[3:]}")
+
+
+def _case_resident_does_not_wake_after_i_spoke() -> None:
+    """② 회차 1 에 이미 말했다 → **깨움 0** (판정의 근거는 릴레이의 이벤트다 · 로컬 표식 아님)."""
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        _resident_advance(ctx_a, room, 1)
+        _resident_say_as_b(ctx_b, room, "회차 1 에서 한 줄")
+        out, calls = _resident_once(ctx_b, home)
+        if out["깨움"] != 0 or calls:
+            raise AssertionError(f"말한 회차로 깨웠다: {out['판정']} 호출={len(calls)}")
+        if not any("이미 말했다" in s["why"] for s in out["건너뛴_방"]):
+            raise AssertionError(f"건너뛴 이유를 안 적는다: {out['건너뛴_방']}")
+
+
+def _case_resident_round_zero_follows_the_same_rule() -> None:
+    """③ 회차 0(주제를 모으는 방)도 같은 규칙 — 안 말했으면 깨움 1 · 말했으면 0."""
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        out, calls = _resident_once(ctx_b, home)
+        if out["깨움"] != 1 or "회차 0" not in _resident_prompt(calls[0]):
+            raise AssertionError(f"회차 0 미발언인데 안 깨웠다: {out['판정']}")
+        _resident_say_as_b(ctx_b, room, "대리인이 고른 주제 한 줄")
+        out, calls = _resident_once(ctx_b, home)
+        if out["깨움"] != 0 or calls:
+            raise AssertionError(f"회차 0 에 말했는데 또 깨웠다: {out['판정']}")
+
+
+def _case_resident_off_flag_does_nothing() -> None:
+    """④ 꺼져 있으면(`resident off`) 들를 방이 있어도 **아무것도 안 한다** — 사람이 끄는 법이 한 줄로 선다."""
+    from agora import resident
+    with _resident_world() as (ctx_a, ctx_b, home):
+        _relay_room(ctx_a)                                  # 들를 방이 있다(회차 0 미발언)
+        resident.set_off(directory=home, off=True)
+        out, calls = _resident_once(ctx_b, home)
+        if calls or out["판정"]["종료코드"] != 0 or out.get("상주") != "꺼짐":
+            raise AssertionError(f"꺼졌는데 움직였다: {out} 호출={len(calls)}")
+        resident.set_off(directory=home, off=False)
+        out, calls = _resident_once(ctx_b, home)
+        if len(calls) != 1:
+            raise AssertionError(f"다시 켰는데 안 깨운다: {out['판정']}")
+
+
+def _case_resident_lock_backs_off_and_reclaims_stale() -> None:
+    """⑤ 한 판이 돌고 있으면(잠금) 물러난다 — rc 3 · 깨움 0. 묵은 잠금은 회수하고 돈다.
+
+    ★묵은 잠금을 회수하지 않으면 한 번 죽은 판이 **그 컴퓨터의 상주를 영영 멈춘다**(아무 말 없이).
+    """
+    import time as _time
+    from agora import resident
+    with _resident_world() as (ctx_a, ctx_b, home):
+        _relay_room(ctx_a)
+        lock = resident.paths(home)["lock"]
+        os.makedirs(lock)
+        out, calls = _resident_once(ctx_b, home)
+        if calls or out["판정"]["종료코드"] != resident.RC_LOCKED:
+            raise AssertionError(f"잠금 중인데 돌았다: {out['판정']} 호출={len(calls)}")
+        if not os.path.isdir(lock):
+            raise AssertionError("남의 잠금을 풀었다")
+        old = _time.time() - resident.LOCK_STALE_SECONDS - 60
+        os.utime(lock, (old, old))
+        out, calls = _resident_once(ctx_b, home)
+        if len(calls) != 1:
+            raise AssertionError(f"묵은 잠금을 회수하지 못했다: {out['판정']}")
+        if os.path.exists(lock):
+            raise AssertionError("판이 끝났는데 잠금이 남았다")
+
+
+def _case_resident_wakes_until_spoken_but_three_times_at_most() -> None:
+    """⑥ 두 판 연속 = 깨움 1(깨운 뒤 대리인이 말하면 릴레이가 그것을 안다) · 말하지 않으면 **세 번까지만**.
+
+    ★상한은 판정이 아니라 **비용 천장**이다 — 할 말이 없어 말하지 않으면 릴레이는 그대로이고,
+      상한이 없으면 10분마다 영원히 깨운다.
+    """
+    from agora import resident
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        first, calls1 = _resident_once(ctx_b, home,
+                                       on_wake=lambda _a: _resident_say_as_b(ctx_b, room, "깨어나서 한 줄"))
+        second, calls2 = _resident_once(ctx_b, home)
+        if len(calls1) + len(calls2) != 1:
+            raise AssertionError(f"같은 (방, 회차)를 두 번 깨웠다: {len(calls1)}+{len(calls2)}")
+        quiet = _relay_room(ctx_a)
+        woke = 0
+        for _ in range(resident.ATTEMPTS_PER_ROUND + 1):
+            _out, calls = _resident_once(ctx_b, home)
+            woke += len(calls)
+        if woke != resident.ATTEMPTS_PER_ROUND:
+            raise AssertionError(f"말하지 않는 방을 {woke}번 깨웠다(상한 {resident.ATTEMPTS_PER_ROUND})")
+        last, _calls = _resident_once(ctx_b, home)
+        if not any("상한" in s["why"] for s in last["건너뛴_방"] if s["room"] == quiet[:8]):
+            raise AssertionError(f"상한에 걸린 이유를 안 적는다: {last['건너뛴_방']}")
+
+
+def _case_resident_wakes_once_per_cycle() -> None:
+    """한 판에 깨우는 것은 **한 번**이다 — 넘치는 방은 다음 판으로 넘긴다(시도로 세지 않는다)."""
+    with _resident_world() as (ctx_a, ctx_b, home):
+        _relay_room(ctx_a)
+        _relay_room(ctx_a)
+        out, calls = _resident_once(ctx_b, home, rooms_per_wake=1)
+        if len(calls) != 1 or out["넘긴_방"] != 1 or out["다음_판으로"] != 1:
+            raise AssertionError(f"한 판에 여러 번 깨웠다: 호출={len(calls)} {out.get('넘긴_방')}/{out.get('다음_판으로')}")
+        out, calls = _resident_once(ctx_b, home, rooms_per_wake=1)
+        if len(calls) != 1:
+            raise AssertionError("넘긴 방을 다음 판에 안 들렀다")
+
+
+def _case_resident_skips_rooms_that_ended() -> None:
+    """끝난 방(권고가 실린 방)은 깨우지 않는다 — 발언을 안 받는 방으로 영원히 깨우는 일이 없게."""
+    from agora import tools
+    f = _fixtures()
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        for target in (1, 2, 3):
+            _resident_advance(ctx_a, room, target)
+        _with_key(f["key_a"], lambda: tools.resolve(
+            ctx_a, thread_id=room, summary="가짜 수렴", dissent=[],
+            recommended_actions=[{"text": "가짜 권고", "execution": "forbidden"}]))
+        out, calls = _resident_once(ctx_b, home)
+        if calls or out["깨움"] != 0:
+            raise AssertionError(f"끝난 방으로 깨웠다: {out['판정']} 안건={out['안건']}")
+
+
+def _case_resident_without_agent_prints_agenda() -> None:
+    """⑦ 깨울 에이전트가 없다 → **안건만** 내고 rc 2(전제 미비) — 「깨웠다」와 구별되는 코드다."""
+    from agora import resident
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        out, calls = _resident_once(ctx_b, home, agent=None)
+        if calls or out["판정"]["종료코드"] != resident.RC_NO_AGENT:
+            raise AssertionError(f"에이전트 없이 깨우려 했다: {out['판정']} 호출={len(calls)}")
+        if [a["room_id"] for a in out["안건"]] != [room]:
+            raise AssertionError(f"안건이 비었다: {out['안건']}")
+        listed, calls = _resident_once(ctx_b, home, print_agenda=True)
+        if calls or listed["판정"]["종료코드"] != 0 or not listed["안건"]:
+            raise AssertionError(f"--print-agenda 가 안건만 내지 않는다: {listed['판정']}")
+
+
+def _case_resident_dry_run_changes_nothing() -> None:
+    """드라이런은 할 일만 적는다 — 깨움 0 · 시도 기록 0 · 마지막 판 기록 0."""
+    from agora import resident
+    with _resident_world() as (ctx_a, ctx_b, home):
+        _relay_room(ctx_a)
+        out, calls = _resident_once(ctx_b, home, dry_run=True)
+        p = resident.paths(home)
+        if calls or not out["안건"]:
+            raise AssertionError(f"드라이런이 깨웠거나 안건을 안 적었다: {out['판정']}")
+        for key in ("attempts", "last"):
+            if os.path.exists(p[key]):
+                raise AssertionError(f"드라이런이 {key} 를 썼다")
+
+
+def _resident_real_footprint() -> tuple[Any, ...]:
+    """이 기계의 **실제** 상주 자리 — 시험 전후로 같아야 한다(이 기계의 신원은 의장이다)."""
+    from agora import resident
+    real_home = os.path.expanduser("~")
+    spots = (os.path.join(real_home, "Library", "LaunchAgents", resident.LABEL_DEFAULT + ".plist"),
+             os.path.join(real_home, ".config", "agora", "resident"))
+    out = []
+    for spot in spots:
+        try:
+            st = os.stat(spot)
+            out.append((spot, st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((spot, None, None))
+    return tuple(out)
+
+
+def _resident_temp_home(tag: str):
+    """임시 집 + 시험용 라벨. ★나갈 때 **실제 자리가 안 바뀌었는지**를 시험이 스스로 단언한다."""
+    import contextlib
+    import tempfile
+    from agora import resident
+
+    @contextlib.contextmanager
+    def _open():
+        before = _resident_real_footprint()
+        home = tempfile.mkdtemp(prefix=f"agora-resident-{tag}-")
+        saved = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE", resident.LABEL_ENV)}
+        os.environ["HOME"] = home
+        os.environ["USERPROFILE"] = home
+        os.environ[resident.LABEL_ENV] = f"kr.godmeyou.agora.resident-selftest-{tag}"
+        try:
+            yield home
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        after = _resident_real_footprint()
+        if before != after:
+            raise AssertionError(f"시험이 이 기계의 실제 상주 자리를 건드렸다: {before} → {after}")
+    return _open()
+
+
+def _case_resident_schedule_file_round_trip() -> None:
+    """⑧ 일정 파일 왕복(임시 집) — 놓으면 생기고 거두면 사라진다 · 등록이 실패하면 **아무것도 안 남긴다**.
+
+    ★맥은 LaunchAgent 파일 · 윈도우는 작업 스케줄러 명령 줄(정적 — 윈도우 실기 미실측).
+    ⚠실행기를 갈아 끼운다 — 진짜 `launchctl` 은 여기서 부르지 않는다.
+    """
+    import plistlib
+    from agora import resident
+    with _resident_temp_home("install") as home:
+        cfg = os.path.join(home, "cfg")
+        os.makedirs(cfg)
+        ran: list[list[str]] = []
+
+        def runner(argv: list[str]) -> dict[str, Any]:
+            ran.append(argv)
+            return {"rc": 0}
+
+        resident.install(directory=cfg, platform="darwin", runner=runner, which=lambda _n: "/fake/bin/claude")
+        target = resident.plist_path()
+        if not target.startswith(home) or not os.path.exists(target):
+            raise AssertionError(f"일정 파일이 임시 집에 안 생겼다: {target}")
+        with open(target, "rb") as fh:
+            doc = plistlib.load(fh)
+        if doc["StartInterval"] != 600 or doc["ProgramArguments"][-4:] != ["resident", "once", "--dir", cfg] \
+                or doc["Label"] != resident.label() or "/fake/bin" not in doc["EnvironmentVariables"]["PATH"]:
+            raise AssertionError(f"일정 파일의 모양이 다르다: {doc}")
+        if not any(a[:2] == ["launchctl", "bootstrap"] and a[-1] == target for a in ran):
+            raise AssertionError(f"등록을 부르지 않았다: {ran}")
+        if not resident.summary_line(cfg).startswith("상주: 켜짐(10분"):
+            raise AssertionError(f"설치 뒤 한 줄이 다르다: {resident.summary_line(cfg)}")
+        resident.uninstall(directory=cfg, platform="darwin", runner=runner)
+        if os.path.exists(target) or os.path.exists(resident.paths(cfg)["settings"]):
+            raise AssertionError("거뒀는데 일정 파일이나 설정이 남았다")
+
+        def refuses(argv: list[str]) -> dict[str, Any]:
+            return {"rc": 5} if argv[:2] == ["launchctl", "bootstrap"] else {"rc": 0}
+
+        try:
+            resident.install(directory=cfg, platform="darwin", runner=refuses, which=lambda _n: "/fake/bin/claude")
+        except AgoraError as e:
+            if e.code != errors.PRECONDITION:
+                raise AssertionError(f"다른 코드: {e.code}") from None
+        else:
+            raise AssertionError("등록이 실패했는데 설치가 성공으로 끝났다")
+        if os.path.exists(target) or os.path.exists(resident.paths(cfg)["settings"]):
+            raise AssertionError("거부된 설치가 파일을 남겼다")
+
+        ran.clear()
+        argv = resident.schtasks_create_argv(p=resident.paths(cfg), interval_min=10, pythonw=r"C:\Py\pythonw.exe")
+        if argv[:2] != ["schtasks", "/Create"] or argv[argv.index("/SC") + 1] != "MINUTE" \
+                or argv[argv.index("/MO") + 1] != "10" or "pythonw.exe" not in argv[argv.index("/TR") + 1] \
+                or "resident once" not in argv[argv.index("/TR") + 1]:
+            raise AssertionError(f"작업 스케줄러 명령 줄이 다르다: {argv}")
+        resident.install(directory=cfg, platform="win32", runner=runner, which=lambda _n: "/fake/bin/claude",
+                         pythonw=r"C:\Py\pythonw.exe")
+        resident.uninstall(directory=cfg, platform="win32", runner=runner)
+        if [a[:2] for a in ran] != [["schtasks", "/Create"], ["schtasks", "/Delete"]]:
+            raise AssertionError(f"윈도우 등록·해제 순서가 다르다: {ran}")
+
+
+def _case_whoami_second_column_is_resident() -> None:
+    """`whoami` **둘째 칸이 상주 한 줄**이다 — 미설치 · 켜짐 · 꺼짐이 볼 때마다 보인다."""
+    import json as _json
+    from agora import onboard, resident
+    with _resident_temp_home("whoami") as _home:
+        d = _onboard_dir()
+        key = os.path.join(d, "id_ed25519")
+        with _fake_relay().serving() as (url, relay):
+            relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
+            _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True))
+
+        def keys() -> list[str]:
+            rendered = _json.dumps(onboard.whoami(directory=d), ensure_ascii=False, sort_keys=True, indent=2)
+            return [ln.strip().split('"')[1] for ln in rendered.splitlines() if ln.startswith('  "')]
+
+        if keys()[:2] != ["approval_gate", "auto_visit"]:
+            raise AssertionError(f"둘째 칸이 상주가 아니다: {keys()[:3]}")
+        if not onboard.whoami(directory=d)["auto_visit"].startswith("상주: 미설치"):
+            raise AssertionError(onboard.whoami(directory=d)["auto_visit"])
+        resident.install(directory=d, platform="darwin", runner=lambda _a: {"rc": 0},
+                         which=lambda _n: "/fake/bin/claude")
+        if not onboard.whoami(directory=d)["auto_visit"].startswith("상주: 켜짐(10분 · 마지막 방문"):
+            raise AssertionError(onboard.whoami(directory=d)["auto_visit"])
+        resident.set_off(directory=d, off=True)
+        if not onboard.whoami(directory=d)["auto_visit"].startswith("상주: 꺼짐"):
+            raise AssertionError(onboard.whoami(directory=d)["auto_visit"])
+        resident.uninstall(directory=d, platform="darwin", runner=lambda _a: {"rc": 0})
+
+
+def _case_resident_cli_entry_stands() -> None:
+    """`bin/agora resident …` 가 **진입점에서** 선다(등록됐다 ≠ 동작한다 — 이 저장소가 세 번 다친 자리)."""
+    import json as _json
+    import subprocess as _sp
+    import tempfile
+    home = tempfile.mkdtemp(prefix="agora-resident-cli-")
+    cfg = os.path.join(home, "cfg")
+    os.makedirs(cfg)
+    before = _resident_real_footprint()
+    env = dict(os.environ, HOME=home, USERPROFILE=home,
+               AGORA_RESIDENT_LABEL="kr.godmeyou.agora.resident-selftest-cli")
+    agora_bin = os.path.join(_ROOT, "bin", "agora")
+
+    def call(*args: str) -> Any:
+        return _sp.run([sys.executable, agora_bin, "resident", *args], env=env,
+                       capture_output=True, text=True, timeout=60)
+
+    shown = call("status", "--dir", cfg)
+    if shown.returncode != 0 or "상주" not in _json.loads(shown.stdout):
+        raise AssertionError(f"status 가 진입점에서 안 선다: rc={shown.returncode} {shown.stderr[:200]}")
+    off = call("off", "--dir", cfg)
+    if off.returncode != 0 or not os.path.exists(os.path.join(cfg, "resident", "OFF")):
+        raise AssertionError(f"off 가 플래그를 안 놓는다: rc={off.returncode}")
+    stray = call("status", "--interval-min", "5", "--dir", cfg)
+    if stray.returncode != errors.ARGUMENT:
+        raise AssertionError(f"동작이 안 받는 인자를 조용히 넘겼다: rc={stray.returncode}")
+    unknown = call("bogus", "--dir", cfg)
+    if unknown.returncode != errors.ARGUMENT:
+        raise AssertionError(f"모르는 동작을 넘겼다: rc={unknown.returncode}")
+    if _resident_real_footprint() != before:
+        raise AssertionError("시험이 이 기계의 실제 상주 자리를 건드렸다")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
+    ("상주: 이번 회차 미발언이면 깨운다", _case_resident_wakes_when_i_have_not_spoken_this_round, None),
+    ("상주: 이번 회차에 말했으면 안 깨운다", _case_resident_does_not_wake_after_i_spoke, None),
+    ("상주: 회차 0 도 같은 규칙",   _case_resident_round_zero_follows_the_same_rule, None),
+    ("상주: 꺼져 있으면 아무것도 안 한다", _case_resident_off_flag_does_nothing, None),
+    ("상주: 잠금이면 물러나고 묵은 잠금은 회수", _case_resident_lock_backs_off_and_reclaims_stale, None),
+    ("상주: 말할 때까지 깨우되 세 번까지", _case_resident_wakes_until_spoken_but_three_times_at_most, None),
+    ("상주: 한 판에 한 번만 깨운다", _case_resident_wakes_once_per_cycle, None),
+    ("상주: 끝난 방은 안 깨운다",   _case_resident_skips_rooms_that_ended, None),
+    ("상주: 에이전트가 없으면 안건만", _case_resident_without_agent_prints_agenda, None),
+    ("상주: 드라이런은 아무것도 안 바꾼다", _case_resident_dry_run_changes_nothing, None),
+    ("상주: 일정 파일 왕복(임시 집)", _case_resident_schedule_file_round_trip, None),
+    ("whoami: 둘째 칸이 상주",      _case_whoami_second_column_is_resident, None),
+    ("상주: CLI 입구가 선다",       _case_resident_cli_entry_stands, None),
     ("초대: 1단계가 혼자 선다",     _case_invite_join_brief_stands_alone, None),
     ("잠금: 수단은 셋 중 하나",    _case_lock_backend_is_one_of_three, None),
     ("잠금: fcntl 없이도 선다",    _case_lock_imports_without_fcntl, None),
@@ -13970,6 +14387,57 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
 # ── 뮤테이션 ────────────────────────────────────────────────────────────────
 # (id, 파일, 찾을 문자열, 바꿀 문자열, 이 변이를 잡아야 하는 케이스 이름)
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+    # ── 상주 방문(2026-09-11 · 0.1.6 · 계약 확장 8) ─────────────────────────
+    # ★브리프가 요구한 여섯 자리(발언 판정 제거·발언 무시·플래그 무시·잠금 제거·깨움 상한 제거·
+    #   uninstall 미삭제) + 그 둘레 여섯. 전부 「개발기에서는 초록이 기본값」인 자리다.
+    ("M501-resident-round-check-dropped", "agora/resident.py",
+     '        if int((event.get("payload") or {}).get("round") or 0) == round_no:\n            return True',
+     '        if True:\n            return True',
+     "상주: 이번 회차 미발언이면 깨운다"),
+    ("M502-resident-ignores-that-i-spoke", "agora/resident.py",
+     "        if spoke_in_round(reduced, me, round_no):",
+     "        if False:",
+     "상주: 이번 회차에 말했으면 안 깨운다"),
+    ("M503-resident-ignores-off-flag", "agora/resident.py",
+     '    if os.path.exists(p["off"]):\n        result = {"판정": _verdict(RC_OK, "꺼져 있다',
+     '    if False:\n        result = {"판정": _verdict(RC_OK, "꺼져 있다',
+     "상주: 꺼져 있으면 아무것도 안 한다"),
+    ("M504-resident-lock-dropped", "agora/resident.py",
+     '    if not _lock_acquire(p["lock"]):',
+     "    if False:",
+     "상주: 잠금이면 물러나고 묵은 잠금은 회수"),
+    ("M505-resident-cycle-cap-dropped", "agora/resident.py",
+     "            for batch in batches[:wakes_per_cycle]:",
+     "            for batch in batches:",
+     "상주: 한 판에 한 번만 깨운다"),
+    ("M506-resident-uninstall-keeps-plist", "agora/resident.py",
+     "        if os.path.exists(target):\n            os.remove(target)\n            removed.append(target)",
+     "        if os.path.exists(target):\n            removed.append(target)",
+     "상주: 일정 파일 왕복(임시 집)"),
+    ("M507-resident-attempt-cap-dropped", "agora/resident.py",
+     "        if tried >= ATTEMPTS_PER_ROUND:",
+     "        if False:",
+     "상주: 말할 때까지 깨우되 세 번까지"),
+    ("M508-resident-wakes-without-agent", "agora/resident.py",
+     "        elif agent is None:",
+     "        elif False:",
+     "상주: 에이전트가 없으면 안건만"),
+    ("M509-resident-state-gate-dropped", "agora/resident.py",
+     "        if state not in POSTING_STATES or type(round_no) is not int:",
+     "        if type(round_no) is not int:",
+     "상주: 끝난 방은 안 깨운다"),
+    ("M510-resident-refused-install-leaves-plist", "agora/resident.py",
+     '            os.remove(target)\n            raise AgoraError(errors.PRECONDITION, "일정 등록(launchctl bootstrap)',
+     '            raise AgoraError(errors.PRECONDITION, "일정 등록(launchctl bootstrap)',
+     "상주: 일정 파일 왕복(임시 집)"),
+    ("M511-whoami-drops-resident-line", "agora/onboard.py",
+     '        "auto_visit": _resident_line(directory),\n',
+     "",
+     "whoami: 둘째 칸이 상주"),
+    ("M512-resident-stale-lock-never-reclaimed", "agora/resident.py",
+     "    if age < LOCK_STALE_SECONDS:\n        return False",
+     "    if True:\n        return False",
+     "상주: 잠금이면 물러나고 묵은 잠금은 회수"),
     # ── 이식 잠금·잔재 이관(2026-09-11 · 0.1.3) ─────────────────────────────
     # ★여덟 자리 전부 「한 OS 에서만 나는 죽음」과 「사람 손을 부르는 거부」를 겨눈다.
     #   개발기에서는 둘 다 **초록이 기본값**이라 뮤턴트 없이는 아무것도 증명되지 않는다.

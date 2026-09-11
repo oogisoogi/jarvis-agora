@@ -331,6 +331,15 @@ def _fetch_checkpoint(store: Any, directory: str) -> dict[str, Any]:
 
 # ── whoami ──────────────────────────────────────────────────────────────────
 
+def _resident_line(directory: str) -> str:
+    """상주 한 줄. ★이 줄이 깨져도 `whoami` 는 서야 한다 — 참가자가 사진으로 보내는 유일한 화면이다."""
+    try:
+        from agora import resident
+        return resident.summary_line(directory)
+    except Exception as e:      # noqa: BLE001 — 한 칸의 실패가 화면 전체를 죽이지 않게
+        return f"상주: 읽지 못함({type(e).__name__})"
+
+
 def whoami(*, directory: str | None = None) -> dict[str, Any]:
     """나는 누구이고, 어디에 대고 말하며, **어떤 겹이 꺼져 있는가**.
 
@@ -380,6 +389,9 @@ def whoami(*, directory: str | None = None) -> dict[str, Any]:
             "note": ("켜져 있으면 현재 구현에서는 모든 발신이 code 3 으로 거부된다"
                      " — 승인자 배선은 v1.1(도구가 「승인 대기」 반환)"),
         },
+        # ★상주 방문(0.1.6) — 승인 게이트 **바로 다음 칸**이다(키 정렬: approval_gate < auto_visit).
+        #   이 컴퓨터가 스스로 광장에 들르는지는 **볼 때마다 보여야** 한다 — 무엇이 돌고 있는지 숨기지 않는다.
+        "auto_visit": _resident_line(directory),
         # ★판본을 여기 둔다 — 참가자가 화면 사진으로 회신하는 명령이 이것 하나뿐이라,
         #   판본이 여기 없으면 「어느 클라이언트에서 난 일인가」를 물을 자리가 사라진다.
         #   ⚠이름이 `c` 로 시작해 승인 게이트(`a`) 다음 자리다 — 첫 칸은 그대로 게이트다.
