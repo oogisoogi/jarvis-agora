@@ -50,6 +50,12 @@ WAKE_TIMEOUT_SECONDS = 300             # 깨운 에이전트가 이만큼 넘기
 WAKES_PER_CYCLE = 1                    # ★한 판에 깨우는 횟수의 상한
 ROOMS_PER_WAKE = 5                     # 한 번 깨울 때 넘기는 방의 상한(넘치는 방은 다음 판)
 ATTEMPTS_PER_ROUND = 3                 # 같은 방·같은 회차로 깨우는 횟수의 상한(비용 천장)
+# ★**깨움이 실패하면 그 방의 상한을 깎지 않는다**(2026-09-11 윈도우 실증 · master 요구 ⑧).
+#   그 판은 방 탓이 아니라 **우리 탓**이었다 — 에이전트가 로그인 안 된 채 떠서 rc 1 로 죽었다.
+#   그런데 옛 코드는 깨우기 **전에** 세고 되돌리지 않아, 세 판 만에 그 회차를 영영 건너뛰었다.
+#   ⇒ 실패한 깨움은 되돌린다. 대신 **비용 천장을 다른 축으로 옮긴다**: 연속 실패에 상한을 둔다.
+#   ⛔안 옮기면 「영원히 실패하며 10분마다 깨우는」 판이 생긴다(옛 상한이 막던 것이 그것이다).
+WAKE_FAILURES_MAX = 3                  # 연속 깨움 실패가 이만큼이면 멈추고 사람을 부른다
 AGENT_MAX_TURNS = 30
 LOG_MAX_BYTES = 256 * 1024
 BROWSE_PAGES_MAX = 10
@@ -70,6 +76,7 @@ LOCK_FILE = "lock"
 SETTINGS_FILE = "settings.json"
 LAST_FILE = "last.json"
 ATTEMPTS_FILE = "attempts.json"
+FAILURES_FILE = "wake-failures.json"
 LOG_FILE = "resident.log"              # 설정 폴더 바로 아래
 OUT_FILE = "resident.out"              # 일정이 붙잡는 표준출력
 
@@ -100,6 +107,7 @@ def paths(directory: str | None = None) -> dict[str, str]:
             "lock": os.path.join(state, LOCK_FILE),
             "settings": os.path.join(state, SETTINGS_FILE),
             "last": os.path.join(state, LAST_FILE),
+            "failures": os.path.join(state, FAILURES_FILE),
             "attempts": os.path.join(state, ATTEMPTS_FILE),
             "log": os.path.join(d, LOG_FILE),
             "out": os.path.join(d, OUT_FILE)}
@@ -272,15 +280,46 @@ def plan(ctx: Any, *, attempts: dict[str, int],
 
 
 # ── 깨우기 ──────────────────────────────────────────────────────────────────
-def find_agent(p: dict[str, str], which: Callable[[str], str | None] | None = None) -> str | None:
-    """설치 때 적어 둔 경로가 살아 있으면 그것, 아니면 PATH 에서 찾는다.
+# ★PATH 에 없을 때 **마지막으로** 들여다볼 자리들(2026-09-11).
+#   스케줄러는 사람의 셸 PATH 를 안 물려받는다 — 설치 때 적어 둔 경로가 없거나 죽었고 `which` 도
+#   빈손이면, 설치기가 실제로 놓는 자리를 본다. ⛔**실재하는 것만** 돌려준다(없으면 없는 것이다).
+#   · `~/.local/bin/claude` = 이 기계에서 **실측**(동봉 설치본 · 2026-09-11).
+#   · 나머지는 **추정**이다 — 존재 검사가 막아 주므로 틀려도 값이 0 이고, 맞으면 깨움 하나를 살린다.
+#     추정임을 여기 적어 둔다: 맞았다는 증거가 아직 없다.
+AGENT_FALLBACKS = (os.path.join("~", ".local", "bin", "claude"),
+                   os.path.join("~", ".local", "bin", "claude.exe"),
+                   os.path.join("~", ".local", "bin", "claude.cmd"),
+                   os.path.join("~", "AppData", "Roaming", "npm", "claude.cmd"),
+                   os.path.join("~", "AppData", "Local", "npm", "claude.cmd"))
+
+
+def agent_fallbacks(exists: Callable[[str], bool] | None = None) -> list[str]:
+    """`which` 가 빈손일 때 볼 자리 — **실재하는 것만** 순서대로."""
+    exists = exists or os.path.exists
+    found = []
+    for item in AGENT_FALLBACKS:
+        path = os.path.expanduser(item)
+        if exists(path):
+            found.append(path)
+    return found
+
+
+def find_agent(p: dict[str, str], which: Callable[[str], str | None] | None = None,
+               exists: Callable[[str], bool] | None = None) -> str | None:
+    """설치 때 적어 둔 경로 → PATH → **설치기가 놓는 자리**(실재하는 것만).
 
     ★일정은 사람의 셸 PATH 를 물려받지 않는다(맥 launchd 는 최소 PATH) — 그래서 설치 때 경로를 적어 둔다.
+    ★세 번째 걸음은 **`which` 가 실패했을 때만** 본다. 먼저 보면 PATH 에 있는 최신본을 두고
+      옛 자리를 잡을 수 있다 — 찾는 순서가 곧 어느 것을 쓰느냐다.
     """
     recorded = _load_json(p["settings"]).get("agent_path")
-    if isinstance(recorded, str) and recorded and os.path.exists(recorded):
+    if isinstance(recorded, str) and recorded and (exists or os.path.exists)(recorded):
         return recorded
-    return (which or shutil.which)(AGENT_NAME)
+    found = (which or shutil.which)(AGENT_NAME)
+    if found:
+        return found
+    candidates = agent_fallbacks(exists)
+    return candidates[0] if candidates else None
 
 
 def shell_command(p: dict[str, str]) -> list[str]:
@@ -387,13 +426,111 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass
 
 
+# ★깨운 에이전트가 **어느 설정 폴더로 뜨는가**(계약 확장 8 보강 · 2026-09-11).
+#   동봉 설치본은 Claude 설정을 **자기 전용 폴더**(아래 상수)에 둔다 — 로그인 표지도 거기 있다.
+#   그런데 일정(스케줄러)이 깨운 프로세스는 **사람의 셸 환경을 물려받지 않으므로**
+#   `CLAUDE_CONFIG_DIR` 이 없고, 헤드리스 claude 는 기본값 `~/.claude`(미로그인)로 뜬다.
+#   ⇒ 깨우기는 제때 됐는데 **에이전트가 로그인 안 된 채** 죽는다(윈도우 실증 2026-09-11 20:08 · rc 1).
+#   ⛔없는 폴더를 지어내지 않는다 — **실재할 때만** 넣는다(없으면 종전대로 claude 의 기본값에 맡긴다).
+CLAUDE_CONFIG_ENV = "CLAUDE_CONFIG_DIR"
+# ⚠아래 한 줄이 이 저장소에서 **그 폴더 이름을 적는 유일한 자리**다(공개 표현 규약 **줄 예외 1건**).
+#   경로는 제품이 **실제로 읽어야 하는 자리**라 다른 말로 바꿔 적을 수 없다 — 바꿔 적으면 못 읽는다.
+#   ⛔글자를 쪼개 검사를 피하지 않는다 — 그건 미탐과 구별되지 않는 억제다(게이트 자신이 경고하는 것).
+#   ⇒ 표식을 달아 **보이게** 넘긴다. 게이트가 이 줄을 파일:줄번호로 찍는다.
+#   ★그리고 이 줄은 **마지막 수단**이다: 그 앞에 「설치 때 본 값」이 있고(아래), 그쪽이 더 일반적이다
+#     — 어느 실행기가 넣어 주든 받아 적기 때문이다. 이 상수는 그것마저 없을 때만 쓰인다.
+VENDOR_CLAUDE_DIR = os.path.join("~", ".cys", "claude")  # public-terms: allow — 제품이 읽는 실제 경로
+
+
+def claude_config_dir(env: dict[str, str] | None = None,
+                      exists: Callable[[str], bool] | None = None,
+                      recorded: str | None = None) -> tuple[str | None, str]:
+    """깨울 때 쓸 Claude 설정 폴더와 **그것을 고른 이유** — 우선순위가 곧 계약이다.
+
+    ⑴ 이미 환경에 있으면 **그것이 이긴다**(사람이 정한 값을 기계가 덮지 않는다).
+    ⑵ 없으면 **설치 때 본 값**을 쓴다 — 사람이 상주를 켠 그 창에는 그 값이 있었다.
+       ★이쪽이 더 일반적이다: 어느 실행기가 넣어 주든 **받아 적기** 때문에 이름을 몰라도 된다.
+    ⑶ 그것도 없으면 알려진 설치본 폴더가 **실재할 때만** 쓴다(마지막 수단).
+    ⑷ 전부 아니면 **아무것도 넣지 않는다** — claude 가 자기 기본값을 쓴다.
+    ⛔없는 폴더를 지어내지 않는다 — 지어내면 「있는데 못 읽는다」와 「없다」가 같은 화면이 된다.
+    ★반환에 이유를 함께 낸다: 깨움 결과 행에 적혀야 「어느 폴더로 깨웠나」를 나중에 물을 수 있다.
+    """
+    env = os.environ if env is None else env
+    exists = exists or os.path.isdir
+    already = env.get(CLAUDE_CONFIG_ENV)
+    if already:
+        return already, "환경에 이미 있었다"
+    if recorded and exists(recorded):
+        return recorded, "상주를 켤 때 그 창에 있던 값"
+    vendor = os.path.expanduser(VENDOR_CLAUDE_DIR)
+    if exists(vendor):
+        return vendor, "알려진 설치본 폴더가 실재한다"
+    return None, "정하지 않았다 — claude 기본값에 맡긴다"
+
+
+def _claude_dir_note(p: dict[str, str] | None = None) -> dict[str, str]:
+    """깨움 결과에 싣는 한 칸 — **어느 설정 폴더로 깨웠나**(요구 ①).
+
+    ★없으면 나중에 「왜 로그인이 안 됐나」를 물을 수단이 없다. 2026-09-11 윈도우 사고가 정확히
+      그 자리였다: 로그는 `rc 1` 만 말했고, **어느 폴더로 떴는지는 아무 데도 없었다.**
+    """
+    chosen, why = claude_config_dir(recorded=_recorded_claude_dir(p) if p else None)
+    return {"자리": chosen or "정하지 않음", "왜": why}
+
+
 def _agent_env(p: dict[str, str]) -> dict[str, str]:
     env = dict(os.environ)
     env["AGORA_CONFIG_DIR"] = p["config_dir"]
     key = os.path.join(p["config_dir"], "id_ed25519")
     if not env.get("AGORA_SIGNING_KEY") and os.path.exists(key):
         env["AGORA_SIGNING_KEY"] = key
+    chosen, _why = claude_config_dir(env, recorded=_recorded_claude_dir(p))
+    if chosen:
+        env[CLAUDE_CONFIG_ENV] = chosen
     return env
+
+
+def _recorded_claude_dir(p: dict[str, str]) -> str | None:
+    value = _load_json(p["settings"]).get("claude_config_dir")
+    return value if isinstance(value, str) and value else None
+
+
+def wake_failures(p: dict[str, str]) -> int:
+    value = _load_json(p["failures"]).get("consecutive")
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _set_wake_failures(p: dict[str, str], value: int, *, why: str | None = None) -> None:
+    """연속 실패 계수 — **0 이면 파일을 지운다**(빈 상태와 「0회 실패」를 같은 모양으로 둔다)."""
+    if value <= 0:
+        if os.path.exists(p["failures"]):
+            os.remove(p["failures"])
+        return
+    doc: dict[str, Any] = {"consecutive": value,
+                           "at": _now().isoformat().replace("+00:00", "Z")}
+    if why:
+        doc["why"] = why
+    _write_json(p["failures"], doc)
+
+
+def _write_last(p: dict[str, str], *, started: str, rc: int, woke: int,
+                due: int | None = None, why: str | None = None) -> None:
+    """마지막 판의 기록 — ★**시작과 끝을 가른다**(2026-09-11 실증이 계기).
+
+    ★왜: 전에는 칸이 `at` 하나였고 그 값은 **판을 시작한 시각**이었는데, `whoami` 는 그것을
+      「마지막 **방문**」이라고 읽어 줬다. 윈도우에서 깨움이 rc 1 로 실패한 판에도 시각이 찍혀
+      **「20:08 에 방문했다」로 보였다** — 실패를 성공처럼 읽게 만드는 화면이다.
+    ⇒ 끝난 시각은 **끝났을 때만** 적고, 실패한 판은 **「마지막 시도 + 이유」**로 적는다.
+      「언제 시도했나」와 「언제 다녀왔나」는 다른 사건이다.
+    """
+    doc: dict[str, Any] = {"started_at": started,
+                           "finished_at": _now().isoformat().replace("+00:00", "Z"),
+                           "rc": rc, "woke": woke, "ok": rc == RC_OK}
+    if due is not None:
+        doc["due"] = due
+    if why:
+        doc["why"] = why
+    _write_json(p["last"], doc)
 
 
 def _verdict(rc: int, meaning: str) -> dict[str, Any]:
@@ -403,6 +540,7 @@ def _verdict(rc: int, meaning: str) -> dict[str, Any]:
 def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: bool = False,
          ctx_factory: Callable[[str], Any] | None = None, runner: Runner | None = None,
          which: Callable[[str], str | None] | None = None,
+         exists: Callable[[str], bool] | None = None,
          rooms_per_wake: int = ROOMS_PER_WAKE, wakes_per_cycle: int = WAKES_PER_CYCLE) -> dict[str, Any]:
     """한 판. 판정 → (필요할 때만) 깨움 → 한 줄 기록."""
     from agora import tools
@@ -432,7 +570,8 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
             found = plan(ctx, attempts=attempts)
         except AgoraError as e:
             _log(p, {**row, "rc": RC_WAKE_FAILED, "why": f"code {e.code}"})
-            _write_json(p["last"], {"at": at, "rc": RC_WAKE_FAILED, "woke": 0})
+            _write_last(p, started=at, rc=RC_WAKE_FAILED, woke=0,
+                        why=f"광장을 읽지 못했다(code {e.code})")
             return {"판정": _verdict(RC_WAKE_FAILED, f"광장을 읽지 못했다 — code {e.code} {e.message}"),
                     "오류": json.loads(e.to_json())}
         due = found["due"]
@@ -442,7 +581,7 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
         row.update({"scanned": found["scanned"], "due": len(due),
                     "rooms": [d["room_id"][:8] for d in due]})
         rules = visit_rules_path()
-        agent = find_agent(p, which)
+        agent = find_agent(p, which, exists)
 
         if not due:
             result = {**base, "판정": _verdict(RC_OK, "이번 판에 들를 방이 없다 — 깨우지 않았다"), "깨움": 0}
@@ -456,6 +595,15 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
                       "깨움": 0,
                       "할일": "이 컴퓨터에 claude 가 없다. 들를 방은 위 안건이다 — 사람이 에이전트에게 직접 시키거나"
                               " `agora resident once --print-agenda` 로 다시 볼 수 있다(codex·gemini 깨우기는 아직 없다)."}
+        elif wake_failures(p) >= WAKE_FAILURES_MAX:
+            # ★비용 천장이 여기로 옮겨 왔다(요구 ⑧). 방의 상한을 깎는 대신 **연속 실패**를 센다 —
+            #   실패는 방 탓이 아니므로 방에서 깎으면 엉뚱한 회차를 건너뛴다.
+            result = {**base,
+                      "판정": _verdict(RC_WAKE_FAILED,
+                                       f"깨움이 잇따라 {wake_failures(p)}번 실패해 멈췄다 — 사람이 봐야 한다"),
+                      "깨움": 0, "에이전트_설정폴더": _claude_dir_note(p),
+                      "할일": "에이전트가 뜨는지·로그인돼 있는지 본 뒤 `agora resident on` 으로 계수를 지운다"
+                              " (안건과 방의 남은 기회는 그대로 있다)."}
         elif not os.path.exists(rules):
             result = {**base, "판정": _verdict(errors.PRECONDITION, "방문 규칙 파일이 없다 — 규칙 없이 깨우지 않는다"),
                       "깨움": 0, "규칙_자리": rules}
@@ -477,7 +625,17 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
                 woke += 1
                 outcomes.append({"rooms": [b["room_id"][:8] for b in batch], **outcome})
             ok = all(o.get("rc") == 0 for o in outcomes)
+            if not ok:
+                # ★**되돌린다** — 깨움이 실패한 판은 그 방이 기회를 쓴 것이 아니다(요구 ⑧).
+                #   실증: 에이전트가 로그인 안 된 채 떠서 rc 1 로 죽었는데 방의 상한만 깎였다.
+                for spent in batches[:wakes_per_cycle]:
+                    for item in spent:
+                        attempts[item["key"]] = max(0, int(attempts.get(item["key"], 1)) - 1)
+                _write_json(p["attempts"], attempts)
+            _set_wake_failures(p, 0 if ok else wake_failures(p) + 1,
+                               why=None if ok else "깨운 에이전트가 rc 0 으로 끝나지 않았다")
             result = {**base, "깨움": woke, "결과": outcomes,
+                      "에이전트_설정폴더": _claude_dir_note(p),
                       "판정": _verdict(RC_OK if ok else RC_WAKE_FAILED,
                                        "에이전트를 깨웠다" if ok else "에이전트를 깨웠으나 끝이 좋지 않았다(결과 칸)"),
                       "넘긴_방": sum(len(b) for b in batches[:wakes_per_cycle]),
@@ -496,7 +654,8 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
                     else dict(attempts))
             if kept != _load_json(p["attempts"]):
                 _write_json(p["attempts"], kept)
-            _write_json(p["last"], {"at": at, "rc": rc, "woke": result.get("깨움", 0), "due": len(due)})
+            _write_last(p, started=at, rc=rc, woke=result.get("깨움", 0), due=len(due),
+                        why=None if rc == RC_OK else result["판정"]["뜻"])
         if lock_backend == "none":
             result["잠금_수단"] = "없음 — 이 파이썬에서는 두 판이 겹쳐 돌 수 있다"
         return result
@@ -554,21 +713,57 @@ def plist_document(*, p: dict[str, str], interval_min: int, agent_path: str) -> 
     return plistlib.dumps(doc, sort_keys=True)
 
 
-def schtasks_create_argv(*, p: dict[str, str], interval_min: int, pythonw: str,
-                         agora_bin: str | None = None) -> list[str]:
-    """윈도우 작업 스케줄러 한 줄. ★`pythonw.exe` 로 부른다 — 콘솔 창이 아예 안 뜬다
-    (PowerShell 을 거치지 않으므로 PowerShell 모듈 경로 문제도 생기지 않는다).
-    ⚠윈도우 실기 미실측 — 정적 시험만 있다.
+def schtasks_xml_document(*, p: dict[str, str], interval_min: int, pythonw: str,
+                          agora_bin: str | None = None) -> str:
+    """작업 스케줄러 등록용 XML 한 벌 — ★**배터리 조건을 끈다.**
+
+    왜 XML 인가(2026-09-11 · 요구 ⑤): `schtasks /Create` 에는 **배터리 조건을 끄는 스위치가 없다.**
+    그 두 값은 작업 정의 **스키마의 `<Settings>`** 에만 있다
+    (`DisallowStartIfOnBatteries` · `StopIfGoingOnBatteries` · 둘 다 기본값이 **true** 다).
+    ⇒ 한 줄로는 못 하고 `/XML` 로 올려야 한다.
+    ⚠**근거의 종류를 정직하게 적는다**: 이것은 **문서·스키마 근거**이고 **윈도우 실기 실측이 아니다**
+      (이 기계는 맥이다). 실측은 윈도우 기계에서만 가능하다 — 그래서 설정에 `windows_measured: False`
+      가 계속 남는다. 「돌려 봤다」로 올리지 않는다.
+    ★왜 이 조건이 중요한가: 노트북이 배터리로 돌아가는 동안 작업이 **아예 안 뜨거나 도중에 멈춘다.**
+      상주는 「사람이 없는 동안」이 존재 이유인데, 사람이 없는 시간은 대개 어댑터도 빠져 있다.
     """
-    # ★실행기 자리는 시험이 짧게 줄 수 있다 — 깊은 폴더에서 꺼낸 개발 트리에서는 이 줄이 261자를
-    #   넘어 설치가 거절되고, 그러면 시험이 **이 저장소가 어디 놓였는지**를 재게 된다(격리 게이트 실측).
     agora_bin = agora_bin or os.path.join(_package_root(), "bin", "agora")
-    tr = f'"{pythonw}" "{agora_bin}" resident once --dir "{p["config_dir"]}"'
-    if len(tr) > 261:
-        raise AgoraError(errors.PRECONDITION, "작업 스케줄러 명령 줄이 너무 길다(261자 상한)",
-                         {"length": len(tr)})
-    schedule = ["/SC", "DAILY"] if interval_min >= 1440 else ["/SC", "MINUTE", "/MO", str(interval_min)]
-    return ["schtasks", "/Create", *schedule, "/TN", task_name(), "/TR", tr, "/F"]
+    args = f'"{agora_bin}" resident once --dir "{p["config_dir"]}"'
+    every = f"PT{interval_min}M" if interval_min < 1440 else "P1D"
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <TimeTrigger>
+      <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <Repetition><Interval>{every}</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{pythonw}</Command>
+      <Arguments>{args}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def schtasks_xml_argv(path: str) -> list[str]:
+    return ["schtasks", "/Create", "/XML", path, "/TN", task_name(), "/F"]
+
+
+# ⛔`schtasks /Create /TR "<한 줄>"` 경로는 **없앴다**(2026-09-11). 그 길로는 배터리 조건을 못 끈다.
+#   그때 있던 261자 상한 검사도 같이 사라졌다 — **/XML 은 명령 줄로 넘기지 않으므로 그 상한이 없다.**
+#   (검사를 「그냥 뺀」 것이 아니라 **그 제약이 있던 경로 자체를 뺀 것**이다.)
 
 
 def _pythonw() -> str | None:
@@ -579,13 +774,19 @@ def _pythonw() -> str | None:
 def install(*, directory: str | None = None, interval_min: int = DEFAULT_INTERVAL_MIN,
             platform: str | None = None, runner: Callable[[list[str]], dict[str, Any]] | None = None,
             which: Callable[[str], str | None] | None = None,
-            pythonw: str | None = None, agora_bin: str | None = None) -> dict[str, Any]:
-    """일정을 놓는다. ★검사를 **먼저 전부** 한다 — 거부된 설치가 파일을 남기면 안 된다."""
+            pythonw: str | None = None, agora_bin: str | None = None,
+            first_visit: bool = True,
+            exists: Callable[[str], bool] | None = None) -> dict[str, Any]:
+    """일정을 놓는다. ★검사를 **먼저 전부** 한다 — 거부된 설치가 파일을 남기면 안 된다.
+
+    ★`first_visit` = 놓자마자 한 판을 돈다(요구 ④). 끄는 손잡이를 남긴 이유는 **시험** 때문이다 —
+      등록·해제만 재는 케이스가 망을 타면 느려지고 흔들린다(흔들리는 그물은 아무것도 증명 못 한다).
+    """
     interval_min = _check_interval(interval_min)
     p = paths(directory)
     run = runner or _run
     plat = platform or sys.platform
-    agent = find_agent(p, which)
+    agent = find_agent(p, which, exists)
     if agent is None:
         raise AgoraError(errors.PRECONDITION,
                          "깨울 에이전트(claude)가 이 컴퓨터에 없다 — 상주를 놓지 않는다",
@@ -596,6 +797,12 @@ def install(*, directory: str | None = None, interval_min: int = DEFAULT_INTERVA
                          {"config_dir": p["config_dir"]})
     settings = {"agent_path": agent, "interval_min": interval_min, "platform": plat,
                 "installed_at": _now().isoformat().replace("+00:00", "Z")}
+    # ★**설치한 창에 있던 값을 받아 적는다.** 사람이 상주를 켜는 창은 대개 제대로 된 창이고,
+    #   일정이 깨운 프로세스는 그 창의 환경을 **안 물려받는다** — 그 간극이 2026-09-11 사고였다.
+    #   ⇒ 이름을 아는 대신 **그때 본 것**을 적어 둔다(어느 실행기든 통한다).
+    seen_home = os.environ.get(CLAUDE_CONFIG_ENV)
+    if seen_home:
+        settings["claude_config_dir"] = seen_home
     if plat == "darwin":
         target = plist_path()
         body = plist_document(p=p, interval_min=interval_min, agent_path=agent)
@@ -617,10 +824,24 @@ def install(*, directory: str | None = None, interval_min: int = DEFAULT_INTERVA
         if exe is None:
             raise AgoraError(errors.PRECONDITION, "pythonw.exe 를 찾지 못했다 — 창 없이 부를 수단이 없어 일정을 놓지 않는다",
                              {"python": sys.executable})
-        made = run(schtasks_create_argv(p=p, interval_min=interval_min, pythonw=exe, agora_bin=agora_bin))
+        # ★XML 로 올린다 — 배터리 조건을 끄는 길이 그것뿐이다(위 주석 참조).
+        doc = schtasks_xml_document(p=p, interval_min=interval_min, pythonw=exe, agora_bin=agora_bin)
+        xml_path = os.path.join(p["state"], "schtasks.xml")
+        os.makedirs(p["state"], mode=0o700, exist_ok=True)
+        with open(xml_path, "w", encoding="utf-16") as fh:      # 스키마가 UTF-16 을 요구한다
+            fh.write(doc)
+        try:
+            made = run(schtasks_xml_argv(xml_path))
+        finally:
+            # ⛔등록에 쓴 파일을 남기지 않는다 — 남으면 「지금 도는 정의」와 헷갈린다(정본은 스케줄러다).
+            if os.path.exists(xml_path):
+                os.remove(xml_path)
         if made.get("rc") != 0:
             raise AgoraError(errors.PRECONDITION, "작업 스케줄러 등록이 실패했다", {"schtasks": made})
-        settings.update({"scheduler": "schtasks", "task": task_name(), "windows_measured": False})
+        settings.update({"scheduler": "schtasks", "task": task_name(), "windows_measured": False,
+                         # ★「배터리에서도 돈다」는 **우리가 그렇게 적었다**는 뜻이지
+                         #   **그렇게 돌더라**는 뜻이 아니다 — 실기 실측 전까지 이 구분을 유지한다.
+                         "battery_conditions_off": "등록 XML 에 적음(윈도우 실기 미실측)"})
     else:
         raise AgoraError(errors.PRECONDITION, "이 운영체제의 일정 등록은 아직 없다(맥·윈도우만)",
                          {"platform": plat,
@@ -628,8 +849,20 @@ def install(*, directory: str | None = None, interval_min: int = DEFAULT_INTERVA
     _write_json(p["settings"], settings)
     if os.path.exists(p["off"]):
         os.remove(p["off"])
-    return {"상주": "켜짐", "설정": settings,
-            "끄기": "agora resident off", "지우기": "agora resident uninstall"}
+    _set_wake_failures(p, 0)       # 새로 놓은 일정에 옛 실패를 물려주지 않는다
+    out: dict[str, Any] = {"상주": "켜짐", "설정": settings,
+                           "끄기": "agora resident off", "지우기": "agora resident uninstall"}
+    # ★**설치 직후 한 판을 바로 돈다**(요구 ④ · 손 0). 전에는 첫 결과를 보려면 최대 10분을 기다려야
+    #   했고, 그 사이에 설치 화면은 「켜짐」만 말했다 — **돌아가는지 아닌지 모르는 채** 사람이 떠났다.
+    #   그래서 윈도우 사고도 다음 날에야 드러났다.
+    # ⛔첫 판이 실패해도 **설치는 되돌리지 않는다**(일정은 이미 올바르게 놓였다). 결과만 그대로 싣는다.
+    if first_visit:
+        try:
+            out["첫_방문"] = once(directory=directory)
+        except AgoraError as e:
+            out["첫_방문"] = {"판정": _verdict(e.code, f"첫 판이 실패했다 — {e.message}"),
+                              "오류": json.loads(e.to_json())}
+    return out
 
 
 def uninstall(*, directory: str | None = None, platform: str | None = None,
@@ -671,18 +904,27 @@ def set_off(*, directory: str | None = None, off: bool) -> dict[str, Any]:
                 "일정_설치됨": bool(_load_json(p["settings"]))}
     if os.path.exists(p["off"]):
         os.remove(p["off"])
-    return {"상주": summary_line(p["config_dir"]), "끄기": "agora resident off"}
+    # ★다시 켜는 것은 **「사람이 봤다」는 신호**다 — 연속 실패 계수를 여기서 지운다(요구 ⑧).
+    #   ⛔방의 남은 기회(attempts)는 **안 건드린다**: 그건 회차마다 스스로 낡아 사라지는 값이고,
+    #     여기서 함께 지우면 「말한 적 없는 회차」를 다시 세는 판이 생긴다.
+    cleared = wake_failures(p)
+    _set_wake_failures(p, 0)
+    out = {"상주": summary_line(p["config_dir"]), "끄기": "agora resident off"}
+    if cleared:
+        out["지운_연속실패"] = cleared
+    return out
 
 
 def status(*, directory: str | None = None, platform: str | None = None,
            runner: Callable[[list[str]], dict[str, Any]] | None = None,
-           which: Callable[[str], str | None] | None = None) -> dict[str, Any]:
+           which: Callable[[str], str | None] | None = None,
+           exists: Callable[[str], bool] | None = None) -> dict[str, Any]:
     """지금 무엇이 돌고 있나 — ★일정이 실제로 올라가 있는지를 **물어서** 적는다(파일만 보고 적지 않는다)."""
     p = paths(directory)
     run = runner or _run
     plat = platform or sys.platform
     settings = _load_json(p["settings"])
-    agent = find_agent(p, which)
+    agent = find_agent(p, which, exists)
     scheduler: dict[str, Any] = {"plat": plat}
     if plat == "darwin":
         asked = run(["launchctl", "print", f"gui/{_uid()}/{label()}"])
@@ -712,17 +954,35 @@ def summary_line(directory: str | None = None) -> str:
     if os.path.exists(p["off"]):
         return "상주: 꺼짐 · 다시 켜기 = agora resident on"
     interval = settings.get("interval_min", DEFAULT_INTERVAL_MIN)
-    last = _load_json(p["last"]).get("at")
+    # ★윈도우는 **돌려 본 적이 없다** — 「켜짐」만 적으면 돈다고 읽힌다(agy 1R MED).
+    unmeasured = "윈도우 미실측 · " if settings.get("platform") == "win32" else ""
+    return (f"상주: 켜짐({unmeasured}{interval}분 · {last_line(p)})"
+            " · 끄기 = agora resident off")
+
+
+def last_line(p: dict[str, str]) -> str:
+    """마지막 판을 **있는 그대로** 한 줄로 — 성공이면 「방문」, 아니면 「시도 + 이유」.
+
+    ⚠옛 판본(0.1.6)이 남긴 기록에는 칸이 `at` 하나뿐이고 그것은 **시작 시각**이다.
+      끝난 시각을 모르므로 그 경우는 **「마지막 시도」**로 읽는다 — 모르는 것을 방문으로 올리지 않는다.
+    """
+    doc = _load_json(p["last"])
+    if not doc:
+        return "마지막 방문 아직 없음"
+    stamp = doc.get("finished_at") or doc.get("started_at") or doc.get("at")
     seen = "아직 없음"
-    if isinstance(last, str):
+    if isinstance(stamp, str):
         try:
-            moment = datetime.datetime.fromisoformat(last.replace("Z", "+00:00"))
+            moment = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
             seen = moment.astimezone().strftime("%H:%M")
         except ValueError:
             seen = "읽지 못함"
-    # ★윈도우는 **돌려 본 적이 없다** — 「켜짐」만 적으면 돈다고 읽힌다(agy 1R MED).
-    unmeasured = "윈도우 미실측 · " if settings.get("platform") == "win32" else ""
-    return f"상주: 켜짐({unmeasured}{interval}분 · 마지막 방문 {seen}) · 끄기 = agora resident off"
+    if doc.get("rc") == RC_OK and doc.get("finished_at"):
+        return f"마지막 방문 {seen}"
+    why = doc.get("why") or (f"종료코드 {doc['rc']}" if doc.get("rc") is not None else "이유 미상")
+    if "finished_at" not in doc:
+        why = f"{why} · 끝난 시각을 모른다(옛 판본 기록)" if doc.get("rc") is not None else "옛 판본 기록"
+    return f"마지막 시도 {seen} — 실패({why})"
 
 
 # ── CLI 입구 ────────────────────────────────────────────────────────────────

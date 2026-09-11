@@ -12,31 +12,12 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 
-TERMS_FILE="tests/forbidden-terms.txt"
-EXCLUDED_FROM_TERM_SCAN=("$TERMS_FILE")
 rc=0
 
 echo "== 공개 표현 규약 =="
-if [ ! -s "$TERMS_FILE" ]; then
-  echo "  FAIL — 금칙어 목록이 비었거나 없다($TERMS_FILE). 검사가 무의미하므로 통과시키지 않는다."
-  exit 3
-fi
-term_count=$(grep -c . "$TERMS_FILE")
-echo "  목록 $term_count 개 · 검사 제외 ${#EXCLUDED_FROM_TERM_SCAN[@]}건: ${EXCLUDED_FROM_TERM_SCAN[*]}"
-
-# 검사 대상 = git 이 추적하거나 추적할 파일(무시 파일 제외). 텍스트만 본다.
-hits=0
-while IFS= read -r f; do
-  case " ${EXCLUDED_FROM_TERM_SCAN[*]} " in *" $f "*) continue ;; esac
-  [ -f "$f" ] || continue
-  n=$(grep -c -f "$TERMS_FILE" -- "$f" 2>/dev/null); [ -n "$n" ] || n=0
-  if [ "$n" -gt 0 ] 2>/dev/null; then
-    echo "  위반 $f: ${n}건"
-    hits=$((hits + n))
-  fi
-done < <(git ls-files --cached --others --exclude-standard)
-echo "  합계 ${hits}건"
-[ "$hits" -eq 0 ] || rc=1
+# ★검사 본체는 `tests/public_terms.sh` 로 떼어 놨다 — 인라인이면 **그 검사 자체를 시험할 수 없다.**
+#   검사기가 고장나면 그 출력은 아무것도 증명하지 않는데, 인라인이면 고장을 알아챌 방법이 없다.
+if ! tests/public_terms.sh; then rc=1; fi
 
 echo "== 비밀 누출 =="
 if command -v gitleaks >/dev/null 2>&1; then

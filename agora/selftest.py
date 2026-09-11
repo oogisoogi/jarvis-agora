@@ -4565,6 +4565,26 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     #   「틀린 일을 조용히 한다」다: 유예를 안 지키고 회차를 넘기거나, 판단하지 않았다고
     #   적어 놓고 요약을 지어내거나, 같은 자리를 두 번 하거나, 하고도 말하지 않는다.
     # ★09-11 신설 — **투표동결**. 표 한 건이 방을 얼리던 자리(두 구현 동시 봉합).
+    # ★09-11 신설 — **표현예외**. 금칙어 검사에 **줄 단위 문**을 낸 자리(master 판정 ⓐ).
+    #   여기서 잃는 것은 「문이 적은 것보다 넓게 열리는 것」이고, 더 나쁜 것은 **그게 안 보이는 것**이다.
+    "표현예외": ("M534-line-exception-swallows-the-file",
+                 "M535-line-exception-not-printed"),
+    # ★09-11 신설 — **상주깨움**. 스케줄러는 제때 깨웠는데 **아무 일도 안 난** 자리(윈도우 실증).
+    #   여기서 잃는 것은 조용하다: 남의 설정 폴더로 떠서 로그인 없이 죽고, 실패한 판이 방의 기회를
+    #   깎고, 화면은 그 실패를 「방문」이라고 읽어 준다 — 셋이 겹치면 사람은 **돈다고 믿는다.**
+    "상주깨움": ("M521-wake-ignores-the-claude-home",
+                 "M522-wake-overrides-the-person",
+                 "M523-invents-a-config-dir",
+                 "M524-fallback-beats-the-path",
+                 "M525-fallback-ignores-existence",
+                 "M526-failed-round-reads-as-a-visit",
+                 "M527-last-drops-the-finish-time",
+                 "M528-install-skips-the-first-visit",
+                 "M529-failed-wake-still-spends-the-room",
+                 "M530-no-ceiling-on-failed-wakes",
+                 "M531-success-does-not-clear-failures",
+                 "M532-battery-conditions-left-on",
+                 "M533-registers-without-xml"),
     # ★09-11 신설 — **침묵봉합**(실사격이 두 번 밟은 자리). 여기서 잃는 것은 **아무 표시도 없다**:
     #   루프는 돌고 exit 0 이고 화면은 깨끗한데, 못 본 글과 못 맞춘 명부가 조용히 쌓인다.
     #   ⛔세는 것만으로는 봉합이 아니다 — **말하는 것**(통보)과 **기계가 보는 칸**(rc)까지가 봉합이다.
@@ -15092,6 +15112,7 @@ def _resident_world():
 
 def _resident_once(ctx_b: Any, home: str, *, agent: str | None = "/fake/claude",
                    on_wake: Callable[[list[str]], None] | None = None,
+                   wake_rc: int = 0,
                    **kw: Any) -> tuple[dict[str, Any], list[list[str]]]:
     """한 판을 돌리고 (결과, 깨운 호출들)을 낸다. ★진짜 에이전트는 부르지 않는다 — 실행기가 받아 적는다."""
     from agora import resident
@@ -15101,8 +15122,12 @@ def _resident_once(ctx_b: Any, home: str, *, agent: str | None = "/fake/claude",
         calls.append(argv)
         if on_wake is not None:
             on_wake(argv)
-        return {"rc": 0, "seconds": 0.0}
+        return {"rc": wake_rc, "seconds": 0.0}
 
+    # ★`exists` 도 막아 준다 — 안 막으면 「에이전트 없음」 판이 **이 기계에 claude 가 깔렸는지**를
+    #   재게 된다(설치 자리 되짚기가 들어오면서 실제로 그렇게 됐다 · 2026-09-11).
+    #   시험이 환경을 재기 시작하면 그 초록은 아무것도 증명하지 않는다.
+    kw.setdefault("exists", (lambda _p: False) if agent is None else os.path.exists)
     out = resident.once(directory=home, ctx_factory=lambda _d: ctx_b, runner=runner,
                         which=lambda _n: agent, **kw)
     return out, calls
@@ -15424,30 +15449,290 @@ def _case_resident_schedule_file_round_trip() -> None:
             raise AssertionError("거부된 설치가 파일을 남겼다")
 
         ran.clear()
-        # ★실행기 자리를 **짧게 준다** — 안 주면 이 저장소가 놓인 폴더 깊이에 따라 261자 상한에 걸려
-        #   시험이 코드가 아니라 체크아웃 위치를 잰다(격리 워크트리 게이트에서 실제로 붉어졌다).
         short_bin = r"C:\a\bin\agora"
-        try:
-            resident.schtasks_create_argv(p=resident.paths(cfg), interval_min=10, pythonw=r"C:\Py\pythonw.exe",
-                                          agora_bin="C:\\" + "x" * 300 + "\\agora")
-        except AgoraError as e:
-            if e.code != errors.PRECONDITION:
-                raise AssertionError(f"긴 명령 줄 거절 코드가 다르다: {e.code}") from None
-        else:
-            raise AssertionError("261자를 넘는 작업 스케줄러 명령 줄을 거절하지 않았다")
-        argv = resident.schtasks_create_argv(p=resident.paths(cfg), interval_min=10, pythonw=r"C:\Py\pythonw.exe",
-                                             agora_bin=short_bin)
-        if argv[:2] != ["schtasks", "/Create"] or argv[argv.index("/SC") + 1] != "MINUTE" \
-                or argv[argv.index("/MO") + 1] != "10" or "pythonw.exe" not in argv[argv.index("/TR") + 1] \
-                or "resident once" not in argv[argv.index("/TR") + 1]:
-            raise AssertionError(f"작업 스케줄러 명령 줄이 다르다: {argv}")
+        # ⛔옛 `/TR "<한 줄>"` 경로와 그 **261자 상한 검사**는 함께 사라졌다(2026-09-11):
+        #   그 길로는 배터리 조건을 못 끄고, `/XML` 은 명령 줄로 넘기지 않아 그 상한이 아예 없다.
+        #   ★검사를 「그냥 뺀」 것이 아니라 **제약이 있던 경로 자체를 뺀 것**이라 여기 적어 둔다.
+        # ★배터리 조건 — `schtasks /Create` 에는 그 스위치가 **없다.** 그래서 XML 로 올린다(요구 ⑤).
+        #   노트북이 배터리로 돌 때 작업이 아예 안 뜨거나 도중에 멈추면, 「사람이 없는 동안」이
+        #   존재 이유인 상주가 정확히 그 시간에 죽는다.
+        import xml.etree.ElementTree as _ET
+        doc = resident.schtasks_xml_document(p=resident.paths(cfg), interval_min=10,
+                                             pythonw=r"C:\Py\pythonw.exe", agora_bin=short_bin)
+        tree = _ET.fromstring(doc)          # 모양이 깨졌으면 스케줄러가 통째로 거절한다
+        ns = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
+        for tag in ("DisallowStartIfOnBatteries", "StopIfGoingOnBatteries"):
+            node = tree.find(f"{ns}Settings/{ns}{tag}")
+            if node is None or node.text != "false":
+                raise AssertionError(f"{tag} 가 false 가 아니다 — 배터리에서 안 돈다")
+        if tree.find(f"{ns}Triggers/{ns}TimeTrigger/{ns}Repetition/{ns}Interval").text != "PT10M":
+            raise AssertionError("반복 간격이 XML 에 안 실렸다")
+
         resident.install(directory=cfg, platform="win32", runner=runner, which=lambda _n: "/fake/bin/claude",
-                         pythonw=r"C:\Py\pythonw.exe", agora_bin=short_bin)
+                         pythonw=r"C:\Py\pythonw.exe", agora_bin=short_bin, first_visit=False)
         if "윈도우 미실측" not in resident.summary_line(cfg):
             raise AssertionError(f"윈도우 상주를 미실측 표시 없이 「켜짐」으로 적는다: {resident.summary_line(cfg)}")
+        # ★등록에 쓴 XML 을 남기지 않는다 — 남으면 「지금 도는 정의」와 헷갈린다(정본은 스케줄러다).
+        if os.path.exists(os.path.join(resident.paths(cfg)["state"], "schtasks.xml")):
+            raise AssertionError("등록에 쓴 XML 이 남았다")
         resident.uninstall(directory=cfg, platform="win32", runner=runner)
         if [a[:2] for a in ran] != [["schtasks", "/Create"], ["schtasks", "/Delete"]]:
             raise AssertionError(f"윈도우 등록·해제 순서가 다르다: {ran}")
+        made = [a for a in ran if a[:2] == ["schtasks", "/Create"]][0]
+        if "/XML" not in made:
+            raise AssertionError(f"한 줄(/TR)로 등록했다 — 배터리 조건이 빠진다: {made}")
+
+
+def _case_public_terms_line_exception_is_visible() -> None:
+    """공개 표현 규약의 **줄 예외** — 표식 없는 낱말은 붉고, 표식 붙은 줄은 **출력에 찍힌다**.
+
+    ★왜 예외가 있나(master 판정 2026-09-11 ⓐ): 제품이 **실제로 읽어야 하는 파일 경로**에 금칙어가
+      들어 있는 경우가 있다 — 바꿔 적으면 못 읽는다.
+    ⛔그렇다고 글자를 쪼개 검사를 피하면 안 된다. 그건 **미탐과 구별되지 않는 억제**이고,
+      이 게이트가 파일 단위 제외에서 이미 세운 원칙(「뺐다는 사실을 출력한다」)을 어긴다.
+    ⇒ 그래서 문은 「적은 만큼만」 열린다: 표식이 붙은 **그 줄만** 빠지고, 빠진 줄은 찍힌다.
+    ★그리고 이 검사 자체를 시험하려고 본체를 `tests/public_terms.sh` 로 떼어 놨다 —
+      게이트 안에 인라인이면 **검사기의 고장을 알아챌 방법이 없다**(그 출력은 아무것도 증명 못 한다).
+    """
+    import subprocess as _sp
+    term = _read_text(os.path.join(_ROOT, "tests", "forbidden-terms.txt")).split()[0]
+    d = _tmpdir("public-terms")
+    bad = os.path.join(d, "prose.txt")
+    good = os.path.join(d, "path.py")
+    with open(bad, "w", encoding="utf-8") as fh:
+        fh.write(f"이건 그냥 산문에 {term} 를 쓴 줄이다\n")
+    with open(good, "w", encoding="utf-8") as fh:
+        fh.write(f'VENDOR = "{term}"  # public-terms: allow — 제품이 읽는 실제 경로\n')
+
+    def scan(path: str) -> _sp.CompletedProcess:
+        return _sp.run([os.path.join(_ROOT, "tests", "public_terms.sh"), path],
+                       capture_output=True, text=True, cwd=_ROOT, timeout=60)
+
+    red = scan(bad)
+    if red.returncode == 0:
+        raise AssertionError(f"표식 없는 낱말이 지나갔다: {red.stdout}")
+    if "위반" not in red.stdout:
+        raise AssertionError(f"어느 파일이 위반인지 안 댄다: {red.stdout}")
+
+    green = scan(good)
+    if green.returncode != 0:
+        raise AssertionError(f"표식 붙은 줄을 거절했다: {green.stdout}")
+    if "줄 예외" not in green.stdout or ":1" not in green.stdout:
+        raise AssertionError(f"뺀 줄을 파일:줄번호로 안 찍는다 — 보이지 않는 억제다: {green.stdout}")
+
+
+def _case_resident_wakes_with_the_right_claude_home() -> None:
+    """깨운 에이전트가 **어느 Claude 설정 폴더로 뜨는가** — 그리고 그것을 **적는다**(요구 ①).
+
+    ★2026-09-11 윈도우 실증: 스케줄러는 20:03·20:08 에 **제때 깨웠고** 판정도 옳았는데
+      에이전트가 `rc 1` 로 죽었다. 원인은 깨운 claude 가 `~/.claude` 로 떴다는 것 —
+      동봉 설치본의 로그인 표지는 **자기 전용 폴더**의 `.credentials.json`(열쇠 108자)에 있고
+      `~/.claude` 쪽은 **열쇠 0자 · 만료 1970** 이었다.
+      일정이 깨운 프로세스는 사람의 셸 환경을 안 물려받으므로 `CLAUDE_CONFIG_DIR` 이 없었다.
+    ★우선순위가 계약이다: **사람이 정한 값 > 실재하는 동봉 설치본 폴더 > 아무것도 안 넣음.**
+      ⛔없는 폴더를 지어내지 않는다 — 지어내면 「있는데 못 읽는다」와 「없다」가 같은 화면이 된다.
+    ★그리고 **어느 폴더로 깨웠는지를 결과에 적는다.** 그 칸이 없어서 저 사고는 로그만 보고는
+      원인을 못 찾았다(로그는 `rc 1` 만 말했다).
+    """
+    from agora import resident
+    seen: list[str] = []
+    chosen, why = resident.claude_config_dir({"CLAUDE_CONFIG_DIR": "/사람이/정한/곳"},
+                                             exists=lambda _p: True)
+    if chosen != "/사람이/정한/곳" or "환경" not in why:
+        raise AssertionError(f"사람이 정한 값을 기계가 덮었다: {chosen} · {why}")
+    chosen, why = resident.claude_config_dir({}, exists=lambda _p: True,
+                                             recorded="/설치할 때 본 곳")
+    if chosen != "/설치할 때 본 곳":
+        raise AssertionError(f"설치 때 본 값을 안 썼다: {chosen} · {why}")
+    chosen, why = resident.claude_config_dir({}, exists=lambda _p: True)
+    if chosen != os.path.expanduser(resident.VENDOR_CLAUDE_DIR):
+        raise AssertionError(f"마지막 수단(알려진 설치본 폴더)을 안 골랐다: {chosen}")
+    # ★기록돼 있어도 **그 폴더가 없으면** 쓰지 않는다 — 옛 기계에서 옮겨 온 설정이 그럴 수 있다.
+    chosen, why = resident.claude_config_dir({}, exists=lambda path: "알려진" not in path,
+                                             recorded="/알려진/사라진/곳")
+    if chosen == "/알려진/사라진/곳":
+        raise AssertionError("사라진 폴더를 기록만 보고 썼다")
+    chosen, why = resident.claude_config_dir({}, exists=lambda _p: False)
+    if chosen is not None:
+        raise AssertionError(f"없는 폴더를 지어냈다: {chosen} · {why}")
+
+    # 실제 깨움 경로 — **넘어가는 환경**에 그 칸이 실리고, 결과에 그것이 적히는가.
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        del room
+
+        def spy(argv: list[str], *, cwd: str, timeout: int, env: dict[str, str]) -> dict[str, Any]:
+            seen.append(env.get(resident.CLAUDE_CONFIG_ENV) or "(없음)")
+            return {"rc": 0, "seconds": 0.0}
+
+        # ★환경에서 **빼고** 잰다. 넣어 두고 재면 「안 지운다」만 증명되고, 진짜 사고였던
+        #   **「없을 때 채워 넣는가」**는 안 재진다(변이 M511 이 그 빈칸에서 살아남았다).
+        #   그리고 동봉 설치본 폴더의 실재 여부에 매이지 않게 고르는 함수를 바꿔 끼운다 —
+        #   시험이 이 기계의 설치 상태를 재기 시작하면 그 초록은 아무것도 증명하지 않는다.
+        saved_env = os.environ.pop(resident.CLAUDE_CONFIG_ENV, None)
+        saved_pick = resident.claude_config_dir
+        resident.claude_config_dir = lambda *_a, **_k: ("/시험이/정한/곳", "시험이 끼웠다")
+        try:
+            result = resident.once(directory=home, ctx_factory=lambda _d: ctx_b, runner=spy,
+                                   which=lambda _n: "/fake/claude")
+        finally:
+            resident.claude_config_dir = saved_pick
+            if saved_env is not None:
+                os.environ[resident.CLAUDE_CONFIG_ENV] = saved_env
+        if seen != ["/시험이/정한/곳"]:
+            raise AssertionError(f"환경에 없던 설정 폴더를 안 채워 넣었다: {seen}")
+        if (result.get("에이전트_설정폴더") or {}).get("자리") != "/시험이/정한/곳":
+            raise AssertionError(f"어느 폴더로 깨웠는지 결과에 안 적는다: {result.get('에이전트_설정폴더')}")
+
+
+def _case_resident_finds_the_agent_where_the_installer_puts_it() -> None:
+    """PATH 에 없으면 **설치기가 놓는 자리**를 본다 — 단 `which` 가 실패했을 때만(요구 ②).
+
+    ★일정은 사람의 셸 PATH 를 안 물려받는다. 설치 때 적어 둔 경로가 없거나 죽었고 `which` 도
+      빈손이면, 전에는 그대로 「에이전트 없음」이었다.
+    ★**순서가 곧 어느 것을 쓰느냐**다: 되짚기를 먼저 보면 PATH 의 최신본을 두고 옛 자리를 잡는다.
+    ⛔**실재하는 것만** 돌려준다 — 없는 경로를 내놓으면 그 다음 걸음이 spawn 실패로 죽는다.
+    """
+    from agora import resident
+    only = os.path.expanduser(resident.AGENT_FALLBACKS[0])
+    found = resident.agent_fallbacks(exists=lambda path: path == only)
+    if found != [only]:
+        raise AssertionError(f"실재하는 자리만 골라야 한다: {found}")
+    if resident.agent_fallbacks(exists=lambda _p: False):
+        raise AssertionError("아무것도 없는데 자리를 내놨다")
+
+    p = resident.paths(_tmpdir("agent-find"))
+    os.makedirs(p["state"], mode=0o700, exist_ok=True)
+    if resident.find_agent(p, which=lambda _n: "/PATH/에/있는/claude",
+                           exists=lambda path: path == only) != "/PATH/에/있는/claude":
+        raise AssertionError("PATH 에 있는데 되짚기를 먼저 썼다 — 옛 자리를 잡게 된다")
+    if resident.find_agent(p, which=lambda _n: None, exists=lambda path: path == only) != only:
+        raise AssertionError("PATH 가 빈손인데 설치 자리를 안 봤다")
+    if resident.find_agent(p, which=lambda _n: None, exists=lambda _p: False) is not None:
+        raise AssertionError("아무 데도 없는데 있다고 했다")
+
+
+def _case_resident_last_splits_try_and_visit() -> None:
+    """`last` 는 **시도와 방문을 가른다** — 실패한 판을 「방문」으로 읽어 주지 않는다(요구 ③).
+
+    ★왜: 옛 칸은 `at` 하나였고 그 값은 **판을 시작한 시각**인데 `whoami` 는 「마지막 **방문**」이라
+      적었다. 윈도우에서 깨움이 rc 1 로 죽은 판에도 시각이 찍혀 **「20:08 에 다녀왔다」로 보였다.**
+      화면이 실패를 성공처럼 읽어 주면, 사람은 볼 이유를 잃는다.
+    """
+    import json as _json
+    from agora import resident
+    p = {"last": os.path.join(_tmpdir("last-line"), "last.json")}
+
+    def write(doc: dict[str, Any]) -> None:
+        with open(p["last"], "w", encoding="utf-8") as fh:
+            _json.dump(doc, fh)
+
+    if resident.last_line(p) != "마지막 방문 아직 없음":
+        raise AssertionError(resident.last_line(p))
+    write({"started_at": "2026-09-11T11:08:00Z", "finished_at": "2026-09-11T11:08:20Z", "rc": 0})
+    if "마지막 방문" not in resident.last_line(p):
+        raise AssertionError(f"성공한 판을 방문으로 안 읽는다: {resident.last_line(p)}")
+    write({"started_at": "2026-09-11T11:08:00Z", "finished_at": "2026-09-11T11:08:09Z",
+           "rc": 1, "why": "에이전트를 깨웠으나 끝이 좋지 않았다"})
+    line = resident.last_line(p)
+    if "마지막 시도" not in line or "실패" not in line or "끝이 좋지 않았다" not in line:
+        raise AssertionError(f"실패한 판에 이유가 없다: {line}")
+    if "마지막 방문" in line:
+        raise AssertionError(f"실패를 방문으로 읽어 준다: {line}")
+    # ★옛 판본(0.1.6)이 남긴 기록 — 끝난 시각을 **모른다.** 모르는 것을 방문으로 올리지 않는다.
+    write({"at": "2026-09-11T11:08:00Z", "rc": 1, "woke": 0})
+    line = resident.last_line(p)
+    if "마지막 방문" in line or "옛 판본" not in line:
+        raise AssertionError(f"옛 기록을 방문으로 읽었다: {line}")
+
+    # ★**실제 판이 그 칸을 쓰는가**도 잰다 — 위는 손으로 적은 기록만 읽는다.
+    #   쓰는 쪽을 안 재면 「끝난 시각을 아예 안 남기는」 변이가 살아남는다(M517 이 그랬다).
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        del room
+        _resident_once(ctx_b, home)
+        with open(resident.paths(home)["last"], encoding="utf-8") as fh:
+            doc = _json.load(fh)
+        for key in ("started_at", "finished_at"):
+            if not doc.get(key):
+                raise AssertionError(f"판이 `{key}` 를 안 남겼다: {doc}")
+        if doc["finished_at"] < doc["started_at"]:
+            raise AssertionError(f"끝난 시각이 시작보다 앞이다: {doc}")
+
+
+def _case_resident_install_visits_once_right_away() -> None:
+    """설치 직후 **한 판을 바로 돈다** — 설치 화면에서 결과가 보인다(요구 ④ · 손 0).
+
+    ★왜: 전에는 첫 결과를 보려면 최대 10분을 기다려야 했고 그 사이 화면은 「켜짐」만 말했다.
+      **돌아가는지 아닌지 모르는 채** 사람이 떠난다 — 윈도우 사고가 다음 날에야 드러난 이유다.
+    ⛔첫 판이 실패해도 **설치는 되돌리지 않는다**(일정은 이미 올바르게 놓였다).
+    """
+    from agora import resident
+    with _resident_temp_home("first-visit") as _home:
+        d = _onboard_dir()
+        rounds: list[int] = []
+        saved = resident.once
+        try:
+            resident.once = lambda **_kw: rounds.append(1) or {"판정": {"종료코드": 0, "뜻": "가짜 판"}}
+            out = resident.install(directory=d, platform="darwin", runner=lambda _a: {"rc": 0},
+                                   which=lambda _n: "/fake/bin/claude")
+        finally:
+            resident.once = saved
+        if rounds != [1]:
+            raise AssertionError(f"설치 직후 한 판을 안 돌았다: {rounds}")
+        if "첫_방문" not in out:
+            raise AssertionError(f"첫 판의 결과를 설치 화면에 안 싣는다: {sorted(out)}")
+        resident.uninstall(directory=d, platform="darwin", runner=lambda _a: {"rc": 0})
+
+
+def _case_resident_failed_wake_does_not_spend_the_room() -> None:
+    """깨움이 **실패하면 그 방의 기회를 안 깎는다** — 대신 **연속 실패**에 상한을 둔다(요구 ⑧).
+
+    ★2026-09-11 실증: 에이전트가 로그인 안 된 채 떠서 rc 1 로 죽었는데, 옛 코드는 깨우기 전에
+      세고 되돌리지 않아 **세 판 만에 그 회차를 영영 건너뛰었다.** 방 탓이 아닌데 방이 값을 치렀다.
+    ★그런데 되돌리기만 하면 **영원히 실패하며 10분마다 깨우는** 판이 생긴다(옛 상한이 막던 것).
+      ⇒ 비용 천장을 **다른 축**으로 옮긴다: 연속 실패에 상한을 두고 거기 닿으면 멈춰 사람을 부른다.
+    ★`resident on` 은 「사람이 봤다」는 신호다 — 거기서 계수를 지운다.
+    """
+    import json as _json
+    from agora import resident
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        del room
+        p = resident.paths(home)
+        out, calls = _resident_once(ctx_b, home, wake_rc=1)
+        if out["판정"]["종료코드"] == 0:
+            raise AssertionError(f"실패한 깨움을 성공으로 적었다: {out['판정']}")
+        if len(calls) != 1:
+            raise AssertionError(f"한 번 깨웠어야 한다: {len(calls)}")
+        with open(p["attempts"], encoding="utf-8") as fh:
+            spent = [v for v in _json.load(fh).values() if v]
+        if spent:
+            raise AssertionError(f"실패한 깨움이 방의 기회를 깎았다: {spent}")
+        if resident.wake_failures(p) != 1:
+            raise AssertionError(f"연속 실패를 안 센다: {resident.wake_failures(p)}")
+
+        # 대조군 — **성공한 깨움은 기회를 쓴다**(되돌리기가 전부를 되돌리면 상한이 사라진다).
+        out2, _c2 = _resident_once(ctx_b, home, wake_rc=0)
+        with open(p["attempts"], encoding="utf-8") as fh:
+            if not [v for v in _json.load(fh).values() if v]:
+                raise AssertionError("성공한 깨움도 기회를 안 썼다 — 상한이 통째로 죽었다")
+        if resident.wake_failures(p) != 0:
+            raise AssertionError("성공했는데 연속 실패 계수가 안 지워졌다")
+        del out2
+
+        # 상한에 닿으면 멈춘다 — 그리고 **왜 멈췄는지**를 말한다.
+        resident._set_wake_failures(p, resident.WAKE_FAILURES_MAX)
+        stopped, calls2 = _resident_once(ctx_b, home, wake_rc=0)
+        if calls2:
+            raise AssertionError("상한에 닿았는데 또 깨웠다")
+        if "잇따라" not in stopped["판정"]["뜻"]:
+            raise AssertionError(f"멈춘 이유를 안 말한다: {stopped['판정']}")
+
+        # `on` 이 계수를 지운다 — 「사람이 봤다」는 신호다.
+        resident.set_off(directory=home, off=False)
+        if resident.wake_failures(p) != 0:
+            raise AssertionError("다시 켰는데 연속 실패 계수가 남았다")
 
 
 def _case_whoami_second_column_is_resident() -> None:
@@ -15469,8 +15754,10 @@ def _case_whoami_second_column_is_resident() -> None:
             raise AssertionError(f"둘째 칸이 상주가 아니다: {keys()[:3]}")
         if not onboard.whoami(directory=d)["auto_visit"].startswith("상주: 미설치"):
             raise AssertionError(onboard.whoami(directory=d)["auto_visit"])
+        # ★`first_visit=False` — 이 케이스가 재는 것은 **whoami 의 칸**이지 첫 판의 결말이 아니다.
+        #   켜 두면 여기서 망을 타고(릴레이 없음 → code 7) 한 줄이 「마지막 시도 … 실패」로 바뀐다.
         resident.install(directory=d, platform="darwin", runner=lambda _a: {"rc": 0},
-                         which=lambda _n: "/fake/bin/claude")
+                         which=lambda _n: "/fake/bin/claude", first_visit=False)
         if not onboard.whoami(directory=d)["auto_visit"].startswith("상주: 켜짐(10분 · 마지막 방문"):
             raise AssertionError(onboard.whoami(directory=d)["auto_visit"])
         resident.set_off(directory=d, off=True)
@@ -15524,6 +15811,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("상주: 에이전트가 없으면 안건만", _case_resident_without_agent_prints_agenda, None),
     ("상주: 드라이런은 아무것도 안 바꾼다", _case_resident_dry_run_changes_nothing, None),
     ("상주: 일정 파일 왕복(임시 집)", _case_resident_schedule_file_round_trip, None),
+    ("게이트: 줄 예외는 보인다",     _case_public_terms_line_exception_is_visible, None),
+    ("상주: 어느 설정 폴더로 깨우나", _case_resident_wakes_with_the_right_claude_home, None),
+    ("상주: 설치 자리를 되짚는다",   _case_resident_finds_the_agent_where_the_installer_puts_it, None),
+    ("상주: 시도와 방문을 가른다",   _case_resident_last_splits_try_and_visit, None),
+    ("상주: 설치 직후 한 판",        _case_resident_install_visits_once_right_away, None),
+    ("상주: 실패는 방을 안 깎는다",  _case_resident_failed_wake_does_not_spend_the_room, None),
     ("whoami: 둘째 칸이 상주",      _case_whoami_second_column_is_resident, None),
     ("상주: CLI 입구가 선다",       _case_resident_cli_entry_stands, None),
     ("초대: 1단계가 혼자 선다",     _case_invite_join_brief_stands_alone, None),
@@ -16089,6 +16382,83 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if buf:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      '        if False:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      "참가 안내: 문서와 같다"),
+    # ── 공개 표현 줄 예외(2026-09-11 · master 판정 ⓐ) ─────────────────────────
+    # ★이 축이 비면 문이 **적은 것보다 넓게** 열린다 — 그리고 그것이 보이지 않는다.
+    ("M534-line-exception-swallows-the-file", "tests/public_terms.sh",
+     '      *"$ALLOW_MARK"*) echo "  줄 예외 $f:${line%%:*}"; allowed=$((allowed + 1)) ;;',
+     '      *) allowed=$((allowed + 1)) ;;',
+     "게이트: 줄 예외는 보인다"),
+    # ★뺀 줄을 **안 찍으면** 파일 단위 제외에서 세운 원칙이 무너진다(보이지 않는 억제).
+    ("M535-line-exception-not-printed", "tests/public_terms.sh",
+     'echo "  줄 예외 $f:${line%%:*}"; allowed=$((allowed + 1))',
+     "allowed=$((allowed + 1))",
+     "게이트: 줄 예외는 보인다"),
+    # ── 상주 깨움(2026-09-11 윈도우 실증 · 대역 **M521~** ) ───────────────────
+    # ★번호 부기: 처음 M511~ 로 적었다가 **M521~ 로 옮겼다** — 665 가 rebase 재부여로 M511~M515 를
+    #   먼저 가져갔다(7478c8c). 오늘만 번호 충돌 **세 번째**다(M435→M441→M481 · 이번 M511→M521).
+    #   ⇒ 원인은 부주의가 아니라 **구조**다: 번호는 선착순 자원인데 예약하는 자리가 없다.
+    # ★이 축이 비면 **제때 깨우는데 아무 일도 안 난다**: 스케줄러는 옳고 판정도 옳은데
+    #   에이전트가 남의 설정 폴더로 떠서 로그인 없이 죽는다. 화면에는 `rc 1` 만 남는다.
+    ("M521-wake-ignores-the-claude-home", "agora/resident.py",
+     "    chosen, _why = claude_config_dir(env, recorded=_recorded_claude_dir(p))\n"
+     "    if chosen:\n        env[CLAUDE_CONFIG_ENV] = chosen",
+     "    chosen, _why = claude_config_dir(env, recorded=_recorded_claude_dir(p))",
+     "상주: 어느 설정 폴더로 깨우나"),
+    # ★사람이 정한 값을 기계가 덮으면, 고쳐 놓은 사람이 **왜 안 듣는지** 모른다.
+    ("M522-wake-overrides-the-person", "agora/resident.py",
+     '    already = env.get(CLAUDE_CONFIG_ENV)\n    if already:\n        return already, "환경에 이미 있었다"',
+     "    already = None\n    if already:\n        return already, \"환경에 이미 있었다\"",
+     "상주: 어느 설정 폴더로 깨우나"),
+    # ★없는 폴더를 지어내면 「있는데 못 읽는다」와 「없다」가 같은 화면이 된다.
+    ("M523-invents-a-config-dir", "agora/resident.py",
+     '    if exists(vendor):\n        return vendor, "알려진 설치본 폴더가 실재한다"',
+     '    if True:\n        return vendor, "알려진 설치본 폴더가 실재한다"',
+     "상주: 어느 설정 폴더로 깨우나"),
+    ("M524-fallback-beats-the-path", "agora/resident.py",
+     "    found = (which or shutil.which)(AGENT_NAME)\n    if found:\n        return found",
+     "    found = (which or shutil.which)(AGENT_NAME)\n    if False:\n        return found",
+     "상주: 설치 자리를 되짚는다"),
+    ("M525-fallback-ignores-existence", "agora/resident.py",
+     "        if exists(path):\n            found.append(path)",
+     "        if True:\n            found.append(path)",
+     "상주: 설치 자리를 되짚는다"),
+    # ★실패한 판을 「방문」으로 읽어 주면 사람은 화면을 볼 이유를 잃는다.
+    ("M526-failed-round-reads-as-a-visit", "agora/resident.py",
+     '    if doc.get("rc") == RC_OK and doc.get("finished_at"):',
+     "    if True:",
+     "상주: 시도와 방문을 가른다"),
+    ("M527-last-drops-the-finish-time", "agora/resident.py",
+     '                           "finished_at": _now().isoformat().replace("+00:00", "Z"),',
+     "",
+     "상주: 시도와 방문을 가른다"),
+    ("M528-install-skips-the-first-visit", "agora/resident.py",
+     "    if first_visit:",
+     "    if False:",
+     "상주: 설치 직후 한 판"),
+    # ★되돌리지 않으면 **방 탓이 아닌 실패**가 그 회차를 영영 건너뛰게 만든다(실증 자리).
+    ("M529-failed-wake-still-spends-the-room", "agora/resident.py",
+     '                        attempts[item["key"]] = max(0, int(attempts.get(item["key"], 1)) - 1)',
+     "                        pass",
+     "상주: 실패는 방을 안 깎는다"),
+    # ★상한을 안 옮기면 **영원히 실패하며 10분마다 깨우는** 판이 생긴다.
+    ("M530-no-ceiling-on-failed-wakes", "agora/resident.py",
+     "        elif wake_failures(p) >= WAKE_FAILURES_MAX:",
+     "        elif False:",
+     "상주: 실패는 방을 안 깎는다"),
+    ("M531-success-does-not-clear-failures", "agora/resident.py",
+     "            _set_wake_failures(p, 0 if ok else wake_failures(p) + 1,",
+     "            _set_wake_failures(p, wake_failures(p) + 1,",
+     "상주: 실패는 방을 안 깎는다"),
+    # ★배터리 조건을 켜 두면 상주가 **사람이 없는 시간에** 정확히 죽는다.
+    ("M532-battery-conditions-left-on", "agora/resident.py",
+     "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
+     "    <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>",
+     "상주: 일정 파일 왕복(임시 집)"),
+    # ★옛 한 줄 경로로 되돌아가면 **배터리 조건이 통째로 빠진다** — 그 길엔 넣을 자리가 없다.
+    ("M533-registers-without-xml", "agora/resident.py",
+     "            made = run(schtasks_xml_argv(xml_path))",
+     '            made = run(["schtasks", "/Create", "/SC", "MINUTE", "/TN", task_name(), "/F"])',
+     "상주: 일정 파일 왕복(임시 집)"),
     # ── 침묵 봉합(2026-09-11 실사격 · 대역 M504~) ────────────────────────────
     # ★이 축이 비면 **아무 오류도 안 난다.** 루프는 계속 돌고 exit 0 이고 화면은 깨끗한데,
     #   못 본 글·못 맞춘 명부가 조용히 쌓인다. 실사격이 이 자리를 두 번 밟았다.
