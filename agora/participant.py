@@ -164,38 +164,56 @@ def load(directory: str | None = None) -> dict[str, Any]:
 #   잠근 뒤에 **다시 읽는다** — 잠그기 전에 읽은 것은 이미 낡았을 수 있기 때문이다.
 
 
+def _relay_shape_problem(value: Any) -> str | None:
+    """옛 `relay` 칸의 **모양**을 본다. 괜찮으면 None, 아니면 **문제의 이름**을 댄다.
+
+    ★모양의 정의처를 여기 하나로 둔다(agy 2R [2]). 전에는 「사전 안쪽의 모르는 칸」은 거부하고
+      「사전도 문자열도 아닌 값」은 경고만 내고 **조용히 지웠다** — 같은 계약을 두 자리에서 다르게
+      집행한 셈이라, 사전을 피해 리스트로 적으면 검사를 지나갔다.
+    ★받는 모양은 둘뿐이다: **비어 있지 않은 주소 문자열**, 또는 **`url`(+선택 `timeout_seconds`)만
+      가진 사전.** 나머지는 전부 거부한다 — 모양을 추측해 옮기면 틀린 주소를 조용히 심는다.
+    """
+    if type(value) is str:
+        return None if value.strip() else "relay(주소가 비었다)"
+    if type(value) is dict:
+        bad = sorted(f"relay.{k}" for k in value if k not in RELAY_LEGACY_KEYS)
+        if bad:
+            return ", ".join(bad)
+        url = value.get("url")
+        if type(url) is not str or not url.strip():
+            return "relay.url(주소가 없다)"
+        return None
+    return f"relay(모양 불명: {type(value).__name__})"
+
+
 def _unknown_inside_legacy(doc: dict[str, Any], legacy: list[str]) -> list[str]:
-    """잔재 칸 **안쪽**의 모르는 칸 이름(`relay.token` 꼴)을 낸다."""
+    """잔재 칸에서 **계약 밖으로 볼 것**의 이름을 낸다(`relay.token` · `relay(모양 불명: list)`)."""
     out: list[str] = []
     for name in legacy:
-        value = doc.get(name)
-        if name == "relay" and type(value) is dict:
-            out += [f"relay.{k}" for k in value if k not in RELAY_LEGACY_KEYS]
+        if name != "relay":
+            continue
+        problem = _relay_shape_problem(doc.get(name))
+        if problem:
+            out.append(problem)
     return out
 
 
 def _relay_patch(value: Any) -> dict[str, Any]:
     """잔재 `relay` 칸의 값을 config.json 의 모양으로 옮긴다.
 
-    옛 설치기가 적은 것은 **주소 문자열**이다(`"relay": "https://…"`). 뒤에 누가 사전으로
-    적었을 경우도 받되 **칸은 닫혀 있다**(`RELAY_LEGACY_KEYS` — 모르는 칸은 load 가 이미 거부했다).
-    그 둘 밖의 모양은 **정체 불명**이므로 이관하지 않는다 — 모양을 추측해 옮기면 틀린 주소를
-    조용히 심는다.
+    ★모양 검사는 이미 `load` 에서 끝났다(`_relay_shape_problem`) — 여기서 다시 판정하지 않는다.
+      같은 규칙을 두 자리에 두면 언젠가 둘이 갈라지고, 갈라진 쪽이 우회로가 된다.
     """
     from agora.store_relay import DEFAULT_TIMEOUT_SECONDS
-    if type(value) is str and value.strip():
+    if type(value) is str:
         return {"transport": "relay",
                 "relay": {"url": value.strip(),
                           "timeout_seconds": DEFAULT_TIMEOUT_SECONDS}}
-    if type(value) is dict and type(value.get("url")) is str and value["url"].strip():
-        relay = {"url": value["url"].strip(),
-                 "timeout_seconds": value.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)}
-        if type(relay["timeout_seconds"]) is not int:
-            relay["timeout_seconds"] = DEFAULT_TIMEOUT_SECONDS
-        return {"transport": "relay", "relay": relay}
-    raise AgoraError(errors.PRECONDITION,
-                     "participant.json 의 relay 칸 모양을 모른다 — 이관하지 않는다",
-                     {"got": type(value).__name__})
+    relay = {"url": value["url"].strip(),
+             "timeout_seconds": value.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)}
+    if type(relay["timeout_seconds"]) is not int:
+        relay["timeout_seconds"] = DEFAULT_TIMEOUT_SECONDS
+    return {"transport": "relay", "relay": relay}
 
 
 def _write_private(path: str, text: str) -> None:
@@ -265,6 +283,22 @@ def _migrate_legacy(directory: str, path: str, doc: dict[str, Any],
         lock.close()
 
 
+def _config_on_disk(path: str) -> dict[str, Any] | None:
+    """지금 디스크에 있는 config.json 을 읽는다 — 없으면 `{}`, 못 읽으면 **None**(= 대조 불가).
+
+    ★None 을 「빈 설정」과 다르게 둔다: 못 읽는 것과 없는 것을 같게 보면, 파일을 깨뜨리는 것이
+      곧 덮어쓰기 허가가 된다.
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            loaded = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return loaded if type(loaded) is dict else None
+
+
 def _migrate_locked(directory: str, path: str, cleaned: dict[str, Any],
                     legacy: list[str]) -> dict[str, Any]:
     """잠금을 쥔 채 하는 일. **다시 읽는 것으로 시작한다.**"""
@@ -285,12 +319,7 @@ def _migrate_locked(directory: str, path: str, cleaned: dict[str, Any],
         return cleaned
 
     config_path = os.path.join(directory, CONFIG_FILENAME)
-    try:
-        patch = _relay_patch(doc["relay"]) if "relay" in legacy else {}
-    except AgoraError as exc:
-        # 모양을 모르면 **옮기지 않는다.** 그렇다고 읽기를 막지도 않는다 — 그 칸을 안 쓰면 될 뿐이다.
-        sys.stderr.write(f"경고: {exc.message} — 그 칸은 그대로 두고 계속한다.\n")
-        return cleaned
+    patch = _relay_patch(doc["relay"]) if "relay" in legacy else {}
 
     try:
         existing: dict[str, Any] = {}
@@ -320,6 +349,17 @@ def _migrate_locked(directory: str, path: str, cleaned: dict[str, Any],
         # ★바꿀 것이 없으면 **쓰지 않는다.** 있던 설정이 이겨서 내용이 그대로인데도 다시 쓰면
         #   남의 파일을 정렬·들여쓰기만 바꿔 건드리는 셈이고, 쓰지 않아도 될 자리에서 실패할 수 있다.
         if merged != existing or not os.path.exists(config_path):
+            # ★쓰기 직전에 **다시 읽어 대조한다**(agy 2R [1] — 갱신 유실).
+            #   config.json 은 우리 잠금을 모르는 손도 쓴다(사람 편집기·설치기·다른 도구).
+            #   잠금을 하나 더 만들어도 **그 손은 그 잠금을 안 잡으므로** 막히지 않는다 —
+            #   그래서 막을 수 있는 것은 「우리가 남의 변경을 덮어쓰는 것」뿐이고,
+            #   그것은 잠금이 아니라 **대조**로 막는다(읽은 뒤 달라졌으면 쓰지 않는다).
+            #   ⚠남는 창(정직): 대조와 `os.replace` 사이의 짧은 틈은 여전히 있다. 0 이 아니다.
+            if _config_on_disk(config_path) != existing:
+                sys.stderr.write(
+                    f"경고: 옮기는 사이 {CONFIG_FILENAME} 이 바뀌었다 — 덮지 않는다."
+                    " participant.json 도 손대지 않았다(다음 실행에서 다시 시도한다).\n")
+                return cleaned
             _write_private(config_path,
                            json.dumps(merged, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     except (OSError, ValueError) as exc:

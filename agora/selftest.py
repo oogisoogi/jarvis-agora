@@ -4506,7 +4506,10 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M401-participant-migrates-before-validating",
                  "M402-participant-nested-unknown-slips",
                  "M403-participant-overwrites-unknown-config",
-                 "M404-backup-overwrites-silently"),
+                 "M404-backup-overwrites-silently",
+                 "M405-migration-clobbers-concurrent-config",
+                 "M406-relay-of-unknown-shape-slips",
+                 "M407-publish-check-ignores-fingerprint"),
 }
 
 
@@ -7737,7 +7740,12 @@ def _sigkill_fixture() -> tuple[str, str, str, str, dict[str, str], str, str, st
                     ignore=shutil.ignore_patterns("__pycache__"))
     # ★드릴 표본 = **하네스 자기 파일이 아닌** 첫 뮤턴트. 자기 파일(M296 등)을 고르면 사본의 복구 루틴 자체가
     #   변이돼 「복구가 안 된다」가 드릴의 결함인지 표본의 결함인지 갈리지 않는다(실측: M296 표본에서 0바이트 복원).
-    mid, relpath, old, new, _killer = next(m for m in MUTATIONS if m[1] != "agora/selftest.py")
+    # ⚠**픽스처가 복사한 것 안에서** 골라야 한다. 이 픽스처는 `agora/` 만 복사하므로 표본도
+    #   거기 있어야 한다 — 2026-09-11 에 `tools/publish-check.sh` 를 겨누는 뮤턴트를 표 맨 위에
+    #   넣자 드릴이 그것을 골라 **없는 파일**을 열려다 케이스 셋이 한꺼번에 붉어졌다.
+    #   (고른 기준이 「selftest.py 만 아니면 된다」였는데, 진짜 기준은 「복사된 트리 안인가」다.)
+    mid, relpath, old, new, _killer = next(
+        m for m in MUTATIONS if m[1].startswith("agora/") and m[1] != "agora/selftest.py")
     target = os.path.join(root, relpath)
     with open(target, encoding="utf-8") as fh:
         pristine = fh.read()
@@ -12168,6 +12176,121 @@ def _case_participant_keeps_config_shape_it_does_not_know() -> None:
         raise AssertionError(f"덮지 않았다는 사실을 말하지 않는다: {got['말']!r}")
 
 
+def _publish_fixture(version: str = "9.9.9") -> tuple[str, str, str]:
+    """게시 게이트가 볼 **최소 꾸러미 한 벌**을 만든다(실물 dist 를 안 건드린다).
+
+    ★실물 산출물(dist/)로 시험하면 그 파일이 없거나 낡은 기계에서는 이 축이 조용히 꺼진다.
+      그래서 꾸러미의 **모양**(내용물 표 · 판본 자리)만 갖춘 것을 여기서 만든다.
+    """
+    import hashlib as _h
+    import json as _json
+    import os as _os
+    import tempfile
+    import zipfile
+    d = tempfile.mkdtemp(prefix="agora-pub-")
+    zip_path = _os.path.join(d, f"agora-client-{version}.zip")
+    init = f'__version__ = "{version}"\n'
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("agora/__init__.py", init)
+        z.writestr("PACKAGE-MANIFEST.json", _json.dumps(
+            {"version": version,
+             "files": {"agora/__init__.py": _h.sha256(init.encode()).hexdigest()},
+             "note": "시험 픽스처"}, ensure_ascii=False))
+    sha = _h.sha256(open(zip_path, "rb").read()).hexdigest()
+    invite = _os.path.join(d, "INVITE.md")
+    with open(invite, "w", encoding="utf-8") as fh:
+        fh.write(f"주소 = https://example.invalid/install/agora-client-{version}.zip\n"
+                 f"지문 = {sha}\n")
+    return zip_path, invite, sha
+
+
+def _case_publish_check_binds_file_to_invite() -> None:
+    """게시 게이트는 **올릴 파일**과 **초대장이 적은 것**을 묶는다(agy 2R [4] · master 판정).
+
+    ★이 자리를 오늘 세 번 밟았다: 소스를 고치면 꾸러미 지문이 바뀌는데 문서의 지문은 **조용히
+      낡는다.** 낡은 지문은 어디서도 붉어지지 않고, 받는 사람 화면에만 「지문이 다릅니다」가 뜬다.
+    ⚠이 게이트가 재는 것은 「이 파일과 이 문서가 같은 것을 가리키는가」다 —
+      「다른 기계에서 빌드해도 같은 바이트인가」는 **재지 않는다**(우리가 하지 않은 약속이다).
+    """
+    import os as _os
+    import subprocess as _sp
+    script = _os.path.join(_ROOT, "tools", "publish-check.sh")
+
+    def run(zip_path: str, invite: str) -> int:
+        return _sp.run(["bash", script, zip_path, invite], cwd=_ROOT,
+                       capture_output=True, text=True, timeout=60).returncode
+
+    zip_path, invite, sha = _publish_fixture()
+    if run(zip_path, invite) != 0:
+        raise AssertionError("맞는 한 벌인데 게시를 막았다")
+
+    # ⑴ 지문이 한 글자 다르면 막는다.
+    bad = invite + ".sha"
+    with open(bad, "w", encoding="utf-8") as fh:
+        fh.write(open(invite, encoding="utf-8").read()
+                 .replace(sha, ("0" if sha[0] != "0" else "1") + sha[1:]))
+    if run(zip_path, bad) != 1:
+        raise AssertionError("지문이 다른데 게시를 허락했다")
+
+    # ⑵ 판본이 갈리면 막는다(주소의 판본만 올린 문서 = 「재빌드를 잊었다」의 얼굴).
+    bad2 = invite + ".ver"
+    with open(bad2, "w", encoding="utf-8") as fh:
+        fh.write(open(invite, encoding="utf-8").read().replace("9.9.9", "9.9.10"))
+    if run(zip_path, bad2) != 1:
+        raise AssertionError("판본이 갈렸는데 게시를 허락했다")
+
+    # ⑶ 없는 파일을 주면 **통과가 아니라** 쓸 수 없음(2)이다.
+    if run(zip_path + ".nope", invite) != 2:
+        raise AssertionError("없는 파일에 대해 판정을 냈다")
+
+
+def _case_participant_config_changed_midway_is_not_clobbered() -> None:
+    """옮기는 **사이에** 남이 config.json 을 바꿨으면 **덮지 않는다**(agy 2R [1] · 갱신 유실).
+
+    ★왜 잠금으로 안 막는가: config.json 은 우리 잠금을 모르는 손도 쓴다(사람 편집기·설치기).
+      잠금을 하나 더 만들어도 **그 손은 그 잠금을 안 잡는다** — 그래서 막을 수 있는 것은
+      「우리가 남의 변경을 덮어쓰는 것」뿐이고, 그것은 **쓰기 직전 대조**로 막는다.
+    ⚠이 케이스가 재지 **못하는** 것: 대조와 `os.replace` 사이의 짧은 틈. 0 이 아니다.
+    """
+    import json as _json
+    import os as _os
+    from agora import participant
+    d = _legacy_participant_dir(relay="https://agora.godmeyou.kr")
+    saved = participant._config_on_disk
+    participant._config_on_disk = lambda _p: {"human_approval": False}   # 남이 그 사이에 썼다
+    try:
+        got = _quiet_load(d)
+    finally:
+        participant._config_on_disk = saved
+    if _os.path.exists(_os.path.join(d, "config.json")):
+        raise AssertionError("바뀐 설정을 덮어썼다")
+    with open(_os.path.join(d, "participant.json"), encoding="utf-8") as fh:
+        if "relay" not in _json.load(fh):
+            raise AssertionError("설정은 못 옮겼는데 참가자 파일은 고쳤다 — 주소가 어디에도 없게 된다")
+    if "바뀌었다" not in got["말"]:
+        raise AssertionError(f"덮지 않은 이유를 말하지 않는다: {got['말']!r}")
+    if not got["doc"].get("id"):
+        raise AssertionError("그 때문에 참가자를 못 읽었다")
+
+
+def _case_participant_relay_of_wrong_shape_is_rejected() -> None:
+    """모양이 틀린 `relay` 는 **거부한다** — 조용히 지우지 않는다(agy 2R [2]).
+
+    ★전에는 같은 계약을 두 자리에서 다르게 집행했다: 사전 안쪽의 모르는 칸은 거부하면서,
+      사전도 문자열도 아닌 값(리스트·숫자)은 **경고만 내고 지웠다.** 그러면 사전을 피해
+      리스트로 적는 것이 곧 우회로다.
+    """
+    d = _legacy_participant_dir(relay=["https://agora.godmeyou.kr"])
+    try:
+        _quiet_load(d)
+    except AgoraError as e:
+        extra = (e.detail or {}).get("extra") or []
+        if not any("모양 불명" in x for x in extra):
+            raise AssertionError(f"무엇이 문제인지 안 짚는다: {e.detail}") from None
+        raise
+    raise AssertionError("모양이 틀린 relay 가 통과했다")
+
+
 def _case_participant_backup_never_overwrites() -> None:
     """백업은 **아무것도 덮지 않는다**(codex 1R [3]).
 
@@ -12296,6 +12419,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("참가자: 안쪽 모르는 칸도 거부", _case_participant_nested_unknown_rejected, errors.PRECONDITION),
     ("참가자: 모르는 설정은 안 덮는다", _case_participant_keeps_config_shape_it_does_not_know, None),
     ("참가자: 백업은 안 덮는다",   _case_participant_backup_never_overwrites, None),
+    ("참가자: 바뀐 설정은 안 덮는다", _case_participant_config_changed_midway_is_not_clobbered, None),
+    ("게시: 파일과 초대장을 묶는다", _case_publish_check_binds_file_to_invite, None),
+    ("참가자: 모양 틀린 relay 거부", _case_participant_relay_of_wrong_shape_is_rejected, errors.PRECONDITION),
     ("참가자: 모르는 칸은 거부",   _case_participant_unknown_field_still_rejected, errors.PRECONDITION),
     ("참가자: 있던 설정이 이긴다", _case_participant_migration_keeps_existing_config, None),
     ("참가자: 이관 실패는 치명이 아니다", _case_participant_migration_failure_is_not_fatal, None),
@@ -12744,6 +12870,19 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     # ★여덟 자리 전부 「한 OS 에서만 나는 죽음」과 「사람 손을 부르는 거부」를 겨눈다.
     #   개발기에서는 둘 다 **초록이 기본값**이라 뮤턴트 없이는 아무것도 증명되지 않는다.
     # ── codex 1R 봉합의 그물(2026-09-11) — 봉합이 되돌아가면 여기가 붉어진다 ──
+    # ── agy 2R 봉합의 그물(2026-09-11) ──────────────────────────────────────
+    ("M407-publish-check-ignores-fingerprint", "tools/publish-check.sh",
+     "elif zip_sha not in doc_shas:",
+     "elif False:",
+     "게시: 파일과 초대장을 묶는다"),
+    ("M405-migration-clobbers-concurrent-config", "agora/participant.py",
+     "            if _config_on_disk(config_path) != existing:",
+     "            if False:",
+     "참가자: 바뀐 설정은 안 덮는다"),
+    ("M406-relay-of-unknown-shape-slips", "agora/participant.py",
+     '    return f"relay(모양 불명: {type(value).__name__})"',
+     "    return None",
+     "참가자: 모양 틀린 relay 거부"),
     ("M400-lock-shared-not-exclusive", "agora/_lock.py",
      "        _MOD.flock(fh.fileno(), _MOD.LOCK_EX)",
      "        _MOD.flock(fh.fileno(), _MOD.LOCK_SH)",
