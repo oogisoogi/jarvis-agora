@@ -207,7 +207,9 @@ Remove-Item -Force "$AH\.client.zip"
 icacls $AH /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null
 
 # 껍데기에 **한글이 들어가지 않게** 사용자 폴더 아래 경로는 %USERPROFILE% 로 되돌립니다.
-$pyCmd = if ($py.StartsWith($env:USERPROFILE)) {
+# ⚠비교는 **대소문자를 무시**합니다. .NET `StartsWith` 는 기본이 대소문자 구분이라
+#   `c:\users\…` 와 `C:\Users\…` 가 엇갈리면 치환이 조용히 안 먹습니다(agy 1R 잔여 지적).
+$pyCmd = if ($py.StartsWith($env:USERPROFILE, [System.StringComparison]::OrdinalIgnoreCase)) {
   '%USERPROFILE%' + $py.Substring($env:USERPROFILE.Length)
 } else { $py }
 
