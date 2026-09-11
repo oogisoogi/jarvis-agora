@@ -4521,6 +4521,23 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     # ★09-11 신설 — **문서코드일치**. 여기서 잃는 것은 「문서대로 한 사람이 실제로 할 수 있는가」다.
     #   이 축이 비면 문서와 코드가 갈라져도 **양쪽 다 초록**이다: 코드는 자기 이름으로 잘 돌고,
     #   문서는 아무도 안 읽는다(기계가). 갈라진 것은 **그 문서를 믿고 친 사람**만 안다.
+    # ★09-11 신설 — **의장루프**. 사람이 안 보는 동안 도는 것이라, 여기서 잃는 것은
+    #   「틀린 일을 조용히 한다」다: 유예를 안 지키고 회차를 넘기거나, 판단하지 않았다고
+    #   적어 놓고 요약을 지어내거나, 같은 자리를 두 번 하거나, 하고도 말하지 않는다.
+    "의장루프": ("M427-chair-manages-every-room",
+                 "M428-chair-guesses-a-broken-timestamp",
+                 "M429-chair-summary-has-no-ceiling",
+                 "M430-chair-marks-written-in-place",
+                 "M431-chair-verifies-without-closing",
+                 "M418-chair-skips-the-grace-window",
+                 "M419-chair-advances-before-everyone-spoke",
+                 "M420-chair-resolution-loses-the-forbidden-mark",
+                 "M421-chair-invents-a-summary",
+                 "M422-chair-does-the-same-thing-twice",
+                 "M423-chair-lock-lets-two-in",
+                 "M424-chair-ignores-the-stop-file",
+                 "M425-chair-dry-run-actually-writes",
+                 "M426-chair-acts-without-telling"),
     "문서코드일치": ("M412-thread-alias-dropped",
                      "M413-unknown-argument-slips-through",
                      "M414-operator-doc-loses-a-required-argument",
@@ -4531,7 +4548,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
 
 
 def _case_s8_axes_have_nets() -> None:
-    """S8 의 20축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한·하네스무결성·설치점검·참가안내·문서코드일치)도 같은 방식으로 덮인다."""
+    """S8 의 21축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한·하네스무결성·설치점검·참가안내·문서코드일치·의장루프)도 같은 방식으로 덮인다."""
     _axes_have_nets(S8_AXES, "S8")
 
 
@@ -12289,6 +12306,298 @@ def _case_join_page_matches_the_document() -> None:
         raise AssertionError("본문에도 참가 길이 하나는 있어야 한다(머리띠만으로는 읽는 흐름에서 안 보인다)")
 
 
+def _chair_loop():
+    """의장 루프 모듈 — `tools/` 는 패키지가 아니라 **스크립트 자리**라 경로로 들인다."""
+    import importlib.util as _util
+    import sys as _sys
+    if "chair_loop" in _sys.modules:
+        return _sys.modules["chair_loop"]
+    path = os.path.join(_ROOT, "tools", "chair_loop.py")
+    spec = _util.spec_from_file_location("chair_loop", path)
+    mod = _util.module_from_spec(spec)
+    _sys.modules["chair_loop"] = mod
+    spec.loader.exec_module(mod)                     # type: ignore[union-attr]
+    return mod
+
+
+def _case_chair_loop_advances_only_when_it_should() -> None:
+    """회차는 **전원 발언**이나 **시간 초과**로만 넘어간다 — 그 둘이 아니면 기다린다.
+
+    ★왜 규칙을 코드에 박는가: 「언제 넘길까」를 사람이 매번 정하면 그 판단이 **기억**이 되고,
+      기억은 늦게 오는 참가자를 잘라 낸다(먼저 말한 사람만으로 회차가 끝난다).
+    ★유예(grace)가 이 규칙의 핵심이다: 전원이 말해도 **조금 기다린다.** 안 그러면 첫 발언자
+      한 명이 말하는 순간 회차가 넘어가고, 그 방의 나머지는 그 회차를 통째로 잃는다.
+    """
+    import datetime as _dt
+    import tempfile
+    from agora import tools
+    cl = _chair_loop()
+    f = _fixtures()
+    base = {"round": 0, "state": "r0", "chair": "operator-a", "posts": [],
+            "started_at": "2026-09-11T00:00:00Z", "spoke_now": set(), "spoke_ever": set()}
+    t0 = _dt.datetime(2026, 9, 11, 0, 0, tzinfo=_dt.timezone.utc)
+
+    ready, why = cl.should_advance(dict(base), now=t0 + _dt.timedelta(minutes=5))
+    if ready:
+        raise AssertionError(f"아무도 말 안 했는데 넘겼다: {why}")
+
+    spoke = dict(base, spoke_now={"a"}, spoke_ever={"a"})
+    ready, why = cl.should_advance(spoke, now=t0 + _dt.timedelta(minutes=5), grace_minutes=30)
+    if ready:
+        raise AssertionError(f"유예 안인데 넘겼다: {why}")
+    ready, why = cl.should_advance(spoke, now=t0 + _dt.timedelta(minutes=31), grace_minutes=30)
+    if not ready:
+        raise AssertionError(f"전원 발언 + 유예 지남인데 안 넘겼다: {why}")
+
+    # ★시각을 못 읽으면 **멈춘다**(agy 1R [HIGH] · 한 번 틀렸던 자리).
+    #   처음에는 못 읽은 시각을 1970년으로 쳤는데, 그러면 age 가 50년이 되어 **그 자리에서
+    #   회차가 넘어간다** — 고장이 「정지」가 아니라 「전진」으로 번진다.
+    broken = dict(base, started_at="언제인지 모름", spoke_now={"a"}, spoke_ever={"a"})
+    ready, why = cl.should_advance(broken, now=t0 + _dt.timedelta(days=9999))
+    if ready:
+        raise AssertionError(f"시작 시각을 못 읽었는데 넘겼다: {why}")
+    if "사람" not in why:
+        raise AssertionError(f"못 읽었으면 사람을 부르는 이유여야 한다: {why}")
+
+    partial = dict(base, spoke_now={"a"}, spoke_ever={"a", "b"})
+    ready, why = cl.should_advance(partial, now=t0 + _dt.timedelta(minutes=60), grace_minutes=30)
+    if ready:
+        raise AssertionError(f"b 가 아직 말 안 했는데 넘겼다: {why}")
+    ready, why = cl.should_advance(partial, now=t0 + _dt.timedelta(minutes=200),
+                                   round_minutes=180)
+    if not ready:
+        raise AssertionError(f"시간 초과인데 안 넘겼다: {why}")
+
+    # 실물(가짜 릴레이)에서도 한 번 — 규칙이 맞아도 **배선이 틀리면** 아무 일도 안 난다.
+    with _relay_env() as (ctx, _relay, _url):
+        room = _relay_room(ctx)
+        now = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=60)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 마디"))
+        state = tempfile.mkdtemp(prefix="chair-marks-")
+        # ★안 맡긴 방은 **읽지도 않는다**(옵트인) — 맡기기 전에 한 판 돌려 그것부터 잰다.
+        idle = _with_key(f["key_a"], lambda: cl.run(ctx, now=now, state_dir=state))
+        if idle["actions"]:
+            raise AssertionError(f"안 맡긴 방을 만졌다: {idle['actions']}")
+        cl.manage(state, room)
+        out = _with_key(f["key_a"], lambda: cl.run(ctx, now=now, state_dir=state))
+        after = tools._reduce(ctx, room)
+        if after["round"] != 1:
+            raise AssertionError(f"회차가 안 넘어갔다: {after['round']} · {out['actions']}")
+        if not any("회차" in line for line in out["said"]):
+            raise AssertionError(f"넘겼는데 주최자에게 알리지 않았다: {out['said']}")
+
+
+def _case_chair_loop_drafts_then_closes() -> None:
+    """마지막 회차가 끝나면 **권고를 걸고 방을 닫는다** — 그리고 권고는 판단하지 않는다.
+
+    ★권고 본문은 결정론이다: 각 참가자의 마지막 발언 **첫 줄**을 그대로 옮기고,
+      「요약도 판단도 하지 않았다」를 적는다. 요약한 척하는 문장은 읽는 사람을 속인다.
+    ★`execution: forbidden` 이 빠지면 스키마가 code 3 으로 막는다(NFR-8) —
+      그러면 이 시험은 「권고가 안 실렸다」로 붉어진다. 표식과 게시가 한 자리에 묶여 있다.
+    """
+    import tempfile
+    from agora import tools
+    cl = _chair_loop()
+    f = _fixtures()
+    with _relay_env() as (ctx, _relay, _url):
+        room = _relay_room(ctx)
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=120)
+        for target in (1, 2, 3):
+            _with_key(f["key_a"], lambda t=target: tools.advance(ctx, thread_id=room, to_round=t))
+        _with_key(f["key_a"], lambda: tools.say(
+            ctx, thread_id=room, body="마지막 회차 발언\n둘째 줄은 안 옮긴다"))
+        state = tempfile.mkdtemp(prefix="chair-marks-")
+        cl.manage(state, room)
+        _with_key(f["key_a"], lambda: cl.run(ctx, now=now, state_dir=state))
+        reduced = tools._reduce(ctx, room)
+        if reduced["state"] != "resolved":
+            raise AssertionError(f"권고가 안 실렸다: {reduced['state']}")
+        payload = None
+        for row in reduced["events"]:
+            if (row.get("event") or {}).get("kind") == "resolution":
+                payload = row["event"].get("payload") or {}
+        if payload is None:
+            raise AssertionError("권고 이벤트가 없다")
+        actions = payload.get("recommended_actions") or []
+        if not actions or any(a.get("execution") != "forbidden" for a in actions):
+            raise AssertionError(f"권고에 집행 금지 표식이 없다: {actions}")
+        if "마지막 회차 발언" not in payload["summary"]:
+            raise AssertionError("발언을 인용하지 않았다 — 지어낸 요약이다")
+        if "둘째 줄은 안 옮긴다" in payload["summary"]:
+            raise AssertionError("첫 줄만 옮기기로 한 계약이 깨졌다")
+        if "판단" not in payload["summary"]:
+            raise AssertionError("기계가 판단하지 않았다는 고지가 본문에 없다")
+
+        # 다음 판에서 **닫는다**(권고가 실린 방이 로비에 남아 있으면 안 된다) · 대조(E)도 한 줄.
+        out = _with_key(f["key_a"], lambda: cl.run(ctx, now=now, state_dir=state,
+                                                   verify=lambda _t: "대조 1줄"))
+        if tools._reduce(ctx, room)["state"] != "closed":
+            raise AssertionError("권고가 실렸는데 방을 안 닫았다")
+        if not any("대조" in line for line in out["said"]):
+            raise AssertionError(f"닫은 뒤 대조 결과를 안 알렸다: {out['said']}")
+
+    # ★인용이 쌓여도 **본문은 상한을 넘지 않는다**(agy 1R): 넘기면 예산에 걸려 `resolve` 가
+    #   code 3 으로 막히고, 재시도 상한까지 쓰면 그 방은 **영영 안 닫힌다.**
+    many = {"round": 3, "posts": [{"from": f"jarvis-{i:03d}", "round": 3,
+                                   "body": "가" * 300, "at": "x"} for i in range(60)]}
+    draft = cl.draft_resolution(many)
+    if len(draft["summary"]) > cl.SUMMARY_CHARS:
+        raise AssertionError(f"권고 본문이 상한을 넘었다: {len(draft['summary'])}")
+    if "뺐다" not in draft["summary"]:
+        raise AssertionError("자르고도 **자른 사실을 안 적었다** — 읽는 사람은 전부인 줄 안다")
+
+    # ★닫기에 **실패**했으면 대조하지 않는다(문서가 「닫은 뒤 대조」라고 적혀 있다).
+    with _relay_env() as (ctx, _relay, _url):
+        room = _relay_room(ctx)
+        import datetime as _dt2
+        now2 = _dt2.datetime.now(_dt2.timezone.utc) + _dt2.timedelta(minutes=120)
+        for target in (1, 2, 3):
+            _with_key(f["key_a"], lambda t=target: tools.advance(ctx, thread_id=room, to_round=t))
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 마디"))
+        state2 = tempfile.mkdtemp(prefix="chair-marks-")
+        cl.manage(state2, room)
+        _with_key(f["key_a"], lambda: cl.run(ctx, now=now2, state_dir=state2))   # 권고
+        real_close = tools.close
+        try:
+            tools.close = lambda *a, **kw: (_ for _ in ()).throw(
+                AgoraError(errors.STORE, "일부러 실패", None))
+            out2 = _with_key(f["key_a"], lambda: cl.run(ctx, now=now2, state_dir=state2,
+                                                        verify=lambda _t: "대조 1줄"))
+        finally:
+            tools.close = real_close
+        if any("대조" in line for line in out2["said"]):
+            raise AssertionError("닫지도 못했는데 대조를 돌렸다")
+
+
+def _case_chair_loop_is_safe_to_run_again() -> None:
+    """안전장치 — **잠금 · 사람이 끄는 법 · 드라이런 · 멱등 · 남의 방.**
+
+    ★루프는 10분마다 깨어난다. 「한 번 더 돌았을 때 아무 일도 안 일어나는 것」이 이 도구의
+      안전 조건이다 — 아니면 같은 줄이 주최자 인박스에 쌓이고, 실패한 자리를 무한히 두드린다.
+    """
+    import datetime as _dt
+    import tempfile
+    from agora import tools
+    cl = _chair_loop()
+    f = _fixtures()
+    state = tempfile.mkdtemp(prefix="chair-marks-")
+
+    # ⑴ 잠금 — 두 번째는 못 들어온다(`mkdir` 는 원자적이라 경합에서 하나만 이긴다).
+    first = cl._lock(state)
+    if first is None or cl._lock(state) is not None:
+        raise AssertionError("잠금이 둘을 들여보낸다 — 같은 방에 두 루프가 쓴다")
+    os.rmdir(first)
+
+    # ⑵ 사람이 끄는 법 — 파일 하나.
+    open(os.path.join(state, cl.STOP_FILE), "w").close()
+    with _relay_env() as (ctx, _relay, _url):
+        out = cl.run(ctx, state_dir=state)
+        if not out.get("stopped") or out["actions"]:
+            raise AssertionError(f"STOP 파일이 있는데 움직였다: {out}")
+    os.remove(os.path.join(state, cl.STOP_FILE))
+
+    with _relay_env() as (ctx, _relay, _url):
+        room = _relay_room(ctx)
+        now = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=60)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="한 마디"))
+        cl.manage(state, room)
+
+        # ⑶ 드라이런 — 할 일을 말하되 **아무것도 바꾸지 않는다.**
+        dry = _with_key(f["key_a"], lambda: cl.run(ctx, now=now, state_dir=state, dry_run=True))
+        if not dry["actions"]:
+            raise AssertionError("드라이런이 할 일을 말하지 않았다")
+        if tools._reduce(ctx, room)["round"] != 0:
+            raise AssertionError("드라이런이 방을 바꿨다")
+
+        # ⑷ 멱등 — 두 번 돌아도 **한 번만** 한다.
+        #   ★★여기는 한 번 잘못 쟀던 자리다(2026-09-11 · M422 SURVIVED 로 드러남):
+        #     진짜로 두 판을 돌리면 첫 판이 회차를 넘겨 **상태가 달라지므로**, 두 번째 판은
+        #     기억(marks) 때문이 아니라 **상태기계 때문에** 아무 일도 안 한다 ⇒ 기억을 통째로
+        #     지워도 시험이 초록이었다. ⇒ **행위가 상태를 안 바꾸게 해 놓고** 다시 돌린다.
+        real_advance = tools.advance
+        tried: list[int] = []
+        try:
+            tools.advance = lambda *a, **kw: tried.append(1)      # 성공하되 방은 그대로
+            _with_key(f["key_a"], lambda: cl.run(ctx, now=now, state_dir=state))
+            _with_key(f["key_a"], lambda: cl.run(ctx, now=now, state_dir=state))
+        finally:
+            tools.advance = real_advance
+        if len(tried) != 1:
+            raise AssertionError(f"같은 자리를 {len(tried)}번 했다 — 기억이 안 듣는다")
+
+        # ⑸ 실패는 **세고**, 상한을 넘으면 사람에게 넘긴다(무한히 두드리지 않는다).
+        room2 = _relay_room(ctx)
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room2, body="한 마디"))
+        state2 = tempfile.mkdtemp(prefix="chair-marks-")
+        cl.manage(state2, room2)
+        hits: list[int] = []
+
+        def always_fail(*_a: Any, **kw: Any) -> None:
+            # ★이 방 것만 센다 — 로비에는 앞 단계에서 만든 방도 있어서, 전부 세면
+            #   「상한 3」이 6 으로 보인다(실제로 그렇게 한 번 붉었다).
+            if kw.get("thread_id") == room2:
+                hits.append(1)
+            raise AgoraError(errors.STORE, "일부러 실패", None)
+
+        try:
+            tools.advance = always_fail
+            for _ in range(5):
+                _with_key(f["key_a"], lambda: cl.run(ctx, now=now, state_dir=state2))
+        finally:
+            tools.advance = real_advance
+        if len(hits) != cl.RETRY_CAP:
+            raise AssertionError(f"실패를 {len(hits)}번 두드렸다 — 상한은 {cl.RETRY_CAP} 이다")
+
+        # ⑹ 기억 파일은 **쓰다 죽어도 안 깨진다**(agy 1R [HIGH]).
+    #   ★그냥 덮어쓰면 쓰는 중에 죽었을 때 **빈 파일**이 남고, 그러면 재시도 상한이 풀려
+    #     같은 자리를 영원히 두드린다(통보도 함께 쌓인다).
+    import json as _json
+    marks = cl.Marks(state)
+    marks.mark("room-atomic", "advance@1", "앞서 적은 기억")
+    real_dump = _json.dump
+    try:
+        _json.dump = lambda *a, **kw: (_ for _ in ()).throw(OSError("디스크가 찼다"))
+        try:
+            marks.mark("room-atomic", "advance@2", "이번 것은 못 적는다")
+        except OSError:
+            pass
+    finally:
+        _json.dump = real_dump
+    if not marks.done("room-atomic", "advance@1"):
+        raise AssertionError("쓰다 죽자 **앞의 기억까지** 사라졌다")
+
+    # ⑸ 남의 방 — 의장이 내가 아니면 읽지도 않는다.
+        stranger = tools.Context(store=ctx.store, ledger=ctx.ledger, spool=ctx.spool,
+                                 allowed_signers_path=ctx.allowed_signers_path,
+                                 participant_id="operator-b",
+                                 config=ctx.config, config_dir=ctx.config_dir)
+        out = _with_key(f["key_a"], lambda: cl.run(stranger, now=now, state_dir=state))
+        if [a for a in out["actions"] if a["action"] != "wait"]:
+            raise AssertionError(f"남의 방을 만졌다: {out['actions']}")
+
+
+def _case_chair_loop_roster_line_keeps_the_order() -> None:
+    """명부 한 줄(A)은 **순서가 규칙의 절반**이다 — sync-roster → whoami → checkpoint.
+
+    ★⑴ 없이 ⑶ 을 하면 내 낡은 사본에 서명하게 되고 상대가 409 로 거절한다(OPERATOR §1).
+      사람이 손으로 할 때 실제로 틀리던 자리라, 순서를 **코드에 박고 여기서 잰다.**
+    """
+    cl = _chair_loop()
+    from agora import onboard as _onboard
+    calls: list[str] = []
+    real = (_onboard.sync_roster, _onboard.whoami, _onboard.issue_checkpoint)
+    try:
+        _onboard.sync_roster = lambda **kw: calls.append("sync-roster")
+        _onboard.whoami = lambda **kw: calls.append("whoami")
+        _onboard.issue_checkpoint = lambda **kw: calls.append("checkpoint")
+        cl.roster_line(None, relay_url="https://example.invalid")
+    finally:
+        _onboard.sync_roster, _onboard.whoami, _onboard.issue_checkpoint = real
+    if calls != ["sync-roster", "whoami", "checkpoint"]:
+        raise AssertionError(f"명부 한 줄의 순서가 바뀌었다: {calls}")
+
+
 def _case_thread_alias_and_argument_names() -> None:
     """인자 이름: **별칭은 받고, 모르는·빠진 이름은 code 10 으로 이름을 말해 준다.**
 
@@ -12751,6 +13060,10 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("참가 안내: 기술 참고는 접혀 있다", _case_join_page_folds_the_technical_note, None),
     ("인자: 별칭과 이름 안내",      _case_thread_alias_and_argument_names, None),
     ("문서=코드: 문서 명령이 파서를 지난다", _case_docs_commands_pass_the_parser, None),
+    ("의장 루프: 넘길 때만 넘긴다",   _case_chair_loop_advances_only_when_it_should, None),
+    ("의장 루프: 권고 뒤 닫는다",     _case_chair_loop_drafts_then_closes, None),
+    ("의장 루프: 다시 돌아도 안전",   _case_chair_loop_is_safe_to_run_again, None),
+    ("의장 루프: 명부 한 줄 순서",    _case_chair_loop_roster_line_keeps_the_order, None),
     ("참가자: 모양 틀린 relay 거부", _case_participant_relay_of_wrong_shape_is_rejected, errors.PRECONDITION),
     ("참가자: 모르는 칸은 거부",   _case_participant_unknown_field_still_rejected, errors.PRECONDITION),
     ("참가자: 있던 설정이 이긴다", _case_participant_migration_keeps_existing_config, None),
@@ -13205,6 +13518,65 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if buf:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      '        if False:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      "참가 안내: 문서와 같다"),
+    # ── 의장 루프(2026-09-11 · 설계 §2 A·B·C·D·E 의 그물) ─────────────────────
+    # ★이 축이 비면 **사람이 안 보는 동안** 루프가 틀린 일을 한다 — 그것이 자동화의 값이자 값이다.
+    ("M418-chair-skips-the-grace-window", "tools/chair_loop.py",
+     "    if age < grace_minutes:",
+     "    if False:",
+     "의장 루프: 넘길 때만 넘긴다"),
+    # ── agy 1R 봉합의 그물(되돌아가면 여기가 붉어진다) ────────────────────────
+    ("M428-chair-guesses-a-broken-timestamp", "tools/chair_loop.py",
+     '    if started is None:\n        # ★모르면 **멈춘다.**',
+     '    if False:\n        # ★모르면 **멈춘다.**',
+     "의장 루프: 넘길 때만 넘긴다"),
+    ("M429-chair-summary-has-no-ceiling", "tools/chair_loop.py",
+     "    if len(body) > SUMMARY_CHARS:",
+     "    if False:",
+     "의장 루프: 권고 뒤 닫는다"),
+    ("M430-chair-marks-written-in-place", "tools/chair_loop.py",
+     "        os.replace(tmp, self._path(thread_id))",
+     "        pass",
+     "의장 루프: 다시 돌아도 안전"),
+    ("M431-chair-verifies-without-closing", "tools/chair_loop.py",
+     "                to_verify.append(thread_id)",
+     "            to_verify.append(thread_id)",
+     "의장 루프: 권고 뒤 닫는다"),
+    ("M427-chair-manages-every-room", "tools/chair_loop.py",
+     "        if thread_id not in mine:",
+     "        if False:",
+     "의장 루프: 넘길 때만 넘긴다"),
+    ("M419-chair-advances-before-everyone-spoke", "tools/chair_loop.py",
+     '    if not room["spoke_ever"] <= room["spoke_now"]:',
+     "    if False:",
+     "의장 루프: 넘길 때만 넘긴다"),
+    ("M420-chair-resolution-loses-the-forbidden-mark", "tools/chair_loop.py",
+     '            "execution": "forbidden"}],',
+     '            "execution": "advised"}],',
+     "의장 루프: 권고 뒤 닫는다"),
+    ("M421-chair-invents-a-summary", "tools/chair_loop.py",
+     '        lines.append(f"· {who}: {first_line[:QUOTE_CHARS] or \'(빈 발언)\'}")',
+     '        lines.append(f"· {who}: (요약됨)")',
+     "의장 루프: 권고 뒤 닫는다"),
+    ("M422-chair-does-the-same-thing-twice", "tools/chair_loop.py",
+     '    def done(self, thread_id: str, key: str) -> bool:\n        return key in (self.load(thread_id).get("done") or {})',
+     "    def done(self, thread_id: str, key: str) -> bool:\n        return False",
+     "의장 루프: 다시 돌아도 안전"),
+    ("M423-chair-lock-lets-two-in", "tools/chair_loop.py",
+     "    except FileExistsError:\n        return None",
+     "    except FileExistsError:\n        return path",
+     "의장 루프: 다시 돌아도 안전"),
+    ("M424-chair-ignores-the-stop-file", "tools/chair_loop.py",
+     "    if os.path.exists(os.path.join(state_dir, STOP_FILE)):",
+     "    if False:",
+     "의장 루프: 다시 돌아도 안전"),
+    ("M425-chair-dry-run-actually-writes", "tools/chair_loop.py",
+     "            if dry_run:\n                return True",
+     "            if False:\n                return True",
+     "의장 루프: 다시 돌아도 안전"),
+    ("M426-chair-acts-without-telling", "tools/chair_loop.py",
+     '            tell(f"【아고라】 {thread_id[:8]} {what}")\n            return True',
+     "            return True",
+     "의장 루프: 넘길 때만 넘긴다"),
     # ── 문서=코드(2026-09-11 · 시연에서 발언 불가로 터진 자리) ────────────────
     # ★agy 1R 이 낸 세 구멍 — 가짜 문서가 그물을 직접 쏜다(문서가 깨끗해도 잡힌다).
     ("M415-doc-scan-skips-uppercase-fence", "agora/selftest.py",
