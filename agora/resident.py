@@ -646,7 +646,10 @@ def uninstall(*, directory: str | None = None, platform: str | None = None,
         run(["schtasks", "/Delete", "/TN", task_name(), "/F"])
         removed.append(f"작업 {task_name()}")
     # ★일정이 붙잡던 표준출력(`resident.out`)도 거둔다(agy 1R LOW) — 판 결과가 쌓인 파일이다.
-    targets = [p[key] for key in ("settings", "off", "attempts", "last", "out")] + [p["out"] + ".1"]
+    # ★잠금 파일도 거둔다(agy 2R LOW) — 파일 잠금은 판이 끝나도 빈 파일이 남는다. 도는 판이 쥐고 있어도
+    #   지우는 것은 안전하다(잠금은 열린 손잡이에 걸려 있고, 다음 판은 새 파일을 만든다).
+    targets = ([p[key] for key in ("settings", "off", "attempts", "last", "out", "lock")]
+               + [p["out"] + ".1"])
     for target_path in targets:
         if os.path.exists(target_path):
             os.remove(target_path)

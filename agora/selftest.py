@@ -13846,11 +13846,14 @@ def _case_resident_schedule_file_round_trip() -> None:
             raise AssertionError(f"설치 뒤 한 줄이 다르다: {resident.summary_line(cfg)}")
         with open(resident.paths(cfg)["out"], "w", encoding="utf-8") as fh:
             fh.write("일정이 붙잡은 표준출력 흉내\n")
+        with open(resident.paths(cfg)["lock"], "w", encoding="utf-8") as fh:
+            fh.write("")                                  # 판이 끝난 뒤 남는 빈 잠금 파일 흉내
         resident.uninstall(directory=cfg, platform="darwin", runner=runner)
         if os.path.exists(target) or os.path.exists(resident.paths(cfg)["settings"]):
             raise AssertionError("거뒀는데 일정 파일이나 설정이 남았다")
-        if os.path.exists(resident.paths(cfg)["out"]):
-            raise AssertionError("거뒀는데 일정 표준출력 파일이 남았다")
+        for leftover in ("out", "lock"):
+            if os.path.exists(resident.paths(cfg)[leftover]):
+                raise AssertionError(f"거뒀는데 {leftover} 파일이 남았다")
 
         def refuses(argv: list[str]) -> dict[str, Any]:
             return {"rc": 5} if argv[:2] == ["launchctl", "bootstrap"] else {"rc": 0}
