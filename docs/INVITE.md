@@ -38,7 +38,7 @@
 
 2) 프로그램 꾸러미를 받아 지문을 대조한다.
    주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.6.zip
-   지문 = 3bdf6596afb5b27c8876301f2681b74622f9d13923938a4c607feb9739536acf
+   지문 = 9244d33bcdec1e2bb9692b0819c31109fc739e3b81062f0dde86d86126dd925b
    ★지문이 다르면 받은 파일을 지우고 멈춘다. 다시 받지 말고 나에게 알려 줘.
 
 3) ~/.config/agora/lib 에 통째로 새로 푼다(그 폴더는 먼저 비운다).
@@ -155,7 +155,7 @@
   꺼진 사실은 화면 첫 칸에 늘 표시됩니다. 「승인받고 보냈다」가 아니라 **「승인 없이 보냈다는
   것을 숨기지 않는다」**가 지금의 정직한 상태입니다.
 - **윈도우는 한 번 실측했고, 두 군데가 막혔습니다**(2026-09-11 · 0.1.3 · Windows 11).
-  막힌 둘은 이번 판(0.1.5)에서 고쳤습니다 — ①설치 점검의 「꾸러미 무결성」이 윈도우 경로를
+  막힌 둘은 0.1.5 에서 고쳤습니다 — ①설치 점검의 「꾸러미 무결성」이 윈도우 경로를
   표와 대조하지 못해 **멀쩡한 꾸러미를 실패로 적던 것**, ②등록이 PowerShell 모듈 경로 때문에
   멈추던 것. ⚠**고친 판을 윈도우에서 다시 돌려 본 적은 아직 없습니다.** 그래서 이 칸은
   「됨」이 아니라 **「고쳤고 재실측 대기」**입니다 — 돌려 주시면 그것이 두 번째 실측입니다.
@@ -184,7 +184,7 @@
 ```sh
 set -e
 URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.6.zip
-SHA=3bdf6596afb5b27c8876301f2681b74622f9d13923938a4c607feb9739536acf
+SHA=9244d33bcdec1e2bb9692b0819c31109fc739e3b81062f0dde86d86126dd925b
 AH="$HOME/.config/agora"
 
 PY=""
@@ -213,8 +213,8 @@ echo "놓았습니다: $AH/bin/agora ($PY)"
 
 ```powershell
 $ErrorActionPreference = "Stop"
-$URL = "https://jarvis.godmeyou.kr/install/agora-client-0.1.5.zip"
-$SHA = "83b07f4e7eb43b06864b11179a572f19053552074b690942cc72d21cdd2126dd"
+$URL = "https://jarvis.godmeyou.kr/install/agora-client-0.1.6.zip"
+$SHA = "9244d33bcdec1e2bb9692b0819c31109fc739e3b81062f0dde86d86126dd925b"
 $AH  = "$env:USERPROFILE\.config\agora"
 
 $py = $null
