@@ -1428,6 +1428,14 @@ ARG_ALIASES: dict[str, str] = {
     "thread": "thread_id",
 }
 
+# **값까지** 계약을 지켜야 하는 칸 — 32자 소문자 hex(`event.is_id`).
+# ★왜 이름 목록인가(codex 1R MEDIUM-5): 구판은 「키가 있는가」만 봤다. 그래서 빈 문자열·한글·
+#   `null` 이 **필수 인자로 인정**됐고, `read` 는 없는 방을 빈 상태로 성공이라 답했다 —
+#   사람은 「그 방에 글이 없다」로 읽는다. **없는 방과 빈 방은 다른 말이다.**
+# ⚠`vote` 의 `target` 은 **일부러 뺐다**: 그 칸의 모양은 계약이 정하지 않고 reducer 가 정한다
+#   (여기서 32-hex 를 강요하면 계약에 없는 규칙을 CLI 가 발명하는 것이 된다).
+ID_ARGS = frozenset({"thread_id", "room_id", "message_id", "post_message_id", "since_event"})
+
 
 def accepted_args(fn: Any) -> tuple[str, ...]:
     """그 함수가 받는 인자 이름(계약의 이름) — `ctx` 는 뺀다."""
@@ -1476,6 +1484,22 @@ def normalize_args(command: str, accepted: tuple[str, ...], kwargs: dict[str, An
         raise AgoraError(errors.ARGUMENT, f"빠진 인자: --{missing[0]}",
                          {"command": command, "missing": missing,
                           "accepts": sorted(accepted)})
+
+    # ★**있는가**가 아니라 **무엇인가**를 본다(codex 1R MEDIUM-5). 검사 함수는 계약이 이미 가진
+    #   것을 쓴다(`event.is_id`) — 여기서 규칙을 다시 적으면 두 곳이 갈라지는 날이 온다.
+    # ★생략(`None`)은 **선택 칸에서만** 생략이다. 필수 칸의 `null` 은 「안 줬다」가 아니라
+    #   「틀린 값을 줬다」로 다룬다 — 둘을 같은 칸에 두면 `--thread_id null` 이 조용히 통과한다.
+    from agora.event import is_id
+    for key in sorted(ID_ARGS & set(out)):
+        value = out[key]
+        if value is None and key not in required:
+            continue
+        if not is_id(value):
+            raise AgoraError(errors.ARGUMENT,
+                             f"--{key} 의 형식이 계약과 다르다(32자 소문자 hex)",
+                             {"command": command, "key": key, "형식": "32자 소문자 hex",
+                              "got_type": type(value).__name__,
+                              "got_len": len(value) if type(value) is str else None})
     return out
 
 
@@ -1487,12 +1511,31 @@ def call(name: str, ctx: Context, kwargs: dict[str, Any]) -> Any:
     ★인자 이름도 **여기서** 맞춘다(별칭·모르는 이름·빠진 이름). 부르는 쪽에 두면
       CLI 로는 되고 MCP 로는 안 되는(또는 그 반대) 자리가 생긴다.
     """
+    # ★이름 검사도 인자 검사와 **같은 한 곳**(`check_args`)이 한다. 구판은 여기에 같은 검사가
+    #   한 벌 더 있었는데, 그것이 둘이 되자 하네스의 조준(M149)이 「어느 것을 쟀는지 모른다」로
+    #   꺼졌다 — 이 저장소가 이미 아는 함정이다(같은 모양이 두 곳에 있으면 그 축이 조용히 빈다).
+    # ⚠**순서가 곧 계약이다**: 검사를 인자 자리에 두면 파이썬이 `CORE_TOOLS[name]` 을 **먼저** 짓고
+    #   계약 밖 이름이 `KeyError` 로 터진다(= 우리 code 10 이 아니라 「예상하지 못한 내부 오류」).
+    #   codex 1R HIGH-1 이 지적한 그 함정을 봉합하다 같은 자리에서 **한 번 더** 밟았다 — 그래서 적는다.
+    checked = check_args(name, kwargs)
+    return CORE_TOOLS[name](ctx, **checked)
+
+
+def check_args(name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """도구 하나의 인자를 **컨텍스트 없이** 검사한다 — 이름·빠짐·값(§id).
+
+    ★왜 따로 떼는가(codex 1R HIGH-1): 부르는 쪽들이 `context_from_config()` 를 **먼저** 평가해
+      왔다(파이썬은 인자를 왼쪽부터 짓는다). 그래서 설정이 없는 기계에서는 **인자 오류가
+      설정 오류로 가려졌다** — CLI 는 10 대신 2, MCP 는 -32602 대신 -32603.
+      첫 설치자는 오타를 고치는 대신 설정을 뒤진다.
+    ⇒ 인자 검사는 **운반층을 세우기 전에** 끝난다. `call` 도 같은 함수를 쓴다(두 번 불러도 같다 —
+      정본 이름으로 바뀐 것을 다시 넣어도 결과가 같은 함수다).
+    """
     fn = CORE_TOOLS.get(name)
     if fn is None:
         raise AgoraError(errors.ARGUMENT, "계약에 없는 도구",
                          {"tool": name, "allowed": sorted(CORE_TOOLS)})
-    kwargs = normalize_args(name, accepted_args(fn), kwargs, required_args(fn))
-    return fn(ctx, **kwargs)
+    return normalize_args(name, accepted_args(fn), kwargs, required_args(fn))
 
 
 # ── 계약 대조표(§4 = 이 표 = CLI 등록표) ────────────────────────────────────

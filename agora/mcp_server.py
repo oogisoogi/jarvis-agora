@@ -21,6 +21,7 @@ from typing import Any
 
 from agora import cli, errors, tools
 from agora.errors import AgoraError
+from agora.event import ID_PATTERN
 
 PROTOCOL_HINT = "tools/list · tools/call"
 
@@ -50,6 +51,10 @@ def tool_schema(name: str) -> dict[str, Any]:
     required: list[str] = []
     for param in list(inspect.signature(fn).parameters.values())[1:]:   # ctx 제외
         props[param.name] = {"type": _json_type(param.annotation)}
+        # ★id 칸은 **모양까지** 말해 준다(codex 1R MEDIUM-6). 런타임이 32-hex 를 강요하는데
+        #   스키마가 그냥 string 이라고 하면, 클라이언트는 통과할 리 없는 값을 만들어 보낸다.
+        if param.name in tools.ID_ARGS:
+            props[param.name]["pattern"] = ID_PATTERN
         if param.default is inspect.Parameter.empty:
             required.append(param.name)
     return {"name": cli.mcp_tool_name(name),
@@ -94,8 +99,20 @@ def handle(request: dict[str, Any], *, ctx: Any = None) -> dict[str, Any]:
         #   이 문을 지워도 아래 문이 대신 답해 **초록이 유지된다**(M187 이 살아남은 자리).
         raise AgoraError(errors.ARGUMENT, "계약에 없는 도구",
                          {"tool": full, "surface": "mcp"})
+    # ★★`arguments` 는 **객체다**(스키마가 그렇게 선언한다 · codex 1R MEDIUM-6).
+    #   구판은 `dict(arguments)` 로 **강제 변환**해서 key/value 배열을 정상 호출로 받았다 —
+    #   스키마와 런타임이 다른 말을 하는 자리(schema/runtime drift)다. 없는 것(`null`)만
+    #   「안 줬다」로 읽고, 그 밖의 모양은 규약의 인자 오류로 돌려보낸다.
+    arguments = params.get("arguments")
+    if arguments is None:
+        arguments = {}
+    if type(arguments) is not dict:
+        raise AgoraError(errors.ARGUMENT, "arguments 는 객체여야 한다",
+                         {"got": type(arguments).__name__, "surface": "mcp"})
+    # ★인자를 **먼저** 검사한다 — 설정 폴더가 없어도 인자 오류는 -32602 다(codex 1R HIGH-1).
+    checked = tools.check_args(inner, arguments)
     context = ctx if ctx is not None else tools.context_from_config()
-    return {"result": tools.call(inner, context, dict(params.get("arguments") or {}))}
+    return {"result": tools.call(inner, context, checked)}
 
 
 def _cli_name(mcp_name: str) -> str | None:

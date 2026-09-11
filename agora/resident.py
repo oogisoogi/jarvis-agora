@@ -736,9 +736,13 @@ ACTION_ARGS: dict[str, tuple[str, ...]] = {
 }
 
 
-def dispatch(action: str, kw: dict[str, Any]) -> dict[str, Any]:
-    """★동작마다 받는 인자를 **따로** 잰다 — `status --interval-min 5` 가 조용히 무시되면
-    사람은 자기가 준 줄이 먹힌 줄 안다."""
+def check_action_args(action: str, kw: dict[str, Any]) -> None:
+    """동작 이름과 그 동작이 받는 인자만 **검사**한다(실행은 안 한다).
+
+    ★`dispatch` 에서 떼어 낸 것은 **문서 시험이 같은 판정을 쓰기 위해서**다(codex 1R HIGH-2):
+      문서에 `agora resident status --interval-min 5` 라고 적히면 그 줄은 실제로 code 10 인데,
+      검사가 실행 경로 안에만 있으면 문서를 재는 쪽은 그것을 못 본다.
+    """
     if action not in ACTIONS:
         raise AgoraError(errors.ARGUMENT, "resident 의 동작은 once·install·uninstall·status·off·on 중 하나다",
                          {"got": action, "usage": "agora resident <once|install|uninstall|status|off|on>"})
@@ -746,6 +750,12 @@ def dispatch(action: str, kw: dict[str, Any]) -> dict[str, Any]:
     if stray:
         raise AgoraError(errors.ARGUMENT, f"resident {action} 는 이 인자를 받지 않는다",
                          {"unknown": stray, "accepted": list(ACTION_ARGS[action])})
+
+
+def dispatch(action: str, kw: dict[str, Any]) -> dict[str, Any]:
+    """★동작마다 받는 인자를 **따로** 잰다 — `status --interval-min 5` 가 조용히 무시되면
+    사람은 자기가 준 줄이 먹힌 줄 안다."""
+    check_action_args(action, kw)
     directory = kw.get("dir")
     if action == "once":
         return once(directory=directory, dry_run=bool(kw.get("dry_run", False)),

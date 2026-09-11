@@ -41,6 +41,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from agora import errors
 from agora.contract_open import SIGN_NAMESPACE
 from agora.errors import AgoraError
 
@@ -433,7 +434,27 @@ def run(*, directory: str | None = None, root: str | None = None,
     }
 
 
+# 이 명령이 **실제로 읽는** 플래그. ★표가 한 곳이라야 문서 시험이 같은 것을 본다
+# (codex 1R HIGH-2: 자기 파서 명령은 문서에서 무엇을 적든 아무도 안 봤다 —
+#  `agora selfcheck --definitely-wrong` 이 조용히 **전축 점검을 돌렸다**).
+ACCEPTED_FLAGS = ("--no-relay",)
+
+
+def parse_argv(argv: list[str] | None = None) -> dict[str, Any]:
+    """이 명령의 **파서**. 모르는 플래그는 code 10 — 실행 전에 죽는다.
+
+    ★`main` 과 문서 시험이 **같은 함수**를 쓴다. 나눠 두면 「문서는 초록인데 실제로는 거절」이
+      (또는 그 반대가) 생기고, 그 차이는 사용자가 발견한다.
+    """
+    argv = list(argv or [])
+    unknown = [t for t in argv if t not in ACCEPTED_FLAGS]
+    if unknown:
+        raise AgoraError(errors.ARGUMENT, f"모르는 인자: {unknown[0]}",
+                         {"command": "selfcheck", "unknown": unknown,
+                          "accepts": list(ACCEPTED_FLAGS)})
+    return {"relay": "--no-relay" not in argv}
+
+
 def main(argv: list[str] | None = None) -> dict[str, Any]:
     """CLI 진입점. 종료 코드는 `cli` 가 판정 칸에서 읽는다."""
-    argv = list(argv or [])
-    return run(relay="--no-relay" not in argv)
+    return run(**parse_argv(argv))

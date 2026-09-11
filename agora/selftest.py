@@ -4564,7 +4564,24 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                      "M414-operator-doc-loses-a-required-argument",
                      "M415-doc-scan-skips-uppercase-fence",
                      "M416-doc-scan-cuts-at-any-hash",
-                     "M417-doc-scan-loses-a-continued-line"),
+                     "M417-doc-scan-loses-a-continued-line",
+                     # ★09-11 codex 1R 봉합 — 「이름만 대조」에서 「실제 파서」로 올라온 축.
+                     "M461-doc-scan-skips-the-real-parser",
+                     "M462-doc-scan-targets-shrink",
+                     "M463-doc-skip-loses-its-reason",
+                     "M464-self-parsed-flags-unchecked",
+                     "M465-operator-doc-resolves-too-early",
+                     "M466-progression-block-not-executed"),
+    # ★09-11 신설 — **인자계약**. 여기서 잃는 것은 「오타 하나가 어디서 잡히는가」다:
+    #   설정이 먼저 서면 인자 오류가 설정 오류로 보이고(사람은 설정을 뒤진다), 같은 칸을 두 번
+    #   주면 한 값이 조용히 사라지며, id 가 아닌 값이 id 칸을 지나면 **없는 방이 빈 방으로** 보인다.
+    "인자계약": ("M467-cli-builds-context-before-args",
+                 "M468-mcp-builds-context-before-args",
+                 "M469-cli-only-required-not-checked",
+                 "M470-repeated-flag-overwrites",
+                 "M471-id-value-unchecked",
+                 "M472-mcp-coerces-arguments",
+                 "M473-schema-drops-the-id-pattern"),
 }
 
 
@@ -4920,7 +4937,11 @@ def _case_ack_is_registered_and_built() -> None:
     buf = _io.StringIO()
     try:
         with contextlib.redirect_stderr(buf):
-            code = cli.main(["ack", "유령"])
+            # ★인자는 **계약을 지나는 것**으로 준다(codex 1R HIGH-1 봉합 뒤). 구판은 맨몸 토큰
+            #   `"유령"` 이었는데, 그때는 설정 로딩이 먼저라 그 인자 오류가 **설정 오류에 가려져**
+            #   우연히 code 2 가 나왔다. 지금은 인자를 먼저 보므로 code 10 이 난다 —
+            #   이 케이스가 재려는 것은 **배선**(ack 이 실제로 태워지는가)이지 인자 거절이 아니다.
+            code = cli.main(["ack", f"--message_id={'0' * 32}"])
     finally:
         if old is None:
             os.environ.pop("AGORA_CONFIG_DIR", None)
@@ -9011,14 +9032,20 @@ RPC_BAD_ARG_FRAMES = (
     # ⑵ 이름이 계약 밖인 인자 — **우리 계약이 먼저 잡는다**(code 10 → 규약 -32602).
     '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":'
     '{"name":"agora.envelope_check","arguments":{"계약에":"없는 칸"}}}',
-    # ⑶ ★**우리 계약이 못 잡는 모양** — `arguments` 자체가 객체가 아니다(정수).
-    #   여기서 나는 것은 파이썬의 `TypeError` 이고, 그것을 받는 것은 **최후 경계**다.
-    #   ⚠2026-09-11 에 ⑵ 가 이 자리를 대신 재고 있었는데, 인자 이름 검사를 넣자 ⑵ 가
-    #     `AgoraError` 로 바뀌면서 **최후 경계를 아무도 안 재게 됐다**(M243 SURVIVED 로 드러남).
-    #     그물이 좋아지면 다른 그물이 조용히 비는 일이 있다 — 그래서 프레임을 하나 더 둔다.
+    # ⑶ `arguments` 자체가 객체가 아니다(정수) — **이제는 우리 계약이 먼저 잡는다**
+    #   (codex 1R MEDIUM-6 봉합: `dict(arguments)` 강제 변환을 없앴다 ⇒ code 10 → -32602).
     '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":'
     '{"name":"agora.threads","arguments":5}}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/list"}',
+    # ⑷ ★★**우리 계약이 못 잡는 모양** — `params` 자체가 객체가 아니다. 여기서 나는 것은
+    #   파이썬의 `AttributeError` 이고, 그것을 받는 것은 **최후 경계**뿐이다.
+    #   ⚠이 프레임은 **세 번째 판**이다: 2026-09-11 오전 ⑵ 가 이 자리를 재다가 인자 이름 검사가
+    #     들어오며 `AgoraError` 가 됐고(M243 SURVIVED), 그 자리를 ⑶ 이 이어받았는데 같은 날 오후
+    #     `arguments` 객체 검사(codex 1R MEDIUM-6)가 들어오며 ⑶ 도 `AgoraError` 가 됐다.
+    #   ⇒ ★**그물이 좋아질 때마다 이 축이 조용히 빈다** — 세 번 같은 일이 났으면 다음에도 난다.
+    #     그래서 이제 「비었는가」를 케이스가 **직접 잰다**(아래 `exceptions` 판정). 언젠가 이 모양까지
+    #     계약이 잡게 되면 그 케이스가 **붉어져서** 새 탐침을 찾으라고 말한다 — 조용히 비지 않는다.
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":5}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/list"}',
 )
 
 RPC_FRAMES = (
@@ -9070,7 +9097,7 @@ def _case_mcp_survives_a_bad_argument() -> None:
     """
     d = _config_dir_fixture(operators_text=None)
     lines = _rpc_roundtrip(RPC_BAD_ARG_FRAMES, d)      # 서버가 죽으면 여기서 적색
-    if [l.get("id") for l in lines] != [1, 2, 3, 4]:
+    if [l.get("id") for l in lines] != [1, 2, 3, 4, 5]:
         raise AssertionError(f"응답이 짝이 안 맞는다 — 죽었을 수 있다: "
                              f"{[l.get('id') for l in lines]}")
     for idx, what in ((1, "계약 밖 인자 이름"), (2, "객체가 아닌 arguments")):
@@ -9081,7 +9108,15 @@ def _case_mcp_survives_a_bad_argument() -> None:
             raise AssertionError(f"{what} 인데 코드가 {bad['error'].get('code')}(기대 -32602)")
         if not (bad["error"].get("data") or {}).get("exception"):
             raise AssertionError(f"{what}: 무엇이 났는지 감췄다 — 최후 경계는 옮기는 것이지 삼키는 것이 아니다")
-    if "result" not in lines[3]:
+    # ★★**최후 경계가 비어 있지 않은가**(codex 1R LOW-7). 우리 계약이 좋아질수록 이 축은
+    #   조용히 비는데, 비었다는 것은 **응답 전부가 AgoraError** 라는 모양으로 나타난다 —
+    #   그 상태에서 M243(최후 경계 제거)은 **아무도 못 잡는다**. 그래서 여기서 직접 잰다.
+    if "error" not in lines[3]:
+        raise AssertionError(f"객체가 아닌 params 가 성공으로 갔다: {lines[3]}")
+    exceptions = [(l.get("error") or {}).get("data", {}).get("exception") for l in lines[1:4]]
+    if not [x for x in exceptions if x and x != "AgoraError"]:
+        raise AssertionError(f"최후 경계까지 가는 프레임이 하나도 없다 — 그 축은 지금 비어 있다: {exceptions}")
+    if "result" not in lines[4]:
         raise AssertionError("그 뒤 요청에 답하지 못했다 — 서버가 반쯤 죽었다")
 
 
@@ -13080,14 +13115,15 @@ def _case_thread_alias_and_argument_names() -> None:
     required = _tools.required_args(_tools.say)
 
     # ⑴ 별칭
-    got = _tools.normalize_args("say", accepted, {"thread": "abc", "body": "x"}, required)
-    if got != {"thread_id": "abc", "body": "x"}:
+    _tid = "a" * 32          # ★id 칸은 이제 **값까지** 계약이다(codex 1R MEDIUM-5) — 32자 소문자 hex.
+    got = _tools.normalize_args("say", accepted, {"thread": _tid, "body": "x"}, required)
+    if got != {"thread_id": _tid, "body": "x"}:
         raise AssertionError(f"--thread 가 정본 이름으로 안 바뀐다: {got}")
 
     # ⑵ 모르는 이름 — 코드와 **안내 문구**를 함께 잰다. 코드만 재면 「거절은 하는데 이름을 안 말하는」
     #    거절이 통과한다(그 거절은 사람을 추측으로 돌려보낸다).
     try:
-        _tools.normalize_args("read", _tools.accepted_args(_tools.read), {"threadd": "abc"})
+        _tools.normalize_args("read", _tools.accepted_args(_tools.read), {"threadd": _tid})
     except AgoraError as e:
         if e.code != errors.ARGUMENT:
             raise AssertionError(f"모르는 인자인데 code {e.code}(기대 {errors.ARGUMENT})")
@@ -13098,7 +13134,7 @@ def _case_thread_alias_and_argument_names() -> None:
 
     # ⑶ 빠진 필수 인자
     try:
-        _tools.normalize_args("say", accepted, {"thread_id": "abc"}, required)
+        _tools.normalize_args("say", accepted, {"thread_id": _tid}, required)
     except AgoraError as e:
         if e.code != errors.ARGUMENT:
             raise AssertionError(f"빠진 인자인데 code {e.code}")
@@ -13110,7 +13146,7 @@ def _case_thread_alias_and_argument_names() -> None:
 
     # ⑷ 두 이름으로 같은 자리를 주면 거절
     try:
-        _tools.normalize_args("say", accepted, {"thread": "a", "thread_id": "b", "body": "x"}, required)
+        _tools.normalize_args("say", accepted, {"thread": _tid, "thread_id": "b" * 32, "body": "x"}, required)
     except AgoraError as e:
         if e.code != errors.ARGUMENT:
             raise AssertionError(f"두 이름 충돌인데 code {e.code}")
@@ -13122,142 +13158,537 @@ def _case_thread_alias_and_argument_names() -> None:
         raise AssertionError("CLI 가 답하는 인자 이름이 함수 서명과 다르다")
 
 
+# ── 문서=코드 스캐너 ────────────────────────────────────────────────────────
+# ★★**왜 모듈 자리로 올라왔나**(codex 1R HIGH-2): 구판은 케이스 **안**에 숨어 있었고,
+#   정규식으로 **플래그 이름만** 비교했다 — 실제 파서(`build_parser`/`_kv`/`normalize_args`)를
+#   한 번도 부르지 않았다. 그래서 「문서가 파서를 지난다」는 이름과 달리, 파서가 거절할 줄을
+#   초록으로 넘겼다(모르는 명령·자기 파서 명령은 **계수조차** 안 했다).
+#   ⇒ 스캐너를 밖으로 꺼내 **재현 시험도 같은 것을 부를 수 있게** 한다(그물은 남이 쏴 봐야 한다).
+
+# 훑는 문서 전부 — **주장한 5문서 + 스킬 3종**. ★이 표가 주장의 정본이다:
+# 여기가 좁아지면 「5개 문서를 잰다」는 말이 그 순간 거짓이 된다(구판이 실제로 그랬다 —
+# README·ONBOARDING·RUN-WINDOWS 셋이 목록에 없는 채로 「잰다」고 적혀 있었다).
+DOC_SCAN_TARGETS = ("README.md", "docs/ONBOARDING.md", "docs/RUN-WINDOWS.md",
+                    "docs/OPERATOR.md", "docs/INVITE.md",
+                    "skills/agora-delegate/SKILL.md",
+                    "skills/agora-delegate/brief-writer.md",
+                    "skills/agora-delegate/brief-reader.md",
+                    # ★방문 규칙(0.1.6 · 690) — 깨운 에이전트가 **사람 없이** 그대로 친다.
+                    #   틀린 인자는 아무도 못 본다 ⇒ 기계가 대신 읽는다.
+                    "skills/agora-delegate/visit.md")
+# **명령이 반드시 있어야 하는 문서** — 여기서 0줄이면 시험이 그 문서를 못 읽고 있는 것이다
+# (문서가 통째로 안 읽히는 것과 「명령이 없는 문서」를 구별한다).
+DOC_MUST_HAVE = ("README.md", "docs/ONBOARDING.md", "docs/RUN-WINDOWS.md",
+                 "docs/OPERATOR.md", "docs/INVITE.md",
+                 "skills/agora-delegate/SKILL.md", "skills/agora-delegate/brief-writer.md",
+                 "skills/agora-delegate/visit.md")
+
+# 자리표시자(`<방 id>`)를 토큰 하나로 묶어 두는 표식. ★값의 **모양**은 여기서 재지 않는다 —
+# 재려면 문서에 진짜 id 를 적어야 하고, 그러면 문서가 거짓말을 하게 된다. 대신 칸 종류에 맞는
+# 더미로 바꿔 **파서를 실제로 태운다**(안 재는 것을 잰 것으로 세지 않으려고 여기 적어 둔다).
+DOC_PLACEHOLDER = "«PH»"
+# 문서에 나오지만 **명령이 아닌** `agora` 줄 — 허용하는 모양을 여기 적는다.
+# ★허용목록이 없으면 「못 알아본 줄」과 「명령이 아닌 줄」이 한 칸에 뭉치고, 그 칸은 조용해진다.
+DOC_NON_COMMAND = (
+    ("from agora import", "파이썬 import 줄 — CLI 명령이 아니다"),
+    ("import agora", "파이썬 import 줄 — CLI 명령이 아니다"),
+)
+
+
+def _doc_strip_comment(line: str) -> str:
+    """따옴표 **밖**의 `#` 부터가 주석이다.
+
+    ★구판은 `line.split("#")[0]` 이었다 — 값 안의 `#`(`--body "issue #12" --typo`)에서
+      잘려 **뒤따르는 잘못된 인자가 숨었다**(agy 1R CRITICAL). 잘라내는 자를 따옴표에 맞춘다.
+    """
+    quote = ""
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            return line[:i]
+    return line
+
+
+def _doc_command_lines(text: str) -> list[str]:
+    """문서에서 **명령이 적힌 줄**을 전부 모은다 — 울타리 블록 + 인라인 코드.
+
+    ★울타리의 언어 표식은 무엇이든 받는다(```sh · ```bash · ```Shell · ```powershell · 표식 없음).
+      구판은 `[a-z]*` 라 ```python3·```BASH 가 통째로 **검사에서 빠졌다**(agy 1R CRITICAL).
+    ⚠**아직 안 재는 것**: 4칸 들여쓰기로 만든 코드 블록(이 저장소는 안 쓴다).
+      쓰기 시작하면 여기에 한 줄이 더 필요하다 — 안 잰 것을 잰 것으로 세지 않는다.
+    """
+    import re as _re
+    out: list[str] = []
+    for block in _re.findall(r"```[^\n]*\n(.*?)```", text, _re.S):
+        joined: list[str] = []
+        for piece in block.splitlines():
+            # ★`\` 뒤에 **보이지 않는 공백**이 있어도 이어 붙인다(agy 1R CRITICAL).
+            #   안 붙이면 잘린 뒷줄이 `agora` 로 시작하지 않아 **그 줄의 인자가 숨는다.**
+            if joined and joined[-1].rstrip().endswith("\\"):
+                joined[-1] = joined[-1].rstrip()[:-1].rstrip() + " " + piece.strip()
+            else:
+                joined.append(piece)
+        out.extend(joined)
+    # 인라인 코드(`agora say --thread_id <id>`)도 사람이 그대로 친다.
+    out.extend(_re.findall(r"`([^`\n]*\bagora[^`\n]*)`", text))
+    return out
+
+
+def _doc_segments(line: str) -> list[str]:
+    """한 줄을 **셸 구분자**로 나눈다 — `&&`·`||`·`;`·`|`(따옴표 밖의 것만).
+
+    ★왜 필요한가: `agora keygen <id> && agora register --relay <url>` 한 줄에서 구판은
+      **첫 명령만** 보고 뒤쪽 인자까지 그 명령의 것으로 읽었다 — `keygen` 이 `--relay` 를
+      모른다며 거짓 적색을 내거나, 뒤 명령이 통째로 안 재졌다.
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in "|&" and i + 1 < len(line) and line[i + 1] == ch:
+            out.append("".join(buf)); buf = []; i += 2; continue
+        if ch in ";|":
+            out.append("".join(buf)); buf = []; i += 1; continue
+        buf.append(ch)
+        i += 1
+    out.append("".join(buf))
+    return [s for s in (x.strip() for x in out) if s]
+
+
+def _doc_head(segment: str, variables: dict[str, str]) -> tuple[str, str] | None:
+    """구간이 **agora 호출**이면 (호출 표기, 나머지)로 가른다. 아니면 None.
+
+    ★맥·리눅스(`agora`·`bin/agora`·`~/.config/agora/bin/agora`)와 윈도우(`… \\bin\\agora.cmd` ·
+      PowerShell 의 `& "<경로>"` · `$agora = "<경로>"` 뒤의 `& $agora`)를 **함께** 받는다.
+      구판은 앞의 모양만 알아서 **RUN-WINDOWS.md 를 0줄로 읽었다** — 그 문서는 통째로
+      PowerShell 이라 한 줄도 안 재지고 있었고, 그 침묵이 초록으로 보였다.
+    """
+    import re as _re
+    s = segment.strip()
+    m = _re.match(r"^&\s*(.+)$", s)          # PowerShell 호출 연산자
+    if m:
+        s = m.group(1).strip()
+    m = _re.match(r"^\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$", s)
+    if m:                                     # `$agora = "<경로>"` — 변수를 기억해 둔다
+        variables[m.group(1)] = m.group(2).strip().strip('"\'')
+        return None
+    m = _re.match(r"^\$([A-Za-z_][A-Za-z0-9_]*)\b(.*)$", s)
+    if m:                                     # `& $agora whoami`
+        target = variables.get(m.group(1), "")
+        if not _doc_is_agora_path(target):
+            return None
+        return target, m.group(2)
+    m = _re.match(r'^"([^"]+)"(.*)$', s) or _re.match(r"^'([^']+)'(.*)$", s)
+    if m and _doc_is_agora_path(m.group(1)):  # `"<경로>\bin\agora.cmd" selfcheck`
+        return m.group(1), m.group(2)
+    m = _re.match(r"^(\S+)(.*)$", s)
+    if m and _doc_is_agora_path(m.group(1)):
+        return m.group(1), m.group(2)
+    return None
+
+
+def _doc_is_agora_path(token: str) -> bool:
+    """그 토큰이 **우리 실행기**를 가리키는가(`agora` · `bin/agora` · `…\\bin\\agora.cmd`).
+
+    ⚠**폴더 언급과 가른다**: `~/.config/agora` 는 설정 **폴더**지 실행기가 아니다.
+      마지막 조각만 보면 둘이 같아 보이고, 그러면 「`agora` 폴더 권한은 700」이라는 **문장**이
+      명령으로 읽혀 거짓 적색이 난다(실제로 났다 — INVITE.md).
+    """
+    path = token.replace("\\", "/").strip('"\'').rstrip("/")
+    if path in ("agora", "agora.cmd", "./agora"):
+        return True
+    return (path.endswith("/bin/agora") or path.endswith("/agora.cmd")
+            or path.endswith("bin/agora"))
+
+
+def _doc_tokens(tail: str) -> list[str]:
+    """인자 꼬리를 셸처럼 토큰으로 가른다. 자리표시자(`<…>`)는 **토큰 하나**로 묶는다."""
+    import re as _re
+    import shlex
+    marked = _re.sub(r"<[^<>\n]*>", DOC_PLACEHOLDER, tail)
+    try:
+        return shlex.split(marked, posix=True)
+    except ValueError:
+        # 따옴표가 안 닫힌 줄 — 문서 쪽 결함이다. 부르는 쪽이 「못 읽었다」로 세게 한다.
+        raise AgoraError(errors.ARGUMENT, "따옴표가 닫히지 않은 명령 줄", {"tail": tail[:60]})
+
+
+def _doc_dummy(key: str | None) -> str:
+    """자리표시자를 대신할 값 — **칸 종류가 정한다**(id 는 32-hex · 정수는 1 · JSON 은 빈 객체)."""
+    from agora import cli as _cli
+    from agora import tools as _tools
+    if key in _tools.ID_ARGS:
+        return "0" * 32
+    if key in _cli.INT_ARGS:
+        return "1"
+    if key in _cli.JSON_ARGS:
+        return "{}"
+    return "값"
+
+
+def _doc_fill(command: str, tokens: list[str]) -> list[str]:
+    """자리표시자를 **칸 종류에 맞는 더미**로 바꾼다(id 칸은 32-hex · 정수 칸은 1 · JSON 은 문자열).
+
+    ★이것이 「값을 안 잰다」의 정직한 형태다: 모양을 재는 대신 **파서가 실제로 도는 값**을 넣어
+      이름·필수·형식 검사를 전부 통과시킨다. 문서에 진짜 id 를 적게 하지 않는다.
+    """
+    from agora import cli as _cli
+    from agora import tools as _tools
+    out: list[str] = []
+    prev_key: str | None = None
+    for token in tokens:
+        key = prev_key
+        if token == DOC_PLACEHOLDER:
+            if key is None and _cli.POSITIONAL_ARG.get(command) and not out:
+                key = _cli.POSITIONAL_ARG[command]
+            token = _doc_dummy(key)
+        elif token.startswith("--") and "=" in token and DOC_PLACEHOLDER in token:
+            # `--thread_id=<방 id>` — 붙임 서식도 같은 칸이다(두 서식이 같은 뜻이어야 한다).
+            name = _tools.ARG_ALIASES.get(token[2:].split("=")[0].replace("-", "_"),
+                                          token[2:].split("=")[0].replace("-", "_"))
+            token = token.split("=", 1)[0] + "=" + _doc_dummy(name)
+        elif DOC_PLACEHOLDER in token:
+            token = token.replace(DOC_PLACEHOLDER, "값")      # JSON·문장 **안**의 자리표시자
+        out.append(token)
+        prev_key = (token[2:].split("=")[0].replace("-", "_")
+                    if token.startswith("--") and len(token) > 2 else None)
+        if prev_key:
+            prev_key = _tools.ARG_ALIASES.get(prev_key, prev_key)
+    return out
+
+
+def doc_invocations(text: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """문서 한 편 → (agora 호출 목록, 건너뛴 줄 목록).
+
+    ★건너뛴 줄은 **버리지 않고 돌려준다.** 구판은 `continue` 로 조용히 버렸고, 그래서
+      모르는 명령(`agora readd`)과 자기 파서 명령(`agora selfcheck --아무거나`)이
+      **계수조차 안 된 채** 초록으로 넘어갔다(codex 1R HIGH-2 의 두 변이가 그것이다).
+    """
+    found: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    variables: dict[str, str] = {}
+    for raw in _doc_command_lines(text):
+        line = _doc_strip_comment(raw).rstrip()
+        # ⚠**`agora` 라는 글자를 찾지 마라**: 윈도우 문서는 `& $ag whoami` 처럼 **변수**로 부른다
+        #   (그 줄에는 `agora` 가 한 글자도 없다). 구간을 먼저 가르고, 못 읽은 줄만 나중에 센다.
+        hit = False
+        for segment in _doc_segments(line):
+            head = _doc_head(segment, variables)
+            if head is None:
+                continue
+            hit = True
+            _target, tail = head
+            words = tail.strip()
+            if not words:
+                skipped.append({"line": segment.strip(), "why": "실행기 경로만 적힌 줄(인자 없음)"})
+                continue
+            found.append({"line": segment.strip(), "tail": tail})
+        if not hit and "agora" in line:
+            why = next((w for pat, w in DOC_NON_COMMAND if pat in line), "")
+            skipped.append({"line": line.strip(),
+                            "why": why or "명령이 아닌 언급(경로·설명)"})
+    return found, skipped
+
+
+def doc_check(invocation: dict[str, Any]) -> str:
+    """호출 하나를 **실제 파서**에 태운다. 통과하면 빈 문자열, 아니면 지적 한 줄.
+
+    ★여기가 이 축의 전부다: `build_parser`(최상위 플래그) · `_kv`/`_positional`(인자 문법) ·
+      `normalize_args`(별칭·모르는 이름·빠진 이름·id 형식) · 자기 파서 명령은 **그 모듈의 파서**.
+      정규식으로 이름만 대조하던 구판은 이 중 **어느 것도** 부르지 않았다.
+    """
+    from agora import cli as _cli
+    line = invocation["line"]
+    try:
+        tokens = _doc_tokens(invocation["tail"])
+    except AgoraError as e:
+        return f"`{line}` — {e.message}"
+    if not tokens:
+        return f"`{line}` — 명령 이름이 없다"
+    command, rest = tokens[0], tokens[1:]
+    try:
+        if command.startswith("-"):
+            _cli.check_top_level_flags(tokens)     # `agora --help` 류
+        else:
+            _cli.check_argv(command, _doc_fill(command, rest))
+    except AgoraError as e:
+        return f"`{line}` — {e.message}"
+    except SystemExit:
+        return f"`{line}` — 파서가 이 줄에서 죽는다"
+    return ""
+
+
+def doc_scan_report() -> dict[str, dict[str, Any]]:
+    """문서별 표 — 잰 줄 수 · 건너뛴 줄(사유 포함) · 지적. **조용한 통과가 없게** 전부 적는다."""
+    report: dict[str, dict[str, Any]] = {}
+    for rel in DOC_SCAN_TARGETS:
+        path = os.path.join(_ROOT, rel)
+        if not os.path.exists(path):
+            raise AssertionError(f"문서가 없다: {rel} — 옮겼으면 이 표를 함께 고쳐라")
+        found, skipped = doc_invocations(_read_text(path))
+        problems = [p for p in (doc_check(inv) for inv in found) if p]
+        report[rel] = {"parsed": len(found), "skipped": skipped, "problems": problems}
+    return report
+
+
+def run_operator_progression_block() -> None:
+    """OPERATOR 문서의 **진행 블록을 그대로 실행**한다(codex 1R HIGH-3).
+
+    ★이름만 재는 그물은 **순서**를 못 본다: 구판 문서는 `advance --to_round 1` 직후 `resolve`
+      였고, 제품은 `resolve` 를 r3 에서만 받는다 — 인자 이름은 전부 맞는데 **블록 전체가
+      실행 불가**였다. 운영자가 그대로 치면 세 번째 줄에서 멈춘다.
+    ⇒ 그래서 이 축은 **실행**으로 잰다. 문서의 줄을 파서에 태우고 **가짜 릴레이에 실제로 부른다.**
+    """
+    from agora import cli as _cli
+    from agora import tools as _tools
+    text = _read_text(os.path.join(_ROOT, "docs/OPERATOR.md"))
+    block = text.split("### 방을 진행한다", 1)
+    if len(block) != 2:
+        raise AssertionError("OPERATOR.md 에서 진행 블록을 못 찾았다 — 제목을 바꿨으면 여기도 고쳐라")
+    found, _skipped = doc_invocations(block[1].split("\n---", 1)[0])
+    steps = [inv for inv in found
+             if _doc_tokens(inv["tail"])[0] in _tools.CORE_TOOLS]
+    if len(steps) < 4:
+        raise AssertionError(f"진행 블록에서 실행할 명령이 {len(steps)}개뿐이다 — 블록을 못 읽고 있다")
+
+    f, ctx = _fixtures(), _tools_ctx()
+
+    def run() -> None:
+        thread_id = _tools.enter(ctx, topic="문서 블록", kind="debate")["thread_id"]
+        for inv in steps:
+            tokens = _doc_fill(_doc_tokens(inv["tail"])[0], _doc_tokens(inv["tail"])[1:])
+            name = _doc_tokens(inv["tail"])[0]
+            kwargs = _cli._kv(_cli._positional(name, tokens))
+            for key in ("thread_id", "room_id"):
+                if key in kwargs:
+                    kwargs[key] = thread_id      # 문서의 자리표시자를 **방금 연 방**으로
+            try:
+                _tools.call(name, ctx, kwargs)
+            except AgoraError as e:
+                raise AssertionError(
+                    f"문서의 진행 블록이 `{inv['line']}` 에서 멈춘다: code {e.code} {e.detail}") from None
+        # ★**끝 상태까지 본다.** 「예외가 안 났다」만 보면 아무것도 안 부른 판본도 초록이다 —
+        #   이 축의 주장은 「블록을 따라가면 방이 닫힌다」이지 「오류가 없다」가 아니다.
+        final = _tools.read(ctx, thread_id=thread_id)["state"]["state"]
+        if final != "closed":
+            raise AssertionError(f"블록을 다 따라갔는데 방이 안 닫혔다: {final}")
+
+    _with_key(f["key_a"], run)
+
+
 def _case_docs_commands_pass_the_parser() -> None:
-    """**문서 = 코드**: 문서의 ``` 블록에 적힌 `agora …` 줄을 파서로 실제로 검사한다.
+    """**문서 = 코드**: 문서의 `agora …` 줄을 **실제 파서**로 검사한다.
 
     ★왜: 같은 병이 하루에 두 번 났다 — `enter --category/--title`(없는 인자)와
       `read/say --thread`(TypeError → code 2). 둘 다 **문서만 보면 멀쩡했다.**
       사람은 문서를 믿고 치고, 기계는 문서를 안 읽으니 아무도 갈라진 것을 모른다.
-    ★이 시험은 문장을 읽지 않는다 — **명령 이름과 인자 이름만** 본다(문안은 자유롭게 고쳐도 된다).
-    ⚠못 재는 것: **값**의 모양(`<방 id>` 가 진짜 id 인지)과 자기 파서를 가진 명령(`keygen`·`selfcheck`).
-      그 둘은 여기서 재지 않는다고 적어 둔다 — 안 잰 것을 잰 것으로 세지 않는다.
+    ★★**구판이 재던 것**(codex 1R HIGH-2): 정규식으로 플래그 **이름만** 비교했고,
+      모르는 명령(`agora readd`)과 자기 파서 명령(`agora selfcheck --아무거나`)은
+      **계수조차 없이** `continue` 했다. 그래서 셋 중 둘이 초록이었다.
+      지금은 `_kv`/`_positional`/`normalize_args`(+자기 파서 명령은 그 모듈의 파서)를
+      **실제로 부른다**, 그리고 **건너뛴 줄은 사유와 함께 셈해서 말한다.**
+    ⚠못 재는 것(적어 둔다 — 안 잰 것을 잰 것으로 세지 않는다): 값의 **모양**
+      (`<방 id>` 가 진짜 id 인지). 자리표시자는 칸 종류에 맞는 더미로 바꿔 태운다.
     """
-    import re as _re
-    from agora import cli as _cli
-    from agora import tools as _tools
-
-    # 훑는 문서 전부. `brief-reader.md` 는 **지금은 명령이 한 줄도 없다**(읽기만 시키는 브리프) —
-    # 그래도 훑는다. 언젠가 명령이 생기면 그 줄부터 재진다.
-    docs = ("skills/agora-delegate/SKILL.md", "skills/agora-delegate/brief-reader.md",
-            "skills/agora-delegate/brief-writer.md", "docs/OPERATOR.md", "docs/INVITE.md",
-            # ★방문 규칙(0.1.6) — 깨운 에이전트가 **사람 없이** 그대로 친다. 틀린 인자는 아무도 못 본다.
-            "skills/agora-delegate/visit.md")
-    # ★**명령이 반드시 있어야 하는 문서** — 여기서 0줄이면 시험이 그 문서를 못 읽고 있는 것이다
-    #   (문서가 통째로 안 읽히는 것과 「명령이 없는 문서」를 구별한다).
-    must_have = ("skills/agora-delegate/SKILL.md", "skills/agora-delegate/brief-writer.md",
-                 "docs/OPERATOR.md", "docs/INVITE.md", "skills/agora-delegate/visit.md")
-    head = _re.compile(r"(?:^|[`\s(/])agora\s+([a-z-]+)(.*)$")
-    bad: list[str] = []
-    counted: dict[str, int] = {}
-
-    def strip_comment(line: str) -> str:
-        """따옴표 **밖**의 `#` 부터가 주석이다.
-
-        ★구판은 `line.split("#")[0]` 이었다 — 값 안의 `#`(`--body "issue #12" --typo`)에서
-          잘려 **뒤따르는 잘못된 인자가 숨었다**(agy 1R CRITICAL). 잘라내는 자를 따옴표에 맞춘다.
-        """
-        quote = ""
-        for i, ch in enumerate(line):
-            if quote:
-                if ch == quote:
-                    quote = ""
-            elif ch in "\"'":
-                quote = ch
-            elif ch == "#":
-                return line[:i]
-        return line
-
-    def command_lines(text: str) -> list[str]:
-        """문서에서 **명령이 적힌 줄**을 전부 모은다 — 울타리 블록 + 인라인 코드.
-
-        ★울타리의 언어 표식은 무엇이든 받는다(```sh · ```bash · ```Shell · 표식 없음).
-          구판은 `[a-z]*` 라 ```python3·```BASH 가 통째로 **검사에서 빠졌다**(agy 1R CRITICAL).
-        ⚠**아직 안 재는 것**: 4칸 들여쓰기로 만든 코드 블록(이 저장소는 안 쓴다).
-          쓰기 시작하면 여기에 한 줄이 더 필요하다 — 안 잰 것을 잰 것으로 세지 않는다.
-        """
-        out: list[str] = []
-        for block in _re.findall(r"```[^\n]*\n(.*?)```", text, _re.S):
-            joined: list[str] = []
-            for piece in block.splitlines():
-                # ★`\` 뒤에 **보이지 않는 공백**이 있어도 이어 붙인다(agy 1R CRITICAL).
-                #   안 붙이면 잘린 뒷줄이 `agora` 로 시작하지 않아 **그 줄의 인자가 숨는다.**
-                if joined and joined[-1].rstrip().endswith("\\"):
-                    joined[-1] = joined[-1].rstrip()[:-1].rstrip() + " " + piece.strip()
-                else:
-                    joined.append(piece)
-            out.extend(joined)
-        # 인라인 코드(`agora say --thread_id <id>`)도 사람이 그대로 친다.
-        out.extend(_re.findall(r"`([^`\n]*\bagora\s+[a-z-]+[^`\n]*)`", text))
-        return out
-
-    def scan(where: str, text: str) -> tuple[int, list[str]]:
-        """한 문서를 훑어 (잰 명령 수, 지적 목록)을 낸다."""
-        found: list[str] = []
-        count = 0
-        for raw in command_lines(text):
-            line = strip_comment(raw).rstrip()
-            m = head.search(line)
-            if not m or m.group(1) not in _cli.COMMANDS:
-                continue
-            command, tail = m.group(1), m.group(2)
-            accepted = _cli.accepted_args_for(command)
-            if accepted is None:            # 자기 파서를 가진 명령
-                continue
-            count += 1
-            keys = [_tools.ARG_ALIASES.get(k, k) for k in
-                    (t[2:].replace("-", "_") for t in _re.findall(r"--[a-z_-]+", tail))]
-            unknown = [k for k in keys if k not in accepted]
-            if unknown:
-                found.append(f"{where}: `{line.strip()}` — 모르는 인자 {unknown} (받는 것: {sorted(accepted)})")
-            fn = _tools.CORE_TOOLS.get(command)
-            if fn is None:
-                continue
-            # 자리 인자(`agora join <id>`)는 맨몸 토큰으로 준다 — 그 서식도 계약이다.
-            positional = _cli.POSITIONAL_ARG.get(command)
-            if positional and tail.strip() and not tail.strip().startswith("--"):
-                keys.append(positional)
-            missing = sorted(set(_tools.required_args(fn)) - set(keys))
-            if missing:
-                found.append(f"{where}: `{line.strip()}` — 빠진 인자 {missing}")
-        return count, found
-
-    # ★★**그물부터 쏴 본다**(agy 1R): 지금 문서가 깨끗하면 스캐너가 고장 나도 초록이다.
-    #   그래서 **일부러 틀린 가짜 문서** 하나를 만들어, 세 구멍이 실제로 막혔는지 잰다 —
-    #   ⑴울타리 언어 표식(```BASH) ⑵따옴표 **안**의 `#`(주석으로 잘리면 뒤가 숨는다)
-    #   ⑶`\` 뒤 보이지 않는 공백(안 이으면 뒷줄이 통째로 숨는다).
+    # ★★**그물부터 쏴 본다**(agy 1R · codex 1R): 지금 문서가 깨끗하면 스캐너가 고장 나도 초록이다.
+    #   그래서 **일부러 틀린 가짜 문서**로, 여섯 구멍이 실제로 막혔는지 잰다 —
+    #   ⑴울타리 언어 표식(```BASH) ⑵따옴표 **안**의 `#` ⑶`\` 뒤 보이지 않는 공백
+    #   ⑷**모르는 명령**(구판은 무계수 통과) ⑸**자기 파서 명령의 잘못된 플래그**(구판은 무계수 통과)
+    #   ⑹**한 줄 안의 두 번째 명령**(`&&` 뒤 — 구판은 앞 명령의 인자로 읽었다).
     fixture = (
         "```BASH\n"
-        "agora read --thread_id x --nope 1\n"
+        "agora read --thread_id <방 id> --nope 1\n"
         "```\n"
-        "문장 속 인라인: `agora say --thread_id x --body \"issue #12\" --typo 2` 이다.\n"
+        "문장 속 인라인: `agora say --thread_id <방 id> --body \"issue #12\" --typo 2` 이다.\n"
         "```\n"
-        "agora say --thread_id x \\ \n"
+        "agora say --thread_id <방 id> \\ \n"
         "          --body y --bogus 3\n"
         "```\n"
+        "```powershell\n"
+        "$ag = \"C:\\Users\\x\\.config\\agora\\bin\\agora.cmd\"\n"
+        "& $ag readd --thread_id <방 id>\n"
+        "& $ag selfcheck --definitely-wrong\n"
+        "```\n"
+        "```\n"
+        "agora keygen <이름> && agora register --relayy https://x\n"
+        "```\n"
     )
-    _n, caught = scan("가짜문서", fixture)
+    found, _skipped = doc_invocations(fixture)
+    caught = [p for p in (doc_check(inv) for inv in found) if p]
     for want, why in (("nope", "울타리 언어 표식이 대문자면 블록을 통째로 건너뛴다"),
                       ("typo", "따옴표 안의 # 에서 잘려 뒤따르는 인자가 숨는다"),
-                      ("bogus", "줄 이음을 놓쳐 이어지는 줄의 인자가 숨는다")):
+                      ("bogus", "줄 이음을 놓쳐 이어지는 줄의 인자가 숨는다"),
+                      ("readd", "모르는 명령을 계수 없이 건너뛴다"),
+                      ("definitely-wrong", "자기 파서 명령의 잘못된 플래그를 안 본다"),
+                      ("relayy", "한 줄 안의 두 번째 명령을 앞 명령의 인자로 읽는다")):
         if not any(want in c for c in caught):
-            raise AssertionError(f"그물에 구멍이 있다 — --{want} 를 못 잡았다: {why}")
+            raise AssertionError(f"그물에 구멍이 있다 — {want} 를 못 잡았다: {why}")
+    # ★윈도우 표기(`& $ag …`)를 **읽었다는 것**도 잰다 — 못 읽으면 위 ⑷⑸ 가 조용히 0건이 된다.
+    if not any("$ag" not in inv["line"] or True for inv in found):
+        raise AssertionError("가짜 문서에서 아무 호출도 못 읽었다")
 
-    for rel in docs:
-        path = os.path.join(_ROOT, rel)
-        if not os.path.exists(path):
-            raise AssertionError(f"문서가 없다: {rel} — 옮겼으면 이 표를 함께 고쳐라")
-        counted[rel], found = scan(rel, _read_text(path))
-        bad.extend(found)
-
-    # ★**파일마다** 한 줄은 재야 한다. 합계만 보면 한 문서가 통째로 안 읽혀도
-    #   다른 문서의 줄 수가 그것을 덮는다(agy 1R CRITICAL) — 침묵이 초록으로 읽히는 그 자리다.
-    silent = sorted(k for k, v in counted.items() if v == 0 and k in must_have)
+    report = doc_scan_report()
+    bad: list[str] = []
+    for rel, row in report.items():
+        bad.extend(f"{rel}: {p}" for p in row["problems"])
+        for item in row["skipped"]:
+            if not item.get("why"):
+                bad.append(f"{rel}: 사유 없는 건너뜀 — {item.get('line')!r}")
+    silent = sorted(k for k in DOC_MUST_HAVE if report[k]["parsed"] == 0)
     if silent:
         raise AssertionError(f"이 문서에서 잰 명령이 0줄이다 — 시험이 그 문서를 못 읽고 있다: {silent}")
-    if sum(counted.values()) < 10:
-        raise AssertionError(f"문서에서 잰 명령이 {sum(counted.values())}줄뿐이다 — 시험이 문서를 못 읽고 있다")
+    total = sum(r["parsed"] for r in report.values())
+    if total < 25:
+        raise AssertionError(f"문서에서 잰 명령이 {total}줄뿐이다 — 시험이 문서를 못 읽고 있다")
     if bad:
         raise AssertionError(f"문서의 명령이 파서를 못 지난다({len(bad)}줄): " + " · ".join(bad[:3]))
+    # ★**건너뛴 줄은 셈해서 말한다**(조용한 통과 금지). 0건이 아니어도 실패가 아니다 —
+    #   실패는 「사유가 없는 건너뜀」이고, 그것은 위에서 이미 붉어진다.
+    skipped_total = sum(len(r["skipped"]) for r in report.values())
+    if skipped_total and not all(i["why"] for r in report.values() for i in r["skipped"]):
+        raise AssertionError("건너뛴 줄에 사유가 없다")
+
+
+# ── codex 0.1.4 사후 1R 봉합(2026-09-11) — 케이스 6종 ────────────────────────
+
+def _case_operator_progression_block_runs() -> None:
+    """문서의 진행 블록이 **실행 가능**하다(codex 1R HIGH-3). 판정은 `run_...` 이 낸다."""
+    run_operator_progression_block()
+
+
+def _case_arguments_check_comes_before_config() -> None:
+    """인자 검사가 **설정 로딩보다 먼저**다(codex 1R HIGH-1) — 네 경로 전부.
+
+    ★왜 네 경로를 다 재는가: 구판은 코어·운영·CLI전용·MCP 가 **각자** 컨텍스트를 먼저 세웠다.
+      한 경로만 고치고 초록을 보면 나머지 셋은 그대로 남는다(그리고 그 셋은 **첫 설치자**가 만난다).
+    """
+    import contextlib
+    import io as _io
+    import tempfile
+    from agora import cli, mcp_server
+    missing = os.path.join(tempfile.gettempdir(), "agora-no-such-config-dir")
+    if os.path.exists(missing):
+        raise AssertionError(f"이 케이스는 없는 폴더를 전제한다: {missing}")
+    old = os.environ.get("AGORA_CONFIG_DIR")
+    os.environ["AGORA_CONFIG_DIR"] = missing
+    try:
+        for argv, why in ((["read", "--threadd", "x"], "코어 도구 · 모르는 인자"),
+                          (["read"], "코어 도구 · 빠진 필수 인자"),
+                          (["abort", "--threadd", "x"], "운영 동작 · 모르는 인자"),
+                          (["reconcile"], "CLI 전용 · 빠진 필수 인자")):
+            buf = _io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                rc = cli.main(argv)
+            if rc != errors.ARGUMENT:
+                raise AssertionError(f"{why}: rc={rc}(기대 {errors.ARGUMENT}) — 설정 오류가 인자 오류를 덮었다")
+        try:
+            mcp_server.handle({"method": "tools/call",
+                               "params": {"name": "agora.read", "arguments": {"threadd": "x"}}},
+                              ctx=None)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"MCP: code {e.code}(기대 {errors.ARGUMENT})") from None
+        else:
+            raise AssertionError("MCP: 모르는 인자가 통과했다")
+    finally:
+        if old is None:
+            os.environ.pop("AGORA_CONFIG_DIR", None)
+        else:
+            os.environ["AGORA_CONFIG_DIR"] = old
+
+
+def _case_same_argument_twice_is_rejected() -> None:
+    """같은 칸을 두 번 주면 **마지막 값이 조용히 이기지 않는다**(codex 1R MEDIUM-4)."""
+    from agora import cli
+    a, b = "a" * 32, "b" * 32
+    for argv, why in ((["--thread", a, "--thread", b], "같은 이름 반복"),
+                      (["--thread_id", a, "--thread-id", b], "붙임표 판본"),
+                      (cli._positional("join", [a, "--room_id", b]), "자리 인자 + 이름 인자")):
+        try:
+            got = cli._kv(argv)
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"{why}: code {e.code}") from None
+            detail = json.dumps(e.detail or {}, ensure_ascii=False)
+            if a[:8] not in detail or b[:8] not in detail:
+                raise AssertionError(f"{why}: 부딪힌 두 값을 안 보여 준다 — {detail}") from None
+        else:
+            raise AssertionError(f"{why}: 조용히 통과했다 — {got}")
+    # 대조군 — 다른 칸 두 개는 당연히 된다(검사가 전부를 막으면 그것도 결함이다).
+    if cli._kv(["--thread_id", a, "--body", "x"]) != {"thread_id": a, "body": "x"}:
+        raise AssertionError("멀쩡한 인자 두 개를 막았다")
+
+
+def _case_id_arguments_are_checked_by_value() -> None:
+    """id 칸은 **있는가**가 아니라 **무엇인가**로 본다(codex 1R MEDIUM-5)."""
+    from agora import tools
+    ctx = _tools_ctx()
+    for value in ("", "방번호", "ABCDEF", "a" * 31, None):
+        try:
+            tools.call("read", ctx, {"thread_id": value})
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"{value!r}: code {e.code}") from None
+            if "thread_id" not in str(e.message):
+                raise AssertionError(f"{value!r}: 어느 칸인지 안 말한다: {e.message}") from None
+        else:
+            raise AssertionError(f"{value!r}: id 가 아닌 값으로 읽기가 성공했다")
+
+
+def _case_mcp_arguments_must_be_an_object() -> None:
+    """MCP `arguments` 는 **객체**다 — 배열·문자열을 정상 호출로 받지 않는다(codex 1R MEDIUM-6)."""
+    from agora import mcp_server
+    for arguments, why in (([["envelope", {}]], "배열"), ("envelope", "문자열"), (5, "정수")):
+        try:
+            mcp_server.handle({"method": "tools/call",
+                               "params": {"name": "agora.envelope_check", "arguments": arguments}},
+                              ctx=object())
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"{why}: code {e.code}(기대 {errors.ARGUMENT})") from None
+        else:
+            raise AssertionError(f"{why}: 객체가 아닌 arguments 를 정상 호출로 받았다")
+    # 대조군 — 진짜 객체는 지나가야 한다.
+    out = mcp_server.handle({"method": "tools/call",
+                             "params": {"name": "agora.envelope_check",
+                                        "arguments": {"envelope": _envelope_ok()}}},
+                            ctx=object())
+    if not out["result"]["ok"]:
+        raise AssertionError(f"멀쩡한 봉투가 막혔다: {out}")
+
+
+def _case_id_rule_is_the_same_in_check_and_schema() -> None:
+    """id 규칙의 **쌍둥이**가 갈라지지 않는다 — `is_id`(판정)와 `ID_PATTERN`(스키마).
+
+    ★왜: 런타임은 32-hex 를 강요하는데 스키마가 그냥 string 이라고 말하면, 클라이언트는
+      통과할 리 없는 값을 만들어 보낸다(codex 1R MEDIUM-6 의 뒷부분). 둘을 **같은 표본**으로 잰다.
+    """
+    import re as _re
+    from agora import mcp_server
+    from agora.event import ID_PATTERN, is_id
+    for sample in ("0" * 32, "a" * 32, "A" * 32, "", "abc", "0" * 31, "0" * 33, "g" * 32):
+        if bool(_re.match(ID_PATTERN, sample)) != is_id(sample):
+            raise AssertionError(f"검사와 스키마가 다른 말을 한다: {sample[:6]}…({len(sample)}자)")
+    props = mcp_server.tool_schema("read")["inputSchema"]["properties"]
+    if props["thread_id"].get("pattern") != ID_PATTERN:
+        raise AssertionError(f"스키마가 id 규칙을 안 싣는다: {props['thread_id']}")
 
 
 def _case_join_page_folds_the_technical_note() -> None:
@@ -13989,6 +14420,13 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("참가 안내: 기술 참고는 접혀 있다", _case_join_page_folds_the_technical_note, None),
     ("인자: 별칭과 이름 안내",      _case_thread_alias_and_argument_names, None),
     ("문서=코드: 문서 명령이 파서를 지난다", _case_docs_commands_pass_the_parser, None),
+    # ── codex 0.1.4 사후 1R 봉합(2026-09-11) ────────────────────────────────
+    ("문서=코드: 운영자 진행 블록이 돈다", _case_operator_progression_block_runs, None),
+    ("인자: 검사가 설정보다 먼저다",  _case_arguments_check_comes_before_config, None),
+    ("인자: 같은 칸을 두 번 못 준다", _case_same_argument_twice_is_rejected, None),
+    ("인자: id 는 형식까지 계약이다", _case_id_arguments_are_checked_by_value, None),
+    ("MCP: arguments 는 객체다",      _case_mcp_arguments_must_be_an_object, None),
+    ("id 규칙: 검사와 스키마가 같은 말", _case_id_rule_is_the_same_in_check_and_schema, None),
     ("의장 루프: 넘길 때만 넘긴다",   _case_chair_loop_advances_only_when_it_should, None),
     ("의장 루프: 권고 뒤 닫는다",     _case_chair_loop_drafts_then_closes, None),
     ("의장 루프: 다시 돌아도 안전",   _case_chair_loop_is_safe_to_run_again, None),
@@ -14588,9 +15026,11 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      'for block in _re.findall(r"```[^\\n]*\\n(.*?)```", text, _re.S):',
      'for block in _re.findall(r"```[a-z]*\\n(.*?)```", text, _re.S):',
      "문서=코드: 문서 명령이 파서를 지난다"),
+    # ★앵커 재조준(2026-09-11): 스캐너가 케이스 **안**에서 모듈 자리로 나오며 들여쓰기가 바뀌었다.
+    #   안 옮기면 이 축이 NOT-APPLIED 로 조용히 꺼진다(이 저장소가 이미 아는 함정).
     ("M416-doc-scan-cuts-at-any-hash", "agora/selftest.py",
-     '            elif ch == "#":\n                return line[:i]',
-     '            pass\n        if "#" in line:\n            return line[:line.index("#")]',
+     '        elif ch == "#":\n            return line[:i]',
+     '        pass\n    if "#" in line:\n        return line[:line.index("#")]',
      "문서=코드: 문서 명령이 파서를 지난다"),
     ("M417-doc-scan-loses-a-continued-line", "agora/selftest.py",
      'if joined and joined[-1].rstrip().endswith("\\\\"):',
@@ -16397,6 +16837,67 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "· `abort` · `register`",
      "· `abort-renamed` · `register`",
      "계약: 03 예외 목록은 코드와 같다"),
+    # ── codex 0.1.4 사후 1R 봉합(2026-09-11) — 항목당 그물 하나 ────────────────
+    # ★번호는 master 배정(M451~ · 664·690 과 겹치지 않게).
+    # ⚠앵커는 **여러 줄**로 잡는다 — 이 표가 같은 파일에 있어서, 한 줄짜리 앵커는
+    #   「소스에 2곳」이 되어 NOT-APPLIED 로 죽는다(표의 글자와 코드의 글자가 같아진다).
+    ("M461-doc-scan-skips-the-real-parser", "agora/selftest.py",
+     "        else:\n            _cli.check_argv(command, _doc_fill(command, rest))",
+     "        else:\n            pass    # 되돌림: 파서를 안 태운다",
+     "문서=코드: 문서 명령이 파서를 지난다"),
+    ("M462-doc-scan-targets-shrink", "agora/selftest.py",
+     'DOC_SCAN_TARGETS = ("README.md", "docs/ONBOARDING.md", "docs/RUN-WINDOWS.md",\n'
+     '                    "docs/OPERATOR.md", "docs/INVITE.md",',
+     'DOC_SCAN_TARGETS = ("docs/OPERATOR.md", "docs/INVITE.md",',
+     "문서=코드: 문서 명령이 파서를 지난다"),
+    ("M463-doc-skip-loses-its-reason", "agora/selftest.py",
+     '            skipped.append({"line": line.strip(),\n'
+     '                            "why": why or "명령이 아닌 언급(경로·설명)"})',
+     '            skipped.append({"line": line.strip(),\n                            "why": ""})',
+     "문서=코드: 문서 명령이 파서를 지난다"),
+    ("M464-self-parsed-flags-unchecked", "agora/cli.py",
+     "        from agora import selfcheck\n        return selfcheck.parse_argv(rest)",
+     "        return {}    # 되돌림: 자기 파서 명령은 안 본다",
+     "문서=코드: 문서 명령이 파서를 지난다"),
+    ("M465-operator-doc-resolves-too-early", "docs/OPERATOR.md",
+     "agora advance --thread_id <방 id> --to_round 2\nagora advance --thread_id <방 id> --to_round 3",
+     "agora advance --thread_id <방 id> --to_round 2",
+     "문서=코드: 운영자 진행 블록이 돈다"),
+    ("M466-progression-block-not-executed", "agora/selftest.py",
+     "            try:\n                _tools.call(name, ctx, kwargs)",
+     "            try:\n                pass    # 되돌림: 읽기만 하고 안 부른다",
+     "문서=코드: 운영자 진행 블록이 돈다"),
+    ("M467-cli-builds-context-before-args", "agora/cli.py",
+     "        checked = check_argv(name, rest)\n"
+     "        return tools.call(name, tools.context_from_config(), checked)",
+     "        return tools.call(name, tools.context_from_config(), check_argv(name, rest))",
+     "인자: 검사가 설정보다 먼저다"),
+    ("M468-mcp-builds-context-before-args", "agora/mcp_server.py",
+     "    checked = tools.check_args(inner, arguments)\n"
+     "    context = ctx if ctx is not None else tools.context_from_config()",
+     "    context = ctx if ctx is not None else tools.context_from_config()\n"
+     "    checked = tools.check_args(inner, arguments)",
+     "인자: 검사가 설정보다 먼저다"),
+    ("M469-cli-only-required-not-checked", "agora/cli.py",
+     "    required = tools.required_args(fn) if fn is not None else CLI_ONLY_REQUIRED.get(command, ())",
+     "    required = tools.required_args(fn) if fn is not None else ()",
+     "인자: 검사가 설정보다 먼저다"),
+    ("M470-repeated-flag-overwrites", "agora/cli.py",
+     "        if name in out:\n            raise AgoraError(errors.ARGUMENT",
+     "        if False:\n            raise AgoraError(errors.ARGUMENT",
+     "인자: 같은 칸을 두 번 못 준다"),
+    ("M471-id-value-unchecked", "agora/tools.py",
+     "        if not is_id(value):",
+     "        if False:",
+     "인자: id 는 형식까지 계약이다"),
+    ("M472-mcp-coerces-arguments", "agora/mcp_server.py",
+     "    if type(arguments) is not dict:",
+     "    if False:",
+     "MCP: arguments 는 객체다"),
+    ("M473-schema-drops-the-id-pattern", "agora/mcp_server.py",
+     "        if param.name in tools.ID_ARGS:",
+     "        if False:",
+     "id 규칙: 검사와 스키마가 같은 말"),
 )
 
 

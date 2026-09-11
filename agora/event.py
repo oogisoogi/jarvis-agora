@@ -38,6 +38,13 @@ def is_id(value: Any) -> bool:
     )
 
 
+# 같은 규칙의 **정규식 쌍둥이** — MCP 스키마처럼 「밖에 내보낼 수 있는 형태」가 필요한 자리용.
+# ★판정의 정본은 위 `is_id` 다. 이것은 그 규칙을 남에게 **말하기 위한** 문자열이고,
+#   둘이 갈라지면 스키마와 런타임이 다른 말을 한다(codex 1R MEDIUM-6 이 바로 그 자리다).
+#   ⇒ 시험이 둘을 같은 표본으로 대조한다(「id 규칙: 검사와 스키마가 같은 말을 한다」).
+ID_PATTERN = f"^[0-9a-f]{{{ID_HEX_LEN}}}$"
+
+
 def _nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 

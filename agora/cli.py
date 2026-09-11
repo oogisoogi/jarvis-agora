@@ -179,9 +179,7 @@ def _run_onboard(name: str, rest: list[str]) -> Any:
     # ★맨 앞의 맨몸 토큰을 **동작 이름**으로 읽는 것은 `checkpoint` 에서만이다
     #   (`agora checkpoint issue`). 다른 명령에서 그런 토큰이 오면 예전처럼 `_kv` 가 code 10 을
     #   낸다 — 규칙을 넓히면 `agora whoami 오타` 가 조용히 통과한다.
-    action = ""
-    if name == "checkpoint" and rest and not rest[0].startswith("--") and "=" not in rest[0]:
-        action, rest = rest[0], rest[1:]
+    action, rest = split_action(name, rest)
     # ★모르는 이름을 **여기서** 거절한다. 아래는 전부 `kw.get(...)` 이라, 안 거절하면
     #   `--relayy` 가 조용히 무시되고 「--relay 가 필요하다」만 뜬다 — 사람은 자기가 준 줄을 본다.
     kw = tools.normalize_args(name, accepted_args_for(name) or (), _kv(rest))
@@ -216,12 +214,12 @@ def _run_operator(name: str, rest: list[str]) -> Any:
       MCP 표면에 올라간다 — 대리인 세션 손에 「의장을 갈아치워라」가 쥐어진다.
     """
     from agora import tools
-    kw = _kv(rest)
-    ctx = tools.context_from_config(kw.pop("dir", None))
     # ★구판은 `kw["thread_id"]` 로 **바로 꺼냈다** — 이름이 하나만 달라도 KeyError 가 나고,
     #   최후 방어가 그것을 「예상하지 못한 내부 오류」(code 2)로 덮었다. 인자 문제는 인자 오류로.
     fn = tools.delegate_chair if name == "delegate-chair" else tools.abort
-    kw = tools.normalize_args(name, accepted_args_for(name) or (), kw, tools.required_args(fn))
+    # ★**정규화가 컨텍스트보다 먼저다**(codex 1R HIGH-1) — 설정이 없어도 인자 오류는 code 10.
+    kw = check_argv(name, rest)
+    ctx = tools.context_from_config(kw.pop("dir", None))
     return fn(ctx, **kw)
 
 
@@ -242,8 +240,107 @@ CLI_ONLY_ARGS: dict[str, tuple[str, ...]] = {
     "resident":     ("interval_min", "dry_run", "print_agenda", "dir"),
 }
 
-# 자기 파서를 갖거나 인자를 안 받는 명령 — 위 표로 재지 않는다(재면 거짓 적색이 난다).
+# CLI 전용 명령의 **필수** 인자. ★구판은 이것을 `_run_local` 안의 분기에서 따로 봤고,
+# 그 분기는 `context_from_config()` **뒤**였다 — 설정이 없으면 「빠진 인자」가 설정 오류로
+# 가려졌다(codex 1R HIGH-1). 이름 표(`CLI_ONLY_ARGS`)와 **같은 자리**에 둔다.
+# ⚠`register` 는 여기 없다: `--relay` 와 `--relay_url` 중 **하나**를 받는 자리라 「전부 있어야
+#   한다」는 이 표로 못 적는다. 그 명령은 운반층을 안 세우므로 순서 문제도 없다(아래 분기 유지).
+CLI_ONLY_REQUIRED: dict[str, tuple[str, ...]] = {
+    "reconcile": ("thread_id",),
+    "export":    ("out",),
+    "import":    ("file",),
+}
+
+# 자기 파서를 갖거나 인자를 안 받는 명령 — 위 표(`CLI_ONLY_ARGS`)로는 못 잰다.
+# ★★구판은 여기서 **검사를 끝냈다**: 문서가 `agora selfcheck --아무거나` 라고 적어도
+#   아무도 안 봤다(codex 1R HIGH-2). 「우리 표로 못 잰다」는 「안 잰다」가 아니다 —
+#   그 명령의 **자기 파서**를 부르면 된다. 아래 `parse_self_parsed` 가 그 한 줄이다.
 SELF_PARSED = ("selfcheck", "selftest", "keygen", "mcp-serve")
+
+# **맨몸 동작 토큰**을 받는 명령(`agora checkpoint issue`). ★표를 한 곳에 둔다 —
+# 진입점(`_run_onboard`)과 문서 시험이 같은 표를 봐야 「문서대로 치면 돈다」가 참이 된다.
+ACTION_ARG: dict[str, tuple[str, ...]] = {"checkpoint": ("issue",)}
+
+
+def action_names(command: str) -> tuple[str, ...]:
+    """그 명령이 받는 **동작 이름**. ★`resident` 는 자기 모듈의 표가 정본이다 —
+    여기에 베껴 두면 동작이 하나 늘어나는 날 두 표가 갈라진다(그날 갈라진 쪽이 조용히 이긴다)."""
+    if command == "resident":
+        from agora import resident
+        return tuple(resident.ACTION_ARGS)
+    return ACTION_ARG.get(command, ())
+
+# 최상위 플래그(서브커맨드 **앞**에 오는 것). ★`main` 과 문서 시험이 같은 표를 본다.
+TOP_LEVEL_FLAGS = ("--json", "-h", "--help")
+
+
+def split_action(command: str, rest: list[str]) -> tuple[str, list[str]]:
+    """맨몸 **동작 토큰**을 떼어 낸다(`agora checkpoint issue`).
+
+    ★★맨 앞의 맨몸 토큰을 동작으로 읽는 것은 `ACTION_ARG` 에 적힌 명령에서만이다 —
+      규칙을 넓히면 `agora whoami 오타` 가 조용히 통과한다.
+    ★진입점(`_run_onboard`)과 문서 시험이 **같은 함수**를 쓴다. 두 벌이면 문서는 초록인데
+      실제로는 거절하는(또는 그 반대의) 자리가 생긴다.
+    """
+    rest = list(rest)
+    names = action_names(command)
+    if names and rest and not rest[0].startswith("--") and "=" not in rest[0]:
+        action, rest = rest[0], rest[1:]
+        if action not in names:
+            raise AgoraError(errors.ARGUMENT, f"{command} 이 모르는 동작: {action}",
+                             {"command": command, "got": action, "accepts": list(names)})
+        return action, rest
+    return "", rest
+
+
+def check_top_level_flags(tokens: list[str]) -> None:
+    """`agora --help` 처럼 서브커맨드 없이 플래그만 있는 줄을 잰다."""
+    for token in tokens:
+        if token not in TOP_LEVEL_FLAGS:
+            raise AgoraError(errors.ARGUMENT, f"모르는 최상위 인자: {token}",
+                             {"arg": token, "accepts": list(TOP_LEVEL_FLAGS)})
+
+
+def parse_self_parsed(command: str, rest: list[str]) -> dict[str, Any]:
+    """자기 파서를 가진 명령의 인자를 **그 모듈의 파서로** 검사한다(실행은 안 한다)."""
+    if command == "selfcheck":
+        from agora import selfcheck
+        return selfcheck.parse_argv(rest)
+    if command == "keygen":
+        from agora import keygen
+        return keygen.parse_argv(rest)
+    # `selftest`·`mcp-serve` 는 인자를 안 받는다 — 받는 척하지 않는다.
+    if rest:
+        raise AgoraError(errors.ARGUMENT, f"모르는 인자: {rest[0]}",
+                         {"command": command, "accepts": []})
+    return {}
+
+
+def check_argv(command: str, rest: list[str]) -> dict[str, Any]:
+    """한 줄(`<명령> <인자들>`)을 **실제 파서에 태운다** — 실행은 하지 않는다.
+
+    ★문서 시험(「문서=코드」)이 여기를 부른다. 구판은 시험이 **정규식으로 이름만** 대조해서,
+      파서가 거절할 줄이 초록으로 지나갔다(codex 1R HIGH-2). 진입점과 시험이 **같은 함수**를
+      지나야 「문서대로 치면 돈다」가 참이 된다.
+    """
+    from agora import tools
+    if command not in COMMANDS:
+        raise AgoraError(errors.ARGUMENT, f"알 수 없는 서브커맨드: {command}",
+                         {"command": command})
+    if command in SELF_PARSED:
+        return parse_self_parsed(command, rest)
+    action, rest = split_action(command, rest)
+    fn = tools.CORE_TOOLS.get(command)
+    if fn is None and command in ("delegate-chair", "abort"):
+        fn = tools.delegate_chair if command == "delegate-chair" else tools.abort
+    required = tools.required_args(fn) if fn is not None else CLI_ONLY_REQUIRED.get(command, ())
+    kw = tools.normalize_args(command, accepted_args_for(command) or (),
+                              _kv(_positional(command, rest)), required)
+    if command == "resident":
+        # ★동작마다 받는 인자가 다르다 — 그 판정도 **그 모듈**이 한다(`status --interval-min` 거절).
+        from agora import resident
+        resident.check_action_args(action, kw)
+    return kw
 
 
 def accepted_args_for(command: str) -> tuple[str, ...] | None:
@@ -271,7 +368,7 @@ def _run_local(name: str, rest: list[str]) -> Any:
       쥐어지고, 그것은 참가자가 아니라 **운영자가 할 일**이다.
     """
     from agora import tools
-    kw = tools.normalize_args(name, accepted_args_for(name) or (), _kv(rest))
+    kw = check_argv(name, rest)
     d = kw.pop("dir", None)
     ctx = tools.context_from_config(d)
     if name == "watch":
@@ -286,21 +383,13 @@ def _run_local(name: str, rest: list[str]) -> Any:
                    revoked_path=ctx.revoked_path)
     if name == "reconcile":
         from agora import reconcile as rec
-        thread_id = kw.get("thread_id")
-        if not thread_id:
-            raise AgoraError(errors.ARGUMENT, "reconcile 은 thread_id 가 필요하다", None)
-        return rec.reconcile(store=ctx.store, ledger=ctx.ledger, thread_id=thread_id,
-                             spool=ctx.spool)
+        # ★필수 검사는 `CLI_ONLY_REQUIRED` 가 **컨텍스트보다 먼저** 끝냈다(두 곳에 두지 않는다).
+        return rec.reconcile(store=ctx.store, ledger=ctx.ledger,
+                             thread_id=kw["thread_id"], spool=ctx.spool)
     from agora import export as export_mod
     if name == "export":
-        out_path = kw.get("out")
-        if not out_path:
-            raise AgoraError(errors.ARGUMENT, "export 는 out=<경로> 가 필요하다", None)
-        return export_mod.dump(directory=_config_dir(d), out_path=out_path)
-    src = kw.get("file")
-    if not src:
-        raise AgoraError(errors.ARGUMENT, "import 는 file=<경로> 가 필요하다", None)
-    with open(src, encoding="utf-8") as fh:
+        return export_mod.dump(directory=_config_dir(d), out_path=kw["out"])
+    with open(kw["file"], encoding="utf-8") as fh:
         doc = json.load(fh)
     return export_mod.load(doc=doc, directory=_config_dir(d))
 
@@ -311,12 +400,11 @@ def _run_resident(rest: list[str]) -> Any:
     ★`checkpoint` 와 같은 모양이다. 맨몸 토큰을 동작으로 읽는 것은 이 명령과 `checkpoint` 뿐이다 —
       규칙을 넓히면 다른 명령의 오타가 조용히 통과한다.
     """
-    from agora import resident, tools
-    action = ""
-    if rest and not rest[0].startswith("--") and "=" not in rest[0]:
-        action, rest = rest[0], rest[1:]
-    kw = tools.normalize_args("resident", accepted_args_for("resident") or (), _kv(rest))
-    return resident.dispatch(action, kw)
+    from agora import resident
+    # ★동작 이름만 먼저 본다 — 인자 검사는 `check_argv` 가 **같은 줄을 다시 갈라서** 한다
+    #   (여기서 잘라 넘기면 그쪽이 「동작이 없다」로 읽는다 — 한 번 그렇게 냈다).
+    action, _rest = split_action("resident", rest)
+    return resident.dispatch(action, check_argv("resident", rest))
 
 
 def _config_dir(explicit: str | None) -> str:
@@ -335,6 +423,23 @@ def _kv(rest: list[str]) -> dict[str, Any]:
       로 준다. **오염을 막는 쪽**을 골랐고, 그 대가를 여기 적어 둔다.
     """
     out: dict[str, Any] = {}
+
+    def put(name: str, value: Any) -> None:
+        """한 칸은 **한 번만** 채운다(codex 1R MEDIUM-4).
+
+        ★구판은 바로 대입이라 `--thread A --thread B` 에서 **앞의 값이 조용히 사라졌다.**
+          자리 인자(`agora join <id> --room_id <다른 id>`)도 같은 자리로 떨어진다 —
+          둘 중 어느 것을 쓸지 우리가 고르면, 사람은 자기가 준 두 값 중 하나가 버려진 것을 모른다.
+        ★거절에 **두 값을 보여 준다.** 이 자리에서만은 값을 싣는다 — 「어느 둘이 부딪혔는가」가
+          없으면 사람은 자기 명령줄을 눈으로 훑어야 한다(값은 방금 그 사람이 친 것이고,
+          나가는 곳은 자기 화면의 stderr 다). 길면 자른다.
+        """
+        if name in out:
+            raise AgoraError(errors.ARGUMENT, f"같은 인자를 두 번 줬다: --{name}",
+                             {"key": name, "first": str(out[name])[:64],
+                              "second": str(value)[:64]})
+        out[name] = value
+
     index = 0
     while index < len(rest):
         token = rest[index]
@@ -350,9 +455,9 @@ def _kv(rest: list[str]) -> dict[str, Any]:
                     if name not in FLAG_ARGS:
                         raise AgoraError(errors.ARGUMENT, "이 인자는 값이 필요하다",
                                          {"key": name})
-                    out[name] = True          # 값 없는 플래그
+                    put(name, True)           # 값 없는 플래그
                     continue
-                out[name] = _value(name, nxt)
+                put(name, _value(name, nxt))
                 index += 1
                 continue
             token = flag
@@ -360,7 +465,7 @@ def _kv(rest: list[str]) -> dict[str, Any]:
             raise AgoraError(errors.ARGUMENT, "인자는 key=value 형식이다",
                              {"token_len": len(token)})
         key, _, raw = token.partition("=")
-        out[key.replace("-", "_")] = _value(key.replace("-", "_"), raw)
+        put(key.replace("-", "_"), _value(key.replace("-", "_"), raw))
     return out
 
 
@@ -451,7 +556,12 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
         #   두 번째 계약이 되고, 언젠가 표와 갈라진다(그때 갈라진 쪽이 조용히 이긴다).
         from agora import tools
         rest = list(args.rest) if hasattr(args, "rest") else []
-        return tools.call(name, tools.context_from_config(), _kv(_positional(name, rest)))
+        # ★★**인자를 먼저 짓고 검사한다**(codex 1R HIGH-1). 구판은 한 줄에
+        #   `tools.call(name, tools.context_from_config(), _kv(...))` 였는데, 파이썬은 인자를
+        #   **왼쪽부터** 짓는다 ⇒ 설정 폴더가 없는 기계에서는 `_kv` 가 돌기도 전에 설정 오류(code 2)가
+        #   났다. 첫 설치자가 오타 하나 때문에 **설정을 뒤지게 된다.**
+        checked = check_argv(name, rest)
+        return tools.call(name, tools.context_from_config(), checked)
     raise AgoraError(errors.PRECONDITION, "실행기 배선 누락", {"command": name})
 
 
@@ -501,9 +611,7 @@ def main(argv: list[str] | None = None) -> int:
             if token in ("-h", "--help"):
                 parser.print_help()
                 return errors.OK
-            if token != "--json":
-                raise AgoraError(errors.ARGUMENT, "모르는 최상위 인자",
-                                 {"arg_len": len(token)})
+            check_top_level_flags([token])
         if not argv:
             parser.print_help()
             return errors.OK

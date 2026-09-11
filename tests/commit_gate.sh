@@ -85,6 +85,16 @@ else
 fi
 rm -f /tmp/agora-f1r2.$$
 
+echo "== codex 0.1.4 사후 1R 재현 시험(판정문 7건 1:1) =="
+# ★같은 이유로 게이트에 싣는다: **시험을 쓴 것과 시험이 도는 것은 다른 말이다.**
+#   파일만 두면 아무도 안 돌린다(이 저장소가 그 차이로 두 번 다쳤다).
+if python3 tests/test_codex_1r_seal.py >/tmp/agora-codex1r.$$ 2>&1; then
+  tail -1 /tmp/agora-codex1r.$$ | sed 's/^/  /'
+else
+  echo "  FAIL — 아래 출력 확인"; grep -E "^  FAIL" /tmp/agora-codex1r.$$ | head -10; rc=1
+fi
+rm -f /tmp/agora-codex1r.$$
+
 echo "== 공백 위생(우리가 건드린 줄만) =="
 # ★codex 4R LOW 가 이 자리에서 났다: `git diff --check` 가 exit 2 였는데 **아무 게이트도 안 봤다.**
 #   손으로 재는 검사는 안 재게 된다 — 그래서 도구에 싣는다.

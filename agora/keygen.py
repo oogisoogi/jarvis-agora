@@ -33,11 +33,27 @@ def _fingerprint(pub_path: str) -> str:
     raise AgoraError(errors.PRECONDITION, "지문 형식을 찾지 못했다", None)
 
 
-def run(rest: list[str]) -> dict[str, Any]:
-    participant_id = rest[0] if rest else None
-    if not participant_id:
+# 이 명령은 **자리 인자 하나**만 받는다(플래그 없음). 표를 비워 두는 것도 계약이다 —
+# 비어 있음을 적어 두지 않으면 문서 시험이 「아직 안 정했다」와 구별하지 못한다.
+ACCEPTED_FLAGS: tuple[str, ...] = ()
+
+
+def parse_argv(rest: list[str]) -> dict[str, Any]:
+    """이 명령의 **파서**. `main` 과 문서 시험이 같은 함수를 쓴다(codex 1R HIGH-2)."""
+    rest = list(rest or [])
+    unknown = [t for t in rest if t.startswith("-") and t not in ACCEPTED_FLAGS]
+    if unknown:
+        raise AgoraError(errors.ARGUMENT, f"모르는 인자: {unknown[0]}",
+                         {"command": "keygen", "unknown": unknown,
+                          "usage": "agora keygen <participant-id>"})
+    if not rest:
         raise AgoraError(errors.ARGUMENT, "참가자 id 가 필요하다",
                          {"usage": "agora keygen <participant-id>"})
+    return {"participant_id": rest[0]}
+
+
+def run(rest: list[str]) -> dict[str, Any]:
+    participant_id = parse_argv(rest)["participant_id"]
 
     directory = config_dir()
     os.makedirs(directory, mode=0o700, exist_ok=True)
