@@ -4401,6 +4401,15 @@ def _case_every_mutation_belongs_to_an_axis() -> None:
 
 
 S8_AXES: dict[str, tuple[str, ...]] = {
+    # ★상주 방문(0.1.6 · 계약 확장 8) — 참가자 컴퓨터가 **사람 없이** 에이전트를 깨우는 자리.
+    #   이름이 곧 「무엇을 잃을 수 있나」다: 판정이 틀리면 안 깨우거나 끝없이 깨우고, 끄는 손이 안 먹으면 사람이 못 멈춘다.
+    "상주판정": ("M501-resident-round-check-dropped", "M502-resident-ignores-that-i-spoke",
+                 "M509-resident-state-gate-dropped"),
+    "상주상한": ("M505-resident-cycle-cap-dropped", "M507-resident-attempt-cap-dropped",
+                 "M504-resident-lock-dropped", "M512-try-acquire-says-yes-when-busy"),
+    "상주멈춤": ("M503-resident-ignores-off-flag", "M508-resident-wakes-without-agent"),
+    "상주원복": ("M506-resident-uninstall-keeps-plist", "M510-resident-refused-install-leaves-plist"),
+    "상주가시": ("M511-whoami-drops-resident-line",),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -6104,7 +6113,10 @@ def _case_local_commands_are_not_tools() -> None:
              "checkpoint",
              # 계약 확장 7(2026-09-09) — 설치 점검. 대리인이 자기 설치를 들여다볼 일은 없고,
              # 도구로 올리면 이 명령의 상세(설정 폴더 경로·명부 해시)가 방으로 나갈 길이 생긴다.
-             "selfcheck"}
+             "selfcheck",
+             # 계약 확장 8(2026-09-11) — 상주 방문. 대리인을 깨우는 일정을 대리인 손에 두면
+             # 방의 글 한 줄이 「일정을 꺼라·늘려라」로 읽혀 실행될 자리가 생긴다.
+             "resident"}
     if cli.MCP_EXEMPT != frozenset(local):
         raise AssertionError(f"예외 목록: {sorted(cli.MCP_EXEMPT)}")
     if local & set(tools.CORE_TOOLS):
@@ -13580,6 +13592,25 @@ def _case_resident_wakes_when_i_have_not_spoken_this_round() -> None:
         if not allowed.startswith("Bash(") or argv[argv.index("--tools") + 1] != "Bash" \
                 or argv[argv.index("--permission-mode") + 1] != "dontAsk":
             raise AssertionError(f"에이전트 손이 좁혀지지 않았다: {argv[3:]}")
+    # ★격리된 글은 말한 것이 아니다(agy 1R 의 「격리 글도 센다」 지적에 대한 실측 반박).
+    #   회차 1 에 회차 0 표시로 쓴 글은 방이 out_of_round 로 격리한다 — 그래도 **깨워야 한다.**
+    from agora import resident, tools
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        _resident_advance(ctx_a, room, 1)
+        f = _fixtures()
+        _with_key(f["key_b"], lambda: tools.say(ctx_b, thread_id=room, body="회차가 틀린 글", round=0))
+        if "out_of_round" not in [q.get("reason") for q in tools._reduce(ctx_b, room).get("quarantined") or []]:
+            raise AssertionError("격리 글을 못 만들었다(측정 실패)")
+        out, calls = _resident_once(ctx_b, home)
+        if len(calls) != 1:
+            raise AssertionError(f"격리된 글을 발언으로 셌다: {out['판정']}")
+    # ★공백이 든 경로는 깨움 글과 허용 규칙에 **같은 모양**(따옴표)으로 들어간다(실측: 따옴표 규칙으로 통과).
+    spaced = ["/Users/홍 길동/.config/agora/bin/agora"]
+    argv = resident.agent_argv("/fake/claude", "x", spaced)
+    if argv[argv.index("--allowedTools") + 1] != f'Bash("{spaced[0]}" *)' \
+            or resident.command_text(spaced) != f'"{spaced[0]}"':
+        raise AssertionError(f"공백 경로의 명령 모양이 두 자리에서 갈린다: {argv}")
 
 
 def _case_resident_does_not_wake_after_i_spoke() -> None:
@@ -13624,28 +13655,35 @@ def _case_resident_off_flag_does_nothing() -> None:
 
 
 def _case_resident_lock_backs_off_and_reclaims_stale() -> None:
-    """⑤ 한 판이 돌고 있으면(잠금) 물러난다 — rc 3 · 깨움 0. 묵은 잠금은 회수하고 돈다.
+    """⑤ 다른 판이 잠금을 쥐고 있으면 물러난다 — rc 3 · 깨움 0. 쥔 프로세스가 **죽으면** 다음 판은 돈다.
 
-    ★묵은 잠금을 회수하지 않으면 한 번 죽은 판이 **그 컴퓨터의 상주를 영영 멈춘다**(아무 말 없이).
+    ★처음엔 mkdir 잠금 + 묵은 잠금 회수였다. 회수 순간 두 판이 서로의 새 잠금을 치우는 경쟁이
+      있었다(agy 1R HIGH). 지금은 파일 잠금이라 **쥔 프로세스가 죽으면 OS 가 푼다** — 그래서 여기서는
+      「다른 프로세스가 쥐고 있다 → 물러난다」와 「그 프로세스가 끝났다 → 돈다」를 **진짜 자식 프로세스**로 잰다.
     """
-    import time as _time
-    from agora import resident
+    import subprocess as _sp
+    from agora import _lock, resident
     with _resident_world() as (ctx_a, ctx_b, home):
         _relay_room(ctx_a)
         lock = resident.paths(home)["lock"]
-        os.makedirs(lock)
-        out, calls = _resident_once(ctx_b, home)
-        if calls or out["판정"]["종료코드"] != resident.RC_LOCKED:
-            raise AssertionError(f"잠금 중인데 돌았다: {out['판정']} 호출={len(calls)}")
-        if not os.path.isdir(lock):
-            raise AssertionError("남의 잠금을 풀었다")
-        old = _time.time() - resident.LOCK_STALE_SECONDS - 60
-        os.utime(lock, (old, old))
+        os.makedirs(os.path.dirname(lock), exist_ok=True)
+        holder = _sp.Popen(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]); from agora import _lock;"
+             " fh = open(sys.argv[2], 'a+'); print(_lock.try_acquire(fh), flush=True); sys.stdin.readline()",
+             _ROOT, lock], stdin=_sp.PIPE, stdout=_sp.PIPE, text=True)
+        try:
+            said = (holder.stdout.readline() or "").strip()
+            if said != "True":
+                raise AssertionError(f"자식이 잠금을 못 잡았다(측정 실패): {said!r} · 수단={_lock.backend()}")
+            out, calls = _resident_once(ctx_b, home)
+            if calls or out["판정"]["종료코드"] != resident.RC_LOCKED:
+                raise AssertionError(f"다른 판이 쥐고 있는데 돌았다: {out['판정']} 호출={len(calls)}")
+        finally:
+            holder.communicate("끝\n", timeout=30)
         out, calls = _resident_once(ctx_b, home)
         if len(calls) != 1:
-            raise AssertionError(f"묵은 잠금을 회수하지 못했다: {out['판정']}")
-        if os.path.exists(lock):
-            raise AssertionError("판이 끝났는데 잠금이 남았다")
+            raise AssertionError(f"쥔 프로세스가 끝났는데 돌지 못했다(잠금이 남았다): {out['판정']}")
 
 
 def _case_resident_wakes_until_spoken_but_three_times_at_most() -> None:
@@ -13806,9 +13844,13 @@ def _case_resident_schedule_file_round_trip() -> None:
             raise AssertionError(f"등록을 부르지 않았다: {ran}")
         if not resident.summary_line(cfg).startswith("상주: 켜짐(10분"):
             raise AssertionError(f"설치 뒤 한 줄이 다르다: {resident.summary_line(cfg)}")
+        with open(resident.paths(cfg)["out"], "w", encoding="utf-8") as fh:
+            fh.write("일정이 붙잡은 표준출력 흉내\n")
         resident.uninstall(directory=cfg, platform="darwin", runner=runner)
         if os.path.exists(target) or os.path.exists(resident.paths(cfg)["settings"]):
             raise AssertionError("거뒀는데 일정 파일이나 설정이 남았다")
+        if os.path.exists(resident.paths(cfg)["out"]):
+            raise AssertionError("거뒀는데 일정 표준출력 파일이 남았다")
 
         def refuses(argv: list[str]) -> dict[str, Any]:
             return {"rc": 5} if argv[:2] == ["launchctl", "bootstrap"] else {"rc": 0}
@@ -13831,6 +13873,8 @@ def _case_resident_schedule_file_round_trip() -> None:
             raise AssertionError(f"작업 스케줄러 명령 줄이 다르다: {argv}")
         resident.install(directory=cfg, platform="win32", runner=runner, which=lambda _n: "/fake/bin/claude",
                          pythonw=r"C:\Py\pythonw.exe")
+        if "윈도우 미실측" not in resident.summary_line(cfg):
+            raise AssertionError(f"윈도우 상주를 미실측 표시 없이 「켜짐」으로 적는다: {resident.summary_line(cfg)}")
         resident.uninstall(directory=cfg, platform="win32", runner=runner)
         if [a[:2] for a in ran] != [["schtasks", "/Create"], ["schtasks", "/Delete"]]:
             raise AssertionError(f"윈도우 등록·해제 순서가 다르다: {ran}")
@@ -14403,8 +14447,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if False:\n        result = {"판정": _verdict(RC_OK, "꺼져 있다',
      "상주: 꺼져 있으면 아무것도 안 한다"),
     ("M504-resident-lock-dropped", "agora/resident.py",
-     '    if not _lock_acquire(p["lock"]):',
-     "    if False:",
+     '    if held is None:\n        _log(p, {**row, "rc": RC_LOCKED',
+     '    if False:\n        _log(p, {**row, "rc": RC_LOCKED',
      "상주: 잠금이면 물러나고 묵은 잠금은 회수"),
     ("M505-resident-cycle-cap-dropped", "agora/resident.py",
      "            for batch in batches[:wakes_per_cycle]:",
@@ -14434,9 +14478,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        "auto_visit": _resident_line(directory),\n',
      "",
      "whoami: 둘째 칸이 상주"),
-    ("M512-resident-stale-lock-never-reclaimed", "agora/resident.py",
-     "    if age < LOCK_STALE_SECONDS:\n        return False",
-     "    if True:\n        return False",
+    # ★기다리지 않는 잠금이 「남이 쥐고 있다」를 「잡았다」로 답하면 두 판이 겹쳐 돈다(창구 = _lock).
+    ("M512-try-acquire-says-yes-when-busy", "agora/_lock.py",
+     "            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):\n                return False",
+     "            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):\n                return True",
      "상주: 잠금이면 물러나고 묵은 잠금은 회수"),
     # ── 이식 잠금·잔재 이관(2026-09-11 · 0.1.3) ─────────────────────────────
     # ★여덟 자리 전부 「한 OS 에서만 나는 죽음」과 「사람 손을 부르는 거부」를 겨눈다.

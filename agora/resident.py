@@ -51,7 +51,6 @@ WAKES_PER_CYCLE = 1                    # ★한 판에 깨우는 횟수의 상�
 ROOMS_PER_WAKE = 5                     # 한 번 깨울 때 넘기는 방의 상한(넘치는 방은 다음 판)
 ATTEMPTS_PER_ROUND = 3                 # 같은 방·같은 회차로 깨우는 횟수의 상한(비용 천장)
 AGENT_MAX_TURNS = 30
-LOCK_STALE_SECONDS = WAKE_TIMEOUT_SECONDS + 600
 LOG_MAX_BYTES = 256 * 1024
 BROWSE_PAGES_MAX = 10
 
@@ -67,7 +66,7 @@ ACTIONS = ("once", "install", "uninstall", "status", "off", "on")
 
 STATE_DIRNAME = "resident"
 OFF_FLAG = "OFF"
-LOCK_DIRNAME = ".lock"
+LOCK_FILE = "lock"
 SETTINGS_FILE = "settings.json"
 LAST_FILE = "last.json"
 ATTEMPTS_FILE = "attempts.json"
@@ -96,9 +95,9 @@ def _config_dir(directory: str | None) -> str:
 def paths(directory: str | None = None) -> dict[str, str]:
     d = _config_dir(directory)
     state = os.path.join(d, STATE_DIRNAME)
-    return {"config": d, "state": state,
+    return {"config_dir": d, "state": state,
             "off": os.path.join(state, OFF_FLAG),
-            "lock": os.path.join(state, LOCK_DIRNAME),
+            "lock": os.path.join(state, LOCK_FILE),
             "settings": os.path.join(state, SETTINGS_FILE),
             "last": os.path.join(state, LAST_FILE),
             "attempts": os.path.join(state, ATTEMPTS_FILE),
@@ -170,42 +169,36 @@ def _log(p: dict[str, str], row: dict[str, Any]) -> None:
         pass       # 로그를 못 써도 판은 계속한다 — 결과는 표준출력에도 나간다
 
 
-# ── 잠금(mkdir) ─────────────────────────────────────────────────────────────
-def _lock_acquire(path: str) -> bool:
-    """★`mkdir` 은 있으면 실패하는 원자적 연산이라 경합에서 하나만 이긴다.
+# ── 잠금(파일 잠금 · 기다리지 않음) ──────────────────────────────────────────
+def _lock_acquire(path: str) -> tuple[Any | None, str]:
+    """(손잡이, 잠금 수단). 손잡이가 None 이면 **다른 판이 쥐고 있다.**
 
-    묵은 잠금(판이 죽으며 남긴 것)은 **rename 으로** 회수한다. 지운 뒤 다시 만들면
-    두 프로세스가 둘 다 「내가 회수했다」를 믿을 수 있다 — 이름을 옮기는 것은 하나만 이긴다.
+    ★mkdir 잠금을 쓰지 않는 이유(agy 1R HIGH · 0.1.6 안에서 바꿨다): 판이 죽으면 디렉터리가 남고,
+      그 묵은 잠금을 나이로 회수하면 두 판이 서로의 새 잠금을 치우는 경쟁이 생긴다. 파일 잠금은
+      **프로세스가 죽으면 OS 가 푼다** — 묵은 잠금이 없으니 회수할 일도 없다(창구 = `agora._lock`).
+    ⚠잠글 수단이 없는 파이썬(fcntl·msvcrt 둘 다 없음)이면 잠그지 못한 채 돌고, 그 사실을 결과에 적는다.
     """
+    from agora import _lock
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fh = open(path, "a+", encoding="utf-8")
     try:
-        os.mkdir(path)
-        return True
-    except FileExistsError:
-        pass
-    try:
-        age = time.time() - os.stat(path).st_mtime
-    except FileNotFoundError:
-        return False
-    if age < LOCK_STALE_SECONDS:
-        return False
-    grave = f"{path}.stale-{os.getpid()}-{int(time.time())}"
-    try:
-        os.rename(path, grave)
+        got = _lock.try_acquire(fh)
     except OSError:
-        return False
-    shutil.rmtree(grave, ignore_errors=True)
-    try:
-        os.mkdir(path)
-        return True
-    except FileExistsError:
-        return False
+        fh.close()
+        raise
+    if got is False:
+        fh.close()
+        return None, _lock.backend()
+    return fh, _lock.backend()
 
 
-def _lock_release(path: str) -> None:
+def _lock_release(fh: Any) -> None:
+    from agora import _lock
     try:
-        os.rmdir(path)
+        _lock.release(fh)
     except OSError:
         pass
+    fh.close()
 
 
 # ── 판정(LLM 없음) ──────────────────────────────────────────────────────────
@@ -223,7 +216,9 @@ def spoke_in_round(reduced: dict[str, Any], me: str, round_no: int) -> bool:
     return False
 
 
-def _open_rooms(ctx: Any) -> list[dict[str, Any]]:
+def _open_rooms(ctx: Any) -> tuple[list[dict[str, Any]], bool]:
+    """(열린 방들, 끝까지 봤는가). ★끝까지 못 봤으면 그 사실을 들고 나간다 —
+    못 본 방의 시도 기록을 「이제 없는 방」으로 지우면 그 방의 상한이 풀린다(agy 1R MED)."""
     from agora import tools
     rooms: list[dict[str, Any]] = []
     cursor = None
@@ -232,8 +227,8 @@ def _open_rooms(ctx: Any) -> list[dict[str, Any]]:
         rooms.extend(page.get("rooms") or [])
         cursor = page.get("next_cursor")
         if not cursor:
-            break
-    return rooms
+            return rooms, True
+    return rooms, False
 
 
 def plan(ctx: Any, *, attempts: dict[str, int],
@@ -248,7 +243,7 @@ def plan(ctx: Any, *, attempts: dict[str, int],
     #   「이번 판에 깨운 방」으로 줄이면 상한에 걸려 건너뛴 방의 기록이 지워지고,
     #   다음 판에 상한이 풀려 다시 깨운다(세 번 → 한 판 쉬고 → 또 세 번 · 시험이 잡은 자리).
     live: set[str] = set()
-    rooms = _open_rooms(ctx)
+    rooms, complete = _open_rooms(ctx)
     for row in rooms:
         room_id = row["room_id"]
         short = room_id[:8]
@@ -272,7 +267,8 @@ def plan(ctx: Any, *, attempts: dict[str, int],
             continue
         due.append({"room_id": room_id, "round": round_no, "key": key, "attempt": tried + 1,
                     "purpose": "speak"})
-    return {"scanned": len(rooms), "due": due, "skipped": skipped, "live": sorted(live)}
+    return {"scanned": len(rooms), "due": due, "skipped": skipped, "live": sorted(live),
+            "complete": complete}
 
 
 # ── 깨우기 ──────────────────────────────────────────────────────────────────
@@ -293,16 +289,27 @@ def shell_command(p: dict[str, str]) -> list[str]:
     껍데기가 없으면(개발 트리) 이 꾸러미의 `bin/agora` 를 이 파이썬으로 부른다.
     """
     name = "agora.cmd" if os.name == "nt" else "agora"
-    shell = os.path.join(p["config"], "bin", name)
+    shell = os.path.join(p["config_dir"], "bin", name)
     if os.path.exists(shell):
         return [shell]
     return [sys.executable, os.path.join(_package_root(), "bin", "agora")]
 
 
+def command_text(shell: list[str]) -> str:
+    """깨움 글과 허용 규칙에 **똑같이** 들어가는 명령 문자열.
+
+    ★허용 규칙은 명령을 **글자 그대로** 대조한다(실측) — 글에 적힌 모양과 규칙의 모양이 한 글자라도
+      다르면 허락해야 할 명령이 거절된다. 그래서 두 자리가 이 함수 하나에서 나온다.
+    ★공백이 든 경로(윈도우 `C:\\Users\\홍 길동\\…`)는 따옴표로 감싼다 — 에이전트는 셸에서 따옴표를 붙여 칠 것이고,
+      규칙이 따옴표 없는 모양이면 그 명령이 거절된다(agy 1R).
+    """
+    return " ".join(f'"{part}"' if " " in part else part for part in shell)
+
+
 def build_prompt(*, due: list[dict[str, Any]], shell: list[str], rules_text: str,
                  rules_path: str) -> str:
     """깨움 글. ★방 제목은 싣지 않는다 — 제목은 남이 쓴 글이고, 깨움 글은 지시 자리다."""
-    command = " ".join(shell)
+    command = command_text(shell)
     lines = ["너는 아고라 광장의 참가 대리인이다. 사람은 지금 옆에 없다 — 이 컴퓨터의 일정이 너를 깨웠다.",
              "아래 「방문 규칙」을 그대로 따르라.",
              f"규칙에 적힌 `agora` 는 이 명령이다. 줄이거나 바꾸지 말고 **그대로** 쳐라"
@@ -325,7 +332,7 @@ def agent_argv(agent_path: str, prompt: str, shell: list[str]) -> list[str]:
     · `--permission-mode dontAsk` = 미리 허락하지 않은 것은 묻지 않고 거절한다(옆에 사람이 없다).
     · `--max-turns` 는 `--help` 에 없는 숨은 옵션이다 — 파서는 받는다(실측). 끝을 지키는 진짜 상한은 우리 시간 상한이다.
     """
-    command = " ".join(shell)
+    command = command_text(shell)
     return [agent_path, "-p", prompt,
             "--tools", "Bash",
             "--allowedTools", f"Bash({command} *)",
@@ -382,8 +389,8 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 def _agent_env(p: dict[str, str]) -> dict[str, str]:
     env = dict(os.environ)
-    env["AGORA_CONFIG_DIR"] = p["config"]
-    key = os.path.join(p["config"], "id_ed25519")
+    env["AGORA_CONFIG_DIR"] = p["config_dir"]
+    key = os.path.join(p["config_dir"], "id_ed25519")
     if not env.get("AGORA_SIGNING_KEY") and os.path.exists(key):
         env["AGORA_SIGNING_KEY"] = key
     return env
@@ -412,13 +419,15 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
         _log(p, {**row, "rc": RC_OK, "why": "off"})
         return result
 
-    if not _lock_acquire(p["lock"]):
+    held, lock_backend = _lock_acquire(p["lock"])
+    if held is None:
         _log(p, {**row, "rc": RC_LOCKED, "why": "locked"})
         return {"판정": _verdict(RC_LOCKED, "이미 한 판이 돌고 있다 — 이번 판은 물러난다"),
                 "잠금": p["lock"]}
+    row["lock"] = lock_backend
     try:
         try:
-            ctx = (ctx_factory or tools.context_from_config)(p["config"])
+            ctx = (ctx_factory or tools.context_from_config)(p["config_dir"])
             attempts = {k: v for k, v in _load_json(p["attempts"]).items() if type(v) is int}
             found = plan(ctx, attempts=attempts)
         except AgoraError as e:
@@ -481,14 +490,18 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
         if not dry_run:
             # 쓸데없이 쌓이지 않게 — **지금 발언을 받는 (방, 회차)** 가 아닌 기록만 버린다
             #   (닫힌 방 · 지나간 회차). 상한에 걸린 방의 기록은 남아야 상한이 선다.
+            #   ★로비를 끝까지 못 본 판에는 줄이지 않는다 — 못 본 방은 「없는 방」이 아니다.
             live = set(found["live"])
-            kept = {k: v for k, v in attempts.items() if k in live}
+            kept = ({k: v for k, v in attempts.items() if k in live} if found["complete"]
+                    else dict(attempts))
             if kept != _load_json(p["attempts"]):
                 _write_json(p["attempts"], kept)
             _write_json(p["last"], {"at": at, "rc": rc, "woke": result.get("깨움", 0), "due": len(due)})
+        if lock_backend == "none":
+            result["잠금_수단"] = "없음 — 이 파이썬에서는 두 판이 겹쳐 돌 수 있다"
         return result
     finally:
-        _lock_release(p["lock"])
+        _lock_release(held)
 
 
 # ── 일정 등록 ────────────────────────────────────────────────────────────────
@@ -520,9 +533,10 @@ def _check_interval(value: Any) -> int:
 def plist_document(*, p: dict[str, str], interval_min: int, agent_path: str) -> bytes:
     """맥 LaunchAgent 한 벌. ★일정은 사람의 셸 환경을 물려받지 않는다 — PATH·집·설정 폴더를 적어 준다."""
     shell = shell_command(p)
-    program = (["/bin/sh", shell[0]] if len(shell) == 1 else shell) + ["resident", "once", "--dir", p["config"]]
+    program = (["/bin/sh", shell[0]] if len(shell) == 1 else shell) + ["resident", "once", "--dir", p["config_dir"]]
+    # ★패키지 관리자 자리(Homebrew)도 싣는다 — 깨운 에이전트가 셸에서 부르는 도구가 거기 있을 수 있다(agy 1R).
     path_dirs = [os.path.dirname(agent_path), os.path.dirname(sys.executable),
-                 "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+                 "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     seen: list[str] = []
     for item in path_dirs:
         if item and item not in seen:
@@ -535,7 +549,7 @@ def plist_document(*, p: dict[str, str], interval_min: int, agent_path: str) -> 
            "StandardOutPath": p["out"],
            "StandardErrorPath": p["out"],
            "EnvironmentVariables": {"HOME": os.path.expanduser("~"),
-                                    "AGORA_CONFIG_DIR": p["config"],
+                                    "AGORA_CONFIG_DIR": p["config_dir"],
                                     "PATH": ":".join(seen)}}
     return plistlib.dumps(doc, sort_keys=True)
 
@@ -546,7 +560,7 @@ def schtasks_create_argv(*, p: dict[str, str], interval_min: int, pythonw: str) 
     ⚠윈도우 실기 미실측 — 정적 시험만 있다.
     """
     agora_bin = os.path.join(_package_root(), "bin", "agora")
-    tr = f'"{pythonw}" "{agora_bin}" resident once --dir "{p["config"]}"'
+    tr = f'"{pythonw}" "{agora_bin}" resident once --dir "{p["config_dir"]}"'
     if len(tr) > 261:
         raise AgoraError(errors.PRECONDITION, "작업 스케줄러 명령 줄이 너무 길다(261자 상한)",
                          {"length": len(tr)})
@@ -574,9 +588,9 @@ def install(*, directory: str | None = None, interval_min: int = DEFAULT_INTERVA
                          "깨울 에이전트(claude)가 이 컴퓨터에 없다 — 상주를 놓지 않는다",
                          {"대신": "agora resident once --print-agenda 로 들를 방만 볼 수 있다",
                           "지원": "claude 만 깨운다(codex·gemini 는 아직 없다)"})
-    if not os.path.isdir(p["config"]):
+    if not os.path.isdir(p["config_dir"]):
         raise AgoraError(errors.PRECONDITION, "설정 폴더가 없다 — 참가 설치(초대문 1~8단계)를 먼저 한다",
-                         {"config_dir": p["config"]})
+                         {"config_dir": p["config_dir"]})
     settings = {"agent_path": agent, "interval_min": interval_min, "platform": plat,
                 "installed_at": _now().isoformat().replace("+00:00", "Z")}
     if plat == "darwin":
@@ -631,10 +645,12 @@ def uninstall(*, directory: str | None = None, platform: str | None = None,
     elif plat == "win32":
         run(["schtasks", "/Delete", "/TN", task_name(), "/F"])
         removed.append(f"작업 {task_name()}")
-    for key in ("settings", "off", "attempts", "last"):
-        if os.path.exists(p[key]):
-            os.remove(p[key])
-            removed.append(p[key])
+    # ★일정이 붙잡던 표준출력(`resident.out`)도 거둔다(agy 1R LOW) — 판 결과가 쌓인 파일이다.
+    targets = [p[key] for key in ("settings", "off", "attempts", "last", "out")] + [p["out"] + ".1"]
+    for target_path in targets:
+        if os.path.exists(target_path):
+            os.remove(target_path)
+            removed.append(target_path)
     return {"상주": "미설치", "거둔_것": removed, "남긴_것": p["log"]}
 
 
@@ -649,7 +665,7 @@ def set_off(*, directory: str | None = None, off: bool) -> dict[str, Any]:
                 "일정_설치됨": bool(_load_json(p["settings"]))}
     if os.path.exists(p["off"]):
         os.remove(p["off"])
-    return {"상주": summary_line(p["config"]), "끄기": "agora resident off"}
+    return {"상주": summary_line(p["config_dir"]), "끄기": "agora resident off"}
 
 
 def status(*, directory: str | None = None, platform: str | None = None,
@@ -672,7 +688,7 @@ def status(*, directory: str | None = None, platform: str | None = None,
                           "measured_on_windows": False})
     else:
         scheduler["note"] = "이 운영체제의 일정 등록은 아직 없다"
-    return {"상주": summary_line(p["config"]),
+    return {"상주": summary_line(p["config_dir"]),
             "설치됨": bool(settings), "설정": settings or None,
             "일정": scheduler,
             "깨울_에이전트": agent or "없음 — `agora resident once --print-agenda` 로 안건만 볼 수 있다",
@@ -698,7 +714,9 @@ def summary_line(directory: str | None = None) -> str:
             seen = moment.astimezone().strftime("%H:%M")
         except ValueError:
             seen = "읽지 못함"
-    return f"상주: 켜짐({interval}분 · 마지막 방문 {seen}) · 끄기 = agora resident off"
+    # ★윈도우는 **돌려 본 적이 없다** — 「켜짐」만 적으면 돈다고 읽힌다(agy 1R MED).
+    unmeasured = "윈도우 미실측 · " if settings.get("platform") == "win32" else ""
+    return f"상주: 켜짐({unmeasured}{interval}분 · 마지막 방문 {seen}) · 끄기 = agora resident off"
 
 
 # ── CLI 입구 ────────────────────────────────────────────────────────────────

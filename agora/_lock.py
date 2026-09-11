@@ -138,6 +138,36 @@ def acquire(fh: IO[Any]) -> str:
     return NONE
 
 
+def try_acquire(fh: IO[Any]) -> bool | None:
+    """**기다리지 않는** 독점 잠금 — 잡으면 True · 남이 쥐고 있으면 False · 잠글 수단이 없으면 None.
+
+    ★상주 방문(0.1.6)이 쓴다. 처음엔 mkdir 잠금이었는데, 판이 죽으면 잠금이 남고 그 **묵은 잠금을
+      회수하는 순간** 두 판이 서로의 잠금을 치우는 경쟁이 생겼다(agy 1R HIGH — A 가 치우고 새로 만든
+      잠금을, 같은 묵은 나이를 먼저 읽어 둔 B 가 다시 치운다). 파일 잠금은 **프로세스가 죽으면 OS 가 푼다** —
+      묵은 잠금이라는 상태 자체가 없으니 회수 경쟁도 없다.
+    ★None 을 True 로 접지 않는다 — 잠글 수단이 없었다는 사실은 부르는 쪽이 적는다.
+    """
+    if _BACKEND == POSIX:
+        try:
+            _MOD.flock(fh.fileno(), _MOD.LOCK_EX | _MOD.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                return False
+            raise
+        return True
+    if _BACKEND == WINDOWS:
+        fh.seek(0)
+        try:
+            _MOD.locking(fh.fileno(), _MOD.LK_NBLCK, _WINDOWS_LOCK_BYTES)
+        except OSError as exc:
+            if exc.errno in _WINDOWS_BUSY:
+                return False
+            raise
+        return True
+    _warn_once()
+    return None
+
+
 def release(fh: IO[Any]) -> str:
     """잠금을 푼다. 잠근 수단과 **같은 수단으로** 푼다."""
     if _BACKEND == POSIX:
