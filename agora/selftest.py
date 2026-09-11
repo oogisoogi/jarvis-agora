@@ -4632,7 +4632,14 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                      "M463-doc-skip-loses-its-reason",
                      "M464-self-parsed-flags-unchecked",
                      "M465-operator-doc-resolves-too-early",
-                     "M466-progression-block-not-executed"),
+                     "M466-progression-block-not-executed",
+                     # ★09-11 갱신 구멍 — 「이미 참가하신 분」 덩어리가 명부까지 가는가.
+                     "M511-upgrade-block-skips-register",
+                     "M512-doc-scan-ignores-numbered-steps",
+                     "M513-invite-marks-only-one-config-dir",
+                     # ★게시 핀 — 「트리 빌드」와 「밖에 있는 것」을 가른 자리.
+                     "M514-invite-pin-not-compared",
+                     "M515-publish-check-ignores-drift"),
     # ★09-11 신설 — **인자계약**. 여기서 잃는 것은 「오타 하나가 어디서 잡히는가」다:
     #   설정이 먼저 서면 인자 오류가 설정 오류로 보이고(사람은 설정을 뒤진다), 같은 칸을 두 번
     #   주면 한 값이 조용히 사라지며, id 가 아닌 값이 id 칸을 지나면 **없는 방이 빈 방으로** 보인다.
@@ -6650,8 +6657,13 @@ def _case_matrix_keeps_k1_honest() -> None:
       그 순간 「미실행」은 **거짓**이 됐다. ★그물이 거짓을 지키게 두면, 사실을 적는 쪽이 붉어진다.
       (이 저장소가 아는 병이다: 시험이 잘못된 값을 정답으로 고정하면 공허한 것을 넘어 해롭다.)
     ★그래서 요구를 **상태 낱말에서 「정직의 모양」으로** 옮겼다: 한 줄 안에
-      ⑴`K-1`(어느 미지수인가) ⑵`재실측 대기`(지금 무엇을 기다리는가) ⑶삭제 금지 표식
-      ⑷`Windows`(자기가 지키는 칸) — 넷이 함께 있어야 한다.
+      ⑴`K-1`(어느 미지수인가) ⑵**아직 안 잰 것이 있다는 표시**(`재실측 대기` 또는 `미측`)
+      ⑶삭제 금지 표식 ⑷`Windows`(자기가 지키는 칸) — 넷이 함께 있어야 한다.
+    ★★**2026-09-11 에 ⑵ 를 한 번 더 넓혔다(같은 이유로 · 두 번째)**: 그날 2차 실측이 끝나
+      「재실측 대기」가 거짓이 됐다(1~11단계 완주 · selfcheck 6/6 · register 200). 그런데 **다 잰 것은
+      아니다** — PowerShell 모듈 경로 축과 상주 첫 방문은 여전히 안 재졌다(그 기계는 Git Bash 로 돌았다).
+      ⇒ 그물이 지키는 것은 「무엇을 기다리는가」가 아니라 ★**「안 잰 것이 있으면 그렇게 적혀 있는가」**다.
+      낱말이 아니라 **그 성질**을 지키게 두 판본(`재실측 대기`·`미측`)을 받는다.
     ⚠**「지원」·「✅」로 바꾸는 길은 이 검사를 지나지 못한다.** 실측 없이 칸을 올리는 것이
       이 그물이 막는 전부이고, 그것은 1차 실측 전이나 후나 같다.
     """
@@ -6665,18 +6677,23 @@ def _case_matrix_keeps_k1_honest() -> None:
     #   ⇒ 그물은 **자기가 지키는 줄에 묶여 있어야** 한다. 같은 낱말을 쓰는 다른 줄이 대신 서 주면
     #     그 순간 이 검사는 문서의 다른 자리를 재고 있는 것이다.
     row = [ln for ln in text.splitlines()
-           if "K-1" in ln and "재실측 대기" in ln and "이 줄을 지우지 마라" in ln]
+           if "K-1" in ln and ("재실측 대기" in ln or "미측" in ln)
+           and "이 줄을 지우지 마라" in ln]
     if not row:
-        raise AssertionError("K-1 재실측 고지가 **한 줄로** 매트릭스에 없다"
-                             " — 세 표식(K-1·재실측 대기·삭제 금지)이 같은 줄에 있어야 한다")
+        raise AssertionError("K-1 미측 고지가 **한 줄로** 매트릭스에 없다"
+                             " — 세 표식(K-1 · 재실측 대기|미측 · 삭제 금지)이 같은 줄에 있어야 한다")
     if "Windows" not in row[0]:
         raise AssertionError(f"그 줄이 윈도우 칸이 아니다: {row[0][:60]}")
     # ★실측 없이 칸을 올리는 것을 막는다 — 이 그물의 처음이자 끝이다.
     if "✅" in row[0]:
         raise AssertionError(f"재실측 전에 윈도우 칸이 ✅ 로 올라갔다: {row[0][:80]}")
     # ★실측이 있었다면 **언제·무엇을** 잰 것인지 그 줄이 말해야 한다(근거 없는 상태는 소문이다).
-    if "2026-09-11" not in row[0] or "0.1.3" not in row[0]:
-        raise AssertionError(f"1차 실측의 날짜·판본이 그 줄에 없다: {row[0][:80]}")
+    # ⚠**날짜·판본을 낱값으로 박지 않는다**(2026-09-11 2차 실측에서 걸린 자리): 「0.1.3」을 요구하면
+    #   2차 실측으로 그 칸이 0.1.6 이 되는 순간 **사실을 적는 쪽이 붉어진다.** 그물이 지키는 것은
+    #   특정 판본이 아니라 ★「날짜와 판본이 **적혀 있는가**」다 — 성질을 지키게 모양으로 잰다.
+    import re as _re
+    if not _re.search(r"\d{4}-\d{2}-\d{2}", row[0]) or not _re.search(r"\b0\.\d+\.\d+", row[0]):
+        raise AssertionError(f"실측의 날짜·판본이 그 줄에 없다: {row[0][:80]}")
     for need in ("8.2", "3.11", "2.40"):
         if need not in text:
             raise AssertionError(f"최소 버전이 빠졌다: {need}")
@@ -14175,6 +14192,13 @@ def _doc_head(segment: str, variables: dict[str, str]) -> tuple[str, str] | None
     """
     import re as _re
     s = segment.strip()
+    # ★**번호 매긴 단계 표시를 떼어 낸다**(`3) ~/.config/agora/bin/agora sync-roster --yes`).
+    #   사람이 쓰는 절차 문서는 명령을 이 모양으로 적는다 — 안 떼면 그 줄은 「명령이 아닌 언급」으로
+    #   분류돼 **조용히 안 재진다**(2026-09-11 갱신 덩어리에서 실제로 그랬다: sync-roster·resident·whoami
+    #   세 줄이 통째로 빠져 있었고, 빠진 채로 초록이었다).
+    m = _re.match(r"^(?:\d+[).]|[-*•])\s+(.+)$", s)
+    if m:
+        s = m.group(1).strip()
     m = _re.match(r"^&\s*(.+)$", s)          # PowerShell 호출 연산자
     if m:
         s = m.group(1).strip()
@@ -14233,7 +14257,30 @@ def _doc_dummy(key: str | None) -> str:
         return "1"
     if key in _cli.JSON_ARGS:
         return "{}"
-    return "값"
+    # ★ASCII 로 둔다 — 한글 더미는 「문장 자르기」(`_doc_cut_prose`)와 부딪힌다.
+    return "x"
+
+
+def _doc_cut_prose(tokens: list[str]) -> list[str]:
+    """명령 뒤에 **문장이 이어지는 줄**을 자른다 — `agora whoami 를 돌려 화면을 보여 줘`.
+
+    ★**자리표시자를 더미로 바꾼 뒤에** 부른다 — 그 전에 자르면 `<참가자-id>` 표식(비-ASCII)이
+      문장으로 오해돼 인자가 통째로 사라진다(한 번 그렇게 났다).
+    ★자르는 자리: **맨몸 토큰인데 ASCII 가 아닌** 첫 자리. 인자 이름·경로·값은 ASCII 이고
+      (자리표시자는 이미 더미로 바뀐다), 한글 맨몸 토큰이 나오면 거기부터는 사람에게 하는 말이다.
+    ⚠**대가를 적는다**: 문서가 따옴표 없이 한글 값을 주면(`--body 안녕`) 그 값도 잘려 그 줄이
+      「값이 필요하다」로 붉어진다. 따옴표를 치라는 뜻이고 그것이 옳다 — 따옴표 없는 값은
+      실제 셸에서도 공백에서 갈라진다.
+    """
+    out: list[str] = []
+    for i, token in enumerate(tokens):
+        bare = not token.startswith("-") and "=" not in token
+        prev = tokens[i - 1] if i else ""
+        expects_value = prev.startswith("--") and "=" not in prev
+        if bare and not expects_value and not token.isascii():
+            break
+        out.append(token)
+    return out
 
 
 def _doc_fill(command: str, tokens: list[str]) -> list[str]:
@@ -14258,7 +14305,7 @@ def _doc_fill(command: str, tokens: list[str]) -> list[str]:
                                           token[2:].split("=")[0].replace("-", "_"))
             token = token.split("=", 1)[0] + "=" + _doc_dummy(name)
         elif DOC_PLACEHOLDER in token:
-            token = token.replace(DOC_PLACEHOLDER, "값")      # JSON·문장 **안**의 자리표시자
+            token = token.replace(DOC_PLACEHOLDER, "x")       # JSON·문장 **안**의 자리표시자
         out.append(token)
         prev_key = (token[2:].split("=")[0].replace("-", "_")
                     if token.startswith("--") and len(token) > 2 else None)
@@ -14292,6 +14339,13 @@ def doc_invocations(text: str) -> tuple[list[dict[str, Any]], list[dict[str, str
             if not words:
                 skipped.append({"line": segment.strip(), "why": "실행기 경로만 적힌 줄(인자 없음)"})
                 continue
+            # ★명령 이름은 **ASCII** 다. 뒤가 한글이면 그 줄은 호출이 아니라 **문장 속 경로 언급**이다
+            #   (`~/.config/agora/bin/agora 라는 실행 껍데기를 만든다`) — 안 가르면 「라는」이
+            #   모르는 서브커맨드로 잡혀 거짓 적색이 난다.
+            if not words.split()[0].isascii():
+                skipped.append({"line": segment.strip(),
+                                "why": "실행기 경로가 문장 속에 있다(명령이 아니다)"})
+                continue
             found.append({"line": segment.strip(), "tail": tail})
         if not hit and "agora" in line:
             why = next((w for pat, w in DOC_NON_COMMAND if pat in line), "")
@@ -14320,7 +14374,7 @@ def doc_check(invocation: dict[str, Any]) -> str:
         if command.startswith("-"):
             _cli.check_top_level_flags(tokens)     # `agora --help` 류
         else:
-            _cli.check_argv(command, _doc_fill(command, rest))
+            _cli.check_argv(command, _doc_cut_prose(_doc_fill(command, rest)))
     except AgoraError as e:
         return f"`{line}` — {e.message}"
     except SystemExit:
@@ -14366,7 +14420,8 @@ def run_operator_progression_block() -> None:
     def run() -> None:
         thread_id = _tools.enter(ctx, topic="문서 블록", kind="debate")["thread_id"]
         for inv in steps:
-            tokens = _doc_fill(_doc_tokens(inv["tail"])[0], _doc_tokens(inv["tail"])[1:])
+            tokens = _doc_cut_prose(_doc_fill(_doc_tokens(inv["tail"])[0],
+                                              _doc_tokens(inv["tail"])[1:]))
             name = _doc_tokens(inv["tail"])[0]
             kwargs = _cli._kv(_cli._positional(name, tokens))
             for key in ("thread_id", "room_id"):
@@ -14384,6 +14439,182 @@ def run_operator_progression_block() -> None:
             raise AssertionError(f"블록을 다 따라갔는데 방이 안 닫혔다: {final}")
 
     _with_key(f["key_a"], run)
+
+
+def _upgrade_block_commands() -> list[tuple[str, dict[str, Any]]]:
+    """INVITE 의 「이미 참가하신 분」 덩어리를 **문서에서 읽어** (명령, 인자)로 돌려준다.
+
+    ★순서의 정본은 **문서**다 — 시험이 순서를 따로 적으면, 문서가 바뀌어도 시험은 초록이고
+      틀린 순서를 받는 것은 그 문서를 그대로 친 참가자뿐이다(이 티켓이 정확히 그렇게 났다).
+    """
+    from agora import cli as _cli
+    text = _read_text(os.path.join(_ROOT, "docs/INVITE.md"))
+    part = text.split("## 이미 참가하신 분", 1)
+    if len(part) != 2:
+        raise AssertionError("INVITE.md 에서 갱신 덩어리를 못 찾았다 — 제목을 바꿨으면 여기도 고쳐라")
+    found, _skipped = doc_invocations(part[1].split("\n---", 1)[0])
+    out: list[tuple[str, dict[str, Any]]] = []
+    for inv in found:
+        tokens = _doc_tokens(inv["tail"])
+        command, rest = tokens[0], _doc_cut_prose(_doc_fill(tokens[0], tokens[1:]))
+        out.append((command, _cli.check_argv(command, rest)))
+    return out
+
+
+# 표지가 놓여야 하는 자리 — **Claude 설정 폴더는 설치 방식마다 다른 자리에 있다.**
+# ★실측(2026-09-11 · 발주자 윈도우 기계): 홈의 `.claude` 가 아닌 자리에 설정 폴더를 두는 판이 있고,
+#   그 창의 Claude 는 `~/.claude/skills` 의 표지를 **못 본다** — 설치는 끝났는데 「아고라에 참가해」를
+#   못 알아듣는다. 그 판은 설정 폴더를 **환경변수로** 알려 준다(같은 날 `CLAUDE_CONFIG_DIR` 실측).
+#   ⇒ 문서가 재야 하는 것은 **자리 이름이 아니라 기제**다: 환경변수 · 지금 창이 아는 자리 · 홈.
+SKILL_MARKER_PLACES = ("CLAUDE_CONFIG_DIR", "네가 지금 돌고 있는 Claude 의 설정 폴더", "~/.claude")
+
+
+def _release_pin_tool():
+    """꾸러미 빌더(핀을 읽는 쪽)를 불러온다 — `tools/` 에 있다(제품 패키지에 빌더를 넣지 않는다)."""
+    import sys as _sys
+    tools_dir = os.path.join(_ROOT, "tools")
+    if tools_dir not in _sys.path:
+        _sys.path.insert(0, tools_dir)
+    import build_client_zip
+    return build_client_zip
+
+
+def _case_invite_fingerprint_matches_the_pin() -> None:
+    """설치 안내의 지문이 **게시 핀과 같다**(`docs/RELEASES.md`).
+
+    ★★**왜 「트리를 빌드한 값」과 대조하지 않는가**(2026-09-11 실측이 가른 자리): 그 둘은 다른 것이다.
+      지문은 **받는 사람이 대조하는 값**이라 「지금 밖에 올라가 있는 것」이어야 하는데, 트리 빌드는
+      `agora/` 를 건드릴 때마다 바뀐다. 그날 main 의 안내는 `04ee6d4b…` 인데 트리 빌드는 `e8720dca…`
+      였다 — 커밋 두 건이 **아무 소리 없이** 갈라 놓은 것이다.
+      ⇒ 평소에는 **핀과** 대조하고(트리를 아무리 고쳐도 조용하다), **게시할 때만**
+        `build_client_zip.py --publish-check` 가 트리 빌드를 핀과 맞춘다. 한 검사에 두 뜻을 싣지 않는다.
+    ★셋을 잰다: ⑴핀 표가 읽히는가(줄이 0개면 검사가 꺼진 것이다) ⑵안내의 판본이 **코드 판본**과 같은가
+      ⑶안내의 지문이 그 판본의 핀과 같은가. 그리고 ⑷게시 검사가 **어긋남을 실제로 잡는가**(가짜 트리).
+    """
+    import json as _json
+    import tempfile
+    from agora import __version__ as version
+    tool = _release_pin_tool()
+    table = tool.pins(_ROOT)
+    if not table:
+        raise AssertionError(f"핀 표가 비었다({tool.PIN_FILE}) — 이 검사는 지금 아무것도 안 재고 있다")
+    invite_ver, invite_sha = tool.invite_pin(_ROOT)
+    if invite_ver != version:
+        raise AssertionError(f"안내가 가리키는 판본({invite_ver})이 코드 판본({version})과 다르다")
+    # ★대조 자체는 **도구 함수**가 한다 — 시험 안에 인라인으로 두면, 지금 문서가 맞는 한
+    #   그 줄을 지워도 초록이다(이 그물의 첫 판이 실제로 SURVIVED 를 냈다).
+    problems = tool.pin_check(_ROOT)
+    if problems:
+        raise AssertionError(f"안내가 핀과 다른 말을 한다: {problems}")
+
+    # ⑷ **게시 검사가 눈을 뜨고 있는가** — 일부러 어긋난 가짜 트리로 쏴 본다.
+    fake = tempfile.mkdtemp(prefix="agora-pin-")
+    os.makedirs(os.path.join(fake, "docs"))
+    with open(os.path.join(fake, tool.PIN_FILE), "w", encoding="utf-8") as fh:
+        fh.write(f"| 판본 | zip sha256 | 게시 |\n|---|---|---|\n| {version} | `{'a' * 64}` | 가짜 |\n")
+    with open(os.path.join(fake, "docs/INVITE.md"), "w", encoding="utf-8") as fh:
+        fh.write(f"주소 = https://x/agora-client-{version}.zip\n지문 = {'b' * 64}\n")
+    # ⑷-a **평소 대조**가 눈을 뜨고 있는가(안내↔핀이 어긋난 트리).
+    if not tool.pin_check(fake):
+        raise AssertionError("안내와 핀이 어긋난 트리를 조용히 넘긴다 — 이 대조는 꺼져 있다")
+    # ⑷-b **게시 대조**가 눈을 뜨고 있는가(위에 더해 빌드↔핀까지).
+    problems = tool.publish_check("c" * 64, fake)
+    if len(problems) < 2:
+        raise AssertionError(f"게시 검사가 어긋남을 못 잡는다(빌드↔핀 · 안내↔핀): {problems}")
+    # 대조군 — 서로 맞는 트리는 조용해야 한다(검사가 전부를 막으면 그것도 결함이다).
+    ok = tool.publish_check("a" * 64, _pin_fixture(fake, version, "a" * 64))
+    if ok:
+        raise AssertionError(f"맞는 트리를 어긋남으로 읽는다: {ok}")
+
+
+def _pin_fixture(directory: str, version: str, sha: str) -> str:
+    """핀·안내가 **서로 맞는** 가짜 트리를 만든다(대조군용)."""
+    with open(os.path.join(directory, "docs/INVITE.md"), "w", encoding="utf-8") as fh:
+        fh.write(f"주소 = https://x/agora-client-{version}.zip\n지문 = {sha}\n")
+    with open(os.path.join(directory, "docs/RELEASES.md"), "w", encoding="utf-8") as fh:
+        fh.write(f"| 판본 | zip sha256 | 게시 |\n|---|---|---|\n| {version} | `{sha}` | 가짜 |\n")
+    return directory
+
+
+def _case_invite_marks_every_claude_config_dir() -> None:
+    """초대문 9단계가 **표지 자리 셋을 다 말한다**(2026-09-11 윈도우 실기).
+
+    ★문서만 재는 케이스다 — 놓는 것은 사람(에이전트)이 한다. 그래서 잴 수 있는 것은
+      「덩어리가 세 자리를 말하는가」와 「놓은 자리를 말하라고 시키는가」뿐이고, 그 둘을 잰다.
+    ⚠**안 재는 것**: 실제로 놓였는지. 그것은 그 기계에서만 알 수 있다(실기 보고가 정본).
+    """
+    text = _read_text(os.path.join(_ROOT, "docs/INVITE.md"))
+    part = text.split("9) 앞으로", 1)
+    if len(part) != 2:
+        raise AssertionError("INVITE.md 에서 9단계를 못 찾았다 — 번호를 바꿨으면 여기도 고쳐라")
+    block = part[1].split("10)", 1)[0]
+    missing = [place for place in SKILL_MARKER_PLACES if place not in block]
+    if missing:
+        raise AssertionError(f"9단계가 표지 자리를 빠뜨렸다: {missing}")
+    if "말해" not in block and "알려" not in block:
+        raise AssertionError("놓은 자리를 화면에 말하라고 시키지 않는다 — 어디에 놓였는지 아무도 모른다")
+
+
+def _case_upgrade_block_reaches_the_roster() -> None:
+    """옛 설치본에 **갱신 덩어리를 순서대로** 돌리면 명부까지 간다(2026-09-11 윈도우 실기).
+
+    ★★**실증**: 0.1.6 의 「이미 참가하신 분」 덩어리대로 하면 `sync-roster` 가
+      **code 2(릴레이 주소를 모른다)** 에서 멈췄다. 새 판은 광장 주소를 `config.json` 에서 읽는데
+      옛 설치본에는 그 파일이 없고, **옛 자리(`participant.json` 의 relay 칸)는 이행이 지웠다**
+      (`.bak` 에만 남아 있었다) ⇒ **이행이 옛 자리를 지우고 새 자리에 안 썼다.**
+      노출은 한 사람이 아니다 — 그 시점 참가자 12 중 9 가 같은 판으로 들어와 있었다.
+    ★판정 셋:
+      ⑴ 문서의 그 덩어리가 `register` 를 `sync-roster` **앞에** 담고 있는가(순서는 문서가 정본)
+      ⑵ 옛 설치본 상태에서 그 순서대로 돌리면 `sync-roster` 가 통과하는가
+      ⑶ **대조군** — `register` 를 빼면 실기와 **같은 code 2** 가 나는가(그물이 비어 있지 않다는 증거)
+    ⚠여기서 **안 재는 것**: `resident install`·`whoami` 는 부르지 않는다 — 일정을 실제로 놓는
+      동작이라 시험이 기계에 손을 대게 된다(그 둘은 상주 케이스가 따로 잰다).
+    """
+    import json as _json
+    from agora import onboard
+    steps = [name for name, _kw in _upgrade_block_commands()]
+    if "register" not in steps or "sync-roster" not in steps:
+        raise AssertionError(f"갱신 덩어리에 register·sync-roster 가 없다: {steps}")
+    if steps.index("register") > steps.index("sync-roster"):
+        raise AssertionError(f"register 가 sync-roster 뒤에 있다: {steps}")
+
+    d = _onboard_dir()                      # 옛 설치본 = 키 + participant.json · **config.json 없음**
+    # 실기와 같은 모양으로 만든다: 옛 relay 칸은 `.bak` 에만 남아 있다(이행이 본 파일에서 지웠다).
+    with open(os.path.join(d, "participant.json"), encoding="utf-8") as fh:
+        doc = _json.load(fh)
+    if "relay" in doc:
+        raise AssertionError("이 시험은 relay 칸이 **없는** 옛 설치본을 전제한다")
+    with open(os.path.join(d, "participant.json.bak"), "w", encoding="utf-8") as fh:
+        _json.dump({**doc, "relay": "https://agora.godmeyou.kr"}, fh)
+    if os.path.exists(os.path.join(d, "config.json")):
+        raise AssertionError("이 시험은 config.json 이 **없는** 상태를 전제한다")
+
+    key = os.path.join(d, "id_ed25519")
+    with _fake_relay().serving() as (url, relay):
+        relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
+        relay.roster_text["operators"] = "operator-a\n"
+        # ⑶ 대조군 — 덩어리에서 register 를 빼면 실기와 같은 자리에서 멈춘다.
+        try:
+            onboard.sync_roster(directory=d, yes=True)
+        except AgoraError as e:
+            if e.code != errors.PRECONDITION or "relay.url" not in str((e.detail or {}).get("missing")):
+                raise AssertionError(f"실기와 다른 실패다: code {e.code} {e.detail}") from None
+        else:
+            raise AssertionError("register 없이도 명부를 받았다 — 이 그물은 아무것도 안 잰다")
+
+        # ⑵ 문서가 적은 순서대로. **주소만** 가짜 릴레이로 바꿔 태운다(그 값은 시험이 정할 수 없다).
+        for command, kw in _upgrade_block_commands():
+            if command == "register":
+                if not kw.get("unattended"):
+                    raise AssertionError("갱신 덩어리의 register 에 --unattended 가 빠졌다")
+                _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True))
+            elif command == "sync-roster":
+                out = onboard.sync_roster(directory=d, yes=bool(kw.get("yes", False)))
+                if len(out["wrote"]) != 3:
+                    raise AssertionError(f"명부 3종을 못 받았다: {out}")
+    cfg = onboard._load_config(d)
+    if (cfg.get("relay") or {}).get("url") != url:
+        raise AssertionError(f"갱신 덩어리가 config.json 에 광장 주소를 안 남겼다: {cfg}")
 
 
 def _case_docs_commands_pass_the_parser() -> None:
@@ -15315,6 +15546,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("문서=코드: 문서 명령이 파서를 지난다", _case_docs_commands_pass_the_parser, None),
     # ── codex 0.1.4 사후 1R 봉합(2026-09-11) ────────────────────────────────
     ("문서=코드: 운영자 진행 블록이 돈다", _case_operator_progression_block_runs, None),
+    ("갱신: 덩어리가 명부까지 간다",  _case_upgrade_block_reaches_the_roster, None),
+    ("표지: 설정 폴더 셋을 다 말한다", _case_invite_marks_every_claude_config_dir, None),
+    ("게시: 안내의 지문이 핀과 같다", _case_invite_fingerprint_matches_the_pin, None),
     ("인자: 검사가 설정보다 먼저다",  _case_arguments_check_comes_before_config, None),
     ("인자: 같은 칸을 두 번 못 준다", _case_same_argument_twice_is_rejected, None),
     ("인자: id 는 형식까지 계약이다", _case_id_arguments_are_checked_by_value, None),
@@ -17348,8 +17582,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     # ⚠앵커를 **옮겼다**(2026-09-11 · 1차 실측으로 칸의 문면이 바뀌었다). 겨누는 것은 같다:
     #   「실측 없이 칸을 ✅/지원 으로 올리는 것」. 낡은 앵커를 그대로 뒀다면 이 변이는
     #   NOT-APPLIED(= 그 축 미측정)로 조용히 빠졌을 것이다 — 실제로 한 번 그렇게 났다.
+    # ★앵커 재조준(2026-09-11 2차 실측): 칸 문구가 「부분 됨 → 재실측 대기」에서
+    #   「대체로 됨 · 한 축 미측」으로 바뀌었다. 안 옮기면 이 축이 NOT-APPLIED 로 조용히 꺼진다.
     ("M175-readme-drops-k1", "docs/../README.md",
-     "⚠**부분 됨(K-1) → 재실측 대기(0.1.5)**",
+     "⚠**대체로 됨(K-1) · 한 축 미측**",
      "✅ 지원",
      "문서: 매트릭스에 K-1 정직"),
     ("M176-readme-claims-zero-dependency", "docs/../README.md",
@@ -17903,12 +18139,35 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "· `abort` · `register`",
      "· `abort-renamed` · `register`",
      "계약: 03 예외 목록은 코드와 같다"),
+    ("M514-invite-pin-not-compared", "tools/build_client_zip.py",
+     "    elif table[invite_ver] != invite_sha:",
+     "    elif False:",
+     "게시: 안내의 지문이 핀과 같다"),
+    ("M515-publish-check-ignores-drift", "tools/build_client_zip.py",
+     "    elif table[ver] != built_sha:",
+     "    elif False:",
+     "게시: 안내의 지문이 핀과 같다"),
+    # ── 갱신 구멍(2026-09-11 윈도우 실기 · TICKET agora-invite-upgrade-hole) ────
+    # ★번호는 504 부터(main 이 M503 까지 썼다 · 앞 대역은 690·광장이 쓴다).
+    ("M511-upgrade-block-skips-register", "docs/INVITE.md",
+     "2) 초대문 6단계를 **한 번 더** 한다.\n"
+     "   ~/.config/agora/bin/agora register --relay https://agora.godmeyou.kr --unattended\n",
+     "",
+     "갱신: 덩어리가 명부까지 간다"),
+    ("M512-doc-scan-ignores-numbered-steps", "agora/selftest.py",
+     '    m = _re.match(r"^(?:\\d+[).]|[-*•])\\s+(.+)$", s)\n    if m:\n        s = m.group(1).strip()',
+     '    m = None\n    if m:\n        s = m.group(1).strip()',
+     "갱신: 덩어리가 명부까지 간다"),
+    ("M513-invite-marks-only-one-config-dir", "docs/INVITE.md",
+     "     ⑵ 네가 지금 돌고 있는 Claude 의 설정 폴더를 네가 안다면 그 아래 skills/",
+     "     ⑵ (없음)",
+     "표지: 설정 폴더 셋을 다 말한다"),
     # ── codex 0.1.4 사후 1R 봉합(2026-09-11) — 항목당 그물 하나 ────────────────
     # ★번호는 master 배정(M451~ · 664·690 과 겹치지 않게).
     # ⚠앵커는 **여러 줄**로 잡는다 — 이 표가 같은 파일에 있어서, 한 줄짜리 앵커는
     #   「소스에 2곳」이 되어 NOT-APPLIED 로 죽는다(표의 글자와 코드의 글자가 같아진다).
     ("M461-doc-scan-skips-the-real-parser", "agora/selftest.py",
-     "        else:\n            _cli.check_argv(command, _doc_fill(command, rest))",
+     "        else:\n            _cli.check_argv(command, _doc_cut_prose(_doc_fill(command, rest)))",
      "        else:\n            pass    # 되돌림: 파서를 안 태운다",
      "문서=코드: 문서 명령이 파서를 지난다"),
     ("M462-doc-scan-targets-shrink", "agora/selftest.py",

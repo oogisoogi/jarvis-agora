@@ -230,10 +230,87 @@ def build(out_path: str, root: str | None = None) -> tuple[str, int, int]:
     return hashlib.sha256(blob).hexdigest(), len(blob), len(files) + 1
 
 
+# ── 게시 핀 ────────────────────────────────────────────────────────────────
+# ★**두 값을 가른다**: 「지금 트리를 빌드한 해시」와 「지금 밖에 올라가 있는 해시」는 다르다.
+#   안내 문서가 가리켜야 하는 것은 **뒤쪽**이고, 그 정본이 이 핀 표다(`docs/RELEASES.md`).
+#   2026-09-11 실측: 당시 main 의 안내는 `04ee6d4b…` 인데 그 트리 빌드는 `e8720dca…` 였다 —
+#   `agora/` 를 건드린 커밋 두 건이 **아무 소리 없이** 갈라 놨다.
+PIN_FILE = "docs/RELEASES.md"
+
+
+def pins(root: str | None = None) -> dict[str, str]:
+    """핀 표를 읽는다 — {판본: sha256}. ★파일이 없거나 줄이 없으면 **빈 표**가 아니라 실패다
+    (없는 것을 「핀이 없다」로 넘기면 그 순간 이 검사는 꺼진 것과 같다 — 부르는 쪽이 판정한다)."""
+    import re
+    root = root or _ROOT
+    text = open(os.path.join(root, PIN_FILE), encoding="utf-8").read()
+    out: dict[str, str] = {}
+    for ver, sha in re.findall(r"^\|\s*(\d+\.\d+\.\d+)\s*\|\s*`([0-9a-f]{64})`\s*\|", text, re.M):
+        out[ver] = sha
+    return out
+
+
+def invite_pin(root: str | None = None) -> tuple[str, str]:
+    """설치 안내가 말하는 (판본, 지문). 주소 줄의 판본과 지문 줄을 **함께** 읽는다 —
+    따로 읽으면 판본만 올리고 지문을 안 고친 문서가 통과한다."""
+    import re
+    root = root or _ROOT
+    text = open(os.path.join(root, "docs/INVITE.md"), encoding="utf-8").read()
+    vers = set(re.findall(r"agora-client-(\d+\.\d+\.\d+)\.zip", text))
+    shas = set(re.findall(r"\b([0-9a-f]{64})\b", text))
+    if len(vers) != 1 or len(shas) != 1:
+        raise AssertionError(f"안내가 판본·지문을 하나씩 말하지 않는다: 판본 {sorted(vers)} · 지문 {len(shas)}개")
+    return vers.pop(), shas.pop()
+
+
+def pin_check(root: str | None = None) -> list[str]:
+    """**평소** 검사 — 안내(`INVITE.md`)가 핀 표와 같은 말을 하는가. 빌드하지 않는다.
+
+    ★여기가 **함수**인 이유(2026-09-11 · 그물이 한 번 헛돌았다): 이 대조를 시험 안에 인라인으로 두면,
+      지금 문서가 맞는 한 그 줄을 지워도 시험은 초록이다 — 실제로 뮤턴트가 **살아남았다**(SURVIVED).
+      ⇒ 대조를 밖으로 꺼내 **일부러 어긋난 트리에도** 부를 수 있게 한다. 그래야 「검사가 눈을 뜨고
+        있는가」를 잴 수 있다. ★한 번도 안 터지는 검사는, 지워도 아무도 모른다.
+    """
+    root = root or _ROOT
+    table = pins(root)
+    problems: list[str] = []
+    if not table:
+        problems.append(f"핀 표가 비었다({PIN_FILE}) — 이 검사는 지금 아무것도 안 재고 있다")
+    invite_ver, invite_sha = invite_pin(root)
+    if invite_ver not in table:
+        problems.append(f"핀 표에 {invite_ver} 줄이 없다 — 안내는 이미 그 판본을 가리키고 있다")
+    elif table[invite_ver] != invite_sha:
+        problems.append(f"안내의 지문이 핀과 다르다: {invite_sha[:12]}… ↔ {table[invite_ver][:12]}…")
+    return problems
+
+
+def publish_check(built_sha: str, root: str | None = None) -> list[str]:
+    """**게시 때만** 도는 검사 — 위의 평소 대조 + 「지금 트리의 빌드가 핀과 같은가」.
+
+    ★평소 게이트가 이것을 돌면 `agora/` 를 건드리는 **모든 커밋**이 게시를 요구하게 된다
+      (그리고 동시 진행 브랜치들이 안내 문서에서 계속 충돌한다). 그래서 **명시 플래그**에만 건다.
+    """
+    root = root or _ROOT
+    ver = client_version()
+    table = pins(root)
+    problems = list(pin_check(root))
+    if ver not in table:
+        problems.append(f"핀 표에 {ver} 줄이 없다 — 올린 뒤 {PIN_FILE} 에 적어라")
+    elif table[ver] != built_sha:
+        problems.append(f"트리 빌드({built_sha[:12]}…)가 {ver} 핀({table[ver][:12]}…)과 다르다"
+                        " — 이 트리를 올릴 참이면 올린 **뒤** 핀을 고쳐라")
+    invite_ver, _invite_sha = invite_pin(root)
+    if invite_ver != ver:
+        problems.append(f"안내가 가리키는 판본({invite_ver})이 코드 판본({ver})과 다르다")
+    return problems
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="아고라 클라이언트 배포 꾸러미 빌더")
     ap.add_argument("--out", default=None, help="산출 경로(기본 dist/agora-client-<ver>.zip)")
     ap.add_argument("--print-sha", action="store_true", help="해시만 한 줄로 낸다")
+    ap.add_argument("--publish-check", action="store_true",
+                    help="게시 전 대조 — 지금 트리의 빌드가 핀(docs/RELEASES.md)·안내와 같은가")
     args = ap.parse_args(argv)
 
     ver = client_version()
@@ -243,6 +320,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_sha:
         print(sha)
         return 0
+    if args.publish_check:
+        problems = publish_check(sha)
+        print(f"판본   : {ver}")
+        print(f"sha256 : {sha}")
+        for line in problems:
+            print(f"  어긋남 — {line}")
+        print("  핀·안내와 같다(게시해도 대조가 선다)" if not problems else "  ⛔게시 전에 위를 맞춰라")
+        return 1 if problems else 0
     print(f"판본   : {ver}")
     print(f"산출   : {out}")
     print(f"파일   : {count}개")
