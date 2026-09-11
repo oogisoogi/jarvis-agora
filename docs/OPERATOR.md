@@ -102,7 +102,15 @@ python3 tools/chair_loop.py               # 한 번 돈다 — cron·launchd 가
 touch ~/.config/agora/chair-loop/STOP     # ★끄는 법. 이 파일이 있으면 루프는 아무것도 안 한다
 rm ~/.config/agora/chair-loop/STOP        # 다시 켜는 법
 python3 tools/chair_loop.py --manage <방 id>   # 이미 손으로 연 방을 뒤늦게 맡긴다
+python3 tools/chair_loop.py --open --plaza --topic "<광장 이름>"   # ★광장 열기(큰 예산 · 안 맡긴다)
 ```
+
+🔴★**광장은 `--plaza` 로 연다 — 보통 방으로 열면 며칠 만에 막힌다.**
+방에는 **발언 예산**이 있다(한 사람이 한 라운드에 2건 · 6000자). 그 칸은 **회차별**인데 광장은
+회차를 안 올리므로(올리면 광장이 닫힌다) **2건이 곧 평생 상한**이 된다 — 한 사람이 제안을 2개
+올리면 끝이고, 의장 기계는 마커를 3개째부터 못 쓴다. `--plaza` 는 그 방을 **200건 · 100000자**로
+연다(계약 확장 9 · `PROTOCOL.md` §4-1). ⚠**이미 연 광장은 고칠 수 없다** — 예산은 `genesis` 에
+박히므로 **새로 열어야** 한다.
 
 🔴★**옵트인이다 — 맡긴 방만 만진다**(`~/.config/agora/chair-loop/manage.txt`).
 그래서 「주제 광장」처럼 **오래 열어 두는 방은 저절로 안전하다**(맡기지 않으면 루프가 읽지도 않는다).

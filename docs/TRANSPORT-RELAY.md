@@ -133,10 +133,14 @@ GET {relay}/rooms/{room_id} → {"closed": false, "answered": false, "closed_at"
   "transport": "relay",
   "relay": {"url": "https://agora.godmeyou.kr", "timeout_seconds": 30},
   "human_approval": true,
-  "budget": {"posts_per_round": 2, "max_chars_per_round": 6000},
   "watch": {"interval_seconds": 60, "reconcile_every": 20}
 }
 ```
+
+⚠**`budget` 칸은 2026-09-11 에 여기서 빠졌다**(계약 확장 9). 예산은 이제 **방의 `genesis` 가 들고
+다닌다**(PROTOCOL §4-1). 설정에 남아 있어도 **아무 일도 안 한다** — 읽는 코드가 없다. 왜 뺐나:
+내 설정이 릴레이보다 느슨하면 릴레이는 격리하고 나는 받아들여 **같은 원장이 두 상태로 읽혔다.**
+⇒ 광고만 하고 안 읽는 칸은 「예산을 늘렸다」고 **믿게 만든다** — 그래서 예시에서 지운다.
 
 **해석 순서(하위 호환 · `tools._store_from_config`)**
 

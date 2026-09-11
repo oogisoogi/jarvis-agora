@@ -51,9 +51,29 @@ ID_HEX_LEN = 32
 # ★더 중요한 규칙은 값이 아니라 순서다: 유효 advance 가 있으면 언제나 expired 보다 우선한다.
 EXPIRED_GRACE_SECONDS = 300
 
-# 설계 §5 — 발언 예산 기본값. 참가자 config.json 이 덮어쓸 수 있다(값이 실제로 읽히는지는 검증 대상).
+# 설계 §5 — 발언 예산 기본값.
 DEFAULT_BUDGET_POSTS_PER_ROUND = 2
 DEFAULT_BUDGET_MAX_CHARS = 6000
+
+# 계약 확장 9(2026-09-11 · master 판정 [master#10906357] A) — **방이 자기 예산을 들고 다닌다.**
+# ★왜: 예산 칸은 debate 면 회차별(`pid@r<n>`)인데 **광장 방은 회차를 안 올린다**(의장 루프에 안
+#   맡기는 것이 규칙) ⇒ 한 사람이 광장에 쓸 수 있는 글이 `posts_per_round` 개로 평생 고정됐다.
+#   실측 2026-09-11: 라이브 광장에서 방을 연 참가자에게 남은 글이 **1개**였고, 하루 한 바퀴는
+#   마커를 3개 쓸 수 없어 첫날 멈췄다. ⇒ 예산의 출처를 **참가자 설정에서 방 genesis 로** 옮긴다.
+# ★덤으로 닫히는 것: 전에는 예산이 **참가자 config.json** 에서 왔다 — 내 설정이 릴레이보다
+#   느슨하면 릴레이는 `budget_exceeded` 로 격리하고 나는 받아들여 두 쪽 상태가 갈렸다
+#   (`tools.py` 의 「릴레이가 받기는 했지만 반영하지 않았다」가 그 자리다). 방 하나가 예산을
+#   들고 다니면 **모두가 같은 숫자를 본다.**
+# ★상한이 있는 이유: 무한 예산은 debate 방의 독점 방지 규칙을 조용히 없앤다. 범위 밖은
+#   **격리**한다(모양이 아니라 정책이므로 스키마가 아니라 리듀서가 판정한다).
+# 예산의 칸 이름 — **여기가 유일한 정의처**다(스키마·프로토콜·리듀서가 전부 이것을 인용한다).
+BUDGET_FIELDS = ("posts_per_round", "max_chars_per_round")
+MAX_BUDGET_POSTS_PER_ROUND = 1000
+MAX_BUDGET_MAX_CHARS = 300000
+
+# 광장은 「제안이 쌓이는 곳」이다 — 토론방 기본값(2)으로는 돌지 않는다.
+PLAZA_BUDGET_POSTS_PER_ROUND = 200
+PLAZA_BUDGET_MAX_CHARS = 100000
 
 # 설계 §D5 — watch 폴링 간격 기본값(초).
 DEFAULT_WATCH_INTERVAL_SECONDS = 60

@@ -80,11 +80,13 @@ def _reduce(ctx: Context, thread_id: str) -> dict[str, Any]:
                                 #   아무도 못 알아본다. 칸은 있는데 늘 비어 있는 상태였다.
                                 roster_checkpoint=_roster_digest(ctx),
                                 scrub_bundle=scrub.current_bundle())
-    # ★예산도 **설정에서** 온다(§5). 안 넘기면 reducer 가 계약 기본값으로 돌고,
-    #   `config.json` 의 `budget` 칸은 **적어도 아무 일도 안 하는 칸**이 된다
-    #   (예시 설정 파일이 그 칸을 광고하고 있으므로 더 나쁘다 — 껐다고 믿게 만든다).
+    # ★예산은 **방 genesis 가 들고 있다**(계약 확장 9 · 2026-09-11). 여기서 아무것도 안 넘기는
+    #   것이 맞다 — reducer 가 그 방의 숫자를 읽는다.
+    #   ⛔전에는 참가자 `config.json` 에서 왔다. 그러면 **내 설정이 릴레이보다 느슨할 때**
+    #     릴레이는 `budget_exceeded` 로 격리하고 나는 받아들여 **같은 원장이 두 상태로 읽혔다**
+    #     (아래 `_publish` 의 「릴레이가 받기는 했지만 반영하지 않았다」가 그 자리다).
+    #     출처를 방 하나로 합치면 그 틈이 **구조적으로** 닫힌다.
     reduced = reducer.apply(reducer.order(collected), operators=ctx.operators,
-                            budget=protocol.load_budget(ctx.config),
                             # ★★`now` 가 없으면 **만료가 아예 안 일어난다**(`is_expired_now` 가
                             #   `now` 없이는 항상 False). 마감·만료·의장 승계(S2-5)가 통째로
                             #   실사용에서 죽어 있었다 — 시험은 `now` 를 직접 넘겨 재고 있었다.
@@ -857,8 +859,13 @@ def _page(events: list[dict[str, Any]], cursor: str | None,
 def propose(ctx: Context, *, type: str, title: str, body: str,
             envelope: dict[str, Any] | None = None,
             deadlines: dict[str, Any] | None = None,
-            parent: dict[str, Any] | None = None) -> dict[str, Any]:
-    """새 스레드. thread_id 는 **미리 만든다**(H-6 · genesis 안에 들어가야 한다)."""
+            parent: dict[str, Any] | None = None,
+            budget: dict[str, int] | None = None) -> dict[str, Any]:
+    """새 스레드. thread_id 는 **미리 만든다**(H-6 · genesis 안에 들어가야 한다).
+
+    ★`budget` 은 **이 방이 평생 들고 다닐 예산**이다(계약 확장 9). 안 주면 칸이 아예 안 생기고
+      계약 기본값으로 돈다 — 「안 적었다」와 「기본값을 적었다」가 원장에서 구별된다.
+    """
     thread_id = new_id()
     payload: dict[str, Any] = {"type": type, "title": title, "body": body}
     if envelope is not None:
@@ -867,6 +874,8 @@ def propose(ctx: Context, *, type: str, title: str, body: str,
         payload["deadlines"] = deadlines
     if parent is not None:
         payload["parent"] = parent
+    if budget is not None:
+        payload["budget"] = dict(budget)
     out = _publish(ctx, kind="genesis", thread_id=thread_id, payload=payload,
                    prev=GENESIS_PREV, expected_state=GENESIS_EXPECTED_STATE,
                    category=type, title=title, is_genesis=True)
@@ -885,7 +894,8 @@ JOINED_FILENAME = "joined.json"
 
 def enter(ctx: Context, *, topic: str, kind: str, body: str = "",
           envelope: dict[str, Any] | None = None,
-          deadlines: dict[str, Any] | None = None) -> dict[str, Any]:
+          deadlines: dict[str, Any] | None = None,
+          budget: dict[str, int] | None = None) -> dict[str, Any]:
     """방을 연다(J1) — genesis 이벤트 1건 · **의장은 자기 자신**이 된다.
 
     ★`propose` 를 부른다. 여기서 `_publish` 를 직접 부르면 계약→스크럽→승인→서명→쓰기→원장
@@ -897,7 +907,7 @@ def enter(ctx: Context, *, topic: str, kind: str, body: str = "",
         raise AgoraError(errors.ARGUMENT, "방은 debate 나 problem 이다",
                          {"kind": kind, "allowed": list(ROOM_KINDS)})
     out = propose(ctx, type=kind, title=topic, body=body or topic,
-                  envelope=envelope, deadlines=deadlines)
+                  envelope=envelope, deadlines=deadlines, budget=budget)
     record = _remember_room(ctx, out["thread_id"], role="chair")
     return {"room_id": out["thread_id"], "thread_id": out["thread_id"],
             "kind": kind, "topic": topic, "chair": ctx.participant_id,
@@ -1005,7 +1015,7 @@ def say(ctx: Context, *, thread_id: str, body: str, round: int | None = None,
                       used=(state.get("usage") or {}).get(
                           reducer.usage_slot(state, ctx.participant_id))
                       or {"posts": 0, "chars": 0},
-                      budget=state.get("budget") or protocol.load_budget(ctx.config))
+                      budget=state.get("budget") or protocol.default_budget())
     payload: dict[str, Any] = {"round": state["round"] or 0 if round is None else round,
                                "body": body}
     if counter is not None:

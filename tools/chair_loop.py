@@ -24,6 +24,7 @@ resolve 1 · close 1 · 대조 1). 그중 **사람이 정해야 하는 것은 �
     touch ~/.config/agora/chair-loop/STOP     # ★사람이 끄는 법 — 이 파일이 있으면 아무것도 안 한다
 
     python3 tools/chair_loop.py --open --topic "<주제>" --body "<발제 3줄>"   # 방 열기 + 맡기기(사람 손 1)
+    python3 tools/chair_loop.py --open --plaza --topic "<광장 이름>"          # 광장 열기(큰 예산 · 안 맡긴다)
     python3 tools/chair_loop.py --manage <방 id>                              # 이미 연 방을 맡긴다
     # ⚠`--open` 이 방을 연 **직후** 죽으면 그 방은 목록에 없다(고아 방). 되살리는 법 = 위 `--manage`.
     #   ★이 순서는 일부러다: 먼저 열고 나중에 적으면 **없는 방을 맡는 일**은 생기지 않는다.
@@ -47,9 +48,16 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from agora import errors, reducer, tools                      # noqa: E402
+from agora.contract_open import (                             # noqa: E402
+    PLAZA_BUDGET_MAX_CHARS, PLAZA_BUDGET_POSTS_PER_ROUND,
+)
 from agora.errors import AgoraError                           # noqa: E402
 
 # ── 설계값(전부 여기 한 곳 · 바꾸려면 이 표를 고친다) ────────────────────────
+# 광장이 열릴 때 들고 가는 예산(계약 확장 9) — **계약 상수가 정본**이다(숫자를 여기 적지 않는다).
+PLAZA_BUDGET = {"posts_per_round": PLAZA_BUDGET_POSTS_PER_ROUND,
+                "max_chars_per_round": PLAZA_BUDGET_MAX_CHARS}
+
 GRACE_MINUTES = 30        # 전원이 말해도 **이만큼은 기다린다**(늦게 오는 사람의 자리)
 ROUND_MINUTES = 180       # 아무도 더 말하지 않아도 이만큼 지나면 넘긴다
 LAST_ROUND = 3            # r3 가 마지막 회차다(r3 뒤가 권고)
@@ -401,6 +409,26 @@ def _verify(thread_id: str) -> str:
     return line[:200] + f" (rc={proc.returncode})"
 
 
+def open_room(ctx: Any, state_dir: str, *, topic: str, kind: str = "debate",
+              body: str | None = None, plaza: bool = False) -> dict[str, Any]:
+    """방 하나를 열고(필요하면) 루프에 맡긴다 — `--open` 이 하는 일 전부.
+
+    ★광장은 **토론방과 다른 방**이다(계약 확장 9 · 2026-09-11):
+      ⑴**예산이 크다** — 광장은 제안이 쌓이는 곳인데 토론방 기본값(2)이면 한 사람이 **평생 2글**이다
+        (예산 칸은 회차별인데 광장은 회차를 안 올린다 ⇒ 기본값이 곧 평생 상한이었다 · 실측 2026-09-11).
+      ⑵**루프에 안 맡긴다** — 맡기면 회차가 돌아 광장이 닫힌다.
+    ★이 일이 `main` 안에 인라인으로 있었다. 함수로 꺼낸 이유는 하나다 — **시험이 부를 수 있게.**
+      인라인이면 「광장을 큰 예산으로 여는가」를 재려면 CLI 전체를 태워야 하고, 그래서 안 재게 된다.
+    """
+    out = tools.enter(ctx, topic=topic, kind=kind, body=body or topic,
+                      budget=PLAZA_BUDGET if plaza else None)
+    if not plaza:
+        manage(state_dir, out["room_id"])
+    return {"opened": out["room_id"], "url": out.get("url"), "plaza": bool(plaza),
+            "budget": PLAZA_BUDGET if plaza else None,
+            "managed": sorted(managed_rooms(state_dir))}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="의장 루프 — 한 번 돈다")
     ap.add_argument("--dry-run", action="store_true", help="무엇을 할지 인쇄만 한다")
@@ -416,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--kind", default="debate", help="--open 의 갈래(debate·problem)")
     ap.add_argument("--topic", default=None, help="--open 의 제목")
     ap.add_argument("--body", default=None, help="--open 의 발제(3줄)")
+    ap.add_argument("--plaza", action="store_true",
+                    help="--open 을 **광장**으로 연다(큰 예산 · 루프에 안 맡긴다)")
     args = ap.parse_args(argv)
 
     ctx = tools.context_from_config(args.dir)
@@ -430,10 +460,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.topic:
             print(json.dumps({"error": "--open 은 --topic 이 필요하다"}, ensure_ascii=False))
             return errors.ARGUMENT
-        out = tools.enter(ctx, topic=args.topic, kind=args.kind, body=args.body or args.topic)
-        manage(state_dir, out["room_id"])
-        print(json.dumps({"opened": out["room_id"], "url": out.get("url"),
-                          "managed": sorted(managed_rooms(state_dir))},
+        print(json.dumps(open_room(ctx, state_dir, topic=args.topic, kind=args.kind,
+                                   body=args.body, plaza=args.plaza),
                          ensure_ascii=False, indent=2))
         return errors.OK
 

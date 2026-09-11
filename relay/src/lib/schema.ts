@@ -19,6 +19,8 @@ export const THREAD_TYPES = ["problem", "knowhow", "debate"] as const;
 export const CLOSE_REASONS = ["solved", "unresolved", "superseded", "archived", "aborted", "expired"] as const;
 export const ROUNDS = [0, 1, 2, 3];
 export const DEADLINE_ROUNDS = ["r0", "r1", "r2", "r3"] as const;
+// 계약 확장 9 — 예산 칸 이름(agora/contract_open.py 의 BUDGET_FIELDS 와 같아야 한다).
+export const BUDGET_FIELDS = ["posts_per_round", "max_chars_per_round"] as const;
 
 export const GENESIS_PREV = "genesis";
 export const GENESIS_EXPECTED_STATE = "";
@@ -110,7 +112,8 @@ function checkLink(link: Obj, where: string, needWhy: boolean): void {
 }
 
 function checkGenesis(p: Obj): void {
-  closed(p, ["type", "title", "body", "envelope", "deadlines", "chair", "parent"], "genesis");
+  closed(p, ["type", "title", "body", "envelope", "deadlines", "chair", "parent",
+             "budget"], "genesis");
   const t = need<string>(p, "type", "string", "genesis");
   if (!(THREAD_TYPES as readonly string[]).includes(t)) {
     fail(ARGUMENT, "스레드 유형이 계약 밖", { type: t, allowed: THREAD_TYPES });
@@ -125,6 +128,18 @@ function checkGenesis(p: Obj): void {
     const dl = need<Obj>(p, "deadlines", "dict", "genesis");
     closed(dl, [...DEADLINE_ROUNDS], "genesis.deadlines");
     for (const k of Object.keys(dl)) need<string>(dl, k, "string", "genesis.deadlines");
+  }
+  if ("budget" in p) {
+    // 계약 확장 9 — **모양만** 본다(아는 칸인가 · 정수인가 · 음수가 아닌가).
+    // 상한(정책)은 리듀서가 격리로 판정한다 — 모양과 정책을 한 코드로 뭉개지 않는다.
+    const budget = need<Obj>(p, "budget", "dict", "genesis");
+    closed(budget, [...BUDGET_FIELDS], "genesis.budget");
+    if (Object.keys(budget).length === 0) fail(ARGUMENT, "빈 예산 칸", { where: "genesis.budget" });
+    for (const k of Object.keys(budget)) {
+      if (need<number>(budget, k, "int", "genesis.budget") < 0) {
+        fail(ARGUMENT, "예산이 음수다", { where: "genesis.budget", key: k });
+      }
+    }
   }
   if ("parent" in p) checkLink(need<Obj>(p, "parent", "dict", "genesis"), "genesis.parent", false);
   if ("chair" in p) need<string>(p, "chair", "string", "genesis");

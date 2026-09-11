@@ -1780,8 +1780,13 @@ def _case_budget_reducer_rejects_without_precheck() -> None:
         raise AssertionError(f"계수가 다르다: {out['usage']}")
 
 
-def _case_budget_comes_from_settings() -> None:
-    """상한은 설정에서 온다 — 값을 바꾸면 결과가 바뀐다(AC ② · 하드코딩 아님)."""
+def _case_budget_override_beats_everything() -> None:
+    """`apply(budget=…)` 는 **부르는 쪽의 명시적 덮어쓰기**다 — 값을 바꾸면 결과가 바뀐다.
+
+    ★이 케이스의 이름이 2026-09-11 에 바뀌었다(구: 「설정에서 읽는다」). 계약 확장 9 로
+      예산의 출처가 **참가자 설정 → 방 genesis** 로 옮겨졌기 때문이다. 인자 자체는 남는다 —
+      시험·도구가 **알고** 덮어쓰는 자리이고, 그 자리가 살아 있는지는 여전히 재야 한다.
+    """
     from agora import reducer
     from agora.event import event_hash
     payload = {"type": "debate", "title": "가짜 제목", "body": "가짜 발제",
@@ -1912,9 +1917,26 @@ def _case_budget_is_per_participant_and_round() -> None:
 
 
 def _case_budget_value_must_be_sane() -> None:
-    """설정의 예산 값이 0 이상의 정수가 아니면 인자 오류(10)."""
-    from agora import protocol
-    protocol.load_budget({"budget": {"posts_per_round": "둘"}})
+    """genesis 가 든 예산의 **모양**이 틀리면 인자 오류(10) — 계약 확장 9.
+
+    ★모양과 정책을 가른다: 여기(10)는 「아는 칸인가·정수인가·음수가 아닌가」이고,
+      **상한을 넘는 것은 격리**다(아래 「예산: 범위 밖이면 방이 안 선다」). 한 코드로 뭉개면
+      「오타를 냈다」와 「독점 방지를 껐다」가 같은 화면으로 나온다.
+    """
+    from agora import schema
+    base = {"type": "debate", "title": "t", "body": "b"}
+    for broken, what in ((({"posts_per_round": 0, "무슨칸": 1}), "모르는 칸"),
+                         (({}), "빈 칸"),
+                         (({"posts_per_round": -1}), "음수")):
+        try:
+            schema.validate(_fake_event("genesis", {**base, "budget": broken}))
+        except AgoraError as e:
+            if e.code != errors.ARGUMENT:
+                raise AssertionError(f"{what}: code {e.code} != 10") from None
+        else:
+            raise AssertionError(f"{what} 이 통과했다: {broken}")
+    # 마지막 하나는 **던져서** 잰다(케이스 표가 기대 코드 10 을 들고 있다).
+    schema.validate(_fake_event("genesis", {**base, "budget": {"posts_per_round": "둘"}}))
 
 
 def _case_usage_field_exists(): 
@@ -4205,7 +4227,7 @@ S7_AXES: dict[str, tuple[str, ...]] = {
                "M199-context-drops-revoked-path", "M200-cas-not-wired",
                "M201-cas-compares-with-itself", "M202-say-skips-local-budget",
                "M203-local-budget-reads-another-slot",
-               "M204-reduce-ignores-config-budget", "M205-usage-slot-ignores-round",
+               "M204-reduce-overrides-the-room-budget", "M205-usage-slot-ignores-round",
                "M206-read-does-not-wrap-body", "M207-wrap-marks-bodyless-events",
                "M208-brief-drops-single-source"),
     # ★진 글이 어디에도 안 나오던 자리(실물 2026-08-26).
@@ -4342,8 +4364,8 @@ S2_AXES: dict[str, tuple[str, ...]] = {
              "M61-operator-delegate-unconditional"),
     "라운드": ("M47-out-of-round-allowed", "M48-counter-not-required",
                "M56-time-beats-event", "M59-expired-never-fires"),
-    "예산": ("M62-budget-not-enforced", "M63-budget-hardcoded",
-             "M64-budget-chars-ignored", "M65-budget-config-unvalidated"),
+    "예산": ("M62-budget-not-enforced", "M63-budget-ignores-the-room",
+             "M64-budget-chars-ignored", "M65-budget-shape-unvalidated"),
 }
 
 
@@ -4543,6 +4565,17 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     #   「틀린 일을 조용히 한다」다: 유예를 안 지키고 회차를 넘기거나, 판단하지 않았다고
     #   적어 놓고 요약을 지어내거나, 같은 자리를 두 번 하거나, 하고도 말하지 않는다.
     # ★09-11 신설 — **투표동결**. 표 한 건이 방을 얼리던 자리(두 구현 동시 봉합).
+    # ★09-11 신설 — **예산출처**. 예산이 참가자 설정에서 **방 genesis** 로 옮긴 자리(계약 확장 9).
+    #   여기서 잃는 것은 조용하다: 광장이 다시 2글짜리 방이 되거나, 두 구현이 다른 예산을 보거나,
+    #   예산이 상태 해시로 새어 기존 방의 계보가 끊긴다 — 셋 다 사람에게는 「가끔 글이 사라진다」로 보인다.
+    "예산출처": ("M441-relay-ignores-the-room-budget",
+                 "M442-relay-drops-the-budget-ceiling",
+                 "M443-budget-ceiling-not-enforced",
+                 "M444-budget-ceiling-off-by-one",
+                 "M445-budget-field-not-closed",
+                 "M446-plaza-opens-with-the-default-budget",
+                 "M447-plaza-handed-to-the-chair-loop",
+                 "M448-budget-leaks-into-the-state-hash"),
     "투표동결": ("M432-prev-uses-the-state-head", "M433-chain-head-is-the-state-head",
                  "M434-relay-state-hash-drops-head"),
     "의장루프": ("M427-chair-manages-every-room",
@@ -5255,13 +5288,16 @@ def _tools_ctx(**kw: Any) -> Any:
     return tools.Context(**opts)
 
 
-def _tools_thread(ctx: Any, *, gtype: str = "debate", key: str = "key_a") -> str:
+def _tools_thread(ctx: Any, *, gtype: str = "debate", key: str = "key_a",
+                  budget: dict[str, int] | None = None) -> str:
     from agora import tools
     f = _fixtures()
     body = {"debate": "가짜 발제"}.get(gtype, "가짜 질문")
     payload: dict[str, Any] = {"type": gtype, "title": "가짜 제목", "body": body}
     if gtype != "debate":
         payload["envelope"] = _envelope_ok()
+    if budget is not None:
+        payload["budget"] = budget
     out = _with_key(f[key], lambda: tools.propose(ctx, **payload))
     return out["thread_id"]
 
@@ -7363,10 +7399,10 @@ def _case_say_stops_over_budget_before_sending() -> None:
     """
     from agora import tools
     f = _fixtures()
-    ctx = _tools_ctx(config={"human_approval": False,
-                             "budget": {"posts_per_round": 1,
-                                        "max_chars_per_round": 6000}})
-    tid = _tools_thread(ctx, gtype="problem")
+    ctx = _tools_ctx(config={"human_approval": False})
+    # 계약 확장 9 — 예산은 **방이 들고 다닌다**(참가자 설정이 아니다).
+    tid = _tools_thread(ctx, gtype="problem",
+                        budget={"posts_per_round": 1, "max_chars_per_round": 6000})
     _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="첫 발언"))
     sent = len(ctx.store.fetch(thread_id=tid)["items"])
     try:
@@ -7382,11 +7418,12 @@ def _case_say_stops_over_budget_before_sending() -> None:
         raise AssertionError("막았다면서 운반층에는 썼다")
 
 
-def _case_reducer_counts_with_the_configured_budget() -> None:
-    """예산 **판정**도 설정에서 온다(§5 · 배선 B-6 — 전수조사에서 딸려 나온 자리).
+def _case_reducer_counts_with_the_room_budget() -> None:
+    """예산 **판정**은 **방 genesis** 에서 온다(계약 확장 9 · 배선 B-6).
 
-    ★`config.json` 은 `budget` 칸을 광고한다(예시 파일에도 있다). 그 값이 reducer 까지
-      가지 않으면 그 칸은 **아무 일도 안 하면서 「예산을 늘렸다」고 믿게 만든다.**
+    ★2026-09-11 에 출처가 바뀌었다(구: 참가자 `config.json`). 왜 바꿨나 — 설정이 출처면
+      **내 설정이 릴레이보다 느슨할 때** 릴레이는 격리하고 나는 받아들여 **같은 원장이
+      두 상태로 읽혔다.** 방 하나가 예산을 들면 모두가 같은 숫자를 본다.
     ★로컬 겹을 **끄고** 잰다 — 설계 §5 가 그렇게 하라고 적어 둔 방식이다.
       두 겹이 서로를 가려 주면 한 겹이 비어도 초록이기 때문이다.
       (여기서는 `_publish` 를 직접 불러 로컬 겹을 건너뛴다.)
@@ -7395,9 +7432,9 @@ def _case_reducer_counts_with_the_configured_budget() -> None:
     from agora import tools
     f = _fixtures()
 
-    def two_posts(cfg: dict[str, Any]) -> list[str]:
-        ctx = _tools_ctx(config=cfg)
-        tid = _tools_thread(ctx, gtype="problem")
+    def two_posts(budget: dict[str, int] | None) -> list[str]:
+        ctx = _tools_ctx(config={"human_approval": False})
+        tid = _tools_thread(ctx, gtype="problem", budget=budget)
         for body in ("첫 발언", "둘째 발언"):
             state, prev, expected = tools._head_and_state(ctx, tid)
             _with_key(f["key_a"], lambda b=body, p=prev, x=expected, s=state:
@@ -7407,12 +7444,14 @@ def _case_reducer_counts_with_the_configured_budget() -> None:
         return [q.get("reason") for q
                 in tools.read(ctx, thread_id=tid, audit=True).get("quarantined") or []]
 
-    if red.BUDGET_EXCEEDED in two_posts({"human_approval": False}):
+    if red.BUDGET_EXCEEDED in two_posts(None):
         raise AssertionError("기본 예산에서 둘째 발언이 잘렸다 — 픽스처가 예산 축을 못 짚었다")
-    tight = two_posts({"human_approval": False,
-                       "budget": {"posts_per_round": 1, "max_chars_per_round": 6000}})
+    tight = two_posts({"posts_per_round": 1, "max_chars_per_round": 6000})
     if red.BUDGET_EXCEEDED not in tight:
-        raise AssertionError(f"설정한 예산이 판정까지 안 갔다: {tight}")
+        raise AssertionError(f"방이 든 예산이 판정까지 안 갔다: {tight}")
+    # ★반대 방향도 잰다 — 넓힌 예산이 실제로 **넓히는가**(좁히는 것만 재면 「전부 거절」도 초록이다).
+    if red.BUDGET_EXCEEDED in two_posts({"posts_per_round": 50}):
+        raise AssertionError("방이 넓힌 예산이 안 먹었다")
 
 
 def _case_read_wraps_bodies_as_untrusted_data() -> None:
@@ -9459,11 +9498,12 @@ def _relay_env(**relay_kw: Any):
     return _open()
 
 
-def _relay_room(ctx: Any, *, kind: str = "debate") -> str:
+def _relay_room(ctx: Any, *, kind: str = "debate",
+                budget: dict[str, int] | None = None) -> str:
     from agora import tools
     f = _fixtures()
     out = _with_key(f["key_a"], lambda: tools.enter(ctx, topic="가짜 주제", kind=kind,
-                                                    body="가짜 발제"))
+                                                    body="가짜 발제", budget=budget))
     return out["room_id"]
 
 
@@ -12983,13 +13023,407 @@ def _three_party(ctx: Any, relay: Any, f: dict[str, Any], relay_url: str) -> Any
     return as_who
 
 
+def _plaza():
+    """광장 파생 모듈(`tools/plaza.py`) — 경로로 들인다."""
+    import importlib.util as _util
+    import sys as _sys
+    if "plaza" in _sys.modules:
+        return _sys.modules["plaza"]
+    spec = _util.spec_from_file_location("plaza", os.path.join(_ROOT, "tools", "plaza.py"))
+    mod = _util.module_from_spec(spec)
+    _sys.modules["plaza"] = mod
+    spec.loader.exec_module(mod)                     # type: ignore[union-attr]
+    return mod
+
+
+def _daily():
+    """하루 한 바퀴 실행기(`tools/daily_loop.py`)."""
+    import importlib.util as _util
+    import sys as _sys
+    if "daily_loop" in _sys.modules:
+        return _sys.modules["daily_loop"]
+    spec = _util.spec_from_file_location("daily_loop", os.path.join(_ROOT, "tools", "daily_loop.py"))
+    mod = _util.module_from_spec(spec)
+    _sys.modules["daily_loop"] = mod
+    spec.loader.exec_module(mod)                     # type: ignore[union-attr]
+    return mod
+
+
+def _ev(kind: str, who: str, at: str, mid: str = "", **payload: Any) -> dict[str, Any]:
+    """광장 이벤트 한 줄(시험용) — 실물 `reduced["events"]` 와 같은 모양."""
+    return {"created_at": at,
+            "event": {"kind": kind, "from": who, "message_id": mid or (who + at)[:32],
+                      "payload": dict(payload)}}
+
+
+def _case_plaza_counts_votes_by_the_rules() -> None:
+    """표를 세는 규칙 — **자기표 제외 · 마지막 것만 · 하루 3표.**
+
+    ★왜 규칙을 코드에 박는가: 「누가 몇 표인가」를 사람이 세면 매일 설명해야 하고, 설명은
+      기억이 된다. 그리고 표는 **이해관계가 걸린 수**라, 세는 규칙이 흔들리면 자리 자체가 흔들린다.
+    ★자기표 불산입이 이 규칙의 뼈대다 — 없으면 제안자가 자기 제안을 계속 올릴 수 있다.
+    """
+    pz = _plaza()
+    events = [
+        _ev("post", "a", "2026-09-10T07:00:00Z", "p1", body="제안 하나", round=0),
+        _ev("post", "b", "2026-09-10T07:05:00Z", "p2", body="제안 둘", round=0),
+        _ev("vote", "a", "2026-09-10T08:00:00Z", target="p1", value=1),   # ⛔자기표
+        _ev("vote", "b", "2026-09-10T08:01:00Z", target="p1", value=1),
+        _ev("vote", "b", "2026-09-10T08:02:00Z", target="p1", value=0),   # 거뒀다(마지막이 이긴다)
+        _ev("vote", "c", "2026-09-10T08:03:00Z", target="p1", value=1),
+        _ev("vote", "c", "2026-09-10T08:04:00Z", target="없는제안", value=1),
+    ]
+    plaza = pz.read_plaza(events)
+    if len(plaza["proposals"]) != 2:
+        raise AssertionError(f"제안이 2건이어야 한다: {sorted(plaza['proposals'])}")
+    valid = pz.valid_votes(plaza)
+    if [(v["from"], v["target"]) for v in valid] != [("c", "p1")]:
+        raise AssertionError(f"유효표가 다르다: {[(v['from'], v['target']) for v in valid]}")
+
+    # 하루 3표 상한 — 넘게 던지면 **최근 3개만** 산다.
+    many = [_ev("post", f"owner{i}", "2026-09-10T07:00:00Z", f"q{i}", body=f"제안 {i}", round=0)
+            for i in range(5)]
+    many += [_ev("vote", "v", f"2026-09-10T09:0{i}:00Z", target=f"q{i}", value=1)
+             for i in range(5)]
+    kept = pz.valid_votes(pz.read_plaza(many))
+    if [v["target"] for v in kept] != ["q2", "q3", "q4"]:
+        raise AssertionError(f"하루 3표 상한이 안 걸렸다: {[v['target'] for v in kept]}")
+
+
+def _case_plaza_score_decays_and_ranks() -> None:
+    """점수는 **매일 반으로 줄고** 오늘 표를 더한다 — 그리고 순위는 그 수로만 정해진다.
+
+    ★왜 감쇠인가(agy 적대검증이 바꾼 자리): 매일 0으로 리셋하면 **심야에 올라온 제안이
+      구조적으로 불리하다**(표 모을 시간이 없다). 감쇠는 그것을 지우면서도 오래된 제안이
+      영원히 이기는 것을 막는다.
+    ★반올림은 **둘째 자리 ROUND_HALF_UP** 으로 못박는다 — 안 그러면 같은 원장이 기계마다 다른 순위를 낸다.
+    """
+    import datetime as _dt
+    pz = _plaza()
+    events = [
+        _ev("post", "a", "2026-09-10T07:00:00Z", "p1", body="오래된 제안", round=0),
+        _ev("post", "b", "2026-09-10T07:00:01Z", "p2", body="같은 날 제안", round=0),
+        _ev("vote", "x", "2026-09-10T08:00:00Z", target="p1", value=1),
+        _ev("vote", "y", "2026-09-10T08:01:00Z", target="p1", value=1),
+        _ev("vote", "x", "2026-09-11T08:00:00Z", target="p2", value=1),
+        _ev("vote", "y", "2026-09-11T08:01:00Z", target="p2", value=1),
+    ]
+    plaza = pz.read_plaza(events)
+    d10, d11 = _dt.date(2026, 9, 10), _dt.date(2026, 9, 11)
+    s10 = pz.scores(plaza, through=d10)
+    if str(s10["p1"]) != "2.00":
+        raise AssertionError(f"첫날 점수가 틀렸다: {s10['p1']}")
+    s11 = pz.scores(plaza, through=d11)
+    if str(s11["p1"]) != "1.00" or str(s11["p2"]) != "2.00":
+        raise AssertionError(f"감쇠가 안 맞는다: p1={s11['p1']} p2={s11['p2']}")
+
+    rows = pz.ranking(plaza, through=d11)
+    if [r["id"] for r in rows] != ["p2", "p1"]:
+        raise AssertionError(f"순위가 점수를 안 따른다: {[r['id'] for r in rows]}")
+    fit = pz.eligible(rows)
+    if [r["id"] for r in fit] != ["p2"]:
+        raise AssertionError(f"개설 조건 판정이 다르다: {[r['id'] for r in fit]}")
+
+    # 동점이면 **오래된 제안**이 앞이다.
+    tie = pz.ranking(pz.read_plaza(events[:2] + [
+        _ev("vote", "x", "2026-09-10T08:00:00Z", target="p1", value=1),
+        _ev("vote", "x", "2026-09-10T08:00:30Z", target="p2", value=1)]), through=d10)
+    if [r["id"] for r in tie] != ["p1", "p2"]:
+        raise AssertionError(f"동점 정렬이 틀렸다(오래된 것이 앞): {[r['id'] for r in tie]}")
+
+    # 조건은 **둘 다** 넘어야 한다 — 한 사람이 몰표를 줘도 열리지 않는다.
+    lonely = pz.read_plaza([
+        _ev("post", "a", "2026-09-10T07:00:00Z", "p9", body="혼자 밀어주는 제안", round=0),
+        _ev("vote", "z", "2026-09-10T08:00:00Z", target="p9", value=1)])
+    rows9 = pz.ranking(lonely, through=d10)
+    if pz.eligible(rows9):
+        raise AssertionError("투표자 1명인데 개설 조건을 넘겼다")
+
+
+def _case_plaza_day_boundary_is_six() -> None:
+    """하루의 경계는 **06:00 Asia/Seoul** 이다 — 마감 시각과 같은 자리.
+
+    ★경계가 둘이면 「어제 표인데 오늘로 세는」 날이 반드시 온다. 그래서 한 함수에만 둔다.
+    """
+    import datetime as _dt
+    pz = _plaza()
+    kst = pz.KST
+    just_before = _dt.datetime(2026, 9, 11, 5, 59, tzinfo=kst)
+    exactly = _dt.datetime(2026, 9, 11, 6, 0, tzinfo=kst)
+    if pz.day_of(just_before) != _dt.date(2026, 9, 10):
+        raise AssertionError(f"05:59 는 어제여야 한다: {pz.day_of(just_before)}")
+    if pz.day_of(exactly) != _dt.date(2026, 9, 11):
+        raise AssertionError(f"06:00 은 오늘이어야 한다: {pz.day_of(exactly)}")
+    # UTC 로 들어와도 같은 답이어야 한다(시간대를 잊으면 9시간이 통째로 밀린다).
+    if pz.day_of(exactly.astimezone(_dt.timezone.utc)) != _dt.date(2026, 9, 11):
+        raise AssertionError("시간대를 바꾸자 날짜가 달라졌다")
+
+
+def _case_plaza_markers_are_the_only_source() -> None:
+    """마커가 **파생 상태의 유일한 출처**다 — 형식은 정규식 하나로 못박는다.
+
+    ★상태기계를 늘리지 않기로 했으므로(규약 변경 = 발주자 게이트), 「졸업했다」는 사실은
+      광장에 남긴 **한 줄**로만 산다. 그 줄의 형식이 흔들리면 보드도 시험도 같이 흔들린다.
+    ★마커 글은 **제안이 아니다** — 아니면 기계가 남긴 줄에 표가 붙는다.
+    """
+    pz = _plaza()
+    line = pz.marker_line("졸업", "a" * 32, "b" * 32, "교착 해소")
+    found = pz.MARKER_RE.match(line)
+    if not found or found.group("kind") != "졸업" or found.group("thread") != "b" * 32:
+        raise AssertionError(f"마커를 내가 만들고 내가 못 읽는다: {line}")
+    if found.group("note") != "교착 해소":
+        raise AssertionError(f"메모가 안 읽힌다: {found.groupdict()}")
+
+    # ★마커의 id 는 **32자리 hex**여야 한다(실물 message_id 모양) — 규칙을 느슨하게 하면
+    #   사람이 쓴 「[보관] 이 얘기는 나중에」 같은 문장이 마커로 읽힌다.
+    p1, p9, room = "a1" * 16, "b2" * 16, "c3" * 16
+    plaza = pz.read_plaza([
+        _ev("post", "a", "2026-09-10T07:00:00Z", p1, body="진짜 제안", round=0),
+        _ev("post", "chair", "2026-09-11T06:10:00Z", "m1",
+            body=pz.marker_line("졸업", p1, room), round=0),
+        _ev("post", "chair", "2026-09-11T06:11:00Z", "m2", body=pz.marker_line("보관", p9), round=0),
+        _ev("post", "human", "2026-09-11T06:12:00Z", "m3",
+            body="[보관] 이 얘기는 나중에 하자", round=0),        # ← 마커가 아니다(제안이다)
+    ])
+    if sorted(plaza["proposals"]) != sorted([p1, "m3"]):
+        raise AssertionError(f"마커 글이 제안으로 셈에 들어갔다: {list(plaza['proposals'])}")
+    if plaza["settled"] if "settled" in plaza else False:
+        raise AssertionError("이 키는 없다(파생은 함수가 한다)")
+    if pz.settled(plaza) != {p1, p9}:
+        raise AssertionError(f"끝난 제안 판정이 다르다: {pz.settled(plaza)}")
+    rows = pz.ranking(plaza, through=__import__("datetime").date(2026, 9, 11))
+    if [r["id"] for r in rows] != ["m3"]:
+        raise AssertionError(f"졸업·보관은 줄에서 빠지고 **진짜 글만** 남아야 한다: {[r['id'] for r in rows]}")
+
+
+def _case_daily_plan_opens_only_when_earned() -> None:
+    """하루 한 바퀴의 **계산**: 조건을 넘긴 상위 N · 못 넘기면 0 · 이틀 교착이면 하나.
+
+    ★교착은 진짜로 난다(agy 적대검증): 자기표 불산입 + 0표 개설 금지가 겹치면, 아무도
+      남의 제안에 표를 안 주는 광장은 **영영 안 열린다.** 그때 침묵을 깨는 것이 이 규칙이다.
+    ★단 「이틀 연속 0건」일 때만이다 — 하루만에 풀어 주면 조건이 사실상 없는 것과 같다.
+    """
+    import datetime as _dt
+    pz, dl = _plaza(), _daily()
+    d12 = _dt.date(2026, 9, 12)
+
+    fit = pz.read_plaza([
+        _ev("post", "a", "2026-09-10T07:00:00Z", "p1", body="될 제안", round=0),
+        _ev("post", "b", "2026-09-10T07:00:01Z", "p2", body="둘째 제안", round=0),
+        _ev("post", "c", "2026-09-10T07:00:02Z", "p3", body="셋째 제안", round=0),
+        _ev("vote", "x", "2026-09-11T08:00:00Z", target="p1", value=1),
+        _ev("vote", "y", "2026-09-11T08:00:01Z", target="p1", value=1),
+        _ev("vote", "x", "2026-09-11T08:00:02Z", target="p2", value=1),
+        _ev("vote", "y", "2026-09-11T08:00:03Z", target="p2", value=1),
+        _ev("vote", "x", "2026-09-11T08:00:04Z", target="p3", value=1),
+    ])
+    sheet = dl.plan(fit, today=d12, per_day=2, deadlock_days=2)
+    if [r["id"] for r in sheet["picks"]] != ["p1", "p2"]:
+        raise AssertionError(f"상위 2개가 아니다: {[r['id'] for r in sheet['picks']]}")
+    if sheet["deadlock"]:
+        raise AssertionError("조건을 넘겼는데 교착이라고 했다")
+
+    # 하루만 0건 — 아직 열지 않는다.
+    quiet = pz.read_plaza([
+        _ev("post", "a", "2026-09-11T07:00:00Z", "q1", body="표가 안 붙는 제안", round=0)])
+    one_day = dl.plan(quiet, today=d12, per_day=2, deadlock_days=2)
+    if one_day["picks"]:
+        raise AssertionError("하루 0건인데 벌써 열었다")
+
+    # 이틀 연속 0건 — 최고점 하나를 연다(교착 해소).
+    two_days = dl.plan(quiet, today=_dt.date(2026, 9, 13), per_day=2, deadlock_days=2)
+    if [r["id"] for r in two_days["picks"]] != ["q1"] or not two_days["deadlock"]:
+        raise AssertionError(f"교착이 안 풀린다: {two_days['picks']} · {two_days['deadlock']}")
+
+
+def _three_party(ctx: Any, relay: Any, f: dict[str, Any], relay_url: str) -> Any:
+    """a·b·c 세 사람이 서명할 수 있는 판 — **표를 두 사람이 던져야** 개설 조건이 성립한다."""
+    import tempfile
+    from agora import tools
+    d = tempfile.mkdtemp(prefix="roster-abc-")
+    path = os.path.join(d, "allowed_signers_abc")
+    lines = []
+    for name, who in (("key_a", "operator-a"), ("key_b", "operator-b"), ("key_c", "operator-c")):
+        with open(f[name] + ".pub", encoding="utf-8") as fh:
+            lines.append(f"{who} {fh.read().strip()}")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    with open(path, encoding="utf-8") as fh:
+        relay.roster_text["allowed_signers"] = fh.read()
+
+    # ★사람마다 **자기 운반층·자기 원장**을 준다. 하나를 돌려 쓰면 앞사람이 방금 쓴 글이
+    #   캐시에 안 잡혀 뒷사람이 **같은 자리를 놓고 겨루다 밀린다**(`lost_race` · 2026-09-11 실측).
+    #   실물에서도 사람마다 기계가 다르다 — 더블을 실물 모양으로 맞추는 쪽이 맞다.
+    from agora.ledger import Ledger
+    from agora.spool import Spool
+    from agora.store_relay import RelayStore
+    made: dict[str, Any] = {}
+
+    def as_who(pid: str) -> Any:
+        if pid not in made:
+            home = tempfile.mkdtemp(prefix=f"agora-{pid}-")
+            made[pid] = tools.Context(store=RelayStore(relay_url, sleep=lambda _s: None),
+                                      ledger=Ledger(home), spool=Spool(home),
+                                      allowed_signers_path=path, participant_id=pid,
+                                      config=ctx.config, config_dir=home)
+        return made[pid]
+    return as_who
+
+
+def _plaza_budget() -> dict[str, int]:
+    """광장이 열릴 때 들고 가는 예산 — **계약 상수가 정본**이다(시험이 숫자를 따로 적지 않는다)."""
+    from agora.contract_open import PLAZA_BUDGET_MAX_CHARS, PLAZA_BUDGET_POSTS_PER_ROUND
+    return {"posts_per_round": PLAZA_BUDGET_POSTS_PER_ROUND,
+            "max_chars_per_round": PLAZA_BUDGET_MAX_CHARS}
+
+
+def _case_daily_loop_opens_marks_and_retires() -> None:
+    """실물(가짜 릴레이) 한 바퀴 — **방 개설 → [졸업] 마커 → 멱등 → [유찰] → [보관].**
+
+    ★계산이 맞아도 **배선이 틀리면** 아무 일도 안 난다. 그래서 한 번은 통째로 돌린다.
+    ★유찰이 이 루프의 값이다(agy 적대검증 ⑴ 빈 방 양산): 표만 받고 아무도 안 오는 방이
+      매일 쌓이면 광장은 **빈 방의 목록**이 된다.
+    """
+    import datetime as _dt
+    import tempfile
+    from agora import tools
+    pz, dl, cl = _plaza(), _daily(), _chair_loop()
+    f = _fixtures()
+    with _relay_env() as (ctx, _relay, _url):          # noqa: F841 — _url 은 아래에서 쓴다
+        # ★광장은 **큰 예산으로 연다**(계약 확장 9). 토론방 기본값(2)으로 열면 의장 기계가
+        #   마커를 셋째부터 못 쓴다 — 2026-09-11 에 이 시험이 정확히 거기서 멈췄다.
+        plaza_id = _relay_room(ctx, budget=_plaza_budget())
+        # ★점수는 **방금 닫힌 하루**까지 접는다 ⇒ 오늘 던진 표는 **다음 판**에서 센다.
+        #   그래서 시각을 내일 06:10 로 주고 돈다(날짜 노브와 같은 자리).
+        cast_at = _dt.datetime.now(_dt.timezone.utc)
+        now = _dt.datetime.combine((cast_at.astimezone(_plaza().KST) + _dt.timedelta(days=1)).date(),
+                                   _dt.time(6, 10), _plaza().KST)
+        # 제안 하나 + 서로 다른 두 사람의 표(=조건 충족). 표는 **어제** 던진 것으로 친다.
+        said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=plaza_id, body="시험 제안 하나"))
+        pid = said["message_id"]
+        # ★서로 다른 **두 사람**의 표가 필요하다(자기표는 안 센다) — 3인 명부를 세운다.
+        as_who = _three_party(ctx, _relay, f, _url)
+        for who, key in (("operator-b", "key_b"), ("operator-c", "key_c")):
+            # ★던지기 전에 **읽는다.** 계약이 그렇게 말하고(「read 로 다시 보고 그 자리에서 써라」),
+            #   안 읽으면 앞사람이 방금 쓴 글을 못 본 채 같은 자리를 놓고 겨루다 밀린다
+            #   (`lost_race` · 2026-09-11 이 시험을 짜다 실제로 났다).
+            _with_key(f[key], lambda w=who: tools.read(as_who(w), thread_id=plaza_id))
+            _with_key(f[key], lambda w=who: tools.vote(as_who(w), thread_id=plaza_id,
+                                                       target=pid, value=1))
+
+        # ★한 바퀴는 **3인 명부를 든 판**으로 돈다. 원래 ctx 는 2인 명부(a·b)라 operator-c 의 표를
+        #   「명부 밖」으로 버린다 ⇒ 서로 다른 투표자가 1명이 되어 문턱(2명)에 걸린다(2026-09-11 실측:
+        #   `voters: 1` · 방 0개). **세는 쪽과 던지는 쪽이 같은 명부를 봐야 한다** — 대조도 이 판으로 한다.
+        a3 = as_who("operator-a")
+        state = tempfile.mkdtemp(prefix="daily-")
+        out = _with_key(f["key_a"], lambda: dl.run(a3, state_dir=state, plaza_id=plaza_id, now=now,
+                                                   config={"per_day": 2, "stale_minutes": 0}))
+        if len(out["opened"]) != 1:
+            raise AssertionError(f"방이 안 열렸다: {out}")
+        room_id = out["opened"][0]["room"]
+        if room_id not in cl.managed_rooms(state):
+            raise AssertionError("연 방을 의장 루프에 안 맡겼다")
+
+        plaza = pz.read_plaza(tools._reduce(a3, plaza_id)["events"])
+        grads = [m for m in plaza["markers"] if m["kind"] == "졸업"]
+        if not grads or grads[0]["id"] != pid or grads[0]["thread"] != room_id:
+            raise AssertionError(f"[졸업] 마커가 없거나 틀렸다: {plaza['markers']}")
+
+        # 멱등 — 같은 날 두 번 돌아도 방은 하나다.
+        again = _with_key(f["key_a"], lambda: dl.run(a3, state_dir=state, plaza_id=plaza_id,
+                                                     now=now, config={"per_day": 2,
+                                                                      "stale_minutes": 0}))
+        if again["opened"]:
+            raise AssertionError(f"같은 날 두 번째 판이 방을 또 열었다: {again['opened']}")
+
+        # 유찰 — 아무도 말하지 않은 방은 권고 없이 닫힌다.
+        if tools._reduce(a3, room_id)["state"] != "closed":
+            raise AssertionError("발언 0 인 방이 안 닫혔다")
+        plaza = pz.read_plaza(tools._reduce(a3, plaza_id)["events"])
+        if not [m for m in plaza["markers"] if m["kind"] == "유찰" and m["id"] == room_id]:
+            raise AssertionError(f"[유찰] 마커가 없다: {plaza['markers']}")
+
+        # 보관 — 오래된 제안은 가려진다(원장은 그대로).
+        old = _with_key(f["key_a"], lambda: tools.say(a3, thread_id=plaza_id, body="오래된 제안"))
+        state2 = tempfile.mkdtemp(prefix="daily-")
+        later = now + _dt.timedelta(days=20)
+        out2 = _with_key(f["key_a"], lambda: dl.run(a3, state_dir=state2, plaza_id=plaza_id,
+                                                    now=later, config={"per_day": 0,
+                                                                       "stale_minutes": 99999}))
+        plaza = pz.read_plaza(tools._reduce(a3, plaza_id)["events"])
+        shelved = {m["id"] for m in plaza["markers"] if m["kind"] == "보관"}
+        if old["message_id"] not in shelved:
+            raise AssertionError(f"14일 지난 제안이 안 가려졌다: {shelved} · {out2['actions']}")
+
+
+def _case_plaza_budget_is_a_lifetime_budget() -> None:
+    """광장에서 **예산은 평생 예산**이다 — 회차가 안 오르기 때문이다(2026-09-11 실측 · 계약 현황).
+
+    ★이 케이스는 **결함을 고치는 것이 아니라 현황을 재는 것**이다. 「하루 한 바퀴」가 여기서 막혔고,
+      막힌 이유를 말로만 적어 두면 다음 사람이 또 시험을 약화시키는 쪽으로 간다.
+    ★두 가지를 한 자리에서 못박는다:
+      ⑴ 예산 칸(`usage_slot`)은 debate 면 **회차별**이다 — 그래서 회차가 오르면 새 칸이 열린다.
+      ⑵ 그런데 **광장 방은 회차를 안 올린다**(의장 루프에 안 맡긴다 · 그게 규칙이다) ⇒ ⑴ 의 구제가
+         광장에는 **안 온다.** 한 사람이 광장에 쓸 수 있는 글은 `posts_per_round` 개로 끝난다.
+    ⇒ 계약이 바뀌면(방이 자기 예산을 들고 다니면) 이 케이스가 **뒤집히는 것이 정상**이다.
+      그때 고칠 곳을 여기 적어 둔다: 아래 기대값과 `tools/daily_loop.py` 의 마커 수.
+    """
+    import tempfile
+    from agora import tools
+    from agora.errors import AgoraError
+    f = _fixtures()
+    with _relay_env() as (ctx, _relay, _url):           # noqa: F841
+        plaza_id = _relay_room(ctx)                     # debate · r0 — 광장이 서는 모양 그대로
+        red = tools._reduce(ctx, plaza_id)
+        cap = int(red["budget"]["posts_per_round"])
+        if red["round"] != 0:
+            raise AssertionError(f"광장은 r0 에서 시작해야 한다: {red['round']}")
+
+        # 상한까지는 쓰인다.
+        for i in range(cap):
+            _with_key(f["key_a"], lambda n=i: tools.say(ctx, thread_id=plaza_id,
+                                                        body=f"제안 {n}"))
+        # 그 다음 한 글이 거절된다 — **조용히 사라지지 않고** code 3 으로 말한다.
+        try:
+            _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=plaza_id, body="제안 하나 더"))
+        except AgoraError as e:
+            if e.code != errors.GATE_REJECT or (e.detail or {}).get("limit") != "posts_per_round":
+                raise AssertionError(f"다른 이유로 막혔다: {e.code} · {e.detail}") from None
+        else:
+            raise AssertionError(f"{cap + 1}번째 글이 지나갔다 — 예산이 안 재지고 있다")
+
+        # ★그리고 이것이 핵심이다: 회차를 올리면 새 칸이 열린다(= 구제가 있긴 하다).
+        #   광장은 그 구제를 **못 받는다** — 올릴 사람이 없다(의장 루프에 안 맡기는 것이 규칙).
+        _with_key(f["key_a"], lambda: tools.advance(ctx, thread_id=plaza_id, to_round=1))
+        _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=plaza_id, body="r1 의 첫 글"))
+        after = tools._reduce(ctx, plaza_id)
+        if after["round"] != 1:
+            raise AssertionError(f"회차가 안 올랐다: {after['round']}")
+        slots = sorted(after["usage"])
+        if len(slots) != 2:
+            raise AssertionError(f"회차가 올랐는데 예산 칸이 안 갈렸다: {slots}")
+
+        # ⇒ 광장이 버틸 수 있는 글 수는 **회차 수 × 상한**이 최대다. 회차는 네 개뿐이다.
+        from agora import reducer as _red
+        if len(_red.DEBATE_ROUNDS) != 4:
+            raise AssertionError(f"회차 수가 넷이 아니다 — 이 케이스의 셈이 바뀐다: {_red.DEBATE_ROUNDS}")
+
+
 def _vote_chain() -> list[dict[str, Any]]:
     """genesis → 제안 → **표** → 표 뒤 발언. 각 이벤트의 `expected_state` 는 그 앞까지 접은 상태다."""
+    return _chain_of([("genesis", "a", {"type": "debate", "title": "t", "body": "b"}),
+                      ("post", "b", {"round": 0, "body": "제안"}),
+                      ("vote", "c", {"target": "1" * 32, "value": 1}),
+                      ("post", "b", {"round": 0, "body": "표 뒤 발언"})])
+
+
+def _chain_of(kinds: list[tuple[str, str, dict[str, Any]]]) -> list[dict[str, Any]]:
+    """사슬 하나를 손으로 엮는다 — 각 이벤트의 `expected_state` 는 **그 앞까지 접은 상태**다.
+
+    ★손으로 엮은 사슬에는 **경합이 없다**(2026-09-11 교훈). 그래서 여기서 재도 되는 것은
+      「접었을 때 무엇이 되는가」뿐이고, 경합이 걸린 축은 반드시 쓰기 경로로 재야 한다.
+    """
     from agora import reducer as _r
-    kinds = [("genesis", "a", {"type": "debate", "title": "t", "body": "b"}),
-             ("post", "b", {"round": 0, "body": "제안"}),
-             ("vote", "c", {"target": "1" * 32, "value": 1}),
-             ("post", "b", {"round": 0, "body": "표 뒤 발언"})]
     entries: list[dict[str, Any]] = []
     prev = "genesis"
     for i, (kind, who, payload) in enumerate(kinds, 1):
@@ -13003,7 +13437,9 @@ def _vote_chain() -> list[dict[str, Any]]:
     for i in range(1, len(entries)):
         pre = _r.apply(_r.order({"thread_id": "t", "fetched": i, "valid": entries[:i],
                                  "quarantined": [], "stale": []}))
-        entries[i]["event"]["expected_state"] = pre["state_hash"]
+        # ★방이 아예 안 서는 사슬(genesis 가 격리된 경우)에는 견줄 상태가 없다 — 빈 칸으로 둔다.
+        #   여기서 예외를 내면 「못 서는 방」을 시험할 수단 자체가 사라진다.
+        entries[i]["event"]["expected_state"] = pre.get("state_hash") or ""
     return entries
 
 
@@ -13011,6 +13447,170 @@ def _apply_chain(entries: list[dict[str, Any]]) -> dict[str, Any]:
     from agora import reducer as _r
     return _r.apply(_r.order({"thread_id": "t", "fetched": len(entries), "valid": entries,
                               "quarantined": [], "stale": []}))
+
+
+# 계약 확장 9(2026-09-11) — **방이 자기 예산을 들고 다닌다.**
+# ★골든 값. 예산 칸이 **없는** 사슬은 확장 전과 **똑같은 상태 해시**를 내야 한다 = 계보 단절 0.
+#   이 숫자는 확장 **직전 커밋(46dc646)의 코드로 실측해** 옮겨 적은 것이다(손으로 지어내지 않았다).
+#   깨지면 둘 중 하나다: ⑴예산이 상태 해시에 새어 들어갔다 ⑵해시 칸을 건드렸다. 둘 다 배포 금지다.
+_PRE_BUDGET_VOTE_CHAIN_HASH = "5eacac2752605a9f0e0a16a50e0a2b2178d3fb1b1a3fd4dd92ac4ea1ed17df30"
+
+
+def _budget_chain(budget: dict[str, int] | None) -> list[dict[str, Any]]:
+    """genesis(예산 선택) → 같은 사람의 발언 둘. 예산이 1이면 둘째가 잘려야 한다."""
+    payload: dict[str, Any] = {"type": "debate", "title": "t", "body": "b"}
+    if budget is not None:
+        payload["budget"] = budget
+    return _chain_of([("genesis", "a", payload),
+                      ("post", "b", {"round": 0, "body": "첫 발언"}),
+                      ("post", "b", {"round": 0, "body": "둘째 발언"})])
+
+
+def _case_room_carries_its_own_budget() -> None:
+    """예산의 **출처는 방 genesis** 다 — 칸이 없으면 계약 기본값이고, 옛 방의 해시는 안 변한다.
+
+    ★왜 바꿨나(2026-09-11 실측): 예산 칸은 debate 면 회차별인데 **광장 방은 회차를 안 올린다**
+      ⇒ 한 사람이 광장에 쓸 수 있는 글이 `posts_per_round` 개로 **평생** 고정됐다. 하루 한 바퀴가
+      마커를 셋째부터 못 써서 첫날 멈췄고, 라이브 광장을 연 참가자에게 남은 글은 1개였다.
+    ★전에는 참가자 `config.json` 이 출처였다. 그러면 **내 설정이 릴레이보다 느슨할 때** 릴레이는
+      격리하고 나는 받아들여 **같은 원장이 두 상태로 읽혔다** — 그 틈이 이 확장으로 같이 닫힌다.
+    ★세 방향을 잰다: ⑴방이 좁히면 좁아진다 ⑵칸이 없으면 계약 기본값이다 ⑶**옛 방의 상태 해시가
+      안 변한다**(골든 · 계보 단절 0). ⑶이 없으면 이 확장은 「기존 방을 전부 깨는 변경」일 수 있다.
+    """
+    from agora import reducer as _r
+
+    tight = _apply_chain(_budget_chain({"posts_per_round": 1, "max_chars_per_round": 6000}))
+    reasons = [q["reason"] for q in tight["quarantined"] if q.get("stage") == "transition"]
+    if reasons != [_r.BUDGET_EXCEEDED]:
+        raise AssertionError(f"방이 든 예산(1)이 판정까지 안 갔다: {reasons}")
+    if tight["budget"]["posts_per_round"] != 1:
+        raise AssertionError(f"상태가 방의 예산을 안 들고 있다: {tight['budget']}")
+
+    plain = _apply_chain(_budget_chain(None))
+    if [q["reason"] for q in plain["quarantined"] if q.get("stage") == "transition"]:
+        raise AssertionError("칸이 없는 방이 기본값(2)보다 좁게 돌았다")
+    from agora.contract_open import DEFAULT_BUDGET_POSTS_PER_ROUND
+    if plain["budget"]["posts_per_round"] != DEFAULT_BUDGET_POSTS_PER_ROUND:
+        raise AssertionError(f"칸이 없는데 기본값이 아니다: {plain['budget']}")
+
+    # ⑶ 골든 — 예산 칸이 없는 옛 사슬의 상태 해시가 확장 전과 같다.
+    old = _apply_chain(_vote_chain())
+    if old["state_hash"] != _PRE_BUDGET_VOTE_CHAIN_HASH:
+        raise AssertionError(
+            "옛 방의 상태 해시가 변했다 — 계보가 끊긴다(배포 금지): "
+            f"{old['state_hash'][:16]} != {_PRE_BUDGET_VOTE_CHAIN_HASH[:16]}")
+    # 그리고 **예산은 해시에 안 들어간다**(위 골든이 우연히 맞는 것이 아님을 못박는다).
+    if _apply_chain(_budget_chain({"posts_per_round": 7}))["state_hash"] == \
+            _apply_chain(_budget_chain({"posts_per_round": 9}))["state_hash"]:
+        return                                    # 예산이 해시 밖 — 기대대로다
+    raise AssertionError("예산 값이 상태 해시를 흔든다 — 방마다 계보가 갈린다")
+
+
+def _case_budget_out_of_range_leaves_no_room() -> None:
+    """상한을 넘긴 예산을 든 genesis 는 **격리**된다 — 그 방은 서지 않는다(계약 확장 9).
+
+    ★조용히 기본값으로 끌어내리지 않는 이유: 그러면 「내가 적은 예산으로 돈다」고 믿는 방이
+      **다른 숫자로 돌고**, 그 차이는 아무도 못 본다. 못 세우는 방은 못 세운다고 말한다.
+    ★모양(10)과 정책(격리)을 가른 자리이기도 하다 — 여기서 재는 것은 **정책**이다.
+    """
+    from agora import protocol
+    from agora import reducer as _r
+    over = protocol.BUDGET_CEILING["posts_per_round"] + 1
+    out = _apply_chain(_budget_chain({"posts_per_round": over}))
+    if out["state"] is not None:
+        raise AssertionError(f"범위 밖 예산으로 방이 섰다: {out['state']}")
+    if out.get("reason") != _r.BUDGET_OUT_OF_RANGE:
+        raise AssertionError(f"사유가 다르다: {out.get('reason')}")
+    if [q["reason"] for q in out["quarantined"]] != [_r.BUDGET_OUT_OF_RANGE]:
+        raise AssertionError(f"격리 목록에 안 남았다: {out['quarantined']}")
+    # 상한 **그대로**는 선다(경계를 한 칸 안쪽에서도 잰다 — 「전부 거절」도 위 검사만으로는 초록이다).
+    edge = _apply_chain(_budget_chain(
+        {"posts_per_round": protocol.BUDGET_CEILING["posts_per_round"]}))
+    if edge["state"] is None:
+        raise AssertionError("상한 그대로인 예산을 거절했다 — 경계가 한 칸 어긋났다")
+
+
+def _case_budget_state_hash_matches_the_relay() -> None:
+    """🔴**예산 낀 방에서도 두 구현이 같은 답을 낸다**(py ↔ ts · 계약 확장 9).
+
+    ★이 확장은 **두 구현을 같이** 고쳤다(리듀서·스키마 각각 py/ts). 한쪽만 고치면 같은 방이
+      두 예산으로 읽히고, 넘친 글이 한쪽에서만 사라진다 — 사람에게는 「가끔 글이 없어진다」로 보인다.
+    ⚠**미측정은 통과가 아니다**: node·esbuild 가 없으면 실패한다(조용히 넘어가지 않는다).
+    """
+    import json as _json
+    import shutil as _shutil
+    import subprocess as _sp
+    from agora import reducer as _r
+    entries = _budget_chain({"posts_per_round": 1, "max_chars_per_round": 6000})
+    mine = _apply_chain(entries)
+
+    if _shutil.which("node") is None:
+        raise AssertionError("node 가 없어 py↔ts 대조를 **못 쟀다**(미측정은 통과가 아니다)")
+    probe = os.path.join(_ROOT, "relay", "tests", "state_hash_probe.mjs")
+    proc = _sp.run(["node", probe], input=_json.dumps({"thread_id": "t", "entries": entries}),
+                   capture_output=True, text=True, cwd=_ROOT, timeout=300)
+    if proc.returncode != 0:
+        raise AssertionError(f"대조 탐침이 못 돌았다(미측정): {(proc.stderr or '')[:200]}")
+    theirs = _json.loads(proc.stdout)
+
+    if theirs["quarantined"] != [_r.BUDGET_EXCEEDED]:
+        raise AssertionError(
+            f"릴레이가 방의 예산을 안 읽었다 — 격리 사유: {theirs['quarantined']}")
+    if theirs["state_hash"] != mine["state_hash"]:
+        raise AssertionError("예산 낀 방에서 상태 해시가 갈렸다: "
+                             f"py={mine['state_hash'][:16]} ts={str(theirs['state_hash'])[:16]}")
+    if theirs["accepted"] != [e["node_id"] for e in mine["events"]]:
+        raise AssertionError(f"받아들인 이벤트가 다르다: ts={theirs['accepted']}")
+
+    # ★상한도 두 구현이 같이 본다 — 한쪽만 상한을 두면 **한쪽에만 있는 방**이 생긴다.
+    from agora import protocol
+    over = _budget_chain({"posts_per_round": protocol.BUDGET_CEILING["posts_per_round"] + 1})
+    if _apply_chain(over)["state"] is not None:
+        raise AssertionError("py 가 범위 밖 예산으로 방을 세웠다 — 대조의 전제가 깨졌다")
+    proc = _sp.run(["node", probe], input=_json.dumps({"thread_id": "t", "entries": over}),
+                   capture_output=True, text=True, cwd=_ROOT, timeout=300)
+    if proc.returncode != 0:
+        raise AssertionError(f"대조 탐침이 못 돌았다(미측정): {(proc.stderr or '')[:200]}")
+    theirs_over = _json.loads(proc.stdout)
+    if theirs_over["quarantined"] != [_r.BUDGET_OUT_OF_RANGE]:
+        raise AssertionError(
+            f"릴레이가 예산 상한을 안 본다 — 격리 사유: {theirs_over['quarantined']}")
+    if theirs_over["state_hash"] is not None:
+        raise AssertionError("릴레이가 범위 밖 예산으로 방을 세웠다")
+
+
+def _case_plaza_opens_with_a_bigger_budget() -> None:
+    """`--open --plaza` 는 **큰 예산으로 열고 루프에 안 맡긴다**(계약 확장 9 · 2026-09-11).
+
+    ★두 가지가 같이 틀리기 쉽다: 예산을 안 싣거나(광장이 곧 막힌다), 루프에 맡기거나
+      (회차가 돌아 **광장이 닫힌다** — 이건 라이브에서 방을 잃는 사고다).
+    ★숫자는 **계약 상수와 대조**한다. 여기 숫자를 적어 두면 상수를 고친 날 시험이 거짓말을 한다.
+    """
+    import tempfile
+    from agora.contract_open import PLAZA_BUDGET_MAX_CHARS, PLAZA_BUDGET_POSTS_PER_ROUND
+    from agora import tools
+    cl = _chair_loop()
+    f = _fixtures()
+    with _relay_env() as (ctx, _relay, _url):          # noqa: F841
+        state = tempfile.mkdtemp(prefix="chair-")
+        out = _with_key(f["key_a"], lambda: cl.open_room(ctx, state, topic="시험 광장",
+                                                         plaza=True))
+        if out["budget"]["posts_per_round"] != PLAZA_BUDGET_POSTS_PER_ROUND \
+                or out["budget"]["max_chars_per_round"] != PLAZA_BUDGET_MAX_CHARS:
+            raise AssertionError(f"광장 예산이 계약 상수와 다르다: {out['budget']}")
+        if out["opened"] in cl.managed_rooms(state):
+            raise AssertionError("광장을 의장 루프에 맡겼다 — 회차가 돌면 광장이 닫힌다")
+        # **원장에 실제로 실렸는가**(반환값만 보면 「돌려주기만 하는」 구현도 초록이다).
+        reduced = tools._reduce(ctx, out["opened"])
+        if reduced["budget"]["posts_per_round"] != PLAZA_BUDGET_POSTS_PER_ROUND:
+            raise AssertionError(f"연 방이 그 예산으로 안 돈다: {reduced['budget']}")
+
+        # 대조군 — 보통 방은 기본 예산이고 루프가 맡는다.
+        plain = _with_key(f["key_a"], lambda: cl.open_room(ctx, state, topic="보통 방"))
+        if plain["budget"] is not None:
+            raise AssertionError(f"토론방에 예산 칸을 실었다: {plain['budget']}")
+        if plain["opened"] not in cl.managed_rooms(state):
+            raise AssertionError("보통 방을 루프에 안 맡겼다")
 
 
 def _case_vote_does_not_freeze_the_room() -> None:
@@ -14433,6 +15033,17 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("의장 루프: 명부 한 줄 순서",    _case_chair_loop_roster_line_keeps_the_order, None),
     ("투표: 표 뒤에도 방이 산다",    _case_vote_does_not_freeze_the_room, None),
     ("투표: py↔ts 해시가 같다",      _case_vote_state_hash_matches_the_relay, None),
+    ("예산: 방이 들고 다닌다",       _case_room_carries_its_own_budget, None),
+    ("예산: 범위 밖이면 방이 안 선다", _case_budget_out_of_range_leaves_no_room, None),
+    ("예산: py↔ts 가 같은 예산",     _case_budget_state_hash_matches_the_relay, None),
+    ("예산: 광장은 크게 연다",       _case_plaza_opens_with_a_bigger_budget, None),
+    ("광장: 표 세는 규칙",           _case_plaza_counts_votes_by_the_rules, None),
+    ("광장: 점수는 감쇠한다",        _case_plaza_score_decays_and_ranks, None),
+    ("광장: 하루 경계는 06시",       _case_plaza_day_boundary_is_six, None),
+    ("광장: 마커가 유일한 출처",     _case_plaza_markers_are_the_only_source, None),
+    ("하루 한 바퀴: 얻어야 연다",    _case_daily_plan_opens_only_when_earned, None),
+    ("하루 한 바퀴: 열고 적고 접는다", _case_daily_loop_opens_marks_and_retires, None),
+    ("광장: 예산은 평생 예산이다",   _case_plaza_budget_is_a_lifetime_budget, None),
     ("참가자: 모양 틀린 relay 거부", _case_participant_relay_of_wrong_shape_is_rejected, errors.PRECONDITION),
     ("참가자: 모르는 칸은 거부",   _case_participant_unknown_field_still_rejected, errors.PRECONDITION),
     ("참가자: 있던 설정이 이긴다", _case_participant_migration_keeps_existing_config, None),
@@ -14548,12 +15159,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("승계: 운영자는 만료 때만",      _case_operator_delegate_only_when_expired, None),
     ("예산: 로컬 사전 검사 → 3",      _case_budget_local_precheck_is_code3, errors.GATE_REJECT),
     ("예산: 사전 검사 없이도 무효",   _case_budget_reducer_rejects_without_precheck, None),
-    ("예산: 설정에서 읽는다",         _case_budget_comes_from_settings, None),
+    ("예산: 부르는 쪽이 덮어쓴다",   _case_budget_override_beats_everything, None),
     ("CAS: 거짓 상태 칸 → 격리",      _case_forged_expected_state_is_quarantined, None),
     ("예산: 글자 수 상한",            _case_budget_counts_chars_too, None),
     ("예산: 진 글은 안 쓴다",         _case_budget_not_spent_by_losers, None),
     ("예산: 참가자·라운드별",         _case_budget_is_per_participant_and_round, None),
-    ("예산: 설정 값 검증 → 10",       _case_budget_value_must_be_sane, errors.ARGUMENT),
+    ("예산: 예산 칸 모양 → 10",       _case_budget_value_must_be_sane, errors.ARGUMENT),
     ("예산: 사용량 칸 실재",          _case_usage_field_exists, None),
     ("관계: 세 필드 정상",            _case_relations_three_fields_ok, None),
     ("관계: 세 필드 위반 → 10",       _case_relations_schema_violations, None),
@@ -14741,7 +15352,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("배선: 명부 3종이 다 실린다",    _case_context_from_config_carries_the_whole_roster, None),
     ("배선: 쓰기 직전 CAS",           _case_write_rechecks_state_at_the_last_moment, None),
     ("배선: 예산 로컬 겹",            _case_say_stops_over_budget_before_sending, None),
-    ("배선: 설정 예산이 판정까지",    _case_reducer_counts_with_the_configured_budget, None),
+    ("배선: 방 예산이 판정까지",      _case_reducer_counts_with_the_room_budget, None),
     ("배선: 본문은 데이터 표식",      _case_read_wraps_bodies_as_untrusted_data, None),
     ("읽기: 진 글도 audit 에 나온다",  _case_audit_shows_the_races_that_were_lost, None),
     ("읽기: 커서로 나눠 준다",         _case_read_pages_with_cursor, None),
@@ -14945,6 +15556,48 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if buf:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      '        if False:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      "참가 안내: 문서와 같다"),
+    # ── 계약 확장 9(2026-09-11) — 방이 자기 예산을 들고 다닌다 ────────────────
+    # ★번호 부기(2026-09-11): 이 축은 처음에 M435~M442 로 적었다가 **M441~M448 로 옮겼다** —
+    #   같은 날 0.1.5 윈도우 축이 M435~M440 을 먼저 가져갔다(origin/main 8071b82). 같은 번호가
+    #   두 사건을 가리키면 판정이 흔들린다(같은 형태 네 번째 · 「표: 번호가 둘을 안 가리킨다」).
+    # ★이 축이 비면 광장이 **조용히 2글짜리 방**으로 돌아간다(그 상태가 넉 달을 갔다).
+    #   그리고 확장은 **두 구현을 같이** 고쳤으므로 한쪽만 되돌아가는 판을 특히 조준한다.
+    ("M441-relay-ignores-the-room-budget", "relay/src/lib/reducer.ts",
+     "  if (!opts.budget && genesisBudget != null) {",
+     "  if (false) {",
+     "예산: py↔ts 가 같은 예산"),
+    ("M442-relay-drops-the-budget-ceiling", "relay/src/lib/reducer.ts",
+     "    if (!Number.isInteger(value) || value < 0 || value > ceiling) {",
+     "    if (false) {",
+     "예산: py↔ts 가 같은 예산"),
+    ("M443-budget-ceiling-not-enforced", "agora/reducer.py",
+     "        over = protocol.out_of_range(genesis_budget)",
+     "        over = None",
+     "예산: 범위 밖이면 방이 안 선다"),
+    # ★상한을 **넘겨야** 막히는가 — 「전부 막는다」도 위 뮤턴트만으로는 안 잡힌다.
+    ("M444-budget-ceiling-off-by-one", "agora/protocol.py",
+     "        if type(value) is not int or value < 0 or value > ceiling:",
+     "        if type(value) is not int or value < 0 or value >= ceiling:",
+     "예산: 범위 밖이면 방이 안 선다"),
+    ("M445-budget-field-not-closed", "agora/schema.py",
+     '        _closed(budget, BUDGET_FIELDS, "genesis.budget")',
+     "        pass",
+     "예산: 예산 칸 모양 → 10"),
+    ("M446-plaza-opens-with-the-default-budget", "tools/chair_loop.py",
+     "                      budget=PLAZA_BUDGET if plaza else None)",
+     "                      budget=None)",
+     "예산: 광장은 크게 연다"),
+    ("M447-plaza-handed-to-the-chair-loop", "tools/chair_loop.py",
+     "    if not plaza:\n        manage(state_dir, out[\"room_id\"])",
+     '    manage(state_dir, out["room_id"])',
+     "예산: 광장은 크게 연다"),
+    # ★골든(계보 단절 0)을 지키는 자리 — 예산이 상태 해시로 새어 들어가면 **기존 방이 전부 깨진다.**
+    ("M448-budget-leaks-into-the-state-hash", "agora/reducer.py",
+     '                ("type", "state", "round", "chair", "requester", "solved_by",\n'
+     '                 "close_reason", "head")}',
+     '                ("type", "state", "round", "chair", "requester", "solved_by",\n'
+     '                 "close_reason", "head", "budget")}',
+     "예산: 방이 들고 다닌다"),
     # ── 투표 동결 핫픽스(2026-09-11) — **두 구현을 같이** 고쳤다는 것을 그물이 증명한다 ──
     # ⑴ **사고 그 자체의 재현** — `prev` 로 상태 머리를 쓰면 표 뒤가 전부 죽는다.
     ("M432-prev-uses-the-state-head", "agora/tools.py",
@@ -16008,18 +16661,21 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "            if over:\n                reject(entry, BUDGET_EXCEEDED, over)\n                continue",
      "            if False:\n                pass",
      "예산: 사전 검사 없이도 무효"),
-    ("M63-budget-hardcoded", "agora/reducer.py",
-     "    limits = protocol.load_budget() if budget is None else dict(budget)",
-     "    limits = protocol.load_budget()",
-     "예산: 설정에서 읽는다"),
+    # ★2026-09-11 재조준(계약 확장 9) — 예산의 출처가 참가자 설정에서 **방 genesis** 로 옮겼다.
+    #   조준선도 같이 옮긴다: 이제 잃을 수 있는 것은 「방이 든 숫자를 안 읽는 것」이다.
+    ("M63-budget-ignores-the-room", "agora/reducer.py",
+     '    limits = protocol.budget_of(genesis["payload"]) if budget is None else dict(budget)',
+     "    limits = protocol.default_budget() if budget is None else dict(budget)",
+     "예산: 방이 들고 다닌다"),
     ("M64-budget-chars-ignored", "agora/protocol.py",
      '    if used["chars"] + len(body) > budget["max_chars_per_round"]:',
      "    if False:",
      "예산: 글자 수 상한"),
-    ("M65-budget-config-unvalidated", "agora/protocol.py",
-     "            if type(value) is not int or value < 0:",
+    # ★2026-09-11 재조준 — 검증하는 자리가 protocol(설정) 에서 schema(genesis 모양) 로 옮겼다.
+    ("M65-budget-shape-unvalidated", "agora/schema.py",
+     '            if _need(budget, key, int, "genesis.budget") < 0:',
      "            if False:",
-     "예산: 설정 값 검증 → 10"),
+     "예산: 예산 칸 모양 → 10"),
     ("M55-grace-ignored", "agora/reducer.py",
      "    return _parse_ts(now, \"now\") > _parse_ts(deadline, \"deadline\") + timedelta(seconds=grace)",
      "    return _parse_ts(now, \"now\") > _parse_ts(deadline, \"deadline\")",
@@ -16406,7 +17062,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
                       used=(state.get("usage") or {}).get(
                           reducer.usage_slot(state, ctx.participant_id))
                       or {"posts": 0, "chars": 0},
-                      budget=state.get("budget") or protocol.load_budget(ctx.config))""",
+                      budget=state.get("budget") or protocol.default_budget())""",
      "    pass",
      "배선: 예산 로컬 겹"),
     # ★두 겹이 **다른 칸**을 보면 로컬 겹은 언제나 통과한다 — 있으나 마나가 된다.
@@ -16414,10 +17070,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "                          reducer.usage_slot(state, ctx.participant_id))",
      '                          reducer.usage_slot(state, "누구도아님"))',
      "배선: 예산 로컬 겹"),
-    ("M204-reduce-ignores-config-budget", "agora/tools.py",
-     "                            budget=protocol.load_budget(ctx.config),",
-     "                            budget=None,",
-     "배선: 설정 예산이 판정까지"),
+    # ★2026-09-11 재조준 — 옛 M204 는 「설정 예산을 reducer 까지 넘기는가」였다. 그 배선은
+    #   계약 확장 9 로 **일부러 없앴다**(출처를 둘로 두면 갈린다). 그래서 조준을 뒤집는다:
+    #   제품 경로가 예산을 **다시 넘기기 시작하면** 방이 든 숫자가 덮인다 — 그것이 이제 사고다.
+    ("M204-reduce-overrides-the-room-budget", "agora/tools.py",
+     "    reduced = reducer.apply(reducer.order(collected), operators=ctx.operators,",
+     "    reduced = reducer.apply(reducer.order(collected), operators=ctx.operators,\n"
+     "                            budget=protocol.default_budget(),",
+     "배선: 방 예산이 판정까지"),
     ("M205-usage-slot-ignores-round", "agora/reducer.py",
      '    if state.get("type") == "debate":',
      "    if False:",

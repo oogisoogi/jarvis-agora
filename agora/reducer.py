@@ -37,6 +37,7 @@ KIND_NOT_ALLOWED = "kind_not_allowed"  # 이 유형의 스레드가 받지 않�
 BAD_TRANSITION = "bad_transition"      # 지금 상태에서 갈 수 없는 자리
 UNKNOWN_TARGET = "unknown_target"      # 가리키는 이벤트가 사슬에 없다
 BUDGET_EXCEEDED = "budget_exceeded"    # 라운드당 발언 예산을 넘겼다
+BUDGET_OUT_OF_RANGE = "budget_out_of_range"   # genesis 가 든 예산이 계약 범위 밖이다(확장 9)
 AFTER_CLOSE = "after_close"            # 닫힌 뒤에 온 이벤트
 STALE_EXPECTED = "stale_expected_state"  # 쓴 사람이 본 상태가 그 자리의 상태가 아니다(CAS)
 
@@ -452,6 +453,20 @@ def apply(ordered: dict[str, Any], *,
 
     genesis = chain[0]["event"]
     gtype = genesis["payload"]["type"]
+    # ★예산은 **방이 들고 다닌다**(계약 확장 9 · 2026-09-11). 범위 밖이면 방이 서지 않는다 —
+    #   모양은 스키마가 보고, **정책은 여기서** 본다. 조용히 기본값으로 끌어내리지 않는 이유:
+    #   그러면 「내가 적은 예산으로 돈다」고 믿는 방이 다른 숫자로 돌고, 그 차이는 아무도 못 본다.
+    genesis_budget = genesis["payload"].get("budget")
+    if genesis_budget is not None:
+        over = protocol.out_of_range(genesis_budget)
+        if over:
+            quarantined.append({"node_id": chain[0]["node_id"],
+                                "created_at": chain[0]["created_at"],
+                                "reason": BUDGET_OUT_OF_RANGE, "stage": "transition",
+                                "detail": over})
+            return {"thread_id": ordered["thread_id"], "state": None,
+                    "reason": BUDGET_OUT_OF_RANGE, "events": [], "deferred": [],
+                    "stale": ordered["stale"], "quarantined": quarantined}
     state: dict[str, Any] = {
         "type": gtype,
         "state": "r0" if gtype == "debate" else "open",
@@ -465,8 +480,10 @@ def apply(ordered: dict[str, Any], *,
     accepted = [chain[0]]
     deferred: list[dict[str, Any]] = []
     post_ids = {chain[0]["message_id"]}
-    # 예산은 **설정에서** 온다(§5 · AC ②). 참가자·라운드별로 따로 센다.
-    limits = protocol.load_budget() if budget is None else dict(budget)
+    # 예산은 **방 genesis 에서** 온다(계약 확장 9). 참가자·라운드별로 따로 센다.
+    # ⛔참가자 `config.json` 은 출처가 아니다 — 두 쪽이 다른 숫자를 보면 같은 원장이 두 상태로 읽힌다.
+    #   `budget` 인자는 **부르는 쪽의 명시적 덮어쓰기**로만 남는다(시험·도구가 알고 쓸 때).
+    limits = protocol.budget_of(genesis["payload"]) if budget is None else dict(budget)
     deadlines = genesis["payload"].get("deadlines") or {}
     usage: dict[str, dict[str, int]] = {}
 

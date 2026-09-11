@@ -30,6 +30,7 @@ export const KIND_NOT_ALLOWED = "kind_not_allowed";
 export const BAD_TRANSITION = "bad_transition";
 export const UNKNOWN_TARGET = "unknown_target";
 export const BUDGET_EXCEEDED = "budget_exceeded";
+export const BUDGET_OUT_OF_RANGE = "budget_out_of_range";
 export const AFTER_CLOSE = "after_close";
 export const STALE_EXPECTED = "stale_expected_state";
 // 2단 stale 사유
@@ -40,6 +41,21 @@ export const EXPIRED = "expired";
 export const DEBATE_ROUNDS = ["r0", "r1", "r2", "r3"];
 export const EXPIRED_GRACE_SECONDS = 300;
 export const DEFAULT_BUDGET = { posts_per_round: 2, max_chars_per_round: 6000 };
+// 계약 확장 9(2026-09-11) — 방이 자기 예산을 들고 다닌다. 상한은 **정책**이라 여기서 본다
+// (모양은 schema 가 본다). 값은 agora/contract_open.py 와 **같아야 한다** — 갈리면 같은 원장이
+// 두 상태로 읽힌다(py↔ts 상태 해시 탐침이 그 자리를 지킨다).
+export const BUDGET_CEILING = { posts_per_round: 1000, max_chars_per_round: 300000 };
+
+export function budgetOutOfRange(budget: Record<string, any>): Record<string, unknown> | null {
+  for (const [key, ceiling] of Object.entries(BUDGET_CEILING)) {
+    if (!(key in budget)) continue;
+    const value = budget[key];
+    if (!Number.isInteger(value) || value < 0 || value > ceiling) {
+      return { key, value: String(value).slice(0, 40), max: ceiling };
+    }
+  }
+  return null;
+}
 
 export const ALLOWED_KINDS: Record<string, Set<string>> = {
   problem: new Set(["post", "answer_selected", "close", "vote", "abort"]),
@@ -258,6 +274,22 @@ export async function apply(ordered: OrderResult, opts: {
   }
   const genesis = chain[0].event;
   const gtype = genesis.payload.type as string;
+  // ★예산은 **방이 들고 다닌다**(계약 확장 9). 범위 밖이면 방이 서지 않는다 — 조용히
+  //   기본값으로 끌어내리면 「내가 적은 예산으로 돈다」고 믿는 방이 다른 숫자로 돈다.
+  const genesisBudget = genesis.payload.budget;
+  if (genesisBudget != null) {
+    const over = budgetOutOfRange(genesisBudget as Record<string, any>);
+    if (over) {
+      quarantined.push({
+        node_id: chain[0].node_id, created_at: chain[0].created_at,
+        reason: BUDGET_OUT_OF_RANGE, stage: "transition", detail: over,
+      });
+      return {
+        thread_id: ordered.thread_id, state: null, reason: BUDGET_OUT_OF_RANGE,
+        events: [], deferred: [], stale: ordered.stale, quarantined,
+      };
+    }
+  }
   const state: Record<string, any> = {
     type: gtype,
     state: gtype === "debate" ? "r0" : "open",
@@ -271,7 +303,19 @@ export async function apply(ordered: OrderResult, opts: {
   const accepted: ValidEntry[] = [chain[0]];
   const deferred: unknown[] = [];
   const postIds = new Set<string>([chain[0].message_id]);
+  // ★출처 순서 = **부르는 쪽의 명시적 덮어쓰기 → 방 genesis → 계약 기본값.**
+  //   ⛔참가자 설정은 출처가 아니다(py 쪽 `protocol.budget_of` 와 같은 순서 — 갈리면 안 된다).
+  //   ★배선을 index.ts 가 아니라 **여기** 둔다: 부르는 자리가 여럿이면 그중 하나가 안 넘기는
+  //     날이 오고, 그날 같은 방이 두 예산으로 읽힌다. 방을 아는 것은 리듀서다.
   const limits = opts.budget ? { ...opts.budget } : { ...DEFAULT_BUDGET };
+  if (!opts.budget && genesisBudget != null) {
+    // **아는 칸만** 받는다(py `protocol.budget_of` 와 같은 규칙) — 모르는 칸을 그대로 퍼
+    // 담으면 한쪽 구현에만 있는 칸이 조용히 생긴다.
+    for (const key of Object.keys(BUDGET_CEILING)) {
+      const value = (genesisBudget as Record<string, any>)[key];
+      if (value !== undefined) (limits as Record<string, number>)[key] = value;
+    }
+  }
   const deadlines = genesis.payload.deadlines ?? {};
   const usage: Record<string, { posts: number; chars: number }> = {};
 

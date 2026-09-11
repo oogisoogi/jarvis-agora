@@ -17,7 +17,8 @@ from typing import Any
 
 from agora import errors
 from agora.contract_open import (
-    GENESIS_EXPECTED_STATE, GENESIS_PREV, ID_HEX_LEN, KINDS, MAX_LOG_EXCERPT_BYTES,
+    BUDGET_FIELDS, GENESIS_EXPECTED_STATE, GENESIS_PREV, ID_HEX_LEN, KINDS,
+    MAX_LOG_EXCERPT_BYTES,
 )
 from agora.errors import AgoraError
 from agora.event import is_id
@@ -128,7 +129,8 @@ def _check_link(link: dict[str, Any], where: str, *, need_why: bool) -> None:
 
 
 def _check_genesis(p: dict[str, Any]) -> None:
-    _closed(p, ("type", "title", "body", "envelope", "deadlines", "chair", "parent"),
+    _closed(p, ("type", "title", "body", "envelope", "deadlines", "chair", "parent",
+                "budget"),
             "genesis")
     t = _need(p, "type", str, "genesis")
     if t not in THREAD_TYPES:
@@ -147,6 +149,17 @@ def _check_genesis(p: dict[str, Any]) -> None:
         _closed(dl, DEADLINE_ROUNDS, "genesis.deadlines")
         for k in dl:
             _need(dl, k, str, "genesis.deadlines")
+    if "budget" in p:
+        # 계약 확장 9 — **방이 자기 예산을 들고 다닌다.** 여기서 보는 것은 **모양뿐**이다:
+        # 아는 칸인가 · 정수인가 · 음수가 아닌가. **상한(정책)은 리듀서가 격리로 판정한다** —
+        # 모양(10)과 정책(격리)을 한 자리에 섞으면 「왜 막혔나」가 한 코드로 뭉개진다.
+        budget = _need(p, "budget", dict, "genesis")
+        _closed(budget, BUDGET_FIELDS, "genesis.budget")
+        if not budget:
+            _fail("빈 예산 칸", {"where": "genesis.budget"})
+        for key in budget:
+            if _need(budget, key, int, "genesis.budget") < 0:
+                _fail("예산이 음수다", {"where": "genesis.budget", "key": key})
     if "parent" in p:
         _check_link(_need(p, "parent", dict, "genesis"), "genesis.parent",
                     need_why=False)
