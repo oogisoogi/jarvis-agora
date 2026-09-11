@@ -13869,13 +13869,25 @@ def _case_resident_schedule_file_round_trip() -> None:
             raise AssertionError("거부된 설치가 파일을 남겼다")
 
         ran.clear()
-        argv = resident.schtasks_create_argv(p=resident.paths(cfg), interval_min=10, pythonw=r"C:\Py\pythonw.exe")
+        # ★실행기 자리를 **짧게 준다** — 안 주면 이 저장소가 놓인 폴더 깊이에 따라 261자 상한에 걸려
+        #   시험이 코드가 아니라 체크아웃 위치를 잰다(격리 워크트리 게이트에서 실제로 붉어졌다).
+        short_bin = r"C:\a\bin\agora"
+        try:
+            resident.schtasks_create_argv(p=resident.paths(cfg), interval_min=10, pythonw=r"C:\Py\pythonw.exe",
+                                          agora_bin="C:\\" + "x" * 300 + "\\agora")
+        except AgoraError as e:
+            if e.code != errors.PRECONDITION:
+                raise AssertionError(f"긴 명령 줄 거절 코드가 다르다: {e.code}") from None
+        else:
+            raise AssertionError("261자를 넘는 작업 스케줄러 명령 줄을 거절하지 않았다")
+        argv = resident.schtasks_create_argv(p=resident.paths(cfg), interval_min=10, pythonw=r"C:\Py\pythonw.exe",
+                                             agora_bin=short_bin)
         if argv[:2] != ["schtasks", "/Create"] or argv[argv.index("/SC") + 1] != "MINUTE" \
                 or argv[argv.index("/MO") + 1] != "10" or "pythonw.exe" not in argv[argv.index("/TR") + 1] \
                 or "resident once" not in argv[argv.index("/TR") + 1]:
             raise AssertionError(f"작업 스케줄러 명령 줄이 다르다: {argv}")
         resident.install(directory=cfg, platform="win32", runner=runner, which=lambda _n: "/fake/bin/claude",
-                         pythonw=r"C:\Py\pythonw.exe")
+                         pythonw=r"C:\Py\pythonw.exe", agora_bin=short_bin)
         if "윈도우 미실측" not in resident.summary_line(cfg):
             raise AssertionError(f"윈도우 상주를 미실측 표시 없이 「켜짐」으로 적는다: {resident.summary_line(cfg)}")
         resident.uninstall(directory=cfg, platform="win32", runner=runner)

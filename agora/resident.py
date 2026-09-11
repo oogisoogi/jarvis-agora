@@ -554,12 +554,15 @@ def plist_document(*, p: dict[str, str], interval_min: int, agent_path: str) -> 
     return plistlib.dumps(doc, sort_keys=True)
 
 
-def schtasks_create_argv(*, p: dict[str, str], interval_min: int, pythonw: str) -> list[str]:
+def schtasks_create_argv(*, p: dict[str, str], interval_min: int, pythonw: str,
+                         agora_bin: str | None = None) -> list[str]:
     """윈도우 작업 스케줄러 한 줄. ★`pythonw.exe` 로 부른다 — 콘솔 창이 아예 안 뜬다
     (PowerShell 을 거치지 않으므로 PowerShell 모듈 경로 문제도 생기지 않는다).
     ⚠윈도우 실기 미실측 — 정적 시험만 있다.
     """
-    agora_bin = os.path.join(_package_root(), "bin", "agora")
+    # ★실행기 자리는 시험이 짧게 줄 수 있다 — 깊은 폴더에서 꺼낸 개발 트리에서는 이 줄이 261자를
+    #   넘어 설치가 거절되고, 그러면 시험이 **이 저장소가 어디 놓였는지**를 재게 된다(격리 게이트 실측).
+    agora_bin = agora_bin or os.path.join(_package_root(), "bin", "agora")
     tr = f'"{pythonw}" "{agora_bin}" resident once --dir "{p["config_dir"]}"'
     if len(tr) > 261:
         raise AgoraError(errors.PRECONDITION, "작업 스케줄러 명령 줄이 너무 길다(261자 상한)",
@@ -576,7 +579,7 @@ def _pythonw() -> str | None:
 def install(*, directory: str | None = None, interval_min: int = DEFAULT_INTERVAL_MIN,
             platform: str | None = None, runner: Callable[[list[str]], dict[str, Any]] | None = None,
             which: Callable[[str], str | None] | None = None,
-            pythonw: str | None = None) -> dict[str, Any]:
+            pythonw: str | None = None, agora_bin: str | None = None) -> dict[str, Any]:
     """일정을 놓는다. ★검사를 **먼저 전부** 한다 — 거부된 설치가 파일을 남기면 안 된다."""
     interval_min = _check_interval(interval_min)
     p = paths(directory)
@@ -614,7 +617,7 @@ def install(*, directory: str | None = None, interval_min: int = DEFAULT_INTERVA
         if exe is None:
             raise AgoraError(errors.PRECONDITION, "pythonw.exe 를 찾지 못했다 — 창 없이 부를 수단이 없어 일정을 놓지 않는다",
                              {"python": sys.executable})
-        made = run(schtasks_create_argv(p=p, interval_min=interval_min, pythonw=exe))
+        made = run(schtasks_create_argv(p=p, interval_min=interval_min, pythonw=exe, agora_bin=agora_bin))
         if made.get("rc") != 0:
             raise AgoraError(errors.PRECONDITION, "작업 스케줄러 등록이 실패했다", {"schtasks": made})
         settings.update({"scheduler": "schtasks", "task": task_name(), "windows_measured": False})
