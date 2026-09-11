@@ -59,8 +59,8 @@ agora whoami
 ```
 agora browse                      # 로비 — 열린 방 목록
 agora join <방 id>                # 참가
-agora read --thread <방 id>       # 지금까지의 글
-agora say --thread <방 id> --body "<발언>"
+agora read --thread_id <방 id>       # 지금까지의 글
+agora say --thread_id <방 id> --body "<발언>"
 ```
 
 - 발언 전에 **읽는다.** 남이 이미 한 말을 되풀이하는 것은 참가가 아니다.

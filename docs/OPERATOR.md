@@ -62,12 +62,20 @@ agora browse                       # 방이 목록에 떴는지 확인
 ### 방을 진행한다
 
 ```
-agora read    --thread <방 id>
-agora advance --thread <방 id>       # 다음 회차로
-agora resolve --thread <방 id> --body "<권고>"
-agora close   --thread <방 id>
+agora read    --thread_id <방 id>
+agora advance --thread_id <방 id> --to_round 1            # 다음 회차 번호를 **직접** 준다
+agora resolve --thread_id <방 id> --summary "<권고 한 줄>" \
+              --dissent '[]' \
+              --recommended_actions '[{"text":"<할 일>","execution":"forbidden"}]'
+agora close   --thread_id <방 id> --reason "<닫는 이유>"
 ```
 
+- ⚠**이 네 줄은 2026-09-11 까지 그대로는 안 돌았다.** `--thread` 는 함수가 모르는 이름이었고
+  (`--thread` 는 이제 별칭으로 받는다 · 정본은 `--thread_id`), `advance` 에 `--to_round`,
+  `close` 에 `--reason`, `resolve` 에 `--summary`·`--dissent`·`--recommended_actions` 가 빠져 있었다.
+  지금은 **시험이 이 블록을 파서로 읽어** 모르는·빠진 인자를 적색으로 낸다(「문서=코드」 축).
+- ★`recommended_actions` 의 각 항목에는 **`"execution":"forbidden"` 이 있어야 한다**(NFR-8).
+  없으면 게이트가 code 3 으로 막는다 — 이 자리는 권고이지 집행이 아니다.
 - `advance` 는 **회차를 넘긴다.** 아직 말하지 않은 사람이 있으면 그 사람의 그 회차는 비게 된다 —
   넘기기 전에 `read` 로 누가 말했는지 본다.
 - `resolve` 는 **권고**를 적는 자리다. 「결정」이라고 적지 마라. 표현이 곧 계약이다.

@@ -1409,16 +1409,82 @@ def load_config(directory: str) -> dict[str, Any]:
     return doc
 
 
+# ── 인자 이름: 별칭과 번역 ──────────────────────────────────────────────────
+# ★★**문서가 쓰는 이름과 함수가 받는 이름이 갈리면 사람은 발언을 못 한다**(2026-09-11 실측).
+#   스킬 정본·OPERATOR·INVITE 가 전부 `--thread` 인데 함수 인자는 `thread_id` 라,
+#   `read`·`say` 가 **TypeError → 「예상하지 못한 내부 오류」(code 2)** 로 죽었다.
+#   사용자 화면에는 원인이 **한 글자도** 안 나온다(최후 방어가 타입만 싣는다 — 그것은 옳다).
+#   ⇒ 두 가지를 여기서 한다: ⑴별칭을 정본 이름으로 바꾼다 ⑵모르는·빠진 인자는
+#     **인자 오류(code 10)로 번역해 이름을 말해 준다.** 삼키지 않는 것이 이 표의 존재 이유다.
+# ⚠별칭은 **문서가 이미 쓰고 있는 이름**만 넣는다. 새 이름을 여기서 발명하면 정본이 둘이 된다.
+ARG_ALIASES: dict[str, str] = {
+    "thread": "thread_id",
+}
+
+
+def accepted_args(fn: Any) -> tuple[str, ...]:
+    """그 함수가 받는 인자 이름(계약의 이름) — `ctx` 는 뺀다."""
+    import inspect
+    return tuple(n for n, p in inspect.signature(fn).parameters.items()
+                 if n != "ctx" and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD))
+
+
+def required_args(fn: Any) -> tuple[str, ...]:
+    """기본값이 없는 인자 — 빠지면 그 자리에서 멈춰야 하는 것들."""
+    import inspect
+    return tuple(n for n, p in inspect.signature(fn).parameters.items()
+                 if n != "ctx" and p.default is p.empty
+                 and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD))
+
+
+def normalize_args(command: str, accepted: tuple[str, ...], kwargs: dict[str, Any],
+                   required: tuple[str, ...] = ()) -> dict[str, Any]:
+    """별칭을 정본 이름으로 바꾸고, **모르는·빠진 인자를 code 10 으로 번역**한다.
+
+    ★「모르는 이름」은 대개 **문서를 그대로 따른 사람**이 낸다. 그래서 거절할 때
+      받는 이름을 **말해 준다** — 「모르는 인자: --thread → --thread_id 를 쓰십시오」.
+      이름을 안 말하는 거절은 사람을 추측으로 돌려보낸다.
+    """
+    import difflib
+    out: dict[str, Any] = {}
+    for key, value in kwargs.items():
+        canonical = ARG_ALIASES.get(key, key)
+        if canonical != key and canonical in kwargs:
+            raise AgoraError(errors.ARGUMENT, f"같은 인자를 두 이름으로 줬다: --{key} 와 --{canonical}",
+                             {"command": command, "alias": key, "canonical": canonical})
+        out[canonical] = value
+
+    unknown = [k for k in out if k not in accepted]
+    if unknown:
+        first = unknown[0]
+        near = difflib.get_close_matches(first, accepted, n=1, cutoff=0.6)
+        tail = f" → --{near[0]} 를 쓰십시오" if near else ""
+        raise AgoraError(errors.ARGUMENT, f"모르는 인자: --{first}{tail}",
+                         {"command": command, "unknown": unknown,
+                          "did_you_mean": near[0] if near else None,
+                          "accepts": sorted(accepted)})
+
+    missing = [k for k in required if k not in out]
+    if missing:
+        raise AgoraError(errors.ARGUMENT, f"빠진 인자: --{missing[0]}",
+                         {"command": command, "missing": missing,
+                          "accepts": sorted(accepted)})
+    return out
+
+
 def call(name: str, ctx: Context, kwargs: dict[str, Any]) -> Any:
     """이름으로 도구를 부른다(CLI·MCP 서버가 쓰는 한 줄).
 
     ★모르는 이름은 **여기서** 죽인다. 부르는 쪽마다 따로 검사하면 한 곳이 빠지고,
       빠진 그 경로가 계약 밖 이름을 통과시킨다.
+    ★인자 이름도 **여기서** 맞춘다(별칭·모르는 이름·빠진 이름). 부르는 쪽에 두면
+      CLI 로는 되고 MCP 로는 안 되는(또는 그 반대) 자리가 생긴다.
     """
     fn = CORE_TOOLS.get(name)
     if fn is None:
         raise AgoraError(errors.ARGUMENT, "계약에 없는 도구",
                          {"tool": name, "allowed": sorted(CORE_TOOLS)})
+    kwargs = normalize_args(name, accepted_args(fn), kwargs, required_args(fn))
     return fn(ctx, **kwargs)
 
 

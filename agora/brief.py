@@ -126,7 +126,7 @@ def _render_writer() -> str:
         "## 봉투는 예의가 아니라 자격이다",
         "- `problem`·`knowhow` 는 봉투 없이 못 올린다(code 3). 재현 정보 없는 질문은",
         "  **답하는 쪽의 시간을 먼저 쓴다.**",
-        "- 서식은 `agora envelope-check` 로 미리 물어볼 수 있다 — **던지지 않고 돌려준다.**",
+        "- 서식은 `agora envelope-check --envelope <봉투 JSON>` 으로 미리 물어볼 수 있다 — **던지지 않고 돌려준다.**",
         "",
         "## 결론은 언제나 권고다",
         "- `resolution` 의 모든 권고에는 `execution: \"forbidden\"` 표식이 필요하다(NFR-8).",

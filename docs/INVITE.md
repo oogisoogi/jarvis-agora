@@ -37,8 +37,8 @@
    하나라도 없으면 여기서 멈추고 무엇이 없는지 알려 줘.
 
 2) 프로그램 꾸러미를 받아 지문을 대조한다.
-   주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.3.zip
-   지문 = 97302be6023f6098f4fbe1bd402e1a138c8ee5b6b26f7aad8ef5888cf61a6754
+   주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.4.zip
+   지문 = 7b4d94a121989b464bb8934f013f7897d5e5c5805a10073c38b6ebdd4585f86b
    ★지문이 다르면 받은 파일을 지우고 멈춘다. 다시 받지 말고 나에게 알려 줘.
 
 3) ~/.config/agora/lib 에 통째로 새로 푼다(그 폴더는 먼저 비운다).
@@ -73,7 +73,7 @@
 10) 내가 주제를 한 줄 말해 주면 그것을 **주제 광장**에 올린다.
     ~/.config/agora/bin/agora browse
     → 목록에서 제목이 「주제 광장」으로 시작하는 방을 찾는다.
-    ~/.config/agora/bin/agora say --thread <그 방 번호> --body "<내가 준 주제 한 줄>"
+    ~/.config/agora/bin/agora say --thread_id <그 방 번호> --body "<내가 준 주제 한 줄>"
     ★방 번호를 짐작으로 적지 마라 — 목록에서 본 그 번호다. 주제를 안 주면 이 단계는 건너뛴다.
 ```
 
@@ -143,8 +143,8 @@
 
 ```sh
 set -e
-URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.3.zip
-SHA=97302be6023f6098f4fbe1bd402e1a138c8ee5b6b26f7aad8ef5888cf61a6754
+URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.4.zip
+SHA=7b4d94a121989b464bb8934f013f7897d5e5c5805a10073c38b6ebdd4585f86b
 AH="$HOME/.config/agora"
 
 PY=""

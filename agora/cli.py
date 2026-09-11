@@ -169,14 +169,16 @@ def _run_onboard(name: str, rest: list[str]) -> Any:
       `register` 는 바로 그 운반층 주소를 **설정에 적으러** 온 명령이다 — 거치면
       「설정이 없어서 설정을 못 적는」 닭·달걀이 된다(첫 설치가 정확히 그 상태다).
     """
-    from agora import onboard
+    from agora import onboard, tools
     # ★맨 앞의 맨몸 토큰을 **동작 이름**으로 읽는 것은 `checkpoint` 에서만이다
     #   (`agora checkpoint issue`). 다른 명령에서 그런 토큰이 오면 예전처럼 `_kv` 가 code 10 을
     #   낸다 — 규칙을 넓히면 `agora whoami 오타` 가 조용히 통과한다.
     action = ""
     if name == "checkpoint" and rest and not rest[0].startswith("--") and "=" not in rest[0]:
         action, rest = rest[0], rest[1:]
-    kw = _kv(rest)
+    # ★모르는 이름을 **여기서** 거절한다. 아래는 전부 `kw.get(...)` 이라, 안 거절하면
+    #   `--relayy` 가 조용히 무시되고 「--relay 가 필요하다」만 뜬다 — 사람은 자기가 준 줄을 본다.
+    kw = tools.normalize_args(name, accepted_args_for(name) or (), _kv(rest))
     directory = kw.get("dir")
     if name == "register":
         relay_url = kw.get("relay") or kw.get("relay_url")
@@ -210,10 +212,48 @@ def _run_operator(name: str, rest: list[str]) -> Any:
     from agora import tools
     kw = _kv(rest)
     ctx = tools.context_from_config(kw.pop("dir", None))
-    if name == "delegate-chair":
-        return tools.delegate_chair(ctx, thread_id=kw["thread_id"],
-                                    new_chair=kw["new_chair"])
-    return tools.abort(ctx, thread_id=kw["thread_id"], reason=kw["reason"])
+    # ★구판은 `kw["thread_id"]` 로 **바로 꺼냈다** — 이름이 하나만 달라도 KeyError 가 나고,
+    #   최후 방어가 그것을 「예상하지 못한 내부 오류」(code 2)로 덮었다. 인자 문제는 인자 오류로.
+    fn = tools.delegate_chair if name == "delegate-chair" else tools.abort
+    kw = tools.normalize_args(name, accepted_args_for(name) or (), kw, tools.required_args(fn))
+    return fn(ctx, **kw)
+
+
+# CLI 전용 명령이 **실제로 읽는** 인자 이름. 코어 도구는 함수 서명이 정본이라 여기 없다.
+# ★왜 표가 필요한가: 이 명령들은 `kw.get(...)` 로 읽으므로 **모르는 이름이 조용히 무시된다**
+#   (`--relayy` 를 주면 「--relay 가 필요하다」가 나고, 사람은 자기가 준 줄을 의심하지 않는다).
+#   ⇒ 문서를 재는 시험도, 사용자에게 이름을 말해 주는 거절도 이 표 하나를 본다.
+CLI_ONLY_ARGS: dict[str, tuple[str, ...]] = {
+    "register":     ("relay", "relay_url", "unattended", "dir"),
+    "sync-roster":  ("relay", "relay_url", "yes", "dir"),
+    "whoami":       ("dir",),
+    "checkpoint":   ("relay", "relay_url", "signer", "dir"),
+    "watch":        ("interval", "once", "dir"),
+    "reconcile":    ("thread_id", "dir"),
+    "export":       ("out", "dir"),
+    "import":       ("file", "dir"),
+}
+
+# 자기 파서를 갖거나 인자를 안 받는 명령 — 위 표로 재지 않는다(재면 거짓 적색이 난다).
+SELF_PARSED = ("selfcheck", "selftest", "keygen", "mcp-serve")
+
+
+def accepted_args_for(command: str) -> tuple[str, ...] | None:
+    """그 서브커맨드가 받는 인자 이름. `None` = 자기 파서를 갖는 명령.
+
+    ★**한 곳에서만** 답한다 — 거절 메시지도, 문서를 재는 시험도 여기를 본다.
+      두 곳에 두면 그중 하나만 갱신되는 날이 오고, 그날 문서는 초록인 채 갈라진다.
+    """
+    from agora import tools
+    if command in SELF_PARSED:
+        return None
+    fn = tools.CORE_TOOLS.get(command)
+    if fn is not None:
+        return tools.accepted_args(fn)
+    if command in ("delegate-chair", "abort"):
+        fn = tools.delegate_chair if command == "delegate-chair" else tools.abort
+        return tools.accepted_args(fn) + ("dir",)
+    return CLI_ONLY_ARGS.get(command)
 
 
 def _run_local(name: str, rest: list[str]) -> Any:
@@ -223,7 +263,7 @@ def _run_local(name: str, rest: list[str]) -> Any:
       쥐어지고, 그것은 참가자가 아니라 **운영자가 할 일**이다.
     """
     from agora import tools
-    kw = _kv(rest)
+    kw = tools.normalize_args(name, accepted_args_for(name) or (), _kv(rest))
     d = kw.pop("dir", None)
     ctx = tools.context_from_config(d)
     if name == "watch":
