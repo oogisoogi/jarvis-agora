@@ -4524,6 +4524,9 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     # ★09-11 신설 — **의장루프**. 사람이 안 보는 동안 도는 것이라, 여기서 잃는 것은
     #   「틀린 일을 조용히 한다」다: 유예를 안 지키고 회차를 넘기거나, 판단하지 않았다고
     #   적어 놓고 요약을 지어내거나, 같은 자리를 두 번 하거나, 하고도 말하지 않는다.
+    # ★09-11 신설 — **투표동결**. 표 한 건이 방을 얼리던 자리(두 구현 동시 봉합).
+    "투표동결": ("M432-prev-uses-the-state-head", "M433-chain-head-is-the-state-head",
+                 "M434-relay-state-hash-drops-head"),
     "의장루프": ("M427-chair-manages-every-room",
                  "M428-chair-guesses-a-broken-timestamp",
                  "M429-chair-summary-has-no-ceiling",
@@ -4548,7 +4551,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
 
 
 def _case_s8_axes_have_nets() -> None:
-    """S8 의 21축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한·하네스무결성·설치점검·참가안내·문서코드일치·의장루프)도 같은 방식으로 덮인다."""
+    """S8 의 22축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한·하네스무결성·설치점검·참가안내·문서코드일치·의장루프·투표동결)도 같은 방식으로 덮인다."""
     _axes_have_nets(S8_AXES, "S8")
 
 
@@ -7951,6 +7954,15 @@ def _case_rejected_event_does_not_wedge_the_chain() -> None:
         other, kind="answer_selected", thread_id=tid,
         payload={"post_message_id": "0" * 32},
         prev=prev, expected_state=expected, category=state["type"]))
+
+    # ⑴-b ★거부는 **상태 해시를 흔든다** — 그래야 같은 자리를 노리던 다른 사람이 code 9 로
+    #   되돌아가 다시 읽는다(그것이 이 축의 남은 절반이다).
+    #   ⚠2026-09-11: `prev` 가 **운반층 머리**로 바뀌면서 ⑵ 만으로는 이 축이 안 재진다 —
+    #     뮤턴트 M211(head 를 받아들인 것에서만 전진)이 **살아남아** 그 사실이 드러났다.
+    #     ★그물이 좋아지면 다른 그물이 조용히 빈다 — 개선한 뒤에는 「이제 무엇이 안 재지는가」를 묻는다.
+    _s2, _p2, expected_after = tools._head_and_state(ctx, tid)
+    if expected_after == expected:
+        raise AssertionError("거부가 상태 해시를 안 흔들었다 — 동시 작성자가 옛 자리를 계속 믿는다")
 
     # ⑵ 그 뒤의 **정상 발언**이 실려야 한다.
     _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=tid, body="거부 뒤의 정상 발언"))
@@ -12598,6 +12610,155 @@ def _case_chair_loop_roster_line_keeps_the_order() -> None:
         raise AssertionError(f"명부 한 줄의 순서가 바뀌었다: {calls}")
 
 
+def _three_party(ctx: Any, relay: Any, f: dict[str, Any], relay_url: str) -> Any:
+    """a·b·c 세 사람이 서명할 수 있는 판 — **표를 두 사람이 던져야** 개설 조건이 성립한다."""
+    import tempfile
+    from agora import tools
+    d = tempfile.mkdtemp(prefix="roster-abc-")
+    path = os.path.join(d, "allowed_signers_abc")
+    lines = []
+    for name, who in (("key_a", "operator-a"), ("key_b", "operator-b"), ("key_c", "operator-c")):
+        with open(f[name] + ".pub", encoding="utf-8") as fh:
+            lines.append(f"{who} {fh.read().strip()}")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    with open(path, encoding="utf-8") as fh:
+        relay.roster_text["allowed_signers"] = fh.read()
+
+    # ★사람마다 **자기 운반층·자기 원장**을 준다. 하나를 돌려 쓰면 앞사람이 방금 쓴 글이
+    #   캐시에 안 잡혀 뒷사람이 **같은 자리를 놓고 겨루다 밀린다**(`lost_race` · 2026-09-11 실측).
+    #   실물에서도 사람마다 기계가 다르다 — 더블을 실물 모양으로 맞추는 쪽이 맞다.
+    from agora.ledger import Ledger
+    from agora.spool import Spool
+    from agora.store_relay import RelayStore
+    made: dict[str, Any] = {}
+
+    def as_who(pid: str) -> Any:
+        if pid not in made:
+            home = tempfile.mkdtemp(prefix=f"agora-{pid}-")
+            made[pid] = tools.Context(store=RelayStore(relay_url, sleep=lambda _s: None),
+                                      ledger=Ledger(home), spool=Spool(home),
+                                      allowed_signers_path=path, participant_id=pid,
+                                      config=ctx.config, config_dir=home)
+        return made[pid]
+    return as_who
+
+
+def _vote_chain() -> list[dict[str, Any]]:
+    """genesis → 제안 → **표** → 표 뒤 발언. 각 이벤트의 `expected_state` 는 그 앞까지 접은 상태다."""
+    from agora import reducer as _r
+    kinds = [("genesis", "a", {"type": "debate", "title": "t", "body": "b"}),
+             ("post", "b", {"round": 0, "body": "제안"}),
+             ("vote", "c", {"target": "1" * 32, "value": 1}),
+             ("post", "b", {"round": 0, "body": "표 뒤 발언"})]
+    entries: list[dict[str, Any]] = []
+    prev = "genesis"
+    for i, (kind, who, payload) in enumerate(kinds, 1):
+        entries.append({"node_id": f"ev_{i:016d}", "hash": f"h{i}", "prev": prev, "kind": kind,
+                        "from": who, "created_at": f"2026-09-11T00:00:{i:02d}.000Z",
+                        "message_id": f"{i:032d}", "canonical": "", "fingerprint": None,
+                        "roster_stale": False, "scrub_recheck": False,
+                        "event": {"kind": kind, "from": who, "payload": payload,
+                                  "expected_state": ""}})
+        prev = f"h{i}"
+    for i in range(1, len(entries)):
+        pre = _r.apply(_r.order({"thread_id": "t", "fetched": i, "valid": entries[:i],
+                                 "quarantined": [], "stale": []}))
+        entries[i]["event"]["expected_state"] = pre["state_hash"]
+    return entries
+
+
+def _apply_chain(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    from agora import reducer as _r
+    return _r.apply(_r.order({"thread_id": "t", "fetched": len(entries), "valid": entries,
+                              "quarantined": [], "stale": []}))
+
+
+def _case_vote_does_not_freeze_the_room() -> None:
+    """🔴**표 한 건이 방을 얼리지 않는다** — 표 뒤에도 표와 발언이 산다(2026-09-11 핫픽스).
+
+    ★사고: `vote` 분기가 「상태를 안 바꾼다」면서 **사슬의 머리까지** 안 옮겼다. 그러면 2단(경합)은
+      그 표를 이미 승자로 정해 놓았는데 머리는 앞자리에 머물러, **다음 글이 전부 `lost_race` 로 죽는다**
+      (표든 발언이든 · 실측 재현 3/3). 투표가 몰리는 광장에서는 **첫 표가 그 방을 영구 동결**시킨다.
+    ★이것은 바로 위 L-1 봉합(「거부돼도 사슬은 지나갔다」)과 같은 병이다 —
+      **「상태를 안 바꿔도 사슬은 지나갔다」**. 그 자리를 여기서 잰다.
+    """
+    # ★★**쓰는 쪽**으로 잰다(가짜 릴레이). 사슬을 손으로 이어 붙여 리듀서에만 먹이면
+    #   이 결함이 **안 보인다** — 손으로 이은 사슬에는 경합이 없기 때문이다(2026-09-11 실측:
+    #   그렇게 짠 첫 판에서 뮤턴트 M432 가 SURVIVED 로 살아남았다). 진짜로 터진 자리는
+    #   「다음 글이 `state["head"]` 를 보고 자기 자리를 잡는」 쓰기 경로다.
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, _relay, _url):
+        room = _relay_room(ctx)
+        said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="제안"))
+        as_who = _three_party(ctx, _relay, f, _url)
+        b, c = as_who("operator-b"), as_who("operator-c")
+        pid = said["message_id"]
+        # ★쓰기 전에 읽는다 — 계약이 그렇게 말한다(「read 로 다시 보고 그 자리에서 써라」).
+        def act(key: str, fn: Any) -> Any:
+            _with_key(f[key], lambda: tools.read(b if key == "key_b" else c, thread_id=room))
+            return _with_key(f[key], fn)
+
+        act("key_b", lambda: tools.vote(b, thread_id=room, target=pid, value=1))
+        # ⑴ 표 뒤에 **또 표**가 들어간다.
+        act("key_c", lambda: tools.vote(c, thread_id=room, target=pid, value=1))
+        # ⑵ 표 뒤에 **발언**이 들어간다.
+        act("key_b", lambda: tools.say(b, thread_id=room, body="표 뒤 발언"))
+
+        # ★대조는 **3인 명부를 든 쪽**으로 한다. 원래 ctx 는 2인 명부(a·b)라 operator-c 의 표를
+        #   「명부 밖」으로 버린다 — 그러면 이 시험은 봉합 여부와 무관하게 붉어진다(실측 3/3).
+        reduced = tools._reduce(b, room)
+        kinds = [(e["event"]["kind"], e["event"]["from"]) for e in reduced["events"]]
+        if ("vote", "operator-c") not in kinds:
+            raise AssertionError(f"두 번째 표가 죽었다: {kinds}")
+        if ("post", "operator-b") not in kinds:
+            raise AssertionError(f"표 뒤 발언이 죽었다: {kinds}")
+        if reduced["state"] != "r0":
+            raise AssertionError(f"표가 **상태**를 바꿨다(구속력 없음이 깨졌다): {reduced['state']}")
+
+    # ⑶ 리듀서 층에서도 사슬의 머리가 표에서 멈추지 않는다.
+    got = _apply_chain(_vote_chain())
+    if got["head"] != "h4" or len(got["events"]) != 4:
+        raise AssertionError(f"사슬의 머리가 표에서 멈췄다: head={got['head']} "
+                             f"accepted={len(got['events'])}")
+
+
+def _case_vote_state_hash_matches_the_relay() -> None:
+    """🔴**같은 사슬에 두 구현이 같은 상태 해시를 낸다**(표가 낀 사슬 · py ↔ ts).
+
+    ★왜 이 시험이 이 봉합과 **한 커밋**에 있어야 하나: 상태 해시에는 사슬의 머리가 들어간다
+      (`agora/reducer.py:417-427`). 그래서 vote 의 head 전진을 **한쪽만** 고치면 그 순간부터
+      클라이언트와 릴레이가 서로 다른 해시를 말하고, 3자 대조가 그 자리에서 깨진다.
+      릴레이 주석(2026-09-05)이 경고한 것이 정확히 그것이다 — 그 경고는 「고치지 마라」가 아니라
+      **「따로 고치지 마라」**로 읽는 것이 맞다.
+    ⚠**미측정은 통과가 아니다**: node·esbuild 가 없으면 이 케이스는 **실패**한다(조용히 넘어가지 않는다).
+    """
+    import json as _json
+    import shutil as _shutil
+    import subprocess as _sp
+    entries = _vote_chain()
+    mine = _apply_chain(entries)
+
+    if _shutil.which("node") is None:
+        raise AssertionError("node 가 없어 py↔ts 대조를 **못 쟀다**(미측정은 통과가 아니다)")
+    probe = os.path.join(_ROOT, "relay", "tests", "state_hash_probe.mjs")
+    proc = _sp.run(["node", probe], input=_json.dumps({"thread_id": "t", "entries": entries}),
+                   capture_output=True, text=True, cwd=_ROOT, timeout=300)
+    if proc.returncode != 0:
+        raise AssertionError(f"대조 탐침이 못 돌았다(미측정): {(proc.stderr or '')[:200]}")
+    theirs = _json.loads(proc.stdout)
+
+    if theirs["state_hash"] != mine["state_hash"]:
+        raise AssertionError(
+            "두 구현의 상태 해시가 갈렸다 — 한쪽만 고쳤다: "
+            f"py={mine['state_hash'][:16]} ts={str(theirs['state_hash'])[:16]}")
+    if theirs["head"] != mine["head"]:
+        raise AssertionError(f"사슬의 머리가 갈렸다: py={mine['head']} ts={theirs['head']}")
+    if theirs["accepted"] != [e["node_id"] for e in mine["events"]]:
+        raise AssertionError(f"받아들인 이벤트가 다르다: ts={theirs['accepted']}")
+
+
 def _case_thread_alias_and_argument_names() -> None:
     """인자 이름: **별칭은 받고, 모르는·빠진 이름은 code 10 으로 이름을 말해 준다.**
 
@@ -13064,6 +13225,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("의장 루프: 권고 뒤 닫는다",     _case_chair_loop_drafts_then_closes, None),
     ("의장 루프: 다시 돌아도 안전",   _case_chair_loop_is_safe_to_run_again, None),
     ("의장 루프: 명부 한 줄 순서",    _case_chair_loop_roster_line_keeps_the_order, None),
+    ("투표: 표 뒤에도 방이 산다",    _case_vote_does_not_freeze_the_room, None),
+    ("투표: py↔ts 해시가 같다",      _case_vote_state_hash_matches_the_relay, None),
     ("참가자: 모양 틀린 relay 거부", _case_participant_relay_of_wrong_shape_is_rejected, errors.PRECONDITION),
     ("참가자: 모르는 칸은 거부",   _case_participant_unknown_field_still_rejected, errors.PRECONDITION),
     ("참가자: 있던 설정이 이긴다", _case_participant_migration_keeps_existing_config, None),
@@ -13518,6 +13681,22 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if buf:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      '        if False:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      "참가 안내: 문서와 같다"),
+    # ── 투표 동결 핫픽스(2026-09-11) — **두 구현을 같이** 고쳤다는 것을 그물이 증명한다 ──
+    # ⑴ **사고 그 자체의 재현** — `prev` 로 상태 머리를 쓰면 표 뒤가 전부 죽는다.
+    ("M432-prev-uses-the-state-head", "agora/tools.py",
+     '    return state, reduced.get("chain_head") or state["head"], state["state_hash"]',
+     '    return state, state["head"], state["state_hash"]',
+     "투표: 표 뒤에도 방이 산다"),
+    # ⑵ 운반층 머리를 **이름만 붙이고 값은 상태 머리**로 채우면 같은 사고다(더 조용하다).
+    ("M433-chain-head-is-the-state-head", "agora/reducer.py",
+     '    result["chain_head"] = chain[-1]["hash"] if chain else None',
+     '    result["chain_head"] = state["head"]',
+     "투표: 표 뒤에도 방이 산다"),
+    # ⑶ 두 구현이 **상태 해시를 다르게** 세면 3자 대조가 깨진다 — 탐침이 그 자리를 지킨다.
+    ("M434-relay-state-hash-drops-head", "relay/src/lib/reducer.ts",
+     'const HASH_FIELDS = ["type", "state", "round", "chair", "requester", "solved_by",\n  "close_reason", "head"];',
+     'const HASH_FIELDS = ["type", "state", "round", "chair", "requester", "solved_by",\n  "close_reason"];',
+     "투표: py↔ts 해시가 같다"),
     # ── 의장 루프(2026-09-11 · 설계 §2 A·B·C·D·E 의 그물) ─────────────────────
     # ★이 축이 비면 **사람이 안 보는 동안** 루프가 틀린 일을 한다 — 그것이 자동화의 값이자 값이다.
     ("M418-chair-skips-the-grace-window", "tools/chair_loop.py",
