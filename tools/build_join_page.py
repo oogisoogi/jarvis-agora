@@ -81,7 +81,8 @@ def inline(text: str) -> str:
 
 def plain(text: str) -> str:
     """한 줄에서 **표시되는 글자만** 남긴다(시험이 페이지와 대조할 때 쓰는 자)."""
-    t = re.sub(r"^\s{0,3}#{1,6}\s+", "", text)
+    t = re.sub(r"^\s*<summary>(.*?)</summary>\s*$", r"\1", text)
+    t = re.sub(r"^\s{0,3}#{1,6}\s+", "", t)
     t = re.sub(r"^\s*>\s?", "", t)
     t = re.sub(r"^\s*[-*]\s+", "", t)
     t = t.replace("**", "").replace("`", "")
@@ -107,6 +108,11 @@ def plain_lines(md: str) -> list[str]:
             continue
         if not raw.strip() or raw.strip() == "---":
             continue
+        # 접힘 틀(`<details>`·`</details>`)은 **글자가 아니라 상자**다 — 화면에는 삼각형으로 선다.
+        # ⚠표제(`<summary>`)는 글자이므로 여기서 빼지 않는다. 빼면 「사람은 읽지 않아도 됩니다」가
+        #   페이지에서 사라져도 아무도 모른다.
+        if raw.strip() in ("<details>", "</details>"):
+            continue
         if re.fullmatch(r"\|[\s:|-]+\|", raw.strip()):
             continue
         line = plain(raw)
@@ -124,7 +130,7 @@ def page_text(doc: str) -> str:
       ⇒ 칸·줄·문단을 여는·닫는 태그만 공백이고, 글 안쪽 태그(굵게·코드)는 **글자를 만들지 않는다.**
     """
     s = re.sub(r"(?s)<script.*?</script>|<style.*?</style>|<!--.*?-->", " ", doc)
-    s = re.sub(r"(?is)</?(?:td|th|tr|li|p|h[1-6]|blockquote|pre|div|table|thead|tbody|ul|hr|br|main|header|nav|body|html|head|title|meta|link)\b[^>]*>", " ", s)
+    s = re.sub(r"(?is)</?(?:td|th|tr|li|p|h[1-6]|blockquote|pre|div|table|thead|tbody|ul|hr|br|main|header|nav|body|html|head|title|meta|link|details|summary)\b[^>]*>", " ", s)
     s = re.sub(r"(?s)<[^>]+>", "", s)
     return re.sub(r"[ \t]+", " ", html.unescape(s))
 
@@ -158,6 +164,19 @@ def render(md: str, copy_blocks: tuple[int, ...]) -> str:
             else:
                 out.append(f"<pre><code{cls}>{code}</code></pre>")
             fence_index += 1
+            continue
+
+        # 접힘 — 문서의 `<details>`/`<summary>`(깃허브도 이 문법으로 접는다)를 **그대로** 접는 칸으로.
+        # ★왜 규칙을 하나 늘리는가: 이 두 줄이 규칙에 없으면 문단으로 떨어져 **글자 「<details>」가
+        #   화면에 뜬다**(삼키지는 않지만 접히지도 않는다). 접는 것이 이 칸의 존재 이유다.
+        if line.strip() in ("<details>", "</details>"):
+            out.append(line.strip())
+            i += 1
+            continue
+        m = re.fullmatch(r"<summary>(.*)</summary>", line.strip())
+        if m:
+            out.append(f"<summary>{inline(m.group(1).strip())}</summary>")
+            i += 1
             continue
 
         # 제목
@@ -221,7 +240,9 @@ def render(md: str, copy_blocks: tuple[int, ...]) -> str:
         while i < n and lines[i].strip() and not lines[i].startswith("```") \
                 and not re.match(r"^(#{1,6})\s+", lines[i]) and lines[i].strip() != "---" \
                 and not lines[i].lstrip().startswith(">") and not re.match(r"^\s*[-*]\s+", lines[i]) \
-                and not lines[i].strip().startswith("|"):
+                and not lines[i].strip().startswith("|") \
+                and lines[i].strip() not in ("<details>", "</details>") \
+                and not re.fullmatch(r"<summary>.*</summary>", lines[i].strip()):
             buf.append(lines[i].strip())
             i += 1
         if buf:
@@ -259,6 +280,11 @@ PAGE_CSS = """
              border: 1px solid var(--line, #e4d9c6); background: var(--surface, #fff); color: var(--ink, #2a2622);
              cursor: pointer }
   .copybtn:hover { background: var(--surface-muted, #efe7d9) }
+  .doc details { margin: var(--space-4, 1rem) 0; padding: .8em 1em; border: 1px solid var(--line, #e4d9c6);
+                 border-radius: 8px; background: var(--surface-muted, #efe7d9) }
+  .doc details[open] { padding-bottom: 1.2em }
+  .doc summary { cursor: pointer; font-weight: 600 }
+  .doc details > :last-child { margin-bottom: 0 }
   .doclinks { margin: var(--space-6, 2rem) 0 var(--space-8, 3rem); display: flex; flex-wrap: wrap; gap: 1rem }
 """
 

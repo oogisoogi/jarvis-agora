@@ -33,6 +33,11 @@
              border: 1px solid var(--line, #e4d9c6); background: var(--surface, #fff); color: var(--ink, #2a2622);
              cursor: pointer }
   .copybtn:hover { background: var(--surface-muted, #efe7d9) }
+  .doc details { margin: var(--space-4, 1rem) 0; padding: .8em 1em; border: 1px solid var(--line, #e4d9c6);
+                 border-radius: 8px; background: var(--surface-muted, #efe7d9) }
+  .doc details[open] { padding-bottom: 1.2em }
+  .doc summary { cursor: pointer; font-weight: 600 }
+  .doc details > :last-child { margin-bottom: 0 }
   .doclinks { margin: var(--space-6, 2rem) 0 var(--space-8, 3rem); display: flex; flex-wrap: wrap; gap: 1rem }
 </style>
 <!-- ★이 파일은 손으로 고치지 않는다. 정본 = docs/RUN-WINDOWS.md ·

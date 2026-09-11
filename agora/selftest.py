@@ -4509,14 +4509,20 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M404-backup-overwrites-silently",
                  "M405-migration-clobbers-concurrent-config",
                  "M406-relay-of-unknown-shape-slips",
-                 "M407-publish-check-ignores-fingerprint",
-                 "M408-join-page-swallows-a-paragraph",
-                 "M409-lobby-loses-the-join-link"),
+                 "M407-publish-check-ignores-fingerprint"),
+    # ★09-11 신설 — **참가 안내**. 구판은 이 셋을 「잔재이관」에 얹어 두었는데, 축 이름은
+    #   「무엇을 잃을 수 있나」여야 한다. 여기서 잃는 것은 **읽는 사람이 길을 찾는 것**이다:
+    #   ⑴문서와 페이지가 갈리는 것 ⑵로비에서 가는 길이 없어지는 것 ⑶안 읽어도 되는 것이
+    #   본문으로 다시 올라오는 것. 셋 다 **조용히** 난다 — 화면은 멀쩡해 보인다.
+    "참가안내": ("M408-join-page-swallows-a-paragraph",
+                 "M409-lobby-loses-the-join-link",
+                 "M410-join-page-unfolds-the-technical-note",
+                 "M411-join-page-drops-the-summary"),
 }
 
 
 def _case_s8_axes_have_nets() -> None:
-    """S8 의 18축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한·하네스무결성·설치점검)도 같은 방식으로 덮인다."""
+    """S8 의 19축(운반교체·실패분류·투영없음·명부신뢰·체크포인트·소유증명·가시성·여정경계·운반선택·진입점·파생대조·더블충실도·쓰기상태·경합반영·3자대조·읽기상한·하네스무결성·설치점검·참가안내)도 같은 방식으로 덮인다."""
     _axes_have_nets(S8_AXES, "S8")
 
 
@@ -11768,8 +11774,15 @@ def _case_invite_join_brief_stands_alone() -> None:
       ⇒ 게시할 때 **주소·지문 두 줄을 사람이 함께 옮긴다**는 규율이 여기서는 잔여로 남는다.
     """
     from agora import __version__
+    import re as _re
     text = _read_text(os.path.join(_ROOT, "docs", "INVITE.md"))
-    head = text[text.index("## 여러분이 하는 일"):text.index("**2. 에이전트 창에")]
+    # ★끝 표식은 **번호**로 잡는다(문안이 아니라). 구판은 「**2. 에이전트 창에」라는 문장에
+    #   묶여 있었고, 2번 칸의 문안을 고치자 시험이 ValueError 로 죽었다(2026-09-11 실측) —
+    #   **재는 자리는 그대로인데 자가 부서진 것**이라, 사람은 무엇이 틀렸는지부터 헷갈린다.
+    end = _re.search(r"^\*\*2\. ", text, _re.M)
+    if not end:
+        raise AssertionError("초대장에 2단계 머리가 없다 — 「여러분이 하는 일」의 뼈대가 바뀌었다")
+    head = text[text.index("## 여러분이 하는 일"):end.start()]
 
     # ⑴ 설치 도우미에 묶이지 않는다. **낱말이 아니라 결합**을 겨눈다 —
     #    「설치 점검」 같은 정당한 쓰임까지 잡으면 케이스가 곧 꺼진다.
@@ -12258,6 +12271,52 @@ def _case_join_page_matches_the_document() -> None:
         raise AssertionError("본문에도 참가 길이 하나는 있어야 한다(머리띠만으로는 읽는 흐름에서 안 보인다)")
 
 
+def _case_join_page_folds_the_technical_note() -> None:
+    """본문에는 **사람이 하는 일만** 남고, 에이전트용 스크립트는 **접힌 칸 안**에 있다.
+
+    ★왜 기계가 재는가(발주자 지적 2026-09-11): 「맥·리눅스라면 위의 2~4단계는 이 한 덩어리를
+      그대로 돌려도 됩니다 … 지문이 어긋나면 …」 + sh 덩어리가 **본문 한가운데** 있었다.
+      읽는 사람에게 「한 덩어리」가 무엇인지, 「지문」이 무엇인지가 그 쪽 어디에도 없었다.
+      ⇒ 안 읽어도 되는 것은 **안 읽어도 되는 자리**에 둔다. 그 자리가 다시 본문으로 올라오면 붉어진다.
+    ★셋을 잰다: ⑴접는 칸이 **상자로 서는가**(글자 「<details>」가 화면에 뜨는 것이 아니라)
+      ⑵스크립트가 그 **안**에 있는가 ⑶접는 칸 **앞**(= 사람이 읽는 본문)에 스크립트가 없는가.
+    """
+    # ★**생성기가 지금 만드는 것**을 잰다(디스크의 커밋본이 아니라). 커밋본만 보면
+    #   생성기가 접기를 잃어도 이 시험은 초록이고, 다음 재생성에서 조용히 풀린다.
+    #   (커밋본과 생성물이 같은지는 짝 케이스 「참가 안내: 문서와 같다」가 이미 잰다.)
+    import sys as _sys
+    tools_dir = os.path.join(_ROOT, "tools")
+    if tools_dir not in _sys.path:
+        _sys.path.insert(0, tools_dir)
+    import build_join_page as bjp
+    spec = next(x for x in bjp.PAGES if x["src"] == "docs/INVITE.md")
+    _out, doc = bjp.build(spec)
+
+    open_at = doc.find("<details>")
+    close_at = doc.find("</details>")
+    if open_at < 0 or close_at < 0:
+        raise AssertionError("참가 안내에 접는 칸이 없다 — 기술 참고가 본문에 풀려 있다")
+    if "&lt;details&gt;" in doc:
+        raise AssertionError("접는 칸이 **글자로** 찍혔다 — 상자로 서지 않았다")
+    summary_at = doc.find("<summary>", open_at)
+    if not 0 <= summary_at < close_at:
+        raise AssertionError("접는 칸에 표제가 없다 — 사람이 무엇이 접혔는지 모른다")
+
+    # ⑵·⑶ 스크립트의 자리. 표식은 **그 스크립트에만 있는 글자**로 고른다.
+    for mark in ("curl -fsSL", "AGORA_SIGNING_KEY"):
+        at = doc.find(mark)
+        if at < 0:
+            raise AssertionError(f"기술 참고에서 {mark!r} 가 사라졌다 — 접은 것이 아니라 지웠다")
+        if not open_at < at < close_at:
+            raise AssertionError(f"{mark!r} 가 접는 칸 밖에 있다 — 사람이 읽는 본문에 스크립트가 섞였다")
+
+    # ⑷ 정본(문서)도 같은 모양이어야 한다. 페이지만 고치면 다음 생성에서 되돌아간다.
+    with open(os.path.join(_ROOT, "docs", "INVITE.md"), encoding="utf-8") as fh:
+        md = fh.read()
+    if md.find("```sh") < md.find("<details>"):
+        raise AssertionError("문서에서 스크립트가 접는 칸보다 앞에 있다 — 재생성하면 본문으로 돌아온다")
+
+
 def _case_publish_check_binds_file_to_invite() -> None:
     """게시 게이트는 **올릴 파일**과 **초대장이 적은 것**을 묶는다(agy 2R [4] · master 판정).
 
@@ -12476,6 +12535,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("참가자: 바뀐 설정은 안 덮는다", _case_participant_config_changed_midway_is_not_clobbered, None),
     ("게시: 파일과 초대장을 묶는다", _case_publish_check_binds_file_to_invite, None),
     ("참가 안내: 문서와 같다",     _case_join_page_matches_the_document, None),
+    ("참가 안내: 기술 참고는 접혀 있다", _case_join_page_folds_the_technical_note, None),
     ("참가자: 모양 틀린 relay 거부", _case_participant_relay_of_wrong_shape_is_rejected, errors.PRECONDITION),
     ("참가자: 모르는 칸은 거부",   _case_participant_unknown_field_still_rejected, errors.PRECONDITION),
     ("참가자: 있던 설정이 이긴다", _case_participant_migration_keeps_existing_config, None),
@@ -12929,6 +12989,15 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("M408-join-page-swallows-a-paragraph", "tools/build_join_page.py",
      '        if buf:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      '        if False:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
+     "참가 안내: 문서와 같다"),
+    # ── 참가 페이지 v2(2026-09-11 · 지적: 본문에 에이전트용 스크립트) ─────────
+    ("M410-join-page-unfolds-the-technical-note", "tools/build_join_page.py",
+     '        if line.strip() in ("<details>", "</details>"):\n            out.append(line.strip())',
+     '        if False:\n            out.append(line.strip())',
+     "참가 안내: 기술 참고는 접혀 있다"),
+    ("M411-join-page-drops-the-summary", "tools/build_join_page.py",
+     '            out.append(f"<summary>{inline(m.group(1).strip())}</summary>")',
+     '            out.append("<summary></summary>")',
      "참가 안내: 문서와 같다"),
     ("M409-lobby-loses-the-join-link", "relay/board/index.html",
      '<a class="cta" href="/join">참가 안내 →</a>',

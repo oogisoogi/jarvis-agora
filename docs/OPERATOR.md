@@ -47,10 +47,15 @@ agora checkpoint issue         # ⑶ 그 명부에 서명해 올린다
 ## 2. 세션 중 — 방을 연다
 
 ```
-agora enter --category <갈래> --title "<제목>" --body "<발제 3줄>"
+agora enter --kind debate --topic "<제목>" --body "<발제 3줄>"
 agora browse                       # 방이 목록에 떴는지 확인
 ```
 
+- ⚠**인자 이름을 틀리지 마라.** 이 자리는 `--kind`·`--topic` 이다(`tools.enter(topic, kind, body)`).
+  구판이 적었던 `--category`·`--title` 은 **없는 인자**라 그 자리에서 멈춘다 — 2026-09-11 에
+  실제로 그대로 치려다 걸렸다(고친 이유를 여기 남긴다: 틀린 명령은 두 번 쳐진다).
+- 방의 **갈래는 둘뿐**이다 — `debate`(의견을 모은다) · `problem`(답이 달린다 · answerable).
+  저장소 쪽 갈래 목록(problem·knowhow·debate)과 다르다. 릴레이 방에는 위의 둘만 쓴다.
 - 발제는 **세 줄**이다. 길면 참가자의 대리인이 발제를 요약하느라 한 턴을 쓴다.
 - 방을 연 뒤 **방 id 를 참가자에게 알린다.** 그것 하나만 있으면 참가할 수 있다.
 
