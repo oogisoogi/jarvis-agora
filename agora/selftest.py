@@ -4488,7 +4488,12 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  # 이종 검증(agy·codex R1)이 연 자리 — 「초록인데 아무것도 안 재는」 네 곳.
                  "M387-selfcheck-empty-table-passes", "M388-selfcheck-one-way-sweep",
                  "M389-selfcheck-ignores-who-signed",
-                 "M390-selfcheck-axis-explosion-escapes"),
+                 "M390-selfcheck-axis-explosion-escapes",
+                 # ★agy 1R HIGH — 점검이 **고치면** 두 번째 점검은 첫 번째와 다른 것을 잰다.
+                 "M423-selfcheck-migrates-while-checking",
+                 # ★윈도우 첫 실측(K-1) — 표와 **만나지 못하는** 검사는 통과도 실패도 아니다.
+                 "M418-package-check-ignores-windows-paths",
+                 "M419-manifest-keys-not-normalized"),
     # ★09-11 신설 — **이식 잠금**. 한 OS 에서만 나는 죽음은 개발기에서 영원히 초록이라,
     #   이 축이 비면 「맥에서 400번 초록」이 윈도우에 대해 아무것도 말하지 않는다.
     "이식잠금": ("M391-lock-silent-when-unavailable",
@@ -4496,7 +4501,11 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M393-lock-release-uses-lock-mode",
                  "M394-ledger-imports-fcntl-again",
                  "M399-whoami-hides-the-lock",
-                 "M400-lock-shared-not-exclusive"),
+                 "M400-lock-shared-not-exclusive",
+                 # ★K-1 실측 차단 — 자식에게 **무엇을 물려주는가**도 이식 잠금 축이다.
+                 "M420-powershell-inherits-module-path", "M421-pwsh-not-preferred",
+                 # ★agy 1R CRITICAL — 껍데기가 **한글 사용자 폴더**에서 깨지던 자리.
+                 "M422-invite-cmd-written-as-ascii"),
     # ★09-11 신설 — **잔재 이관**. 거부는 초록으로 보이지 않지만 **사람 손을 부른다**(실측:
     #   노트북 실기에서 사람이 편집기로 칸을 지웠다). 이 축은 「거부로 되돌아가는가」를 잰다.
     "잔재이관": ("M395-participant-legacy-rejected-again",
@@ -5884,6 +5893,202 @@ def _case_windows_mode_check_uses_acl() -> None:
             raise AssertionError("ACL 을 못 읽었는데 통과했다(fail-open)")
 
 
+def _case_selfcheck_writes_nothing() -> None:
+    """점검은 **한 바이트도 쓰지 않는다**(agy 1R HIGH · 2026-09-11 실측).
+
+    ★★잔재 `relay` 칸이 있는 폴더에서 `selfcheck` 를 돌리면 `config.json` 이 생기고
+      `participant.json` 이 고쳐지고 `.bak`·`.lock` 이 남았다 — 문서는 「전부 읽기만 하고
+      아무것도 쓰지 않는다」고 적혀 있었다. ★**점검이 고치면 사람은 「무엇이 원래 상태였는지」를
+      다시는 볼 수 없고, 두 번째 점검은 첫 번째와 다른 것을 잰다.**
+    ⚠이관 자체는 옳다(거부는 사람 손을 부른다) — 바뀐 것은 **누가 부를 때 하는가**뿐이다.
+      그래서 대조군으로 **도구 경로는 여전히 이관하는지**도 함께 잰다(봉합이 기능을 끈 것이 아니다).
+    """
+    import json as _json
+    import shutil
+    import tempfile
+    from agora import participant, selfcheck as sc
+    example = os.path.join(_ROOT, "config", "participant.json.example")
+    with open(example, encoding="utf-8") as fh:
+        base = _json.load(fh)
+    base["relay"] = "https://agora.godmeyou.kr"
+
+    def seed() -> str:
+        d = tempfile.mkdtemp(prefix="agora-ro-")
+        path = os.path.join(d, "participant.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump(base, fh, ensure_ascii=False)
+        os.chmod(d, 0o700)
+        os.chmod(path, 0o600)
+        return d
+
+    d = seed()
+    try:
+        path = os.path.join(d, "participant.json")
+        before, mtime = sorted(os.listdir(d)), os.path.getmtime(path)
+        row = sc.check_participant(d)
+        if row["결과"] != "통과":
+            raise AssertionError(f"잔재 칸이 있는 신원을 점검이 거부했다: {row}")
+        after = sorted(os.listdir(d))
+        if after != before:
+            raise AssertionError(f"점검이 파일을 만들었다: {before} → {after}")
+        if os.path.getmtime(path) != mtime:
+            raise AssertionError("점검이 participant.json 을 고쳤다")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # 대조군 — **도구 경로는 여전히 이관한다**(봉합이 기능을 끈 것이 아니다).
+    # ⚠이관은 사람에게 **알림 한 줄을 stderr 로** 낸다. 게이트는 `2>&1` 로 합쳐 JSON 을 읽으므로
+    #   여기서 그 줄이 새면 **게이트가 「출력을 읽지 못했다」로 죽는다**(실제로 한 번 그랬다 —
+    #   `commit_gate.sh` 주석이 2026-08-25 에 같은 사고를 적어 뒀다).
+    #   ★시험은 자기가 재는 것 말고 아무것도 화면에 쓰지 않는다.
+    import contextlib
+    import io as _io
+    d = seed()
+    try:
+        with contextlib.redirect_stderr(_io.StringIO()), \
+             contextlib.redirect_stdout(_io.StringIO()):
+            participant.load(d)
+        if not os.path.exists(os.path.join(d, "config.json")):
+            raise AssertionError("도구 경로에서도 이관이 안 일어났다(기능을 껐다)")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _case_invite_windows_block_survives_a_korean_path() -> None:
+    """윈도우 설치 덩어리가 **한글 사용자 폴더에서 살아남는가**(agy 1R CRITICAL · 2026-09-11).
+
+    ★★`.cmd` 는 cmd.exe 가 **OEM 코드 페이지**로 읽는다. `Set-Content -Encoding ASCII` 로 쓰면
+      한글이 `?` 로 **깨진 채 저장**되고, `C:\\Users\\???\\python.exe` 를 부르는 껍데기가 남는다 —
+      실행하면 그제서야 죽는다. ★1차 실측 기계가 **정확히 한글 사용자 폴더**였다: 그때 통과한
+      것은 우리 덩어리가 아니라 테스터가 손으로 만든 껍데기였다.
+    ★두 겹으로 막는다: ⑴사용자 폴더 아래 경로는 `%USERPROFILE%` 로 되돌려 **한글이 파일에 아예
+      안 들어가게** 하고 ⑵그래도 들어갈 수 있으니 **OEM 으로 쓴다**.
+    ⚠이 검사는 문서를 읽는다 — 우리에게 윈도우가 없어서 **실행해 볼 수 없기 때문**이다.
+      「돌려 봤다」가 아니라 「이 두 표식이 문서에 있다」를 잰다. 그 차이를 여기 적어 둔다.
+    """
+    text = _doc("docs/INVITE.md")
+    block = [b for b in text.split("```") if b.startswith("powershell")]
+    if len(block) != 1:
+        raise AssertionError(f"윈도우 PowerShell 덩어리가 한 개가 아니다: {len(block)}개")
+    body = block[0]
+    if "-Encoding ASCII" in body:
+        raise AssertionError("`.cmd` 를 ASCII 로 쓴다 — 한글 사용자 폴더에서 경로가 깨진다")
+    if "-Encoding OEM" not in body:
+        raise AssertionError("`.cmd` 를 OEM(cmd.exe 가 읽는 코드 페이지)으로 쓰지 않는다")
+    if "%USERPROFILE%' + $py.Substring" not in body:
+        raise AssertionError("파이썬 경로를 %USERPROFILE% 로 되돌리지 않는다 — 한글이 파일에 들어간다")
+    if "agora.cmd" not in body:
+        raise AssertionError("윈도우 껍데기(`agora.cmd`)를 만들지 않는다")
+
+
+def _case_windows_powershell_child_gets_a_pinned_module_path() -> None:
+    """윈도우 PowerShell 자식에 **무엇을 물려주는가**(윈도우 첫 실측 K-1 · 2026-09-11 · 차단).
+
+    ★★테스터의 등록이 code 2 에서 막혔다. 원인은 우리 코드가 아니라 **물려받은 환경**이었다:
+      PowerShell 7 안에서 띄운 터미널이 자식에게 7 용 `PSModulePath` 를 물려주는데 우리가 부른
+      것은 `powershell`(5.1)이라, 5.1 이 7 용 보안 모듈을 집어 로드에 실패하고 `Get-Acl` 이 죽었다.
+      ★**자식에게 무엇을 물려줄지는 부르는 쪽이 정해야 한다** — 물려받은 것을 그대로 넘기는 것도
+      선택이고, 그 선택이 여기서 사람을 막았다.
+    셋을 잰다: ⑴`pwsh` 가 있으면 그것을 먼저 부른다 ⑵`powershell` 을 부를 때 `PSModulePath` 를
+      5.1 기본값으로 **고정**한다(7 용 값이 새어 들어가지 않는다) ⑶실패 문면에 **어느 PowerShell·
+      어느 모듈 경로**가 적힌다(code 2 뒤에 숨기지 않는다).
+    """
+    from unittest import mock
+    from agora import participant
+    seven = "C:\\Program Files\\PowerShell\\7\\Modules"
+    env = {"PSModulePath": seven, "ProgramFiles": "C:\\Program Files",
+           "SystemRoot": "C:\\Windows"}
+
+    # ⑴ pwsh 가 있으면 pwsh — 7 용 환경을 7 이 받으면 어긋남이 없다.
+    with mock.patch.object(participant, "_which",
+                           lambda n: "C:\\pwsh.exe" if n == "pwsh" else None):
+        argv, child_env, name, _mp = participant._powershell_invocation(env)
+    if name != "pwsh" or not argv[0].endswith("pwsh.exe"):
+        raise AssertionError(f"pwsh 가 있는데 5.1 을 불렀다: {name} {argv[0]}")
+    if child_env["PSModulePath"] != seven:
+        raise AssertionError("7 에게 7 의 모듈 경로를 안 물려줬다(고정이 오히려 해롭다)")
+
+    # ⑵ pwsh 가 없으면 powershell + **고정된** 모듈 경로.
+    with mock.patch.object(participant, "_which",
+                           lambda n: "C:\\powershell.exe" if n == "powershell" else None):
+        argv, child_env, name, module_path = participant._powershell_invocation(env)
+    if name != "powershell":
+        raise AssertionError(f"pwsh 가 없는데 {name} 을 불렀다")
+    if "PowerShell\\7" in child_env["PSModulePath"]:
+        raise AssertionError(f"7 용 모듈 경로가 5.1 자식에 샜다: {child_env['PSModulePath']}")
+    for want in ("WindowsPowerShell\\Modules", "v1.0\\Modules"):
+        if want not in child_env["PSModulePath"]:
+            raise AssertionError(f"5.1 기본값이 아니다({want} 없음): {child_env['PSModulePath']}")
+    if module_path != child_env["PSModulePath"]:
+        raise AssertionError("보고한 모듈 경로와 실제로 물려준 값이 다르다")
+
+    # ⑶ 실패하면 **어느 PowerShell·어느 모듈 경로**인지 말한다.
+    class _Dead:
+        returncode, stdout, stderr = 1, "", "Import-Module: 모듈을 로드하지 못했습니다"
+
+    with mock.patch.object(participant, "_which",
+                           lambda n: "C:\\powershell.exe" if n == "powershell" else None), \
+         mock.patch.dict(os.environ, env, clear=True), \
+         mock.patch("subprocess.run", lambda *a, **k: _Dead()):
+        try:
+            participant._windows_acl_sids("C:\\x")
+        except participant._PowerShellFailure as exc:
+            failure = exc
+        else:
+            raise AssertionError("실패한 자식을 성공으로 읽었다")
+    # ★★진단은 **문자열 뒤가 아니라 칸**에 있어야 한다(agy 1R HIGH): 뒤에 이어 붙이면
+    #   받는 쪽의 절삭에 먹혀 **한 번도 도달하지 못한다**. 「적었다」와 「도달한다」는 다른 말이다.
+    if failure.shell != "powershell" or "WindowsPowerShell" not in failure.module_path:
+        raise AssertionError(f"진단 칸이 비었다: {failure.shell} {failure.module_path}")
+
+    # ⑷ 그리고 그 두 값이 **사용자 화면까지** 간다(code 2 가 원인을 삼키지 않는다).
+    with mock.patch.object(participant.os, "name", "nt"), \
+         mock.patch.object(participant, "_windows_acl_sids",
+                           lambda p: (_ for _ in ()).throw(failure)):
+        try:
+            participant._require_private_windows("C:\\x", "참가자 파일")
+        except AgoraError as exc:
+            detail = exc.detail or {}
+        else:
+            raise AssertionError("ACL 을 못 읽었는데 통과했다(fail-open)")
+    # ⚠`why` 는 잘린다(그래도 된다). 잘리면 안 되는 두 값은 **자기 칸**에 있다.
+    if detail.get("shell") != "powershell" or \
+            "WindowsPowerShell" not in str(detail.get("psmodulepath")):
+        raise AssertionError(f"진단 두 칸이 사용자까지 도달하지 않는다: {detail}")
+
+
+def _case_powershell_is_spawned_through_one_door() -> None:
+    """PowerShell 자식을 띄우는 자리는 **하나뿐이다**(정적 검사 · K-1 후속).
+
+    ★★자리가 둘이 되면 한쪽만 고쳐진 채 남고, 그 한쪽은 **그 기계에서만** 죽는다 —
+      개발기에서는 영원히 초록이라 아무도 모른다. 그래서 「고쳤다」가 아니라
+      「고칠 자리가 하나다」를 잰다.
+    ⚠이 검사는 문자열을 본다 — 자리를 옮기면 여기가 붉어지고, 그때 **옮긴 사람이**
+      이 목록을 고친다(조용히 늘어나지 않는다).
+    """
+    import re
+    allowed = {os.path.join("agora", "participant.py")}
+    offenders: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(os.path.join(_ROOT, "agora")):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        for fn in sorted(filenames):
+            if not fn.endswith(".py") or fn == "selftest.py":
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, _ROOT)
+            body = _read_text(full)
+            if re.search(r"""["'](?:pwsh|powershell)(?:\.exe)?["']""", body) and rel not in allowed:
+                offenders.append(rel)
+    if offenders:
+        raise AssertionError(
+            "PowerShell 자식을 띄우는 자리가 늘었다 — `_powershell_invocation()` 을 쓰고 "
+            f"이 목록에 적어라: {offenders}")
+    # 그 하나의 문이 실제로 **env 를 넘기는가**(넘기지 않으면 고정이 장식이 된다).
+    door = _read_text(os.path.join(_ROOT, "agora", "participant.py"))
+    if "subprocess.run(argv + [cmd]" not in door or "env=env" not in door:
+        raise AssertionError("하나뿐인 문이 자식에게 env 를 안 넘긴다 — 고정이 장식이 된다")
+
+
 def _case_local_commands_are_not_tools() -> None:
     """CLI 전용 명령은 **도구 표에 없다** — 대리인 세션의 손에 운영 동작을 쥐어 주지 않는다."""
     from agora import cli, tools
@@ -6337,8 +6542,19 @@ def _case_threat_model_names_what_machines_miss() -> None:
         raise AssertionError("그 자리를 무엇이 메우는지 안 적혀 있다")
 
 
-def _case_matrix_keeps_k1_unrun() -> None:
-    """지원 매트릭스에 **K-1 미실행 고지**가 있다(AC ④) — 그리고 지우지 말라고 적혀 있다."""
+def _case_matrix_keeps_k1_honest() -> None:
+    """지원 매트릭스의 **윈도우 칸이 실측 그대로**다(AC ④) — 그리고 지우지 말라고 적혀 있다.
+
+    ★★2026-09-11 에 이 그물을 **옮겼다**(끄지 않았다). 그전까지 이 칸은 「미실행」이었고 검사도
+      그 낱말을 요구했는데, 그날 테스트팀이 윈도우에서 **실제로 돌렸다**(0.1.3 · 부분 됨) —
+      그 순간 「미실행」은 **거짓**이 됐다. ★그물이 거짓을 지키게 두면, 사실을 적는 쪽이 붉어진다.
+      (이 저장소가 아는 병이다: 시험이 잘못된 값을 정답으로 고정하면 공허한 것을 넘어 해롭다.)
+    ★그래서 요구를 **상태 낱말에서 「정직의 모양」으로** 옮겼다: 한 줄 안에
+      ⑴`K-1`(어느 미지수인가) ⑵`재실측 대기`(지금 무엇을 기다리는가) ⑶삭제 금지 표식
+      ⑷`Windows`(자기가 지키는 칸) — 넷이 함께 있어야 한다.
+    ⚠**「지원」·「✅」로 바꾸는 길은 이 검사를 지나지 못한다.** 실측 없이 칸을 올리는 것이
+      이 그물이 막는 전부이고, 그것은 1차 실측 전이나 후나 같다.
+    """
     text = _doc("README.md")
     if "지원 매트릭스" not in text:
         raise AssertionError("매트릭스가 없다")
@@ -6349,12 +6565,18 @@ def _case_matrix_keeps_k1_unrun() -> None:
     #   ⇒ 그물은 **자기가 지키는 줄에 묶여 있어야** 한다. 같은 낱말을 쓰는 다른 줄이 대신 서 주면
     #     그 순간 이 검사는 문서의 다른 자리를 재고 있는 것이다.
     row = [ln for ln in text.splitlines()
-           if "K-1" in ln and "미실행" in ln and "이 줄을 지우지 마라" in ln]
+           if "K-1" in ln and "재실측 대기" in ln and "이 줄을 지우지 마라" in ln]
     if not row:
-        raise AssertionError("K-1 미실행 고지가 **한 줄로** 매트릭스에 없다"
-                             " — 세 표식(K-1·미실행·삭제 금지)이 같은 줄에 있어야 한다")
+        raise AssertionError("K-1 재실측 고지가 **한 줄로** 매트릭스에 없다"
+                             " — 세 표식(K-1·재실측 대기·삭제 금지)이 같은 줄에 있어야 한다")
     if "Windows" not in row[0]:
         raise AssertionError(f"그 줄이 윈도우 칸이 아니다: {row[0][:60]}")
+    # ★실측 없이 칸을 올리는 것을 막는다 — 이 그물의 처음이자 끝이다.
+    if "✅" in row[0]:
+        raise AssertionError(f"재실측 전에 윈도우 칸이 ✅ 로 올라갔다: {row[0][:80]}")
+    # ★실측이 있었다면 **언제·무엇을** 잰 것인지 그 줄이 말해야 한다(근거 없는 상태는 소문이다).
+    if "2026-09-11" not in row[0] or "0.1.3" not in row[0]:
+        raise AssertionError(f"1차 실측의 날짜·판본이 그 줄에 없다: {row[0][:80]}")
     for need in ("8.2", "3.11", "2.40"):
         if need not in text:
             raise AssertionError(f"최소 버전이 빠졌다: {need}")
@@ -9707,6 +9929,76 @@ def _case_selfcheck_catches_a_tampered_package_file() -> None:
         raise AssertionError("원복 뒤에도 붉다")
     shutil.rmtree(root, ignore_errors=True)
     del d
+
+
+def _case_selfcheck_matches_windows_style_paths() -> None:
+    """윈도우식 경로(역슬래시)에서도 표와 **만난다**(윈도우 첫 실측 K-1 · 2026-09-11).
+
+    ★★테스트팀 실측에서 이 축이 붉었다: 표는 `agora/…`, 윈도우에서 걷은 경로는 `agora\…` 라
+      **한 건도 매칭되지 않아** 「표에 없는 파일 = 전부」가 됐다 — 파일도 해시도 전부 같았다.
+      ★검사가 대상을 **못 만나는** 것은 통과도 실패도 아닌데 우리는 그것을 실패로 적었고,
+      그 화면을 본 사람은 꾸러미를 다시 받는다(고쳐지지 않는 일을 반복한다).
+    ★맥에서 이것을 재려면 **윈도우를 흉내 내야 한다**: `os.path.relpath` 가 역슬래시를 돌려주는
+      상황을 그대로 만든다. 윈도우가 있어야만 재는 봉합은 다음 사람에게 넘기는 빚이다.
+    ⚠양방향으로 잰다 — 걷은 쪽이 역슬래시인 경우(실측)와 **표 쪽**이 역슬래시인 경우
+      (언젠가 윈도우에서 만든 표). 한쪽만 옮기면 같은 사고가 반대로 난다.
+    """
+    import hashlib
+    import json as _json
+    import shutil
+    import tempfile
+    from unittest import mock
+    from agora import selfcheck as sc
+    root = tempfile.mkdtemp(prefix="agora-winpath-")
+    try:
+        os.makedirs(os.path.join(root, "agora"), exist_ok=True)
+        body = b"x = 1\n"
+        with open(os.path.join(root, "agora", "core.py"), "wb") as fh:
+            fh.write(body)
+        digest = hashlib.sha256(body).hexdigest()
+        manifest = os.path.join(root, sc.MANIFEST_NAME)
+
+        def write_manifest(key: str) -> None:
+            with open(manifest, "w", encoding="utf-8") as fh:
+                _json.dump({"version": "test", "files": {key: digest}}, fh)
+
+        # ⑴ 표는 `/`, 걷은 경로는 역슬래시 — 실측 그대로.
+        write_manifest("agora/core.py")
+        real_relpath = os.path.relpath
+
+        def windows_relpath(*a, **k):
+            return real_relpath(*a, **k).replace("/", "\\")
+
+        # ★흉내는 **구분자까지** 낸다: 윈도우는 `os.sep` 이 역슬래시이고, 우리 정규화는 그 값으로만
+        #   옮긴다 — 무조건 치환하면 POSIX 에서 합법적인 역슬래시 파일 이름이 폴더 경계로 읽혀
+        #   **리눅스에 새 오탐**이 생긴다(agy 1R MEDIUM · 윈도우 오탐을 고치려다 반대편을 깨는 셈).
+        with mock.patch.object(os.path, "relpath", windows_relpath), \
+             mock.patch.object(os, "sep", "\\"), mock.patch.object(os, "altsep", "/"):
+            row = sc.check_package(root)
+        if row["결과"] != "통과":
+            raise AssertionError(f"윈도우식 경로에서 표와 못 만난다(오탐): {row}")
+
+        # ⑵ 표 쪽이 역슬래시 = **실패로 말한다**(조용히 받아 주지 않는다).
+        #   ★그 표는 윈도우에서 만들어진 것이고 계약은 `/` 다. 받아 주면 다음 사람은
+        #     「표가 두 어휘를 갖는다」고 배우고, 그 순간 이 축은 어느 쪽도 제대로 못 잰다.
+        write_manifest("agora\\core.py")
+        row = sc.check_package(root)
+        if row["결과"] != "실패" or "윈도우_경로_키" not in row["상세"]:
+            raise AssertionError(f"윈도우 경로로 적힌 표를 조용히 받았다: {row}")
+
+        # ⑵-b **POSIX 에서 역슬래시는 파일 이름의 일부다** — 폴더 경계로 읽으면 안 된다.
+        if sc._as_posix("foo\\bar.txt") != "foo\\bar.txt":
+            raise AssertionError("POSIX 에서 역슬래시를 폴더 경계로 읽는다(리눅스에 새 오탐)")
+
+        # ⑶ **대조군** — 정규화가 축을 끈 것이 아니다: 진짜 변조는 여전히 붉다.
+        write_manifest("agora/core.py")
+        with open(os.path.join(root, "agora", "core.py"), "wb") as fh:
+            fh.write(body + b"# tampered\n")
+        row = sc.check_package(root)
+        if row["결과"] != "실패" or row["상세"]["달라진_파일"] != ["agora/core.py"]:
+            raise AssertionError(f"정규화가 검사를 껐다: {row}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _case_selfcheck_refuses_an_empty_manifest() -> None:
@@ -13341,7 +13633,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("문서: 오류 코드 표가 코드와",   _case_protocol_error_codes_match_module, None),
     ("문서: 잔여 위험 세 항목",       _case_threat_model_lists_residual_risks, None),
     ("문서: 기계가 못 잡는 것",       _case_threat_model_names_what_machines_miss, None),
-    ("문서: 매트릭스에 K-1 미실행",   _case_matrix_keeps_k1_unrun, None),
+    ("문서: 매트릭스에 K-1 정직",     _case_matrix_keeps_k1_honest, None),
     ("문서: 의존 0 이라 안 쓴다",     _case_readme_does_not_claim_zero_dependency, None),
     ("문서: 링크가 살아 있다",        _case_docs_point_at_real_files, None),
     ("관계: 왕복이 양방향",           _case_related_is_bidirectional, None),
@@ -13462,6 +13754,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("점검: 꾸러미에선 selftest 거절", _case_selftest_refuses_outside_a_dev_tree, None),
     # ── 이종 검증 봉합(2026-09-09 · agy·codex R1 REVISE) ────────────────────
     ("점검: 빈 표는 실패",            _case_selfcheck_refuses_an_empty_manifest, None),
+    # ── 윈도우 첫 실측(K-1 · 2026-09-11 · 테스트팀) 피드백 2건 ─────────────────
+    ("점검: 윈도우 경로도 표와 만난다", _case_selfcheck_matches_windows_style_paths, None),
+    ("윈도우: PowerShell 자식 환경 고정", _case_windows_powershell_child_gets_a_pinned_module_path, None),
+    ("윈도우: PowerShell 문은 하나다", _case_powershell_is_spawned_through_one_door, None),
+    ("초대장: 윈도우 덩어리가 한글 경로를 버틴다", _case_invite_windows_block_survives_a_korean_path, None),
+    ("점검: 아무것도 쓰지 않는다",     _case_selfcheck_writes_nothing, None),
     ("점검: 표 밖 파일도 센다",       _case_selfcheck_counts_files_missing_from_the_table, None),
     ("점검: 누가 서명했는지 본다",    _case_selfcheck_checks_who_signed, None),
     ("점검: 축이 터져도 계속 잰다",   _case_selfcheck_keeps_measuring_when_one_axis_explodes, None),
@@ -13633,8 +13931,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "        _MOD.flock(fh.fileno(), _MOD.LOCK_SH)",
      "잠금: 남이 못 들어온다"),
     ("M401-participant-migrates-before-validating", "agora/participant.py",
-     '    if doc["namespace"] != SIGN_NAMESPACE:\n        raise AgoraError(errors.PRECONDITION, "namespace 불일치",\n                         {"got": doc["namespace"]})\n    if type(doc["operator"]) is not bool:\n        raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)\n    if extra:\n        doc = _migrate_legacy(directory, path, doc, extra)\n    return doc',
-     '    if extra:\n        doc = _migrate_legacy(directory, path, doc, extra)\n    if doc["namespace"] != SIGN_NAMESPACE:\n        raise AgoraError(errors.PRECONDITION, "namespace 불일치",\n                         {"got": doc["namespace"]})\n    if type(doc["operator"]) is not bool:\n        raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)\n    return doc',
+     '    if doc["namespace"] != SIGN_NAMESPACE:\n        raise AgoraError(errors.PRECONDITION, "namespace 불일치",\n                         {"got": doc["namespace"]})\n    if type(doc["operator"]) is not bool:\n        raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)\n    if extra:\n        if not migrate:\n            # ★읽기 전용으로 불렀으면 **이관하지 않고 그대로 돌려준다.**\n            #   잔재 칸이 있다는 사실은 도구 경로가 다음에 고친다(점검은 말하지 않고 고치지도 않는다).\n            return doc\n        doc = _migrate_legacy(directory, path, doc, extra)\n    return doc',
+     '    if extra:\n        if not migrate:\n            # ★읽기 전용으로 불렀으면 **이관하지 않고 그대로 돌려준다.**\n            #   잔재 칸이 있다는 사실은 도구 경로가 다음에 고친다(점검은 말하지 않고 고치지도 않는다).\n            return doc\n        doc = _migrate_legacy(directory, path, doc, extra)\n    if doc["namespace"] != SIGN_NAMESPACE:\n        raise AgoraError(errors.PRECONDITION, "namespace 불일치",\n                         {"got": doc["namespace"]})\n    if type(doc["operator"]) is not bool:\n        raise AgoraError(errors.PRECONDITION, "operator 는 참·거짓이어야 한다", None)\n    return doc',
      "참가자: 거부는 아무것도 안 바꾼다"),
     ("M402-participant-nested-unknown-slips", "agora/participant.py",
      "    unknown += _unknown_inside_legacy(doc, extra)",
@@ -13668,8 +13966,9 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      'from agora import _lock, errors',
      'import fcntl\nfrom agora import _lock, errors',
      "잠금: 창구는 _lock 하나"),
+    # ⚠앵커를 옮겼다(2026-09-11 · `migrate=False` 갈래가 생겼다 · agy 1R HIGH 봉합).
     ("M395-participant-legacy-rejected-again", "agora/participant.py",
-     '    if extra:\n        doc = _migrate_legacy(directory, path, doc, extra)',
+     '    if extra:\n        if not migrate:\n            # ★읽기 전용으로 불렀으면 **이관하지 않고 그대로 돌려준다.**\n            #   잔재 칸이 있다는 사실은 도구 경로가 다음에 고친다(점검은 말하지 않고 고치지도 않는다).\n            return doc\n        doc = _migrate_legacy(directory, path, doc, extra)',
      '    if extra:\n        raise AgoraError(errors.PRECONDITION, "participant.json 에 계약 밖 칸이 있다",\n                         {"extra": extra})',
      "참가자: 옛 relay 칸은 이관된다"),
     ("M396-participant-unknown-field-migrated-too", "agora/participant.py",
@@ -13861,6 +14160,35 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '  echo "  FAIL — main 을 못 찾아 커밋 범위 **미측정**(통과 아님 · 작업트리·staged 만 쟀다)"\n  rc=1',
      '  echo "  FAIL — main 을 못 찾아 커밋 범위 **미측정**(통과 아님 · 작업트리·staged 만 쟀다)"',
      "게이트: 기준 브랜치 부재는 실패"),
+    # ── 윈도우 첫 실측(K-1 · 2026-09-11) — 한 OS 에서만 나는 죽음에 그물을 건다 ──────────
+    # ★이 둘은 **맥에서 영원히 초록**인 종류다: 경로 구분자도, 물려받는 환경도 개발기에서는
+    #   문제가 안 된다. 그래서 흉내 낸 상대(역슬래시 relpath · 7 용 PSModulePath)로 잰다.
+    ("M418-package-check-ignores-windows-paths", "agora/selfcheck.py",
+     '            rel = _as_posix(os.path.relpath(os.path.join(dirpath, fn), root))',
+     '            rel = os.path.relpath(os.path.join(dirpath, fn), root)',
+     "점검: 윈도우 경로도 표와 만난다"),
+    # ⚠앵커를 **옮겼다**(agy 1R MEDIUM 봉합 · 2026-09-11): 표 쪽 정규화를 **말하기**로 바꿨다.
+    #   겨누는 것은 같다 — 표가 두 어휘를 갖게 두면 이 축은 어느 쪽도 제대로 못 잰다.
+    ("M419-manifest-keys-not-normalized", "agora/selfcheck.py",
+     '    windows_keys = sorted(k for k in files if "\\\\" in k)',
+     '    windows_keys = []',
+     "점검: 윈도우 경로도 표와 만난다"),
+    ("M420-powershell-inherits-module-path", "agora/participant.py",
+     '    exe = _which("powershell") or "powershell"\n    env["PSModulePath"] = _winps_51_module_path(env)',
+     '    exe = _which("powershell") or "powershell"',
+     "윈도우: PowerShell 자식 환경 고정"),
+    ("M423-selfcheck-migrates-while-checking", "agora/selfcheck.py",
+     '        doc = load(directory, migrate=False)',
+     '        doc = load(directory)',
+     "점검: 아무것도 쓰지 않는다"),
+    ("M422-invite-cmd-written-as-ascii", "docs/INVITE.md",
+     '"@ | Set-Content -Encoding OEM "$AH\\bin\\agora.cmd"',
+     '"@ | Set-Content -Encoding ASCII "$AH\\bin\\agora.cmd"',
+     "초대장: 윈도우 덩어리가 한글 경로를 버틴다"),
+    ("M421-pwsh-not-preferred", "agora/participant.py",
+     '    exe = _which("pwsh")\n    if exe:',
+     '    exe = None\n    if exe:',
+     "윈도우: PowerShell 자식 환경 고정"),
     ("M362-resolution-skips-local-round-gate", "agora/tools.py",
      '    if state.get("state") != "r3":',
      '    if False:',
@@ -14808,10 +15136,13 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "**경계 표식은 보조다**",
      "경계 표식이 막는다",
      "문서: 잔여 위험 세 항목"),
+    # ⚠앵커를 **옮겼다**(2026-09-11 · 1차 실측으로 칸의 문면이 바뀌었다). 겨누는 것은 같다:
+    #   「실측 없이 칸을 ✅/지원 으로 올리는 것」. 낡은 앵커를 그대로 뒀다면 이 변이는
+    #   NOT-APPLIED(= 그 축 미측정)로 조용히 빠졌을 것이다 — 실제로 한 번 그렇게 났다.
     ("M175-readme-drops-k1", "docs/../README.md",
-     "⚠**미실행(K-1)**",
-     "지원",
-     "문서: 매트릭스에 K-1 미실행"),
+     "⚠**부분 됨(K-1) → 재실측 대기(0.1.5)**",
+     "✅ 지원",
+     "문서: 매트릭스에 K-1 정직"),
     ("M176-readme-claims-zero-dependency", "docs/../README.md",
      "⚠그렇다고 **의존이 없는 것은 아니다**",
      "외부 의존 0 이다. 다만",

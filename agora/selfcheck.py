@@ -74,6 +74,24 @@ def _row(result: str, detail: dict[str, Any] | None = None,
 
 # ── ⑴ 꾸러미 무결성 ──────────────────────────────────────────────────────────
 
+def _as_posix(rel: str) -> str:
+    """걷은 경로를 **표의 어휘**로 옮긴다 — 표는 언제나 `/` 로 적힌다(꾸러미는 zip 이다).
+
+    ★★윈도우 첫 실측(K-1 · 2026-09-11)이 이 한 줄이 없어서 붉었다: 표는 `agora/…`, 걷은
+      경로는 `agora\…` 라 **한 건도 매칭되지 않았고**, 파일·해시가 전부 같은데도
+      「표에 없는 파일 = 전부」로 나왔다. ★검사가 대상을 **못 만나는** 것은 통과도 실패도
+      아닌데 우리 표시는 그것을 **실패**라고 적었다 — 그 화면을 본 사람은 꾸러미를 다시 받는다.
+    ★★옮기는 것은 **이 기계의 구분자**(`os.sep`)뿐이다(agy 1R MEDIUM · 2026-09-11).
+      역슬래시를 무조건 바꾸면 **POSIX 에서 합법적인 파일 이름**(`foo\bar.txt`)을 폴더 경계로
+      잘못 읽어 없는 파일·잉여 파일이 동시에 생긴다 — 윈도우 오탐을 고치려다 리눅스에 오탐을
+      새로 만드는 셈이다. `os.sep` 으로만 옮기면 윈도우에서는 옮겨지고 POSIX 에서는 그대로다.
+    """
+    rel = rel.replace(os.sep, "/")
+    if os.altsep:
+        rel = rel.replace(os.altsep, "/")
+    return rel
+
+
 def check_package(root: str | None = None) -> dict[str, Any]:
     """담겨 온 파일이 표와 같은가.
 
@@ -106,10 +124,25 @@ def check_package(root: str | None = None) -> dict[str, Any]:
         return _row(FAIL, {"why": "내용물 표가 비었다 — 잴 대상이 없다", "표에_적힌_파일": 0},
                     "꾸러미를 다시 받아라(설치 한 줄을 다시 돌리면 된다).")
 
+    # ★★**표의 어휘는 `/` 하나다**(윈도우 첫 실측 K-1 · 2026-09-11 · 테스트팀).
+    #   표는 `agora/core.py` 로 적히는데 윈도우에서 걷은 경로는 `agora\\core.py` 라
+    #   **한 건도 매칭되지 않았다** — 파일도 해시도 전부 같은데 이 축이 붉었다(오탐).
+    #   ⇒ 걷은 쪽을 `os.sep` 으로 옮겨 표와 만나게 한다(아래 `_as_posix`).
+    # ⚠**표 쪽은 옮기지 않는다**(agy 1R MEDIUM): 옮기면 POSIX 에서 합법적인 역슬래시 파일 이름이
+    #   폴더 경계로 잘못 읽힌다. 대신 표에 역슬래시가 있으면 **그 사실을 실패로 말한다** —
+    #   그 표는 윈도우에서 만들어진 것이고, 계약은 `/` 다. 조용히 받아 주면 다음 사람은
+    #   **표가 두 어휘를 갖는다**고 배우고, 그 순간 이 축은 어느 쪽도 제대로 못 잰다.
+    windows_keys = sorted(k for k in files if "\\" in k)
+    if windows_keys:
+        return _row(FAIL, {"why": "내용물 표가 윈도우 경로로 적혀 있다 — 표의 어휘는 `/` 다",
+                           "윈도우_경로_키": windows_keys[:5],
+                           "표에_적힌_파일": len(files)},
+                    "이 꾸러미를 만든 쪽에 알려라(빌드가 윈도우에서 돌았다). 다시 받아도 같다.")
+
     missing: list[str] = []
     changed: list[str] = []
     for rel, want in sorted(files.items()):
-        full = os.path.join(root, rel)
+        full = os.path.join(root, *rel.split("/"))
         if not os.path.isfile(full):
             missing.append(rel)
             continue
@@ -133,7 +166,7 @@ def check_package(root: str | None = None) -> dict[str, Any]:
         for fn in filenames:
             if fn.endswith(".pyc") or fn == MANIFEST_NAME:
                 continue
-            rel = os.path.relpath(os.path.join(dirpath, fn), root)
+            rel = _as_posix(os.path.relpath(os.path.join(dirpath, fn), root))
             if rel not in files:
                 extra.append(rel)
 
@@ -151,7 +184,10 @@ def check_package(root: str | None = None) -> dict[str, Any]:
 def check_participant(directory: str) -> dict[str, Any]:
     from agora.participant import load
     try:
-        doc = load(directory)
+        # ★**읽기만 한다**(agy 1R HIGH): 이 축이 잔재 이관을 부르면 점검이 상태를 바꾼다 —
+        #   그러면 두 번째 점검은 첫 번째와 다른 것을 잰다(그리고 문서의 「아무것도 쓰지 않는다」가
+        #   거짓이 된다). 이관은 도구 경로의 일이다.
+        doc = load(directory, migrate=False)
     except AgoraError as e:
         return _row(FAIL, {"code": e.code, "message": e.message, "detail": e.detail},
                     "설치 한 줄을 다시 돌려라 — 참가자 신원 파일은 설치가 만든다.")
