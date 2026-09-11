@@ -4565,17 +4565,35 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     #   「틀린 일을 조용히 한다」다: 유예를 안 지키고 회차를 넘기거나, 판단하지 않았다고
     #   적어 놓고 요약을 지어내거나, 같은 자리를 두 번 하거나, 하고도 말하지 않는다.
     # ★09-11 신설 — **투표동결**. 표 한 건이 방을 얼리던 자리(두 구현 동시 봉합).
+    # ★09-11 신설 — **광장파생**. 「어떤 제안이 오늘 방이 되는가」를 계산이 정하는 자리.
+    #   여기서 잃는 것은 조용하다: 오류 없이 **다른 제안이 열린다**. 표를 던진 사람만 알아채고,
+    #   그 사람도 증명할 수 없다(규칙이 코드 한 곳에 있다는 것이 곧 증명 수단이기 때문이다).
+    "광장파생": ("M489-plaza-score-does-not-decay",
+                 "M490-plaza-counts-self-votes",
+                 "M491-plaza-daily-vote-cap-removed",
+                 "M492-plaza-keeps-withdrawn-votes",
+                 "M493-plaza-day-starts-at-midnight",
+                 "M494-plaza-marker-counted-as-proposal",
+                 "M495-plaza-settled-proposals-run-again",
+                 "M496-daily-score-threshold-ignored",
+                 "M497-daily-voter-threshold-ignored",
+                 "M498-daily-deadlock-fires-on-day-one",
+                 "M499-daily-deadlock-never-fires",
+                 "M500-daily-marker-not-posted",
+                 "M501-daily-empty-room-not-retired",
+                 "M502-daily-not-idempotent",
+                 "M503-daily-shelves-nothing"),
     # ★09-11 신설 — **예산출처**. 예산이 참가자 설정에서 **방 genesis** 로 옮긴 자리(계약 확장 9).
     #   여기서 잃는 것은 조용하다: 광장이 다시 2글짜리 방이 되거나, 두 구현이 다른 예산을 보거나,
     #   예산이 상태 해시로 새어 기존 방의 계보가 끊긴다 — 셋 다 사람에게는 「가끔 글이 사라진다」로 보인다.
-    "예산출처": ("M441-relay-ignores-the-room-budget",
-                 "M442-relay-drops-the-budget-ceiling",
-                 "M443-budget-ceiling-not-enforced",
-                 "M444-budget-ceiling-off-by-one",
-                 "M445-budget-field-not-closed",
-                 "M446-plaza-opens-with-the-default-budget",
-                 "M447-plaza-handed-to-the-chair-loop",
-                 "M448-budget-leaks-into-the-state-hash"),
+    "예산출처": ("M481-relay-ignores-the-room-budget",
+                 "M482-relay-drops-the-budget-ceiling",
+                 "M483-budget-ceiling-not-enforced",
+                 "M484-budget-ceiling-off-by-one",
+                 "M485-budget-field-not-closed",
+                 "M486-plaza-opens-with-the-default-budget",
+                 "M487-plaza-handed-to-the-chair-loop",
+                 "M488-budget-leaks-into-the-state-hash"),
     "투표동결": ("M432-prev-uses-the-state-head", "M433-chain-head-is-the-state-head",
                  "M434-relay-state-hash-drops-head"),
     "의장루프": ("M427-chair-manages-every-room",
@@ -13235,6 +13253,32 @@ def _case_daily_plan_opens_only_when_earned() -> None:
     if [r["id"] for r in two_days["picks"]] != ["q1"] or not two_days["deadlock"]:
         raise AssertionError(f"교착이 안 풀린다: {two_days['picks']} · {two_days['deadlock']}")
 
+    # ★문턱 **둘을 따로** 잰다. 기본값(점수 2 · 투표자 2)에서는 두 문턱이 갈리지 않는다 —
+    #   한 사람은 한 제안에 **평생 한 표**이고(마지막 것만 센다) 점수는 매일 반으로 접히므로,
+    #   **점수 2 를 넘으려면 같은 날 두 사람이 필요하다.** ⇒ 기본값에서는 점수 문턱이 투표자
+    #   문턱을 **품는다**. 그래서 기본값만 재면 「투표자 문턱을 통째로 지운」 변이가 **살아남는다**
+    #   (2026-09-11 실측: M496·M497 SURVIVED). 문턱은 노브이므로 **노브를 움직여 갈라 재야 한다.**
+    lonely = pz.read_plaza([
+        _ev("post", "a", "2026-09-10T07:00:00Z", "s1", body="한 사람만 미는 제안", round=0),
+        _ev("vote", "x", "2026-09-11T08:00:00Z", target="s1", value=1)])
+    rows_lonely = pz.ranking(lonely, through=_dt.date(2026, 9, 11))
+    if pz.eligible(rows_lonely, min_score=1, min_voters=2):
+        raise AssertionError("투표자 문턱이 없다 — 한 사람 표로 방이 열린다")
+    if not pz.eligible(rows_lonely, min_score=1, min_voters=1):
+        raise AssertionError("대조군이 안 열린다 — 이 탐침이 문턱을 안 짚고 있다")
+
+    spread = pz.read_plaza([
+        _ev("post", "a", "2026-09-09T07:00:00Z", "s2", body="이틀에 걸쳐 한 표씩", round=0),
+        _ev("vote", "x", "2026-09-10T08:00:00Z", target="s2", value=1),
+        _ev("vote", "y", "2026-09-11T08:00:00Z", target="s2", value=1)])
+    rows_spread = pz.ranking(spread, through=_dt.date(2026, 9, 11))
+    if rows_spread[0]["voters"] != 2:
+        raise AssertionError(f"탐침이 두 사람 표를 못 만들었다: {rows_spread}")
+    if pz.eligible(rows_spread, min_score=2, min_voters=1):
+        raise AssertionError(f"점수 문턱이 없다 — {rows_spread[0]['score']} 점이 2 를 넘었다고 한다")
+    if not pz.eligible(rows_spread, min_score="1.5", min_voters=1):
+        raise AssertionError("대조군이 안 열린다 — 점수 탐침이 문턱을 안 짚고 있다")
+
 
 def _three_party(ctx: Any, relay: Any, f: dict[str, Any], relay_url: str) -> Any:
     """a·b·c 세 사람이 서명할 수 있는 판 — **표를 두 사람이 던져야** 개설 조건이 성립한다."""
@@ -13354,6 +13398,55 @@ def _case_daily_loop_opens_marks_and_retires() -> None:
         shelved = {m["id"] for m in plaza["markers"] if m["kind"] == "보관"}
         if old["message_id"] not in shelved:
             raise AssertionError(f"14일 지난 제안이 안 가려졌다: {shelved} · {out2['actions']}")
+
+
+def _case_daily_loop_does_not_open_twice_when_the_marker_fails() -> None:
+    """마커가 **실패해도** 같은 제안으로 방을 두 번 열지 않는다 — 기억(Marks)이 그 벨트다.
+
+    ★왜 따로 재는가(2026-09-11 실측 · 변이 M502 가 살아남아 드러났다): 보통은 `[졸업]` 마커가
+      멱등을 대신 해 준다(마커가 붙은 제안은 순위에서 빠진다). 그래서 **기억을 통째로 지워도**
+      통합 시험이 초록이었다 — 두 벨트가 서로를 가려 준 것이다.
+    ★그런데 마커는 **실패할 수 있다**(광장 예산 소진·릴레이 거절). 그때 기억이 없으면 루프는
+      **매일 같은 제안으로 새 방을 연다** — 빈 방이 쌓이고, 그게 이 루프가 막으려던 바로 그 사고다.
+    ⇒ 마커가 못 붙는 판을 **일부러** 만들어 기억만 남겨 놓고 잰다.
+    """
+    import datetime as _dt
+    import tempfile
+    from agora import tools
+    pz, dl = _plaza(), _daily()
+    f = _fixtures()
+    with _relay_env() as (ctx, _relay, _url):          # noqa: F841
+        # ★예산 1 짜리 광장 — 제안 한 건이 그 자리를 다 쓰므로 **마커가 못 올라간다.**
+        plaza_id = _relay_room(ctx, budget={"posts_per_round": 1, "max_chars_per_round": 6000})
+        now = _dt.datetime.combine(
+            (_dt.datetime.now(_dt.timezone.utc).astimezone(pz.KST) + _dt.timedelta(days=1)).date(),
+            _dt.time(6, 10), pz.KST)
+        said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=plaza_id, body="시험 제안"))
+        pid = said["message_id"]
+        as_who = _three_party(ctx, _relay, f, _url)
+        for who, key in (("operator-b", "key_b"), ("operator-c", "key_c")):
+            _with_key(f[key], lambda w=who: tools.read(as_who(w), thread_id=plaza_id))
+            _with_key(f[key], lambda w=who: tools.vote(as_who(w), thread_id=plaza_id,
+                                                       target=pid, value=1))
+        a3 = as_who("operator-a")
+        state = tempfile.mkdtemp(prefix="daily-")
+        conf = {"per_day": 2, "stale_minutes": 99999}          # 유찰은 이 시험의 축이 아니다
+        first = _with_key(f["key_a"], lambda: dl.run(a3, state_dir=state, plaza_id=plaza_id,
+                                                     now=now, config=conf))
+        if len(first["opened"]) != 1:
+            raise AssertionError(f"첫 판에서 방이 안 열렸다: {first}")
+        plaza = pz.read_plaza(tools._reduce(a3, plaza_id)["events"])
+        if [m for m in plaza["markers"] if m["kind"] == "졸업"]:
+            raise AssertionError("마커가 붙었다 — 이 시험의 전제(마커 실패)가 안 섰다")
+
+        # ★마커가 없으니 제안은 **여전히 순위에 있다.** 그래도 두 번째 방은 안 열려야 한다.
+        rows = pz.ranking(plaza, through=pz.day_of(now) - _dt.timedelta(days=1))
+        if pid not in [r["id"] for r in rows]:
+            raise AssertionError("제안이 순위에서 빠졌다 — 전제가 안 섰다")
+        again = _with_key(f["key_a"], lambda: dl.run(a3, state_dir=state, plaza_id=plaza_id,
+                                                     now=now, config=conf))
+        if again["opened"]:
+            raise AssertionError(f"마커가 없다고 같은 제안으로 방을 또 열었다: {again['opened']}")
 
 
 def _case_plaza_budget_is_a_lifetime_budget() -> None:
@@ -15043,6 +15136,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("광장: 마커가 유일한 출처",     _case_plaza_markers_are_the_only_source, None),
     ("하루 한 바퀴: 얻어야 연다",    _case_daily_plan_opens_only_when_earned, None),
     ("하루 한 바퀴: 열고 적고 접는다", _case_daily_loop_opens_marks_and_retires, None),
+    ("하루 한 바퀴: 마커가 실패해도 한 번",
+     _case_daily_loop_does_not_open_twice_when_the_marker_fails, None),
     ("광장: 예산은 평생 예산이다",   _case_plaza_budget_is_a_lifetime_budget, None),
     ("참가자: 모양 틀린 relay 거부", _case_participant_relay_of_wrong_shape_is_rejected, errors.PRECONDITION),
     ("참가자: 모르는 칸은 거부",   _case_participant_unknown_field_still_rejected, errors.PRECONDITION),
@@ -15556,43 +15651,116 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if buf:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      '        if False:\n            out.append("<p>" + inline(" ".join(buf)) + "</p>")',
      "참가 안내: 문서와 같다"),
+    # ── 광장파생(2026-09-11) — 「어떤 제안이 오늘 방이 되는가」는 판단이 아니라 계산이다 ──
+    # ★이 축이 비면 **아무 오류도 안 난다.** 규칙 한 줄이 조용히 빠지고, 광장은 계속 도는데
+    #   **다른 제안이 열린다** — 그리고 그 차이는 표를 던진 사람만 안다(그 사람도 증명할 수 없다).
+    ("M489-plaza-score-does-not-decay", "tools/plaza.py",
+     'DECAY = decimal.Decimal("0.5")',
+     'DECAY = decimal.Decimal("1")',
+     "광장: 점수는 감쇠한다"),
+    ("M490-plaza-counts-self-votes", "tools/plaza.py",
+     '        if proposals[target]["from"] == vote["from"]:\n            continue',
+     "        if False:\n            continue",
+     "광장: 표 세는 규칙"),
+    ("M491-plaza-daily-vote-cap-removed", "tools/plaza.py",
+     "        out.extend(same[-VOTES_PER_DAY:])",
+     "        out.extend(same)",
+     "광장: 표 세는 규칙"),
+    # ★같은 사람이 같은 제안에 여러 번 던지면 **마지막 것만** — 이게 빠지면 「거둔 표」가 안 먹는다.
+    ("M492-plaza-keeps-withdrawn-votes", "tools/plaza.py",
+     '    kept = [v for v in last.values() if v["value"] == 1]',
+     "    kept = list(last.values())",
+     "광장: 표 세는 규칙"),
+    ("M493-plaza-day-starts-at-midnight", "tools/plaza.py",
+     "DAY_START_HOUR = 6            # 하루의 경계(=투표 마감 시각)",
+     "DAY_START_HOUR = 0            # 하루의 경계(=투표 마감 시각)",
+     "광장: 하루 경계는 06시"),
+    # ★마커는 제안이 아니다 — 이 `continue` 가 빠지면 마커가 **후보로 줄에 선다**(자기가 자기를 연다).
+    ("M494-plaza-marker-counted-as-proposal", "tools/plaza.py",
+     '                markers.append({"from": who, "at": when, **found.groupdict()})\n'
+     "                continue                       # 마커는 제안이 아니다",
+     '                markers.append({"from": who, "at": when, **found.groupdict()})',
+     "광장: 마커가 유일한 출처"),
+    ("M495-plaza-settled-proposals-run-again", "tools/plaza.py",
+     "            if pid not in done and day_of(proposal[\"at\"]) <= through]",
+     '            if day_of(proposal["at"]) <= through]',
+     "광장: 마커가 유일한 출처"),
+    # ── 하루 한 바퀴(2026-09-11) — 문턱·교착·유찰·멱등 ─────────────────────────
+    ("M496-daily-score-threshold-ignored", "tools/plaza.py",
+     '    return [r for r in rows if r["score"] >= floor and r["voters"] >= int(min_voters)]',
+     '    return [r for r in rows if r["voters"] >= int(min_voters)]',
+     "하루 한 바퀴: 얻어야 연다"),
+    ("M497-daily-voter-threshold-ignored", "tools/plaza.py",
+     '    return [r for r in rows if r["score"] >= floor and r["voters"] >= int(min_voters)]',
+     '    return [r for r in rows if r["score"] >= floor]',
+     "하루 한 바퀴: 얻어야 연다"),
+    # ★교착 해소가 **하루 만에** 풀리면 조건이 사실상 없는 것과 같다(양쪽 방향으로 잰다).
+    ("M498-daily-deadlock-fires-on-day-one", "tools/daily_loop.py",
+     "        if empty_days >= deadlock_days:",
+     "        if empty_days >= 1:",
+     "하루 한 바퀴: 얻어야 연다"),
+    ("M499-daily-deadlock-never-fires", "tools/daily_loop.py",
+     "        if empty_days >= deadlock_days:",
+     "        if False:",
+     "하루 한 바퀴: 얻어야 연다"),
+    ("M500-daily-marker-not-posted", "tools/daily_loop.py",
+     "        post_marker(\"졸업\", row[\"id\"], out[\"room_id\"],",
+     "        pass  # post_marker(",
+     "하루 한 바퀴: 열고 적고 접는다"),
+    ("M501-daily-empty-room-not-retired", "tools/daily_loop.py",
+     '        if room["state"] == "closed" or room["posts"]:\n            continue',
+     "        if True:\n            continue",
+     "하루 한 바퀴: 열고 적고 접는다"),
+    # ★killer 를 바꿨다(2026-09-11): 통합 케이스로는 **못 잡는다** — 거기서는 `[졸업]` 마커가
+    #   멱등을 대신 해 주기 때문이다(두 벨트가 서로를 가린다). 마커가 실패하는 판에서만 갈린다.
+    ("M502-daily-not-idempotent", "tools/daily_loop.py",
+     '        if marks.done(plaza_id, key) or marks.failures(plaza_id, key) >= chair.RETRY_CAP:\n'
+     "            continue\n        title, body = room_brief(row)",
+     "        title, body = room_brief(row)",
+     "하루 한 바퀴: 마커가 실패해도 한 번"),
+    ("M503-daily-shelves-nothing", "tools/plaza.py",
+     '        if (now - proposal["at"]).days >= days:',
+     "        if False:",
+     "하루 한 바퀴: 열고 적고 접는다"),
     # ── 계약 확장 9(2026-09-11) — 방이 자기 예산을 들고 다닌다 ────────────────
-    # ★번호 부기(2026-09-11): 이 축은 처음에 M435~M442 로 적었다가 **M441~M448 로 옮겼다** —
-    #   같은 날 0.1.5 윈도우 축이 M435~M440 을 먼저 가져갔다(origin/main 8071b82). 같은 번호가
-    #   두 사건을 가리키면 판정이 흔들린다(같은 형태 네 번째 · 「표: 번호가 둘을 안 가리킨다」).
+    # ★번호 부기(2026-09-11 · **두 번 옮겼다**): M435~M442 → M441~M448 → **M481~M488**.
+    #   하루에 세 워커가 같은 구간을 집었다 — 0.1.5 윈도우 축(M435~M440) · 690 F(M441~M452) ·
+    #   665(M461~M473). ★번호는 **선착순 자원인데 아무도 예약하지 않는다** — 그래서 같은 날
+    #   같은 함정을 셋이 밟았다. master 가 대역(M481~)을 배정해 풀었다.
+    #   ⚠옮길 때는 **슬러그 전체**로 옮긴다(`M441` 같은 접두 치환은 M4410 류를 같이 먹는다).
     # ★이 축이 비면 광장이 **조용히 2글짜리 방**으로 돌아간다(그 상태가 넉 달을 갔다).
     #   그리고 확장은 **두 구현을 같이** 고쳤으므로 한쪽만 되돌아가는 판을 특히 조준한다.
-    ("M441-relay-ignores-the-room-budget", "relay/src/lib/reducer.ts",
+    ("M481-relay-ignores-the-room-budget", "relay/src/lib/reducer.ts",
      "  if (!opts.budget && genesisBudget != null) {",
      "  if (false) {",
      "예산: py↔ts 가 같은 예산"),
-    ("M442-relay-drops-the-budget-ceiling", "relay/src/lib/reducer.ts",
+    ("M482-relay-drops-the-budget-ceiling", "relay/src/lib/reducer.ts",
      "    if (!Number.isInteger(value) || value < 0 || value > ceiling) {",
      "    if (false) {",
      "예산: py↔ts 가 같은 예산"),
-    ("M443-budget-ceiling-not-enforced", "agora/reducer.py",
+    ("M483-budget-ceiling-not-enforced", "agora/reducer.py",
      "        over = protocol.out_of_range(genesis_budget)",
      "        over = None",
      "예산: 범위 밖이면 방이 안 선다"),
     # ★상한을 **넘겨야** 막히는가 — 「전부 막는다」도 위 뮤턴트만으로는 안 잡힌다.
-    ("M444-budget-ceiling-off-by-one", "agora/protocol.py",
+    ("M484-budget-ceiling-off-by-one", "agora/protocol.py",
      "        if type(value) is not int or value < 0 or value > ceiling:",
      "        if type(value) is not int or value < 0 or value >= ceiling:",
      "예산: 범위 밖이면 방이 안 선다"),
-    ("M445-budget-field-not-closed", "agora/schema.py",
+    ("M485-budget-field-not-closed", "agora/schema.py",
      '        _closed(budget, BUDGET_FIELDS, "genesis.budget")',
      "        pass",
      "예산: 예산 칸 모양 → 10"),
-    ("M446-plaza-opens-with-the-default-budget", "tools/chair_loop.py",
+    ("M486-plaza-opens-with-the-default-budget", "tools/chair_loop.py",
      "                      budget=PLAZA_BUDGET if plaza else None)",
      "                      budget=None)",
      "예산: 광장은 크게 연다"),
-    ("M447-plaza-handed-to-the-chair-loop", "tools/chair_loop.py",
+    ("M487-plaza-handed-to-the-chair-loop", "tools/chair_loop.py",
      "    if not plaza:\n        manage(state_dir, out[\"room_id\"])",
      '    manage(state_dir, out["room_id"])',
      "예산: 광장은 크게 연다"),
     # ★골든(계보 단절 0)을 지키는 자리 — 예산이 상태 해시로 새어 들어가면 **기존 방이 전부 깨진다.**
-    ("M448-budget-leaks-into-the-state-hash", "agora/reducer.py",
+    ("M488-budget-leaks-into-the-state-hash", "agora/reducer.py",
      '                ("type", "state", "round", "chair", "requester", "solved_by",\n'
      '                 "close_reason", "head")}',
      '                ("type", "state", "round", "chair", "requester", "solved_by",\n'
