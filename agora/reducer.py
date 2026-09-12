@@ -190,6 +190,24 @@ def links_of(reduced: dict[str, Any], *,
     return out
 
 
+def _read_body(entry: dict[str, Any]) -> str | None:
+    """사람용 이벤트 본문. 구조화된 권고도 한 줄씩 빠짐없이 펼친다."""
+    payload = entry["event"]["payload"]
+    if entry["kind"] != "resolution":
+        return payload.get("body")
+
+    lines = ["제목: 권고", f"근거: {payload['summary']}", "recommended_actions:"]
+    for action in payload["recommended_actions"]:
+        lines.append(f"- {action['text']} [execution: {action['execution']}]")
+    lines.append("dissent:")
+    if not payload["dissent"]:
+        lines.append("- 없음")
+    for item in payload["dissent"]:
+        message_id = f" ({item['message_id']})" if item.get("message_id") else ""
+        lines.append(f"- {item['from']}{message_id}: {item['quote']}")
+    return "\n".join(lines)
+
+
 def read_view(collected: dict[str, Any], *, state: Any, audit: bool = False,
               accepted: list[dict[str, Any]] | None = None,
               quarantined: list[dict[str, Any]] | None = None,
@@ -211,7 +229,7 @@ def read_view(collected: dict[str, Any], *, state: Any, audit: bool = False,
         "state": state,
         "events": [{"message_id": v["message_id"], "kind": v["kind"], "from": v["from"],
                     "ts": v["event"]["ts"], "sig": "ok",
-                    "body": v["event"]["payload"].get("body")}
+                    "body": _read_body(v)}
                    for v in source],
     }
     if audit:

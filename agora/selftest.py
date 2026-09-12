@@ -4219,7 +4219,8 @@ S7_AXES: dict[str, tuple[str, ...]] = {
     "온보딩공백": ("M188-repo-config-not-checked", "M189-json-guessed-by-shape",
                    "M190-unexpected-error-leaks-message"),
     "읽기정직": ("M191-read-shows-rejected-as-valid",
-                 "M192-audit-hides-procedure-rejects"),
+                 "M192-audit-hides-procedure-rejects",
+                 "M536-read-drops-resolution-action"),
     "투영배선": ("M193-close-does-not-project", "M194-projection-claims-verified",
                  "M195-projection-failure-raises", "M196-close-verify-always-true"),
     # ★전수조사에서 나온 축 — 「정의는 있는데 부르는 곳이 없다」.
@@ -5514,6 +5515,31 @@ def _case_tool_mark_solved_requires_requester() -> None:
         ctx, thread_id=tid, post_message_id=said["message_id"]))
     if not ok["ok"]:
         raise AssertionError("요청자 본인도 못 했다 — 그물이 너무 넓다")
+
+
+def _case_read_renders_resolution_payload() -> None:
+    """권고 이벤트는 제목·근거·항목·집행 표식·이견을 사람용 본문에 펼친다."""
+    from agora import tools
+    f = _fixtures()
+    ctx = _tools_ctx()
+    tid = _tools_thread(ctx)
+    for target in (1, 2, 3):
+        _with_key(f["key_a"], lambda t=target: tools.advance(ctx, thread_id=tid, to_round=t))
+    _with_key(f["key_a"], lambda: tools.resolve(
+        ctx, thread_id=tid, summary="두 선택지를 비교한 결과",
+        dissent=[{"from": "participant-b", "quote": "다른 의견"}],
+        recommended_actions=[
+            {"text": "첫 권고를 검토한다", "execution": "forbidden"},
+            {"text": "두 번째 권고를 기록한다", "execution": "forbidden"},
+        ]))
+    event = next(e for e in tools.read(ctx, thread_id=tid)["events"]
+                 if e["kind"] == "resolution")
+    body = event.get("body") or ""
+    for expected in ("제목: 권고", "근거: 두 선택지를 비교한 결과",
+                     "첫 권고를 검토한다", "두 번째 권고를 기록한다",
+                     "execution: forbidden", "dissent:", "participant-b: 다른 의견"):
+        if expected not in body:
+            raise AssertionError(f"권고 본문에서 빠졌다: {expected!r} · {body!r}")
 
 
 def _case_tool_resolution_needs_forbidden_mark() -> None:
@@ -16108,6 +16134,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("도구: 라운드 기본값",           _case_tool_say_uses_current_round, None),
     ("도구: 전진은 의장만",           _case_tool_advance_requires_chair, None),
     ("도구: 해결은 요청자만",         _case_tool_mark_solved_requires_requester, None),
+    ("읽기: 권고 payload를 펼친다",    _case_read_renders_resolution_payload, None),
     ("도구: 권고엔 집행 금지",        _case_tool_resolution_needs_forbidden_mark, None),
     ("도구: 승인 게이트를 지난다",    _case_tool_write_passes_approval_gate, None),
     ("도구: usage 는 토큰 안 센다",   _case_tool_usage_does_not_count_tokens, None),
@@ -18023,6 +18050,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                         {"exception": type(e).__name__, "reason": "unexpected"})',
      '                         {"exception": str(e), "reason": "unexpected"})',
      "CLI: 뜻밖의 예외도 JSON"),
+    ("M536-read-drops-resolution-action", "agora/reducer.py",
+     '        lines.append(f"- {action[\'text\']} [execution: {action[\'execution\']}]")',
+     "        pass",
+     "읽기: 권고 payload를 펼친다"),
     ("M191-read-shows-rejected-as-valid", "agora/tools.py",
      '                             accepted=reduced.get("events"),',
      "                             accepted=None,",
