@@ -64,6 +64,24 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _hidden_window_kwargs() -> dict[str, Any]:
+    """윈도우에서 콘솔 자식(PowerShell)을 **창 없이** 띄우는 subprocess 인자 — 타 OS 는 빈 dict.
+
+    ★2026-09-15 운영자 노트북 WMI 실측(윈도 콘솔 창 깜빡임): 참가자 클라이언트는 pythonw(콘솔 없음)
+      로 돌고, `load()` 한 번마다 `Get-Acl` PowerShell 을 두 번(폴더·participant.json) 띄운다. 숨김이
+      없으면 자식마다 새 콘솔 창이 할당돼 **도구 호출·상주 주기마다 창이 깜빡였다**.
+    두 겹: `CREATE_NO_WINDOW`(콘솔 창 자체를 안 만든다) + `STARTUPINFO(SW_HIDE)`(창이 생기는 경로가
+      남아도 보이지 않게). 출력은 `capture_output` 으로 받으므로 숨겨도 잃는 것이 없다.
+    """
+    import subprocess
+    if os.name != "nt":
+        return {}
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = subprocess.SW_HIDE
+    return {"creationflags": 0x08000000, "startupinfo": si}
+
+
 def _winps_51_module_path(env: dict[str, str]) -> str:
     """Windows PowerShell 5.1 의 **기본** `PSModulePath`.
 
@@ -136,7 +154,8 @@ def _windows_acl_sids(path: str) -> list[str]:
         "catch { $_.IdentityReference.Value } }"
     )
     argv, env, shell_name, module_path = _powershell_invocation()
-    r = subprocess.run(argv + [cmd], capture_output=True, text=True, timeout=20, env=env)
+    r = subprocess.run(argv + [cmd], capture_output=True, text=True, timeout=20, env=env,
+                       **_hidden_window_kwargs())
     if r.returncode != 0:
         raise _PowerShellFailure((r.stderr or r.stdout).strip()[:200],
                                  shell=shell_name, module_path=module_path)
