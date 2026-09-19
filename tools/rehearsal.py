@@ -35,7 +35,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from agora import errors, onboard, tools                      # noqa: E402
+from agora import errors, onboard, skillpin, tools            # noqa: E402
 from agora.errors import AgoraError                           # noqa: E402
 from agora.store_relay import USER_AGENT                      # noqa: E402
 
@@ -144,7 +144,8 @@ def run(*, live: bool = False, relay_url: str | None = None,
             _as(dirs[pid])
             rec.step("register", pid,
                      lambda d=dirs[pid]: onboard.register(directory=d, relay_url=url,
-                                                          unattended=True))
+                                                          unattended=True,
+                                                          skill_pin=skillpin.expected()))
         if any(r["step"] == "register" and r["code"] != 0 for r in rec.rows):
             # ★**등재가 안 됐으면 그 다음은 재는 시늉이다.** 여기서 멈추고 표를 낸다
             #   (전에는 그대로 진행하다 설정 부재로 **역추적**이 났다 — 스택트레이스는 기록이 아니다).

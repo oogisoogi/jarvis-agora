@@ -61,3 +61,33 @@ def require(path: str, root: str | None = None) -> dict[str, str]:
                          {"reason": "skill_pin_mismatch", "expected": want, "got": got,
                           "다음": "사람에게 알린다. 문서가 바뀐 것인지 가짜인지는 여기서 가를 수 없다."})
     return {"skill_sha256": got, "pin": want}
+
+
+def require_for_register(skill: str | None = None, pin: str | None = None,
+                         root: str | None = None) -> dict[str, str]:
+    """등록 전 대조 — **건너뛰는 길이 없다.** 핀 파일이 없으면 그 자체로 code 2(`skill_pin_missing`).
+
+    ★둘 다 주면 둘 다 본다(하나만 맞고 하나가 틀린 판을 통과시키지 않는다).
+    ⚠`--skill-pin` 이 증명하는 것은 「붙여넣은 덩어리와 이 꾸러미가 같은 판본이다」뿐이다 — 문서 자체의
+      바이트는 `--skill` 일 때만 잰다. 핀 값은 공개돼 있으므로 악의적인 문서가 그 값을 베껴 적는 것은
+      막지 못한다(정직 고지 · 막는 것은 「대조 없이 등록」과 「낡은·다른 판본의 덩어리」다).
+    """
+    want = expected(root)
+    if not skill and not pin:
+        raise AgoraError(errors.PRECONDITION,
+                         "등록은 언제나 skill.md 핀과 대조한다 — --skill <문서> 또는 --skill-pin <sha256> 이 필요하다",
+                         {"reason": "skill_pin_required",
+                          "다음": "참가 안내 페이지의 붙여넣기 덩어리를 그대로 쓴다(핀이 들어 있다)."})
+    out: dict[str, str] = {"pin": want}
+    if pin is not None:
+        value = str(pin).strip().lower()
+        if not _PIN_RE.match(value) or value != want:
+            raise AgoraError(errors.PRECONDITION,
+                             "붙여넣은 핀이 이 꾸러미의 skill.md 핀과 다르다 — 등록하지 않는다",
+                             {"reason": "skill_pin_mismatch", "expected": want,
+                              "got": value[:64],
+                              "다음": "사람에게 알린다. 덩어리와 꾸러미의 판본이 다르거나 덩어리가 가짜다."})
+        out["pasted_pin"] = value
+    if skill:
+        out.update(require(skill, root))
+    return out

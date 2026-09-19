@@ -255,7 +255,11 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
             #   ⚠릴레이가 준 사유는 「다시 보라」는 신호일 뿐, 새 자리는 우리가 계산한다(계약 §3-5).
             fresh = _reduce(ctx, thread_id)
             state = _require_open(fresh)
-            if (state["head"], state["state_hash"]) == (prev, expected_state):
+            # ★자리는 **운반층 머리**로 다시 잡는다 — `_head_and_state` 와 같은 규칙(09-11 투표동결).
+            #   🔴2026-09-19: 이 분기만 상태 머리를 쓰고 있었다. 표는 상태 머리를 안 옮기므로, 남의 표에
+            #   밀린 뒤의 재시도가 **같은 자리**를 다시 가리켜 또 졌다(연달아 던진 추천이 첫 표만 삶).
+            head = fresh.get("chain_head") or state["head"]
+            if (head, state["state_hash"]) == (prev, expected_state):
                 raise AgoraError(errors.STATE_CONFLICT,
                                  "릴레이는 밀렸다는데 우리 사슬은 그대로다 — 보이지 않는 글이 있다",
                                  {"reason": "rejected_but_head_unchanged",
@@ -273,7 +277,7 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
                                  "그 사이 라운드가 바뀌었다 — read 후 다시 써라",
                                  {"reason": "round_moved", "relay": rejected,
                                   "was": was_round, "now": state.get("round")})
-            prev, expected_state = state["head"], state["state_hash"]
+            prev, expected_state = head, state["state_hash"]
             event = {**event, "message_id": new_id(), "prev": prev,
                      "expected_state": expected_state, "ts": now_iso()}
             core.declare_scrub(event, config_dir=ctx.config_dir)

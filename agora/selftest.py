@@ -4442,7 +4442,14 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                 "M549-resident-ignores-home",
                 "M550-register-skips-skill-pin",
                 "M551-skill-pin-never-mismatches",
-                "M552-build-ships-stale-pin"),
+                "M552-build-ships-stale-pin",
+                # agora-v2-mvp-2(2026-09-19) — 등록은 언제나 대조 · 안내 주입은 판본 게이트
+                "M554-register-pin-optional-again",
+                "M555-register-skips-the-pin-check",
+                "M556-pasted-pin-not-compared",
+                "M557-pin-injection-ignores-the-version",
+                "M558-any-ahead-version-passes",
+                "M559-cli-budget-read-as-string"),
     # ★상주 방문(0.1.6 · 계약 확장 8) — 참가자 컴퓨터가 **사람 없이** 에이전트를 깨우는 자리.
     #   이름이 곧 「무엇을 잃을 수 있나」다: 판정이 틀리면 안 깨우거나 끝없이 깨우고, 끄는 손이 안 먹으면 사람이 못 멈춘다.
     "상주판정": ("M441-resident-round-check-dropped", "M442-resident-ignores-that-i-spoke",
@@ -4512,6 +4519,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M359-blind-spot-ignored", "M360-double-never-judges-chain",
                  "M361-retry-writes-to-the-same-slot",
                  "M362-resolution-skips-local-round-gate",
+                 # agora-v2-mvp-2(2026-09-19) — 표에 밀린 재시도가 상태 머리로 돌아가는 판
+                 "M553-retry-reclaims-the-state-head",
                  # ★F-1 2차(codex 2R) — 같은 병이 **다른 두 문**으로 돌아왔다:
                  #   응답 유실 뒤 재조회(M363)와 로컬 수용에 의한 면제(M364).
                  "M363-settle-existence-is-commitment",
@@ -11010,6 +11019,48 @@ def _case_write_retries_after_lost_race() -> None:
             raise AssertionError(f"재전송본이 사슬 끝이 아니다: {last.get('from')}")
 
 
+def _competing_vote(ctx: Any, room: str, key_path: str, who: str, target: str) -> str:
+    """**남의 표**가 그 자리를 먼저 차지한다 — `_competing_post` 의 표 판본(미리 서명 · 올리지 않음)."""
+    from agora import core, sign, tools as _t
+    from agora.event import new_id, render_post
+    from agora.ledger import now_iso
+    _state, head, expected = _t._head_and_state(ctx, room)
+    event = {"v": 1, "kind": "vote", "thread_id": room, "message_id": new_id(),
+             "prev": head, "expected_state": expected, "from": who,
+             "roster": _t._roster_digest(ctx), "ts": now_iso(),
+             "payload": {"target": target, "value": 1}}
+    core.declare_scrub(event, config_dir=ctx.config_dir)
+    signed = _with_key(key_path, lambda: sign.sign_event(event, config_dir=ctx.config_dir))
+    return render_post(event, signed["signature"])
+
+
+def _case_retry_after_vote_race_uses_chain_head() -> None:
+    """🔴**표에 밀린 재시도는 운반층 머리에 붙는다** — 연달아 던진 추천이 둘 다 산다(2026-09-19).
+
+    ★사고 모양: 첫 시도는 `chain_head` 를 쓰는데(09-11 투표동결 봉합) **재시도 분기만** 상태 머리
+      (`state["head"]`)로 자리를 다시 잡았다. 표는 상태 머리를 안 옮기므로, 남의 표에 밀린 뒤의
+      재시도는 **같은 자리**를 다시 가리켜 또 진다(code 9) — 추천이 몰리는 커뮤니티에서
+      「연달아 던진 추천은 첫 표만 산다」가 바로 이 자리다.
+    ★밀어내는 글이 **표**여야 한다 — 글(post)은 상태 머리도 옮겨서 이 결함을 가린다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _relay_env() as (ctx, relay, _url):
+        room = _relay_room(ctx)
+        said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=room, body="추천받을 글"))
+        pid = said["message_id"]
+        relay.race_queue = [_competing_vote(ctx, room, f["key_b"], "operator-b", pid)]
+        out = _with_key(f["key_a"], lambda: tools.vote(ctx, thread_id=room, target=pid, value=1))
+        if not out.get("message_id"):
+            raise AssertionError(f"표에 밀린 뒤 재시도가 성립하지 않았다: {out}")
+        reduced = tools._reduce(ctx, room)
+        votes = [e["from"] for e in reduced["events"] if e["kind"] == "vote"]
+        if votes != ["operator-b", "operator-a"]:
+            raise AssertionError(f"연달아 던진 두 표가 둘 다 살지 않았다: {votes}")
+        if [s.get("reason") for s in reduced["stale"]] != ["lost_race"]:
+            raise AssertionError(f"밀린 것이 첫 시도 하나가 아니다: {reduced['stale']}")
+
+
 def _case_relay_rejection_is_not_success() -> None:
     """**접수(2xx)와 반영은 다르다** — 릴레이가 반영 안 했다고 하면 rc≠0(F-1 봉합 ⓑ).
 
@@ -11743,7 +11794,7 @@ def _case_write_result_carries_http_status() -> None:
         relay.roster_text["allowed_signers"] = open(f["roster_ab"], encoding="utf-8").read()
         # ⑴ 등록 = 201(계약 §3-1)
         reg = _with_key(os.path.join(d, "id_ed25519"),
-                        lambda: onboard.register(directory=d, relay_url=url, unattended=True))
+                        lambda: onboard.register(directory=d, relay_url=url, unattended=True, skill_pin=_PIN()))
         if reg.get("status") != 201:
             raise AssertionError(f"등록 응답 상태가 안 실렸다: {reg}")
         # ⑵ 체크포인트 발행 = 201(계약 §3-6b) — P4 에서 못 잰 바로 그 칸이다.
@@ -12059,7 +12110,7 @@ def _case_register_carries_proof_of_possession() -> None:
     key = os.path.join(d, "id_ed25519")
     with _fake_relay().serving() as (url, relay):
         out = _with_key(key, lambda: onboard.register(directory=d, relay_url=url,
-                                                      unattended=True))
+                                                      unattended=True, skill_pin=_PIN()))
         row = relay.registered.get("operator-a")
         if not row:
             raise AssertionError("등록이 서버에 안 남았다")
@@ -12174,7 +12225,7 @@ def _case_whoami_reports_the_lock_backend() -> None:
     key = os.path.join(d, "id_ed25519")
     with _fake_relay().serving() as (url, relay):
         relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
-        _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True))
+        _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True, skill_pin=_PIN()))
     out = onboard.whoami(directory=d)
     got = (out.get("file_lock") or {}).get("backend")
     if got != _lock.backend():
@@ -12203,7 +12254,7 @@ def _case_whoami_puts_the_approval_gate_first() -> None:
     key = os.path.join(d, "id_ed25519")
     with _fake_relay().serving() as (url, relay):
         relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
-        _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True))
+        _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True, skill_pin=_PIN()))
         onboard.sync_roster(directory=d, relay_url=url)
     out = onboard.whoami(directory=d)
     rendered = _json.dumps(out, ensure_ascii=False, sort_keys=True, indent=2)
@@ -12272,7 +12323,7 @@ def _case_cli_surface_accepts_flag_arguments() -> None:
                 with contextlib.redirect_stdout(_io.StringIO()):
                     return _with_key(key, lambda: cli.main(argv))
 
-            for argv in (["register", "--relay", url, "--unattended"],
+            for argv in (["register", "--relay", url, "--unattended", "--skill-pin", _PIN()],
                          ["sync-roster"],
                          ["whoami"],
                          ["enter", "--topic", "가짜 주제", "--kind", "debate"]):
@@ -12333,7 +12384,10 @@ def _case_invite_join_brief_stands_alone() -> None:
     vers = re.findall(r"agora-client-([0-9][^.]*\.[^.]*\.[^.\s/]+)\.zip", text)
     if not vers:
         raise AssertionError("초대장에 꾸러미 주소가 없다")
-    if set(vers) != {__version__}:
+    gap = None if set(vers) == {__version__} else (
+        None if len(set(vers)) == 1 and _release_pin_tool().invite_version_gap(vers[0], __version__, _ROOT) is None
+        else "gap")
+    if gap:
         raise AssertionError(
             f"초대장의 꾸러미 판본이 갈렸다: 문서={sorted(set(vers))} 코드={__version__} "
             f"— 주소·지문 두 줄을 **모든 자리에서** 함께 갱신하라(빌더가 내는 두 줄을 그대로 옮긴다)")
@@ -12343,7 +12397,8 @@ def _case_invite_join_brief_stands_alone() -> None:
             f"초대장의 꾸러미 지문이 한 값이 아니다({len(shas)}종) — 옛 지문이 남았다")
     #    ★자리별 존재 — 맥·리눅스 덩어리의 `URL=`·`SHA=` 두 줄이 통째로 빠져도 위 집합 검사는
     #      초록이 된다(codex 2R ⑤-b). 그 덩어리는 set -u 라 빠지면 사람이 그 자리에서 막힌다.
-    for need in (f"URL=https://jarvis.godmeyou.kr/install/agora-client-{__version__}.zip",
+    #    ★판본 = 안내가 말하는 판(위 ⑵ 가 코드 판과의 관계를 이미 재었다 · 후보 기간엔 게시판이 맞다).
+    for need in (f"URL=https://jarvis.godmeyou.kr/install/agora-client-{vers[0]}.zip",
                  "SHA=" + next(iter(shas))):
         if need not in text:
             raise AssertionError(f"초대장 맥·리눅스 덩어리에 이 줄이 없다: {need}")
@@ -14179,6 +14234,11 @@ def _case_vote_does_not_freeze_the_room() -> None:
             raise AssertionError(f"표 뒤 발언이 죽었다: {kinds}")
         if reduced["state"] != "r0":
             raise AssertionError(f"표가 **상태**를 바꿨다(구속력 없음이 깨졌다): {reduced['state']}")
+        # ★경합이 없는 판에서 **첫 시도가 진 흔적도 없어야 한다**(2026-09-19). 재시도가 운반층 머리로 고쳐진 뒤로는
+        #   첫 시도가 상태 머리를 써도 재시도가 살려 내 결과만 보면 초록이다 — 두 안전장치가 서로를 가린다(M432 생존 실측).
+        if reduced.get("stale"):
+            raise AssertionError(f"경합이 없는데 진 글이 있다(첫 시도가 자리를 잘못 잡았다): "
+                                 f"{[s.get('reason') for s in reduced['stale']]}")
 
     # ⑶ 리듀서 층에서도 사슬의 머리가 표에서 멈추지 않는다.
     got = _apply_chain(_vote_chain())
@@ -14657,6 +14717,123 @@ def run_operator_progression_block() -> None:
     _with_key(f["key_a"], run)
 
 
+def _join_page_module() -> Any:
+    import importlib.util as _util
+    spec = _util.spec_from_file_location("build_join_page_st", os.path.join(_ROOT, "tools", "build_join_page.py"))
+    mod = _util.module_from_spec(spec)
+    spec.loader.exec_module(mod)                     # type: ignore[union-attr]
+    return mod
+
+
+def _invite_as_tree_release() -> str:
+    """이 트리가 **게시될 때의** 안내 — INVITE 의 꾸러미 판을 트리 판으로 바꾸고 핀 주입 함수를 태운다.
+
+    ★이 트리의 CLI 는 등록 때 핀을 요구한다. 라이브 안내(옛 판 꾸러미)를 그대로 태우면 「옛 판 덩어리를
+      새 판 CLI 로 친다」는 존재하지 않는 조합을 재게 된다. 게시 때 바뀌는 것은 꾸러미 판뿐이고, 그러면
+      주입은 페이지 빌더가 한다 — 그 **같은 함수**를 여기서 부른다(주입 함수 단일).
+    """
+    import re
+    import agora as _agora
+    mod = _join_page_module()
+    text = _read_text(os.path.join(_ROOT, "docs/INVITE.md"))
+    text = re.sub(r"agora-client-\d+\.\d+\.\d+\.zip", f"agora-client-{_agora.__version__}.zip", text)
+    return mod.inject_skill_pin(text, mod.read_skill_pin())[0]
+
+
+def _case_join_page_pin_injection_is_version_gated() -> None:
+    """🔴핀 주입은 **판본 게이트**다 — 라이브 안내(옛 판)는 한 바이트도 안 바뀌고, 후보 판은 등록 줄마다 붙는다.
+
+    ★옛 판 CLI 는 `--skill-pin` 을 모른다(code 10). 라이브 페이지에 붙으면 새 참가자가 전원 막힌다.
+    """
+    import re
+    mod = _join_page_module()
+    pin = mod.read_skill_pin()
+    live = _read_text(os.path.join(_ROOT, "docs/INVITE.md"))
+    m = mod._CLIENT_ZIP_RE.search(live)
+    if not m:
+        raise AssertionError("INVITE 에서 꾸러미 주소를 못 찾았다(측정 실패)")
+    live_ver = tuple(int(x) for x in m.groups())
+    got, n = mod.inject_skill_pin(live, pin)
+    if live_ver < mod.SKILL_PIN_SINCE and (n != 0 or got != live):
+        raise AssertionError(f"옛 판({live_ver}) 안내에 핀을 붙였다: {n}줄")
+    older = re.sub(r"agora-client-\d+\.\d+\.\d+\.zip", "agora-client-0.1.7.zip", live)
+    if mod.inject_skill_pin(older, pin) != (older, 0):
+        raise AssertionError("0.1.7 안내가 주입으로 바뀌었다")
+    since = ".".join(str(x) for x in mod.SKILL_PIN_SINCE)
+    cand = re.sub(r"agora-client-\d+\.\d+\.\d+\.zip", f"agora-client-{since}.zip", live)
+    out, n = mod.inject_skill_pin(cand, pin)
+    regs = [ln for ln in out.splitlines() if "agora register --relay" in ln]
+    if not regs or n != len(regs) or any(not ln.endswith(f"--skill-pin {pin}") for ln in regs):
+        raise AssertionError(f"후보 판 등록 줄에 핀이 안 붙었다: n={n} lines={regs}")
+    if mod.inject_skill_pin(out, pin)[1] != 0:
+        raise AssertionError("두 번 태우면 두 번 붙는다(같은 인자 두 번 = code 10)")
+
+
+def _case_cli_enter_reads_budget_as_json() -> None:
+    """CLI 로 **커뮤니티를 연다** — `--budget` 은 JSON 칸이다(발언 상한 · 2026-09-19 시험용 릴레이 재현에서 드러남).
+
+    ★빠져 있을 때: 문자열이 `propose` 까지 가서 `dict(str)` 이 ValueError → code 2 「예상하지 못한 내부 오류」.
+      명세 A2 의 커뮤니티 = genesis 에 발언 상한 칸이 있는 토론방이라, CLI 사용자는 커뮤니티를 **못 열었다.**
+    ★가짜 릴레이로 genesis 까지 실제로 태워 발언 상한 칸이 실렸는지 잰다(인자 해석만 보면 쓰는 쪽을 못 본다).
+    """
+    from agora import cli, tools
+    budget = {"posts_per_round": 50, "max_chars_per_round": 20000}
+    kw = tools.normalize_args("enter", cli.accepted_args_for("enter") or (),
+                              cli._kv(["--topic", "커뮤니티", "--kind", "debate", "--budget", json.dumps(budget)]))
+    if kw.get("budget") != budget:
+        raise AssertionError(f"--budget 이 JSON 으로 안 읽혔다: {kw.get('budget')!r}")
+    f = _fixtures()
+    with _relay_env() as (ctx, _relay, _url):
+        out = _with_key(f["key_a"], lambda: tools.enter(ctx, **kw))
+        reduced = tools._reduce(ctx, out["room_id"])
+        genesis = reduced["events"][0]["event"]["payload"]
+        if genesis.get("budget") != budget:
+            raise AssertionError(f"genesis 에 발언 상한 칸이 안 실렸다: {genesis.get('budget')}")
+
+
+def _case_register_never_skips_the_pin() -> None:
+    """🔴등록은 **언제나** 핀과 대조한다 — 「--skill 없이 등록하라」는 가짜 문서가 대조를 건너뛸 수 없다.
+
+    ★세 판: ⑴아무것도 안 줌 = code 2 `skill_pin_required` ⑵틀린 핀 = code 2 `skill_pin_mismatch`
+      ⑶맞는 핀 = 핀 검사를 **지나** 다음 전제(공개키 없음)에서 멈춘다(대조군 · 핀 검사가 실제로 가른다).
+      ⑷CLI 줄 그대로(가짜 문서가 시키는 모양) = rc 2. ⑸핀 파일이 없으면 = code 2 `skill_pin_missing`.
+    """
+    import contextlib
+    import io as _io
+    import tempfile
+    from agora import cli, onboard, skillpin
+    d = tempfile.mkdtemp(prefix="agora-alwayspin-")
+    def reason_of(fn: Any) -> Any:
+        try:
+            fn()
+        except AgoraError as e:
+            return e.code, (e.detail or {}).get("reason")
+        return None
+    url = "http://127.0.0.1:9"
+    if reason_of(lambda: onboard.register(directory=d, relay_url=url)) != (errors.PRECONDITION, "skill_pin_required"):
+        raise AssertionError("핀 없이 등록이 대조를 건너뛰었다")
+    if reason_of(lambda: onboard.register(directory=d, relay_url=url, skill_pin="0" * 64)) != (errors.PRECONDITION, "skill_pin_mismatch"):
+        raise AssertionError("틀린 핀으로 등록이 막히지 않았다")
+    ok = reason_of(lambda: onboard.register(directory=d, relay_url=url, skill_pin=_PIN()))
+    if ok is None or ok[1] in ("skill_pin_required", "skill_pin_mismatch"):
+        raise AssertionError(f"맞는 핀이 핀 검사를 못 지났다(측정 실패): {ok}")
+    old = os.environ.get("AGORA_CONFIG_DIR")
+    os.environ["AGORA_CONFIG_DIR"] = d
+    try:
+        with contextlib.redirect_stdout(_io.StringIO()), contextlib.redirect_stderr(_io.StringIO()):
+            rc = cli.main(["register", "--relay", url, "--unattended"])
+    finally:
+        if old is None:
+            os.environ.pop("AGORA_CONFIG_DIR", None)
+        else:
+            os.environ["AGORA_CONFIG_DIR"] = old
+    if rc != errors.PRECONDITION:
+        raise AssertionError(f"CLI 가 핀 없는 등록을 막지 않았다: rc={rc}")
+    empty = tempfile.mkdtemp(prefix="agora-nopin-")
+    if reason_of(lambda: skillpin.require_for_register(pin=_PIN(), root=empty)) != (errors.PRECONDITION, "skill_pin_missing"):
+        raise AssertionError("핀 파일이 없는데 등록 대조가 통과했다")
+
+
 def _upgrade_block_commands() -> list[tuple[str, dict[str, Any]]]:
     """INVITE 의 「이미 참가하신 분」 덩어리를 **문서에서 읽어** (명령, 인자)로 돌려준다.
 
@@ -14664,7 +14841,7 @@ def _upgrade_block_commands() -> list[tuple[str, dict[str, Any]]]:
       틀린 순서를 받는 것은 그 문서를 그대로 친 참가자뿐이다(이 티켓이 정확히 그렇게 났다).
     """
     from agora import cli as _cli
-    text = _read_text(os.path.join(_ROOT, "docs/INVITE.md"))
+    text = _invite_as_tree_release()
     part = text.split("## 이미 참가하신 분", 1)
     if len(part) != 2:
         raise AssertionError("INVITE.md 에서 갱신 덩어리를 못 찾았다 — 제목을 바꿨으면 여기도 고쳐라")
@@ -14715,8 +14892,12 @@ def _case_invite_fingerprint_matches_the_pin() -> None:
     if not table:
         raise AssertionError(f"핀 표가 비었다({tool.PIN_FILE}) — 이 검사는 지금 아무것도 안 재고 있다")
     invite_ver, invite_sha = tool.invite_pin(_ROOT)
-    if invite_ver != version:
-        raise AssertionError(f"안내가 가리키는 판본({invite_ver})이 코드 판본({version})과 다르다")
+    gap = tool.invite_version_gap(invite_ver, version, _ROOT)
+    if gap:
+        raise AssertionError(gap)
+    # ★후보 허용이 **눈을 뜨고 있는가** — 후보 줄 없이 코드만 앞선 트리는 붉어야 한다.
+    if tool.invite_version_gap(invite_ver, "9.9.9", _ROOT) is None:
+        raise AssertionError("후보 줄 없는 앞선 판을 허용한다 — 판 올림 뒤 안내 미갱신을 못 잡는다")
     # ★대조 자체는 **도구 함수**가 한다 — 시험 안에 인라인으로 두면, 지금 문서가 맞는 한
     #   그 줄을 지워도 초록이다(이 그물의 첫 판이 실제로 SURVIVED 를 냈다).
     problems = tool.pin_check(_ROOT)
@@ -14823,7 +15004,10 @@ def _case_upgrade_block_reaches_the_roster() -> None:
             if command == "register":
                 if not kw.get("unattended"):
                     raise AssertionError("갱신 덩어리의 register 에 --unattended 가 빠졌다")
-                _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True))
+                if not kw.get("skill_pin"):
+                    raise AssertionError("갱신 덩어리의 register 에 --skill-pin 이 없다(주입 함수를 안 탔다)")
+                _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True,
+                                                        skill_pin=kw["skill_pin"]))
             elif command == "sync-roster":
                 out = onboard.sync_roster(directory=d, yes=bool(kw.get("yes", False)))
                 if len(out["wrote"]) != 3:
@@ -15940,7 +16124,7 @@ def _case_whoami_second_column_is_resident() -> None:
         key = os.path.join(d, "id_ed25519")
         with _fake_relay().serving() as (url, relay):
             relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
-            _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True))
+            _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True, skill_pin=_PIN()))
 
         def keys() -> list[str]:
             rendered = _json.dumps(onboard.whoami(directory=d), ensure_ascii=False, sort_keys=True, indent=2)
@@ -16052,6 +16236,12 @@ def _case_resident_home_picks_but_the_ledger_decides() -> None:
                 del ctx_b.store.home
             except AttributeError:
                 pass
+
+
+def _PIN() -> str:
+    """꾸러미 핀 — 등록은 **언제나** 핀과 대조하므로(2026-09-19) 시험의 등록도 붙여넣기 덩어리처럼 핀을 든다."""
+    from agora import skillpin
+    return skillpin.expected()
 
 
 def _case_skill_pin_blocks_registration() -> None:
@@ -16643,6 +16833,10 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("계약: RELAY.md 와 대조",        _case_contract_parity_with_relay_doc, None),
     ("릴레이: 쓰기는 상태를 싣는다",  _case_write_result_carries_http_status, None),
     ("경합: 밀리면 자리를 다시 잡는다", _case_write_retries_after_lost_race, None),
+    ("경합: 표에 밀린 재시도는 운반층 머리에", _case_retry_after_vote_race_uses_chain_head, None),
+    ("핀: 안내 주입은 판본 게이트", _case_join_page_pin_injection_is_version_gated, None),
+    ("핀: 등록은 언제나 대조한다", _case_register_never_skips_the_pin, None),
+    ("CLI: enter --budget 은 JSON 칸", _case_cli_enter_reads_budget_as_json, None),
     ("쓰기: 접수는 반영이 아니다",     _case_relay_rejection_is_not_success, None),
     ("명부: 못 읽는 글이면 안 쓴다",   _case_unreadable_events_block_the_write, None),
     ("더블: 사슬 판정을 낸다",        _case_double_judges_the_chain, None),
@@ -17357,8 +17551,9 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if state.get("state") != "r3":',
      '    if False:',
      "쓰기: 접수는 반영이 아니다"),
+    # ★2026-09-19 앵커 이동: 재시도 자리 = 운반층 머리(`head`)로 바뀌었다(축은 같다 · 같은 자리에 다시 쓰기).
     ("M361-retry-writes-to-the-same-slot", "agora/tools.py",
-     '            prev, expected_state = state["head"], state["state_hash"]',
+     '            prev, expected_state = head, state["state_hash"]',
      '            pass',
      "경합: 밀리면 자리를 다시 잡는다"),
     # ★P4 후속(2026-09-06 · master 채택) — 쓰기 결과의 응답 상태.
@@ -18430,9 +18625,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    summary = home(ctx) if home is not None else None',
      '    summary = None',
      '광장v2: /home 은 고르고 원장이 판정'),
-    ('M550-register-skips-skill-pin', 'agora/onboard.py',
-     '        skill_pin = skillpin.require(skill)',
-     '        skill_pin = None',
+    # ★2026-09-19 앵커 이동: 문서 대조가 onboard 에서 skillpin.require_for_register 로 옮겨 갔다(축은 같다).
+    ('M550-register-skips-skill-pin', 'agora/skillpin.py',
+     '        out.update(require(skill, root))',
+     '        pass',
      '광장v2: skill 핀이 다르면 등록 안 함'),
     ('M551-skill-pin-never-mismatches', 'agora/skillpin.py',
      '    if got != want:',
@@ -19016,6 +19212,35 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "        if param.name in tools.ID_ARGS:",
      "        if False:",
      "id 규칙: 검사와 스키마가 같은 말"),
+    # ── agora-v2-mvp-2(2026-09-19) — 연달아 던진 추천 ──────────────────────
+    ("M553-retry-reclaims-the-state-head", "agora/tools.py",
+     '            head = fresh.get("chain_head") or state["head"]',
+     '            head = state["head"]',
+     "경합: 표에 밀린 재시도는 운반층 머리에"),
+    ("M554-register-pin-optional-again", "agora/skillpin.py",
+     "    if not skill and not pin:",
+     "    if False:",
+     "핀: 등록은 언제나 대조한다"),
+    ("M555-register-skips-the-pin-check", "agora/onboard.py",
+     "    pin_check = skillpin.require_for_register(skill=skill, pin=skill_pin)",
+     "    pin_check = None",
+     "핀: 등록은 언제나 대조한다"),
+    ("M556-pasted-pin-not-compared", "agora/skillpin.py",
+     "        if not _PIN_RE.match(value) or value != want:",
+     "        if False:",
+     "핀: 등록은 언제나 대조한다"),
+    ("M557-pin-injection-ignores-the-version", "tools/build_join_page.py",
+     "    if not m or tuple(int(x) for x in m.groups()) < SKILL_PIN_SINCE:\n        return md, 0",
+     "    if not m:\n        return md, 0",
+     "핀: 안내 주입은 판본 게이트"),
+    ("M558-any-ahead-version-passes", "tools/build_client_zip.py",
+     "    if code_ver in candidates(root) and published and invite_ver == published[-1]:",
+     "    if published and invite_ver == published[-1]:",
+     "게시: 안내의 지문이 핀과 같다"),
+    ("M559-cli-budget-read-as-string", "agora/cli.py",
+     'JSON_ARGS = frozenset({"envelope", "deadlines", "budget", "counter", "refs", "parent",',
+     'JSON_ARGS = frozenset({"envelope", "deadlines", "counter", "refs", "parent",',
+     "CLI: enter --budget 은 JSON 칸"),
 )
 
 

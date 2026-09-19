@@ -351,10 +351,59 @@ def page_html(spec: dict[str, object], body: str) -> str:
 """
 
 
+# ── skill.md 핀 자동 주입(명세 E · 2026-09-19 오너 채택 A) ──────────────────────
+# ★등록은 **언제나** 핀과 대조한다(`agora/skillpin.py` `require_for_register`). 붙여넣기 덩어리의
+#   `agora register` 줄에 `--skill-pin <핀>` 을 **여기 한 곳에서** 붙인다 — 사람이 손으로 적지 않는다.
+# ★**판본 게이트**: 덩어리가 가리키는 꾸러미 판이 `SKILL_PIN_SINCE` 이상일 때만 붙인다.
+#   그보다 옛 판의 CLI 는 `--skill-pin` 을 모른다(모르는 인자 = code 10) — 라이브 안내(0.1.7)에 붙이면
+#   그 페이지를 다시 올리는 순간 새 참가자가 전원 막힌다. ⇒ 라이브 안내·산출물은 바이트 그대로이고,
+#   본 릴리스 때 안내의 꾸러미 판을 올리는 순간 핀이 저절로 들어간다.
+# ⛔주입 함수는 이것 하나다(시험·next 시험 페이지 빌더가 모두 이것을 부른다).
+SKILL_PIN_SINCE = (0, 1, 8)
+SKILL_PIN_FILE = "config/skill-pin.txt"
+_CLIENT_ZIP_RE = re.compile(r"agora-client-(\d+)\.(\d+)\.(\d+)[^/\s]*\.zip")
+_REGISTER_LINE_RE = re.compile(r"^(?P<body>[^\n]*\bagora register --relay \S+[^\n]*?)[ \t]*$", re.M)
+_PIN_SHAPE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def read_skill_pin(root: str = _ROOT) -> str:
+    with open(os.path.join(root, SKILL_PIN_FILE), encoding="utf-8") as fh:
+        pin = fh.read().strip()
+    if not _PIN_SHAPE.match(pin):
+        raise SystemExit(f"{SKILL_PIN_FILE} 모양이 sha256 이 아니다")
+    return pin
+
+
+def inject_skill_pin(md: str, pin: str) -> tuple[str, int]:
+    """(주입된 문서, 붙인 줄 수). 문서가 가리키는 꾸러미 판이 게이트 아래면 **한 바이트도 안 바꾼다.**
+
+    ★판은 문서에 처음 나오는 꾸러미 주소에서 읽는다. 주소가 없으면 판을 모르는 것이므로 붙이지 않는다
+      (모름을 「새 판」으로 접지 않는다 — 옛 CLI 에 모르는 인자를 쥐여 주는 쪽이 더 나쁘다).
+    ★이미 `--skill-pin` 이 있는 줄은 건드리지 않는다(두 번 붙이면 code 10 · 같은 인자 두 번).
+    """
+    if not _PIN_SHAPE.match(pin):
+        raise ValueError("핀 모양이 sha256 이 아니다")
+    m = _CLIENT_ZIP_RE.search(md)
+    if not m or tuple(int(x) for x in m.groups()) < SKILL_PIN_SINCE:
+        return md, 0
+    count = 0
+
+    def add(match: "re.Match[str]") -> str:
+        nonlocal count
+        body = match.group("body")
+        if "--skill-pin" in body:
+            return match.group(0)
+        count += 1
+        return f"{body} --skill-pin {pin}"
+
+    return _REGISTER_LINE_RE.sub(add, md), count
+
+
 def build(spec: dict[str, object]) -> tuple[str, str]:
     src = os.path.join(_ROOT, str(spec["src"]))
     with open(src, encoding="utf-8") as fh:
         md = fh.read()
+    md, _added = inject_skill_pin(md, read_skill_pin())
     return os.path.join(_ROOT, str(spec["out"])), page_html(spec, render(md, spec["copy_blocks"]))  # type: ignore[arg-type]
 
 

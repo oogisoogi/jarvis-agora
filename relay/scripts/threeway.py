@@ -150,7 +150,11 @@ class Builder:
         st = self.state()
         if st.get("state") is None:
             return "genesis", ""
-        return st["head"], st["state_hash"]
+        # ★prev = **운반층 머리**(사슬의 마지막) — 상태 머리(`head`)가 아니다. 제품 클라이언트
+        #   (`agora/tools.py` `_head_and_state`)와 같은 규칙. 🔴2026-09-19: 여기서 상태 머리를 쓰고 있어,
+        #   표 뒤에 오는 글·표가 표와 같은 자리를 가리켜 `lost_race` 로 졌다(v2 워크스루의 「연달아 던진
+        #   추천은 첫 표만 산다」가 이 하네스 모양에서 나왔다 · 세트5 의 answer_selected 도 같은 병).
+        return st.get("chain_head") or st["head"], st["state_hash"]
 
     def make(self, signer, kind, payload, *, prev=None, expected=None, roster_hash=None,
              scrub_rules="test", ts="2026-09-06T00:00:00Z"):
@@ -434,6 +438,26 @@ def main():
     for ev, sig in b6c.posted:
         send(args.base, t6c, "debate", "참조 대조", ev, sig, ev["kind"] == "genesis")
     results.append(("세트6c 참조는 답이 아니다", t6c, b6c))
+
+    # ── 세트 7: 연달아 던진 추천 3표(agora-v2-mvp-2 · 2026-09-19) ──────────────
+    # ★세 사람이 한 글에 차례로 추천한다 — 셋 다 유효여야 한다. 표는 상태 머리를 안 옮기지만
+    #   운반층 사슬에는 들어가므로, 다음 표는 **앞 표 뒤**에 붙어야 한다(위 head_and_hash).
+    #   커뮤니티 방이 아닌 problem 방에서 잰다 — 세트6 피드 대조(new·top 순서)를 흔들지 않게.
+    t7v = new_id()
+    b7v = Builder(t7v, args.workdir, allowed, revoked, [op["id"]], now)
+    b7v.add(alice, "genesis", {"type": "problem", "title": "연속 추천", "body": "본문", "envelope": env})
+    p7v, _ = b7v.add(bob, "post", {"round": 0, "body": "추천받을 글"})
+    votes7 = []
+    for voter in (alice, op, bob):
+        ev, sig = b7v.add(voter, "vote", {"target": p7v["message_id"], "value": 1})
+        votes7.append(ev["message_id"])
+    verdict7 = {}
+    for ev, sig in b7v.posted:
+        code, body = send(args.base, t7v, "problem", "연속 추천", ev, sig, ev["kind"] == "genesis")
+        v = body.get("verdict", {}) if isinstance(body, dict) else {}
+        verdict7[ev["message_id"]] = (code, v.get("reducer"))
+        print("  %-16s -> %s %-11s %s" % (ev["kind"], code, v.get("reducer"), v.get("reason") or ""))
+    results.append(("세트7 연속 추천 3표", t7v, b7v))
 
     # ── 3자 대조 ──────────────────────────────────────────────────────────
     print("\n== 3자 대조(파이썬 리듀서 == 서버 파생) ==")
@@ -821,6 +845,8 @@ def main():
            ((feeds["top"].get("items") or [{}])[0]).get("id"))
     code, _ = http("GET", args.base + "/feed?sort=best")
     record("/feed 모르는 정렬 = 400", 400, code)
+    record("세트7 연속 추천 3표 = 전부 201·accepted", [(201, "accepted")] * 3,
+           [verdict7.get(m) for m in votes7])
 
     code, hb = http("GET", args.base + "/home?participant=" + bob["id"])
     hb = hb if isinstance(hb, dict) else {}

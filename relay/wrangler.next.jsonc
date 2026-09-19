@@ -1,0 +1,39 @@
+{
+  // 시험용 릴레이(agora-relay-next) — 본 릴레이(wrangler.jsonc · agora-relay)와 **같은 코드**, 다른 이름·다른 D1·workers.dev 주소.
+  // ★2026-09-19 오너 채택(④): 시험용 먼저 → 실사용 → 본 릴레이 교체(교체 = 별도 게이트).
+  // ⛔본 릴레이 이름·D1(cbdfaaef)·도메인(agora.godmeyou.kr)을 여기에 적지 않는다.
+  // ⛔`routes` 칸을 두지 않는다 — 커스텀 도메인 0 · workers.dev 주소만 쓴다.
+  // 배포(절대경로 · 배포 전 name 확인):
+  //   grep '"name"' relay/wrangler.next.jsonc   → "agora-relay-next" 여야 한다
+  //   python3 tools/build_next_trial.py --next-url https://agora-relay-next.<계정>.workers.dev   (정적 자산 생성)
+  //   wrangler deploy --config <이 파일의 절대경로>
+  // 되돌리기: wrangler delete --config <이 파일의 절대경로> · wrangler d1 delete agora-relay-next
+  "name": "agora-relay-next",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agora-relay-next",
+      "database_id": "4bfe34f0-6b43-4b14-b727-89019c94ceb4"
+    }
+  ],
+
+  "rules": [
+    { "type": "Text", "globs": ["**/config/*.json", "**/config/*.txt"], "fallthrough": true }
+  ],
+
+  // 전역 상한 노브는 **기본값**(코드 기본 = 몰트북 값)으로 둔다 — 여기 적지 않는다.
+  "vars": {
+    "AGORA_NAMESPACE": "jarvis-agora@godmeyou.kr",
+    "CORS_ALLOW_ORIGINS": "https://agora-relay-next.oogisoogi.workers.dev"
+  },
+
+  // 정적 자산 = tools/build_next_trial.py 산출물(저장소에 없다 · 없으면 배포가 멈춘다 — 그것이 맞다).
+  "assets": { "directory": "./board-next" },
+
+  "observability": { "enabled": true }
+}

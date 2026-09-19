@@ -273,6 +273,34 @@ def pins(root: str | None = None) -> dict[str, str]:
     return out
 
 
+def candidates(root: str | None = None) -> set[str]:
+    """핀 표의 **후보** 줄 — 판본 칸 다음이 「후보」로 시작하는 줄(지문 칸 없음 = 게시 아님).
+
+    ★후보는 핀이 아니다: 지문을 적는 순간 「밖에 올라가 있다」는 말이 되므로(위 표 머리) 후보 줄에는
+      지문을 적지 않는다. `pins()` 는 지문 칸이 있는 줄만 읽으므로 후보가 핀으로 섞이지 않는다.
+    """
+    import re
+    root = root or _ROOT
+    text = open(os.path.join(root, PIN_FILE), encoding="utf-8").read()
+    return set(re.findall(r"^\|\s*(\d+\.\d+\.\d+)\s*\|\s*후보", text, re.M))
+
+
+def invite_version_gap(invite_ver: str, code_ver: str, root: str | None = None) -> str | None:
+    """안내 판본과 코드 판본의 관계 — 허용이면 None, 아니면 사유 한 줄.
+
+    ★허용은 둘뿐이다: ⑴같다 ⑵코드가 **핀 표에 후보로 적힌 판**이고, 안내는 게시된 판 중 **가장 새 판**이다
+      (라이브 안내를 바이트 그대로 둔 채 후보를 시험용 자리에서 먼저 쓰는 기간 · 2026-09-19 오너 채택).
+      ⛔후보 줄이 없는데 코드만 앞서 있으면 그것은 「판을 올리고 안내를 안 고친」 사고다.
+    """
+    if invite_ver == code_ver:
+        return None
+    published = sorted(pins(root), key=lambda v: tuple(int(x) for x in v.split(".")))
+    if code_ver in candidates(root) and published and invite_ver == published[-1]:
+        return None
+    return (f"안내 판본({invite_ver})이 코드 판본({code_ver})과 다르고, 코드 판본이 핀 표의 후보 줄도 아니다"
+            f"(또는 안내가 최신 게시판이 아니다)")
+
+
 def invite_pin(root: str | None = None) -> tuple[str, str]:
     """설치 안내가 말하는 (판본, 지문). 주소 줄의 판본과 지문 줄을 **함께** 읽는다 —
     따로 읽으면 판본만 올리고 지문을 안 고친 문서가 통과한다."""

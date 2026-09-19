@@ -146,6 +146,12 @@ MUTATIONS = [
      "",
      "harness", "/home 참조(why=see)는 답이 아니다 = answered False"),
 
+    # ★하네스 자신의 자리잡기 — 상태 머리로 되돌리면 연달아 던진 추천이 첫 표만 산다(v2 워크스루 증상 재현).
+    ("M27 하네스가 prev 로 상태 머리를 쓴다", "scripts/threeway.py",
+     '        return st.get("chain_head") or st["head"], st["state_hash"]',
+     '        return st["head"], st["state_hash"]',
+     "harness", "세트7 연속 추천 3표 = 전부 201·accepted"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",

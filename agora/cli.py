@@ -164,7 +164,9 @@ FLAG_ARGS = frozenset({"unattended", "yes", "once", "audit", "dry_run", "print_a
 #   시험 글 제목은 `[selftest] …` 로 시작해야 하는데(04-tasks S7-2), 그 값이 JSON 으로 해석되어
 #   `code 10` 이 난다. S7-1 실물 절차에서 실제로 막혔다 — **값의 모양으로 추측하면
 #   언제나 이런 충돌이 생긴다.** 칸 이름은 계약이 정하고, 계약은 충돌하지 않는다.
-JSON_ARGS = frozenset({"envelope", "deadlines", "counter", "refs", "parent",
+# ★`budget`(발언 상한 칸 · 2026-09-19 추가): 빠져 있어 `agora enter --budget '{…}'` 가 문자열로 넘어가
+#   `propose` 에서 ValueError(code 2 「예상하지 못한 내부 오류」)로 죽었다 — CLI 로는 커뮤니티를 못 열었다.
+JSON_ARGS = frozenset({"envelope", "deadlines", "budget", "counter", "refs", "parent",
                        "dissent", "recommended_actions", "arguments"})
 
 
@@ -188,10 +190,11 @@ def _run_onboard(name: str, rest: list[str]) -> Any:
         relay_url = kw.get("relay") or kw.get("relay_url")
         if not relay_url:
             raise AgoraError(errors.ARGUMENT, "register 는 --relay <url> 이 필요하다",
-                             {"usage": "agora register --relay <url> [--unattended] [--skill <skill.md>]"})
+                             {"usage": "agora register --relay <url> [--unattended] "
+                                       "(--skill <skill.md> | --skill-pin <sha256>)"})
         return onboard.register(directory=directory, relay_url=relay_url,
                                 unattended=bool(kw.get("unattended", False)),
-                                skill=kw.get("skill"))
+                                skill=kw.get("skill"), skill_pin=kw.get("skill_pin"))
     if name == "sync-roster":
         return onboard.sync_roster(directory=directory,
                                    relay_url=kw.get("relay") or kw.get("relay_url"),
@@ -229,7 +232,7 @@ def _run_operator(name: str, rest: list[str]) -> Any:
 #   (`--relayy` 를 주면 「--relay 가 필요하다」가 나고, 사람은 자기가 준 줄을 의심하지 않는다).
 #   ⇒ 문서를 재는 시험도, 사용자에게 이름을 말해 주는 거절도 이 표 하나를 본다.
 CLI_ONLY_ARGS: dict[str, tuple[str, ...]] = {
-    "register":     ("relay", "relay_url", "unattended", "skill", "dir"),
+    "register":     ("relay", "relay_url", "unattended", "skill", "skill_pin", "dir"),
     "sync-roster":  ("relay", "relay_url", "yes", "dir"),
     "whoami":       ("dir",),
     "checkpoint":   ("relay", "relay_url", "signer", "dir"),
