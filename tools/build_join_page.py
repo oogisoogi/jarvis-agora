@@ -358,8 +358,9 @@ def page_html(spec: dict[str, object], body: str) -> str:
 #   그보다 옛 판의 CLI 는 `--skill-pin` 을 모른다(모르는 인자 = code 10) — 라이브 안내(0.1.7)에 붙이면
 #   그 페이지를 다시 올리는 순간 새 참가자가 전원 막힌다. ⇒ 라이브 안내·산출물은 바이트 그대로이고,
 #   본 릴리스 때 안내의 꾸러미 판을 올리는 순간 핀이 저절로 들어간다.
+# ⚠문턱은 0.1.9 다 — 게시된 0.1.8(09-16 · 윈도우 수리 갈래)은 `--skill-pin` 을 모른다(그 갈래에 skillpin 이 없다).
 # ⛔주입 함수는 이것 하나다(시험·next 시험 페이지 빌더가 모두 이것을 부른다).
-SKILL_PIN_SINCE = (0, 1, 8)
+SKILL_PIN_SINCE = (0, 1, 9)
 SKILL_PIN_FILE = "config/skill-pin.txt"
 _CLIENT_ZIP_RE = re.compile(r"agora-client-(\d+)\.(\d+)\.(\d+)[^/\s]*\.zip")
 _REGISTER_LINE_RE = re.compile(r"^(?P<body>[^\n]*\bagora register --relay \S+[^\n]*?)[ \t]*$", re.M)

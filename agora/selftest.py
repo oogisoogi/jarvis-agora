@@ -4468,7 +4468,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M307-relay-write-timeout-is-seven", "M325-relay-ignores-body-code",
                  "M326-relay-forbidden-is-signature", "M329-relay-ignores-retry-after",
                  "M334-relay-exhausted-write-is-seven", "M335-relay-lets-server-forge-retry",
-                 "M336-relay-unprocessable-is-not-a-gate"),
+                 "M336-relay-unprocessable-is-not-a-gate", "M560-relay-limit-wall-retried",
+                 "M561-relay-wall-on-any-status", "M562-relay-wall-swallows-window-edge"),
     "투영없음": ("M308-relay-projection-claims-ok",),
     "명부신뢰": ("M309-relay-roster-swallows-404", "M310-sync-roster-skips-confirmation",
                  "M311-sync-roster-keeps-no-previous",
@@ -6157,6 +6158,51 @@ def _case_invite_windows_block_survives_a_korean_path() -> None:
         raise AssertionError("파이썬 경로를 %USERPROFILE% 로 되돌리지 않는다 — 한글이 파일에 들어간다")
     if "agora.cmd" not in body:
         raise AssertionError("윈도우 껍데기(`agora.cmd`)를 만들지 않는다")
+
+
+def _case_windows_acl_child_hides_its_window() -> None:
+    """윈도우 `Get-Acl` PowerShell 자식은 **창 없이** 뜬다(2026-09-15 운영자 노트북 WMI 실측 · 깜빡임).
+
+    참가자 클라이언트는 pythonw 로 돌아 콘솔이 없다 — 숨김 없이 콘솔 자식을 낳으면 `load()` 마다
+      창이 두 번 깜빡인다. 셋을 잰다: ⑴윈도우(흉내)에서 실제로 `subprocess.run` 에 넘어간 인자에
+      CREATE_NO_WINDOW 가 있다 ⑵STARTUPINFO 가 SW_HIDE 로 창을 숨긴다 ⑶윈도우가 아니면 아무 인자도
+      더하지 않는다(맥·리눅스 행동 무변경).
+    """
+    import subprocess
+    from unittest import mock
+    from agora import participant
+
+    class _SI:
+        def __init__(self) -> None:
+            self.dwFlags, self.wShowWindow = 0, None
+
+    class _Ok:
+        returncode, stdout, stderr = 0, "S-1-5-21-1\n", ""
+
+    seen: dict[str, Any] = {}
+
+    def _run(*a: Any, **k: Any) -> Any:
+        seen.update(k)
+        return _Ok()
+
+    with mock.patch.object(participant.os, "name", "nt"), \
+         mock.patch.object(subprocess, "STARTUPINFO", _SI, create=True), \
+         mock.patch.object(subprocess, "STARTF_USESHOWWINDOW", 0x1, create=True), \
+         mock.patch.object(subprocess, "SW_HIDE", 0, create=True), \
+         mock.patch.object(participant, "_which",
+                           lambda n: "C:\\powershell.exe" if n == "powershell" else None), \
+         mock.patch("subprocess.run", _run):
+        sids = participant._windows_acl_sids("C:\\x")
+    if sids != ["S-1-5-21-1"]:
+        raise AssertionError(f"흉내 자식의 출력을 못 읽었다(측정이 대상에 안 닿음): {sids}")
+    if seen.get("creationflags", 0) & 0x08000000 != 0x08000000:
+        raise AssertionError(f"Get-Acl 자식에 CREATE_NO_WINDOW 가 없다: {seen.get('creationflags')!r}")
+    si = seen.get("startupinfo")
+    if si is None or not (si.dwFlags & 0x1) or si.wShowWindow != 0:
+        raise AssertionError("Get-Acl 자식의 STARTUPINFO 가 창을 숨기지 않는다(SW_HIDE)")
+    with mock.patch.object(participant.os, "name", "posix"):
+        if participant._hidden_window_kwargs() != {}:
+            raise AssertionError("윈도우가 아닌데 창 숨김 인자를 더했다")
 
 
 def _case_windows_powershell_child_gets_a_pinned_module_path() -> None:
@@ -16857,6 +16903,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     # ── 윈도우 첫 실측(K-1 · 2026-09-11 · 테스트팀) 피드백 2건 ─────────────────
     ("점검: 윈도우 경로도 표와 만난다", _case_selfcheck_matches_windows_style_paths, None),
     ("윈도우: PowerShell 자식 환경 고정", _case_windows_powershell_child_gets_a_pinned_module_path, None),
+    ("윈도우: Get-Acl 자식 창 숨김", _case_windows_acl_child_hides_its_window, None),
     ("윈도우: PowerShell 문은 하나다", _case_powershell_is_spawned_through_one_door, None),
     ("초대장: 윈도우 덩어리가 한글 경로를 버틴다", _case_invite_windows_block_survives_a_korean_path, None),
     ("점검: 아무것도 쓰지 않는다",     _case_selfcheck_writes_nothing, None),
