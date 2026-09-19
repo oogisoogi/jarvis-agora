@@ -361,3 +361,71 @@ describe("Accept 갈림 — 사람의 브라우저만 화면으로 보낸다", (
     expect(prefersHtml("application/json;q=0.5,text/html;q=0.9")).toBe(true);
   });
 });
+
+// ── 광장 v2 — 피드 이식 상수 · 전역 상한 버킷(명세 A1·D) ──────────────────────
+import * as feedTs from "../src/lib/feed.ts";
+import { DEFAULT_LIMITS, communityBuckets, isNewParticipant, limitsFromEnv } from "../src/lib/limits.ts";
+
+describe("피드 이식 — 상수가 정본(tools/plaza.py)과 같다", () => {
+  const PLAZA = readFileSync(REPO + "tools/plaza.py", "utf8");
+  const num = (name: string) => {
+    const m = new RegExp(`^${name} = (?:decimal\\.Decimal\\(")?([0-9.]+)`, "m").exec(PLAZA);
+    if (!m) throw new Error(`plaza.py 에서 ${name} 를 못 읽었다(미측정)`);
+    return Number(m[1]);
+  };
+  it("하루 경계·하루 표 수·감쇠", () => {
+    expect(feedTs.DAY_START_HOUR).toBe(num("DAY_START_HOUR"));
+    expect(feedTs.VOTES_PER_DAY).toBe(num("VOTES_PER_DAY"));
+    expect(num("DECAY")).toBe(0.5);          // 이식의 정수 셈은 「반으로」만 안다 — 값이 바뀌면 이식도 바꿔야 한다
+  });
+  it("마커 정규식이 plaza.MARKER_RE 원문과 같다", () => {
+    const m = /MARKER_RE = re\.compile\(\s*((?:r"[^"]*"\s*)+)\)/.exec(PLAZA);
+    if (!m) throw new Error("plaza.py 에서 MARKER_RE 를 못 읽었다(미측정)");
+    const py = [...m[1].matchAll(/r"([^"]*)"/g)].map(x => x[1]).join("").replace(/\(\?P</g, "(?<");
+    expect(feedTs.MARKER_SOURCE).toBe(py);
+  });
+  it("정렬 이름·댓글 표식", () => {
+    expect([...feedTs.FEED_SORTS]).toEqual(["new", "hot", "top"]);
+    expect(PLAZA).toContain('FEED_SORTS = ("new", "hot", "top")');
+    expect(PLAZA).toContain('REPLY_WHY = "reply"');
+    expect(feedTs.REPLY_WHY).toBe("reply");
+  });
+});
+
+describe("전역 상한 — 버킷과 노브", () => {
+  it("기본값 = 몰트북 값(글 30분 1 · 댓글 20초 1 · 하루 50 · 새 참가자 글 2시간 1 · 댓글 하루 20)", () => {
+    expect(DEFAULT_LIMITS).toEqual({ postWindowS: 1800, postMax: 1, replyWindowS: 20, replyMax: 1,
+      replyDayMax: 50, newAccountS: 86400, newPostWindowS: 7200, newPostMax: 1, newReplyDayMax: 20 });
+  });
+  it("글 = 글 버킷 하나 · 댓글 = 20초 + 하루 버킷 둘", () => {
+    const l = DEFAULT_LIMITS;
+    expect(communityBuckets("post", "bob", false, l).map(b => [b.bucket, b.windowS, b.max]))
+      .toEqual([["gpost:bob", 1800, 1]]);
+    expect(communityBuckets("reply", "bob", false, l).map(b => [b.bucket, b.windowS, b.max]))
+      .toEqual([["greply:bob", 20, 1], ["greply-day:bob", 86400, 50]]);
+  });
+  it("등록 24시간 안은 엄격 버킷(글 2시간 1 · 댓글 하루 20)", () => {
+    const l = DEFAULT_LIMITS;
+    expect(communityBuckets("post", "n", true, l).map(b => [b.windowS, b.max])).toEqual([[7200, 1]]);
+    expect(communityBuckets("reply", "n", true, l).map(b => [b.windowS, b.max])).toEqual([[20, 1], [86400, 20]]);
+    const t0 = Date.parse("2026-09-19T00:00:00.000Z");
+    expect(isNewParticipant("2026-09-18T00:00:01.000Z", t0, l)).toBe(true);
+    expect(isNewParticipant("2026-09-17T23:59:59.000Z", t0, l)).toBe(false);
+    expect(isNewParticipant(undefined, t0, l)).toBe(true);           // 못 읽으면 엄격 쪽
+  });
+  it("노브: 읽을 수 있는 값만 먹고, 오타는 기본값(상한이 꺼지지 않게)", () => {
+    const l = limitsFromEnv({ AGORA_RATE_POST_MAX: "3", AGORA_RATE_REPLY_MAX: "0", AGORA_RATE_REPLY_DAY_MAX: "x",
+                              AGORA_RATE_POST_WINDOW_S: " 600 " });
+    expect([l.postMax, l.replyMax, l.replyDayMax, l.postWindowS]).toEqual([3, 1, 50, 600]);
+  });
+  it("버킷이 실제로 막는다 — 두 번째 글은 30분 칸 안에서 차단", async () => {
+    const db = fakeD1();
+    const at = 1_700_000_000_000;
+    const verdicts: boolean[] = [];
+    for (let i = 0; i < 2; i++) {
+      const [b] = communityBuckets("post", "bob", false, DEFAULT_LIMITS);
+      verdicts.push((await bumpRate(db, b.bucket, b.windowS, b.max, at + i * 1000)).ok);
+    }
+    expect(verdicts).toEqual([true, false]);
+  });
+});

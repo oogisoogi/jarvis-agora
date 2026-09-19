@@ -84,7 +84,7 @@ def read_plaza(events: list[dict[str, Any]]) -> dict[str, Any]:
     votes: list[dict[str, Any]] = []
     markers: list[dict[str, Any]] = []
     unreadable = 0
-    for row in events:
+    for order, row in enumerate(events):
         event = row.get("event") or {}
         kind = event.get("kind")
         who = event.get("from")
@@ -101,7 +101,10 @@ def read_plaza(events: list[dict[str, Any]]) -> dict[str, Any]:
                 continue                       # 마커는 제안이 아니다
             proposals[event.get("message_id")] = {
                 "id": event.get("message_id"), "from": who, "at": when,
-                "body": body, "round": int(payload.get("round") or 0)}
+                "body": body, "round": int(payload.get("round") or 0),
+                # 피드용 두 칸 — 적재 순서와 「댓글이면 부모」(아래 feed 가 쓴다 · 셈에는 안 쓴다)
+                "order": order, "parent": reply_parent(event),
+                "created_at": row.get("created_at")}
         elif kind == "vote":
             votes.append({"from": who, "at": when,
                           "target": payload.get("target"), "value": int(payload.get("value") or 0)})
@@ -211,3 +214,94 @@ def to_shelve(plaza: dict[str, Any], *, now: datetime.datetime,
         if (now - proposal["at"]).days >= days:
             out.append(pid)
     return sorted(out, key=lambda pid: plaza["proposals"][pid]["at"])
+
+
+# ── 피드(광장 v2 · 명세 A1) ────────────────────────────────────────────────
+# ★정렬 규칙의 **정본은 여기 한 곳**이다. 릴레이(`relay/src/lib/feed.ts`)는 이 규칙을 옮겨 적은 이식이고,
+#   selftest 의 py↔ts 대조 케이스가 같은 입력에 두 구현이 **같은 순서**를 내는지 기계로 맞춰 본다.
+#   규칙을 바꾸려면 여기를 고치고 → 이식을 같은 커밋에서 고친다(대조가 한쪽만 고친 것을 잡는다).
+#
+#   · 댓글 = post 인데 `refs[0]` 이 부모 글을 가리키고 `why` 가 "reply" 인 것(새 칸 없음 · 명세 §0-1).
+#     부모가 **같은 방에 먼저 적재된 글**일 때만 댓글로 붙는다. 아니면 일반 글로 보인다(격리 아님).
+#   · new = 적재 시각 최신이 앞 · hot = 감쇠 점수(위 scores) 높은 것이 앞 · top = 누적 유효 추천 많은 것이 앞.
+#     hot·top 동점이면 **최신이 앞**. 끝까지 같으면 (방, 글 id) 내림차순 — 순서가 기계마다 갈리지 않게.
+#   · 댓글은 부모 아래에 **적재 순**(오래된 것이 위)으로 붙는다. 댓글의 댓글도 같은 규칙으로 한 단 더.
+#   ⚠「많이 추천됐다」는 「참이다」가 아니다 — 이 순서는 읽는 순서일 뿐 판정이 아니다.
+FEED_SORTS = ("new", "hot", "top")
+
+
+def is_community(genesis_payload: dict[str, Any]) -> bool:
+    """이 방이 **커뮤니티**(광장과 같은 방식으로 연 방)인가 — 판별의 **정본은 이 함수 하나**다.
+
+    커뮤니티 = type 이 debate · `deadlines` 칸 없음 · `budget` 칸 있음(광장 열기가 늘 넣는 칸).
+    ★budget 조건은 명세 A2 문구에 **덧붙인 것**이다(작성자 판단 · 오너 확인 대상 · 2026-09-19 master 판정 B).
+      없으면 루프가 도는 일반 토론방(deadlines 를 안 넣는다)까지 커뮤니티로 읽혀, 전역 상한이 토론을 막는다.
+    릴레이 `/communities`·피드·전역 상한 버킷이 이 정의를 옮겨 쓴다(`relay/src/lib/feed.ts` isCommunity).
+    """
+    if not isinstance(genesis_payload, dict):
+        return False
+    return (genesis_payload.get("type") == "debate"
+            and "deadlines" not in genesis_payload
+            and isinstance(genesis_payload.get("budget"), dict))
+REPLY_WHY = "reply"
+
+
+def reply_parent(event: dict[str, Any]) -> str | None:
+    """이 글이 댓글이면 부모 글의 message_id(`refs[0]` · why="reply"), 아니면 None."""
+    refs = (event.get("payload") or {}).get("refs") or []
+    if not isinstance(refs, list) or not refs or not isinstance(refs[0], dict):
+        return None
+    if refs[0].get("why") != REPLY_WHY:
+        return None
+    parent = refs[0].get("message_id")
+    return parent if isinstance(parent, str) and parent else None
+
+
+def feed(rooms: dict[str, list[dict[str, Any]]], *, sort: str,
+         now: datetime.datetime) -> list[dict[str, Any]]:
+    """커뮤니티 방들의 글·댓글을 **한 줄 피드**로 — 방마다 접은 뒤 합쳐서 정렬한다.
+
+    `rooms` = {방 id: 그 방의 받아들여진 이벤트(적재 순)}. 표·점수는 **방 안에서만** 센다.
+    """
+    if sort not in FEED_SORTS:
+        raise ValueError(f"정렬은 {FEED_SORTS} 중 하나다: {sort!r}")
+    through = day_of(now)
+    tops: list[dict[str, Any]] = []
+    for room_id, events in rooms.items():
+        plaza = read_plaza(events)
+        table = scores(plaza, through=through)
+        counts: dict[str, int] = {}
+        for vote in valid_votes(plaza):
+            counts[vote["target"]] = counts.get(vote["target"], 0) + 1
+        props = plaza["proposals"]
+        items = {pid: {"room": room_id, "id": pid, "from": p["from"], "at": p["created_at"],
+                       "body": p["body"], "score": format(table[pid], ".2f"), "votes": counts.get(pid, 0),
+                       "replies": [], "_t": p["at"], "_order": p["order"]}
+                 for pid, p in props.items()}
+        for pid in sorted(props, key=lambda k: props[k]["order"]):
+            parent = props[pid]["parent"]
+            if parent in props and props[parent]["order"] < props[pid]["order"]:
+                items[parent]["replies"].append(items[pid])
+            else:
+                tops.append(items[pid])
+
+    def key(item: dict[str, Any]) -> tuple[Any, ...]:
+        if sort == "hot":
+            first: Any = -decimal.Decimal(item["score"])
+        elif sort == "top":
+            first = -item["votes"]
+        else:
+            first = 0
+        return (first, -item["_t"].timestamp())
+
+    # 마지막 동점 깨기 = (방, 글 id) 내림차순 → 먼저 그것으로 정렬하고 안정 정렬을 한 번 더.
+    tops.sort(key=lambda i: (i["room"], i["id"]), reverse=True)
+    tops.sort(key=key)
+    return [_strip(i) for i in tops]
+
+
+def _strip(item: dict[str, Any]) -> dict[str, Any]:
+    """내부 칸(_로 시작)을 빼고, 댓글은 적재 순으로 재귀 정리한다."""
+    out = {k: v for k, v in item.items() if not k.startswith("_") and k != "replies"}
+    out["replies"] = [_strip(r) for r in sorted(item["replies"], key=lambda r: r["_order"])]
+    return out

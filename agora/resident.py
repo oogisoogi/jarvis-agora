@@ -66,7 +66,10 @@ POSTING_STATES = ("r0", "r1", "r2", "r3")   # 발언을 받는 상태 — 끝났
 #   판정 조건은 `plan` 에, 들러서 할 일은 visit.md 의 그 목적 절에. 이 판본의 목적은 하나다.
 PURPOSES: dict[str, str] = {
     "speak": "이 회차에 너는 아직 말하지 않았다",
+    # 광장 v2(명세 B ②) — 「내 글에 달린 답글에 먼저 답한다」. 주기(10분)는 그대로다.
+    "reply": "네 글에 아직 답하지 않은 답글이 달렸다",
 }
+REPLY_WHY = "reply"                    # 댓글 표식(refs[0].why) — tools/plaza.py REPLY_WHY 와 같은 값
 AGENT_NAME = "claude"
 ACTIONS = ("once", "install", "uninstall", "status", "off", "on")
 
@@ -224,6 +227,58 @@ def spoke_in_round(reduced: dict[str, Any], me: str, round_no: int) -> bool:
     return False
 
 
+def reply_parent(event: dict[str, Any]) -> str | None:
+    """댓글이면 부모 글 id — `refs[0]` 이 가리키고 why="reply" 일 때만(규칙 정본 = tools/plaza.py reply_parent)."""
+    refs = (event.get("payload") or {}).get("refs") or []
+    if not isinstance(refs, list) or not refs or not isinstance(refs[0], dict):
+        return None
+    if refs[0].get("why") != REPLY_WHY:
+        return None
+    parent = refs[0].get("message_id")
+    return parent if isinstance(parent, str) and parent else None
+
+
+def unanswered_replies(reduced: dict[str, Any], me: str) -> list[str]:
+    """이 방의 **받아들여진** 글 중, 남이 **내 글에** 단 답글인데 내가 아직 답하지 않은 것(적재 순).
+
+    ★부모는 **먼저 적재된 내 post** 여야 한다 — 뒤에 올 id 를 미리 걸어 둔 글은 답글이 아니다(피드 규칙과 같다).
+    ★「답했다」도 원장으로 본다: 그 답글을 부모로 건 **내 post** 가 뒤에 있으면 답한 것이다(로컬 표식 아님).
+    """
+    mine: set[str] = set()
+    pending: list[str] = []
+    for row in reduced.get("events") or []:
+        event = row.get("event") or {}
+        if event.get("kind") != "post":
+            continue
+        mid, parent = event.get("message_id"), reply_parent(event)
+        if event.get("from") == me:
+            if parent in pending:
+                pending.remove(parent)
+            mine.add(mid)
+        elif parent in mine:
+            pending.append(mid)
+    return pending
+
+
+def _home(ctx: Any) -> dict[str, Any] | None:
+    """릴레이 `/home` 한 번(있으면). ★없거나 실패하면 None → 로비·방 읽기(GET 3종)로 돌아간다.
+
+    ★/home 은 **캐시**다: 여기서 고른 방도 아래에서 우리 리듀서로 다시 접어 판정한다.
+      /home 이 「답글 있음」이라고 해도 원장에 없으면 깨우지 않는다.
+    """
+    fetch = getattr(getattr(ctx, "store", None), "home", None)
+    if fetch is None:
+        return None
+    try:
+        doc = fetch(participant=ctx.participant_id)
+    except AgoraError:
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("speak_due"), list) \
+            or not isinstance(doc.get("replies"), list):
+        return None
+    return doc
+
+
 def _open_rooms(ctx: Any) -> tuple[list[dict[str, Any]], bool]:
     """(열린 방들, 끝까지 봤는가). ★끝까지 못 봤으면 그 사실을 들고 나간다 —
     못 본 방의 시도 기록을 「이제 없는 방」으로 지우면 그 방의 상한이 풀린다(agy 1R MED)."""
@@ -240,7 +295,8 @@ def _open_rooms(ctx: Any) -> tuple[list[dict[str, Any]], bool]:
 
 
 def plan(ctx: Any, *, attempts: dict[str, int],
-         reduce: Callable[[Any, str], dict[str, Any]] | None = None) -> dict[str, Any]:
+         reduce: Callable[[Any, str], dict[str, Any]] | None = None,
+         home: Callable[[Any], dict[str, Any] | None] | None = _home) -> dict[str, Any]:
     """깨울 방을 고른다. **이유와 함께** 답한다(이유 없는 판정은 감사할 수 없다)."""
     from agora import tools
     reduce = reduce or tools._reduce
@@ -251,7 +307,20 @@ def plan(ctx: Any, *, attempts: dict[str, int],
     #   「이번 판에 깨운 방」으로 줄이면 상한에 걸려 건너뛴 방의 기록이 지워지고,
     #   다음 판에 상한이 풀려 다시 깨운다(세 번 → 한 판 쉬고 → 또 세 번 · 시험이 잡은 자리).
     live: set[str] = set()
-    rooms, complete = _open_rooms(ctx)
+    # ★/home 이 있으면 그 **한 번**으로 들를 후보를 고른다(명세 B ①). 후보만 다시 접어 판정한다.
+    #   ⚠후보 밖 방은 이번 판에 안 본다 ⇒ 로비를 끝까지 본 것이 아니므로 complete=False —
+    #   못 본 방의 시도 기록을 「없는 방」으로 지우면 그 방의 상한이 풀린다(위 주석과 같은 이유).
+    summary = home(ctx) if home is not None else None
+    if summary is not None:
+        picked: list[str] = []
+        for item in summary["speak_due"] + [r for r in summary["replies"] if not r.get("answered")]:
+            rid = item.get("room_id") if isinstance(item, dict) else None
+            if isinstance(rid, str) and rid not in picked:
+                picked.append(rid)
+        rooms, complete, source = [{"room_id": r} for r in picked], False, "home"
+    else:
+        rooms, complete = _open_rooms(ctx)
+        source = "browse"
     for row in rooms:
         room_id = row["room_id"]
         short = room_id[:8]
@@ -265,6 +334,18 @@ def plan(ctx: Any, *, attempts: dict[str, int],
             continue
         key = f"{room_id}@r{round_no}"
         live.add(key)
+        # ── 목적 reply(광장 v2) — 답 안 한 답글이 있으면. speak 와 **따로** 본다(말했어도 답글은 남는다).
+        pending = unanswered_replies(reduced, me)
+        if pending:
+            rkey = f"{room_id}@reply:{pending[-1]}"
+            live.add(rkey)
+            rtried = int(attempts.get(rkey, 0))
+            if rtried >= ATTEMPTS_PER_ROUND:
+                skipped.append({"room": short, "round": round_no,
+                                "why": f"이 답글로 이미 {rtried}번 깨웠다(상한) — 새 답글이 오면 다시 본다"})
+            else:
+                due.append({"room_id": room_id, "round": round_no, "key": rkey, "attempt": rtried + 1,
+                            "purpose": "reply"})
         if spoke_in_round(reduced, me, round_no):
             skipped.append({"room": short, "round": round_no, "why": "이 회차에 이미 말했다"})
             continue
@@ -276,7 +357,7 @@ def plan(ctx: Any, *, attempts: dict[str, int],
         due.append({"room_id": room_id, "round": round_no, "key": key, "attempt": tried + 1,
                     "purpose": "speak"})
     return {"scanned": len(rooms), "due": due, "skipped": skipped, "live": sorted(live),
-            "complete": complete}
+            "complete": complete, "source": source}
 
 
 # ── 깨우기 ──────────────────────────────────────────────────────────────────

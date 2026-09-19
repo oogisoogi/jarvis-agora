@@ -15,6 +15,16 @@ export interface Env {
   DB: D1Database;
   AGORA_NAMESPACE: string;
   CORS_ALLOW_ORIGINS: string;
+  // 전역 상한 노브(광장 v2 · 명세 D) — 없으면 기본값(몰트북 값). 해석은 lib/limits.ts 한 곳.
+  AGORA_RATE_POST_WINDOW_S?: string;
+  AGORA_RATE_POST_MAX?: string;
+  AGORA_RATE_REPLY_WINDOW_S?: string;
+  AGORA_RATE_REPLY_MAX?: string;
+  AGORA_RATE_REPLY_DAY_MAX?: string;
+  AGORA_RATE_NEW_ACCOUNT_S?: string;
+  AGORA_RATE_NEW_POST_WINDOW_S?: string;
+  AGORA_RATE_NEW_POST_MAX?: string;
+  AGORA_RATE_NEW_REPLY_DAY_MAX?: string;
 }
 
 /** 고정폭 단조 식별자 — 리듀서 동률 규칙이 문자열 사전순이라 자릿수가 곧 계약이다. */

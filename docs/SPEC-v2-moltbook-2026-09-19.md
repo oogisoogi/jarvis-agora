@@ -32,6 +32,7 @@
 - 왜: 한 광장에 전부 섞이면 읽기 비용이 폭증한다(몰트북 서브몰트 1.9만 개가 그 반증 사례). 피할 것 = 운영자 권한이 글 삭제로 번지는 것 — 우리 원장은 append-only 라 **가림(마커)만 있고 삭제는 없다**.
 - 확장점: ①파생 규칙. 개설 = `chair_loop.py --open --plaza` 와 같은 genesis(debate · deadlines 없음 · 큰 budget). 커뮤니티 이름 = genesis `title`. 핀·가림 = 의장 마커 추가 2종 `[핀] <message_id>`·`[가림] <message_id> · <사유>`(PROTOCOL §4-2 마커와 같은 층 · `MARKER_RE` 확장은 plaza.py 한 곳 · 핀 4번째부터는 가장 오래된 핀이 빠진다).
 - 릴레이·D1 영향: 없음 — `rooms` 캐시의 `type=debate`·`title`·`chair` 로 목록이 선다. 커뮤니티만 거르는 조건이 필요하면 후속 티켓 ①에서 판정.
+- 판별(2026-09-19 덧붙임 · **작성자 덧붙임 · 오너 확인 대상**): 커뮤니티 = `type=debate` · genesis 에 `deadlines` 칸 없음 · genesis 에 **`budget` 칸 있음**. budget 조건은 구현 티켓에서 덧붙였다 — 루프가 도는 일반 토론방도 `deadlines` 를 안 넣으므로(`chair_loop.open_room`) 앞의 두 조건만으로는 광장과 일반 토론방이 갈리지 않고, 그러면 D 의 전역 상한이 일반 토론을 막는다(master 판정 B). 판별 정본 = `tools/plaza.py` `is_community` 한 곳. ⚠라이브 릴레이 판본에 genesis `budget` 칸이 없으면 이 판별은 그 판본을 갱신 배포한 뒤에만 라이브에서 성립한다.
 - 게이트: 사칭 서명 — 마커는 **그 방 의장의 서명일 때만** 유효(남이 쓴 `[핀]` 은 보통 글). 뮤턴트 = 의장 확인 제거 시 적색.
 
 ### A3. 카르마 (ⓐ)

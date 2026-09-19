@@ -58,6 +58,9 @@ MANIFEST: tuple[dict[str, object], ...] = (
     {"path": "config/allowlist-v1.json", "kind": "file", "mode": 0o644},
     {"path": "config/allow-domains.txt", "kind": "file", "mode": 0o644},
     # 설정 예시 — 사람이 무엇을 적는 자리인지 볼 수 있게 함께 둔다(실물은 설정 폴더에 있다).
+    # ★skill.md 판본 핀(명세 E) — 에이전트가 받은 안내 문서를 이것과 대조한다. 문서 원본(docs/skill.md)과
+    #   갈리면 빌드가 거부한다(`_assert_skill_pin_fresh`) — 낡은 핀이 나가면 진짜 문서가 가짜로 읽힌다.
+    {"path": "config/skill-pin.txt", "kind": "file", "mode": 0o644},
     {"path": "config/config.json.example", "kind": "file", "mode": 0o644},
     {"path": "config/participant.json.example", "kind": "file", "mode": 0o644},
     {"path": "config/README.md", "kind": "file", "mode": 0o644},
@@ -193,10 +196,30 @@ def _assert_output_is_outside(root: str, out_path: str) -> None:
                     f"산출 경로가 담기는 파일과 같다: {out_path}")
 
 
+SKILL_DOC = "docs/skill.md"
+SKILL_PIN = "config/skill-pin.txt"
+
+
+def _assert_skill_pin_fresh(root: str) -> None:
+    """핀 = sha256(docs/skill.md) 여야 한다. 갈리면 **꾸러미를 만들지 않는다**.
+
+    ★핀이 낡은 채 나가면 참가자는 진짜 안내 문서를 가짜로 읽고 등록이 막힌다 — 그 막힘은 모든 신규
+      참가자에게 온다. 반대로 핀을 문서에서 **그 자리에서 계산해** 담으면 이 검사가 사라지므로 하지 않는다
+      (핀은 사람이 확인하고 커밋한 값이어야 한다).
+    """
+    with open(os.path.join(root, SKILL_DOC), "rb") as fh:
+        want = hashlib.sha256(fh.read()).hexdigest()
+    with open(os.path.join(root, SKILL_PIN), encoding="utf-8") as fh:
+        got = fh.read().strip()
+    if got != want:
+        raise SystemExit(f"skill.md 핀이 낡았다 — {SKILL_PIN} 을 {want} 로 고친 뒤 다시 만들어라(지금 {got[:16]}…)")
+
+
 def build(out_path: str, root: str | None = None) -> tuple[str, int, int]:
     """꾸러미를 만들고 (sha256, 바이트, 파일 수) 를 돌려준다."""
     root = root or _ROOT
     _assert_roster_is_template(root)
+    _assert_skill_pin_fresh(root)
     version = client_version()
     files = collect(root)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)

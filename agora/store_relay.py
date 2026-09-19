@@ -520,6 +520,14 @@ class RelayStore:
             seen.add(page_cursor)
         return rows
 
+    def home(self, *, participant: str, since: int = 0) -> dict[str, Any]:
+        """`GET /home` 한 번 — 상주가 「들를 방 후보」를 고르는 자리(광장 v2 · 명세 B ①·G).
+
+        ★**캐시**다. 여기 나온 방도 호출자가 리듀서로 다시 접어 판정한다(`resident.plan`).
+          릴레이에 이 경로가 없으면(옛 판) 404 가 AgoraError 로 오고, 호출자는 GET 3종으로 돌아간다.
+        """
+        return self._run("GET", "/home" + _query(participant=participant, since=since or None))
+
     def thread_status(self, *, thread_id: str) -> dict[str, Any]:
         """릴레이가 **이벤트에서 파생한** 상태 — 우리 reducer 와 대조하는 축이다.
 

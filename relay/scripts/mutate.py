@@ -109,6 +109,38 @@ MUTATIONS = [
      '    checkpoint, purpose: "agora-roster-checkpoint-v1", signer,',
      "harness", "signed_at 만 바꾼 재제출 = 401"),
 
+    # ── 광장 v2(2026-09-19) — 전역 상한 · 새 읽기 경로 ─────────────────────────
+    # ★상한은 **두 방향**으로 잰다: 빼면(M20·M22) 세트6 이 적색, 모든 방에 걸면(M21) 세트4(의장 기계)가 적색.
+    ("M20 커뮤니티 글 버킷 제거", "src/index.ts",
+     "      for (const b of communityBuckets(kind, event.from, isNew, limits)) {",
+     '      for (const b of communityBuckets(kind, event.from, isNew, limits).filter(x => !x.label.endsWith("post"))) {',
+     "harness", "세트6 같은 참가자 두 번째 글 = 429"),
+
+    ("M21 상한을 모든 방에 건다", "src/index.ts",
+     "    if (g && isCommunity(genesisPayloadOf(g.canonical))) {",
+     "    if (g) {",
+     "harness", "세트4 정상 진행 중 429 = 0(의장 기계)"),
+
+    ("M22 댓글 20초 버킷 제거", "src/index.ts",
+     "      for (const b of communityBuckets(kind, event.from, isNew, limits)) {",
+     '      for (const b of communityBuckets(kind, event.from, isNew, limits).filter(x => x.label !== "reply")) {',
+     "harness", "세트6 20초 안 두 번째 댓글 = 429"),
+
+    ("M23 새 참가자 엄격 버킷 무시", "src/lib/limits.ts",
+     '      ? [{ bucket: "gpost-new:" + from, windowS: l.newPostWindowS, max: l.newPostMax, label: "new_participant_post" }]',
+     '      ? [{ bucket: "gpost:" + from, windowS: l.postWindowS, max: l.postMax, label: "post" }]',
+     "vitest", "등록 24시간 안은 엄격 버킷"),
+
+    ("M24 /home 질의 상한이 실제로 선다", "src/index.ts",
+     "const HOME_D1_QUERIES_MAX = 6;",
+     "const HOME_D1_QUERIES_MAX = 5;",
+     "harness", "/home(bob) = 200(상한 5 면 503)"),
+
+    ("M25 커뮤니티 목록이 판별을 안 쓴다", "src/index.ts",
+     "  return cand.filter(r => isCommunity(first.get(r.thread_id))).slice(0, limit)",
+     "  return cand.filter(r => true).slice(0, limit)",
+     "harness", "/communities 에 열린 일반 토론방(세트6b) 없음"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",

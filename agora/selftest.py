@@ -4424,6 +4424,25 @@ def _case_every_mutation_belongs_to_an_axis() -> None:
 
 
 S8_AXES: dict[str, tuple[str, ...]] = {
+    # ★09-19 신설 — **광장v2**. 피드 순서와 「어느 방이 커뮤니티인가」를 계산이 정하는 자리.
+    #   여기서 잃는 것은 조용하다: 서버 피드와 클라이언트 피드가 다른 순서를 보이거나, 일반 토론방이
+    #   커뮤니티로 읽혀 전역 상한이 토론을 막는다 — 오류 없이.
+    "광장v2": ("M537-feed-tie-prefers-older",
+                "M538-feed-reply-to-later-parent",
+                "M539-community-ignores-budget",
+                "M540-feed-hot-sorts-by-votes",
+                "M541-relay-community-ignores-budget",
+                "M542-relay-feed-reply-to-later-parent",
+                "M543-relay-feed-score-does-not-decay",
+                "M544-relay-feed-day-starts-at-midnight",
+                "M545-relay-feed-counts-markers",
+                "M546-relay-feed-counts-self-votes",
+                "M547-resident-ignores-replies",
+                "M548-resident-forgets-it-answered",
+                "M549-resident-ignores-home",
+                "M550-register-skips-skill-pin",
+                "M551-skill-pin-never-mismatches",
+                "M552-build-ships-stale-pin"),
     # ★상주 방문(0.1.6 · 계약 확장 8) — 참가자 컴퓨터가 **사람 없이** 에이전트를 깨우는 자리.
     #   이름이 곧 「무엇을 잃을 수 있나」다: 판정이 틀리면 안 깨우거나 끝없이 깨우고, 끄는 손이 안 먹으면 사람이 못 멈춘다.
     "상주판정": ("M441-resident-round-check-dropped", "M442-resident-ignores-that-i-spoke",
@@ -13287,6 +13306,155 @@ def _case_plaza_markers_are_the_only_source() -> None:
         raise AssertionError(f"졸업·보관은 줄에서 빠지고 **진짜 글만** 남아야 한다: {[r['id'] for r in rows]}")
 
 
+# ── 광장 v2 피드(명세 A1·A2 · 2026-09-19) ─────────────────────────────────────
+def _rep(parent: str) -> list[dict[str, Any]]:
+    """댓글 표식 — `refs[0]` 이 부모를 가리키고 why="reply"(새 칸 없음 · 명세 §0-1)."""
+    return [{"thread_id": "t", "message_id": parent, "why": "reply"}]
+
+
+def _feed_fixture() -> dict[str, list[dict[str, Any]]]:
+    """피드 규칙의 모서리를 한 벌에 모은 입력 — 두 방.
+
+    자기표 · 거둔 표 · 하루 경계(05:00/07:00 KST) · 하루 3표 · 댓글의 댓글 · 없는 부모 ·
+    **뒤에 올** 부모 · why 가 reply 가 아닌 refs · 마커 · 못 읽는 시각 · 다른 방 부모 · 같은 시각 동점.
+    """
+    R1 = [
+        _ev("genesis", "a", "2026-09-16T00:00:00.000Z", "g1", type="debate", title="광장", body="b", budget={"posts_per_round": 50}),
+        _ev("post", "a", "2026-09-17T01:00:00.000Z", "p1", body="첫 글", round=0),
+        _ev("post", "b", "2026-09-17T02:00:00.000Z", "p2", body="둘째 글", round=0),
+        _ev("post", "c", "2026-09-17T03:00:00.000Z", "r1", body="p1 에 답", round=0, refs=_rep("p1")),
+        _ev("post", "d", "2026-09-17T04:00:00.000Z", "r2", body="r1 에 답", round=0, refs=_rep("r1")),
+        _ev("post", "e", "2026-09-17T05:00:00.000Z", "x1", body="없는 부모", round=0, refs=_rep("p9")),
+        _ev("post", "a", "2026-09-17T06:00:00.000Z", "mk", body="[보관] " + format(7, "032x"), round=0),
+        _ev("post", "f", "2026-09-17T07:00:00.000Z", "q1", body="뒤에 올 부모", round=0, refs=_rep("q2")),
+        _ev("post", "g", "2026-09-17T08:00:00.000Z", "q2", body="나중 글", round=0),
+        _ev("post", "h", "not-a-time", "zz", body="시각 못 읽음", round=0),
+        _ev("post", "k", "2026-09-17T09:00:00.000Z", "w1", body="반쯤 답", round=0, refs=[{"thread_id": "t", "message_id": "p1", "why": "see"}]),
+        _ev("vote", "b", "2026-09-17T10:00:00.000Z", "v1", target="p1", value=1),
+        _ev("vote", "c", "2026-09-17T10:01:00.000Z", "v2", target="p1", value=1),
+        _ev("vote", "a", "2026-09-17T10:02:00.000Z", "v3", target="p1", value=1),
+        _ev("vote", "b", "2026-09-17T10:03:00.000Z", "v4", target="p2", value=1),
+        _ev("vote", "b", "2026-09-17T10:04:00.000Z", "v5", target="p2", value=0),
+        _ev("vote", "d", "2026-09-18T22:00:00.000Z", "v6", target="p2", value=1),
+        _ev("vote", "e", "2026-09-18T20:00:00.000Z", "v7", target="p2", value=1),
+        _ev("vote", "z", "2026-09-18T01:00:00.000Z", "v8", target="q2", value=1),
+        _ev("vote", "z", "2026-09-18T01:01:00.000Z", "v9", target="x1", value=1),
+        _ev("vote", "z", "2026-09-18T01:02:00.000Z", "va", target="r1", value=1),
+        _ev("vote", "z", "2026-09-18T01:03:00.000Z", "vb", target="w1", value=1),
+    ]
+    R2 = [
+        _ev("post", "h", "2026-09-18T00:00:00.000Z", "s1", body="동시 하나", round=0),
+        _ev("post", "i", "2026-09-18T00:00:00.000Z", "s2", body="동시 둘", round=0),
+        _ev("post", "j", "2026-09-18T00:30:00.000Z", "s3", body="다른 방 부모", round=0, refs=_rep("p1")),
+    ]
+    return {"R1": R1, "R2": R2}
+
+
+_FEED_NOW = "2026-09-19T03:00:00.000Z"      # = 12:00 KST · 하루 = 09-19
+
+
+def _feed_order(items: list[dict[str, Any]]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        out.append(f"{item['room']}:{item['id']}")
+        out.extend("  " + x for x in _feed_order(item["replies"]))
+    return out
+
+
+def _case_feed_sorts_by_the_rules() -> None:
+    """피드 정렬 new·hot·top — **규칙대로의 순서를 값으로 못박는다**(정본 = tools/plaza.py feed).
+
+    ★py↔ts 대조만 두면 **두 구현이 함께 틀리는 것**을 못 잡는다. 그래서 정본 쪽 순서를 사람이 한 번
+      손으로 검산해 여기 적었다(2026-09-19 · 자기표 제외·거둔 표·06시 경계·하루 3표·감쇠·동점 규칙).
+    """
+    import datetime as _dt
+    pz = _plaza()
+    now = _dt.datetime.fromisoformat(_FEED_NOW.replace("Z", "+00:00"))
+    want = {
+        "new": ["R2:s3", "R2:s2", "R2:s1", "R1:w1", "R1:q2", "R1:q1", "R1:x1", "R1:p2", "R1:p1",
+                "  R1:r1", "    R1:r2"],
+        "hot": ["R1:p2", "R1:w1", "R1:x1", "R1:p1", "  R1:r1", "    R1:r2",
+                "R2:s3", "R2:s2", "R2:s1", "R1:q2", "R1:q1"],
+        "top": ["R1:p2", "R1:p1", "  R1:r1", "    R1:r2", "R1:w1", "R1:x1",
+                "R2:s3", "R2:s2", "R2:s1", "R1:q2", "R1:q1"],
+    }
+    for sort, order in want.items():
+        got = _feed_order(pz.feed(_feed_fixture(), sort=sort, now=now))
+        if got != order:
+            raise AssertionError(f"{sort} 순서가 규칙과 다르다: {got}")
+    top = {i["id"]: i for i in pz.feed(_feed_fixture(), sort="new", now=now)}
+    if (top["p2"]["score"], top["p2"]["votes"], top["p1"]["score"], top["p1"]["votes"]) != ("1.50", 2, "0.50", 2):
+        raise AssertionError(f"점수·표 수가 다르다: p2={top['p2']['score']}/{top['p2']['votes']} "
+                             f"p1={top['p1']['score']}/{top['p1']['votes']}")
+    try:
+        pz.feed(_feed_fixture(), sort="best", now=now)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("모르는 정렬 이름을 받아들였다")
+
+
+def _case_community_is_one_rule() -> None:
+    """커뮤니티 판별 = debate · deadlines 없음 · budget 있음 — **정본 함수 하나**(plaza.is_community).
+
+    ★budget 조건이 빠지면 루프가 도는 일반 토론방(deadlines 를 안 넣는다)까지 커뮤니티가 되고,
+      전역 상한이 토론을 막는다(master 판정 B · 2026-09-19).
+    """
+    pz = _plaza()
+    table = [
+        ({"type": "debate", "budget": {"posts_per_round": 50}}, True),
+        ({"type": "debate"}, False),                                           # 일반 토론방(루프)
+        ({"type": "debate", "budget": {"posts_per_round": 50}, "deadlines": {"r0": "x"}}, False),
+        ({"type": "problem", "budget": {"posts_per_round": 50}}, False),
+        ({"type": "debate", "budget": 5}, False),
+        (None, False),
+    ]
+    for payload, want in table:
+        if pz.is_community(payload) is not want:
+            raise AssertionError(f"커뮤니티 판별이 틀렸다: {payload!r} → {not want}")
+
+
+def _community_table() -> list[Any]:
+    return [{"type": "debate", "budget": {"posts_per_round": 50}}, {"type": "debate"},
+            {"type": "debate", "budget": {"posts_per_round": 1}, "deadlines": {}},
+            {"type": "knowhow", "budget": {"posts_per_round": 1}}, {"type": "debate", "budget": []}]
+
+
+def _case_feed_matches_the_relay() -> None:
+    """🔴**같은 입력에 두 구현이 같은 피드·같은 판별을 낸다**(plaza.py ↔ relay feed.ts).
+
+    ★규칙의 정본은 plaza.py 하나다. 릴레이는 이식이라, 한쪽만 고치면 서버 피드와 클라이언트 피드가
+      **조용히** 다른 순서를 보인다. 그래서 기계가 JSON 을 통째로 맞춰 본다.
+    ⚠**미측정은 통과가 아니다**: node·esbuild 가 없으면 이 케이스는 실패한다.
+    """
+    import datetime as _dt
+    import json as _json
+    import shutil as _shutil
+    import subprocess as _sp
+    pz = _plaza()
+    now = _dt.datetime.fromisoformat(_FEED_NOW.replace("Z", "+00:00"))
+    rooms = _feed_fixture()
+    mine = [pz.feed(rooms, sort=s, now=now) for s in pz.FEED_SORTS]
+    mine_c = [pz.is_community(g) for g in _community_table()]
+    if _shutil.which("node") is None:
+        raise AssertionError("node 가 없어 py↔ts 대조를 **못 쟀다**(미측정은 통과가 아니다)")
+    probe = os.path.join(_ROOT, "relay", "tests", "feed_probe.mjs")
+    inp = {"feed": [{"rooms": [[k, v] for k, v in rooms.items()], "sort": s, "now": _FEED_NOW}
+                    for s in pz.FEED_SORTS],
+           "community": _community_table()}
+    proc = _sp.run(["node", probe], input=_json.dumps(inp), capture_output=True, text=True,
+                   cwd=_ROOT, timeout=300)
+    if proc.returncode != 0:
+        raise AssertionError(f"대조 탐침이 못 돌았다(미측정): {(proc.stderr or '')[:200]}")
+    theirs = _json.loads(proc.stdout)
+    for sort, a, b in zip(pz.FEED_SORTS, mine, theirs["feed"]):
+        if _json.dumps(a, sort_keys=True, ensure_ascii=False) != _json.dumps(b, sort_keys=True, ensure_ascii=False):
+            raise AssertionError(f"{sort} 피드가 두 구현에서 갈렸다 — 한쪽만 고쳤다: "
+                                 f"py={_feed_order(a)} ts={_feed_order(b)}")
+    if theirs["community"] != mine_c:
+        raise AssertionError(f"커뮤니티 판별이 갈렸다: py={mine_c} ts={theirs['community']}")
+
+
 def _case_daily_plan_opens_only_when_earned() -> None:
     """하루 한 바퀴의 **계산**: 조건을 넘긴 상위 N · 못 넘기면 0 · 이틀 교착이면 하나.
 
@@ -14131,13 +14299,15 @@ DOC_SCAN_TARGETS = ("README.md", "docs/ONBOARDING.md", "docs/RUN-WINDOWS.md",
                     "skills/agora-delegate/brief-reader.md",
                     # ★방문 규칙(0.1.6 · 690) — 깨운 에이전트가 **사람 없이** 그대로 친다.
                     #   틀린 인자는 아무도 못 본다 ⇒ 기계가 대신 읽는다.
-                    "skills/agora-delegate/visit.md")
+                    "skills/agora-delegate/visit.md",
+                    # ★광장 v2(2026-09-19) — 에이전트가 **스스로 읽고 치는** 두 장.
+                    "docs/skill.md", "docs/heartbeat.md")
 # **명령이 반드시 있어야 하는 문서** — 여기서 0줄이면 시험이 그 문서를 못 읽고 있는 것이다
 # (문서가 통째로 안 읽히는 것과 「명령이 없는 문서」를 구별한다).
 DOC_MUST_HAVE = ("README.md", "docs/ONBOARDING.md", "docs/RUN-WINDOWS.md",
                  "docs/OPERATOR.md", "docs/INVITE.md",
                  "skills/agora-delegate/SKILL.md", "skills/agora-delegate/brief-writer.md",
-                 "skills/agora-delegate/visit.md")
+                 "skills/agora-delegate/visit.md", "docs/skill.md", "docs/heartbeat.md")
 
 # 자리표시자(`<방 id>`)를 토큰 하나로 묶어 두는 표식. ★값의 **모양**은 여기서 재지 않는다 —
 # 재려면 문서에 진짜 id 를 적어야 하고, 그러면 문서가 거짓말을 하게 된다. 대신 칸 종류에 맞는
@@ -15792,6 +15962,156 @@ def _case_whoami_second_column_is_resident() -> None:
         resident.uninstall(directory=d, platform="darwin", runner=lambda _a: {"rc": 0})
 
 
+def _resident_reply_setup(ctx_a: Any, ctx_b: Any) -> tuple[str, str]:
+    """나(b)가 글을 쓰고, 의장(a)이 **그 글에 답글**을 단다 → (방 id, 답글 message_id)."""
+    from agora import tools
+    f = _fixtures()
+    room = _relay_room(ctx_a)
+    _resident_say_as_b(ctx_b, room, "내 글")
+    mine = [r["event"]["message_id"] for r in tools._reduce(ctx_b, room)["events"]
+            if r["event"]["kind"] == "post" and r["event"]["from"] == "operator-b"][-1]
+    ref = [{"thread_id": room, "message_id": mine, "why": "reply"}]
+    _with_key(f["key_a"], lambda: tools.say(ctx_a, thread_id=room, body="네 글에 답한다", refs=ref))
+    reply = [r["event"]["message_id"] for r in tools._reduce(ctx_b, room)["events"]
+             if r["event"]["kind"] == "post" and r["event"]["from"] == "operator-a"][-1]
+    return room, reply
+
+
+def _case_resident_wakes_for_an_unanswered_reply() -> None:
+    """광장 v2(명세 B ②) — **내 글에 새 답글**이 오면 깨운다. 이 회차에 이미 말했어도.
+
+    ★「답했다」도 원장으로 본다: 그 답글을 부모로 건 내 글이 생기면 다시 깨우지 않는다.
+    ★음성 대조: 부모가 내 글이 아닌 답글(why 가 reply 가 아닌 refs 포함)로는 깨우지 않는다.
+    """
+    from agora import tools
+    f = _fixtures()
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room, reply = _resident_reply_setup(ctx_a, ctx_b)
+        out, calls = _resident_once(ctx_b, home)
+        if len(calls) != 1:
+            raise AssertionError(f"답글이 왔는데 안 깨웠다: {out['판정']} 건너뜀={out['건너뛴_방']}")
+        prompt = _resident_prompt(calls[0])
+        if "목적 reply" not in prompt or room not in prompt:
+            raise AssertionError("깨움 글에 목적 reply 줄이 없다")
+        # ★깨움 글에는 방문 규칙 전문(「목적 speak」 절 포함)이 실리므로 글이 아니라 **안건**으로 잰다.
+        if [a["purpose"] for a in out["안건"]] != ["reply"]:
+            raise AssertionError(f"이 회차에 이미 말했는데 speak 로도 깨웠다: {out['안건']}")
+        ref = [{"thread_id": room, "message_id": reply, "why": "reply"}]
+        # 한 회차 예산(2)은 이미 썼다 — 회차를 넘긴 뒤 답한다(답은 회차와 무관하게 원장에 남는다).
+        _resident_advance(ctx_a, room, 1)
+        _with_key(f["key_b"], lambda: tools.say(ctx_b, thread_id=room, body="답글에 답한다", refs=ref))
+        out2, calls2 = _resident_once(ctx_b, home)
+        if calls2:
+            raise AssertionError(f"이미 답한 답글로 또 깨웠다: {out2['안건']}")
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room = _relay_room(ctx_a)
+        _resident_say_as_b(ctx_b, room, "내 글")
+        mine = [r["event"]["message_id"] for r in tools._reduce(ctx_b, room)["events"]
+                if r["event"]["kind"] == "post" and r["event"]["from"] == "operator-b"][-1]
+        see = [{"thread_id": room, "message_id": mine, "why": "see"}]
+        _with_key(f["key_a"], lambda: tools.say(ctx_a, thread_id=room, body="참고로 건다", refs=see))
+        out, calls = _resident_once(ctx_b, home)
+        if calls:
+            raise AssertionError(f"답글이 아닌 참조(why=see)로 깨웠다: {out['안건']}")
+
+
+def _case_resident_home_picks_but_the_ledger_decides() -> None:
+    """광장 v2(명세 B ①·G) — `/home` 이 있으면 **그 한 번**으로 후보를 고르고, 판정은 원장이 한다.
+
+    ⑴/home 이 답글 방을 알려 주면 로비 전체를 훑지 않고(browse 0회) 그 방만 접어 깨운다.
+    ⑵/home 이 「답글 있음」이라고 해도 **원장에 답할 답글이 없으면** 깨우지 않는다(캐시를 믿지 않는다).
+    ⑶/home 이 없으면(옛 릴레이) 로비·방 읽기로 돌아간다 — 위 케이스들이 그 길이다.
+    """
+    from agora import tools
+    browse_calls: list[int] = []
+    real_browse = tools.browse
+
+    def counting_browse(*a: Any, **k: Any) -> Any:
+        browse_calls.append(1)
+        return real_browse(*a, **k)
+
+    with _resident_world() as (ctx_a, ctx_b, home):
+        room, _reply = _resident_reply_setup(ctx_a, ctx_b)
+        tools.browse = counting_browse
+        try:
+            ctx_b.store.home = lambda **_k: {"speak_due": [], "replies": [
+                {"room_id": room, "answered": False}]}
+            out, calls = _resident_once(ctx_b, home)
+            if len(calls) != 1 or browse_calls:
+                raise AssertionError(f"/home 으로 고르지 않았다: 깨움={len(calls)} browse={len(browse_calls)}")
+            other = _relay_room(ctx_a)
+            _resident_say_as_b(ctx_b, other, "여기선 이미 말했다")
+            ctx_b.store.home = lambda **_k: {"speak_due": [{"room_id": other}], "replies": [
+                {"room_id": other, "answered": False}]}
+            out2, calls2 = _resident_once(ctx_b, home)
+            if calls2:
+                raise AssertionError(f"원장에 없는 답글·끝난 차례를 캐시만 믿고 깨웠다: {out2['안건']}")
+        finally:
+            tools.browse = real_browse
+            try:
+                del ctx_b.store.home
+            except AttributeError:
+                pass
+
+
+def _case_skill_pin_blocks_registration() -> None:
+    """명세 E — 받은 skill.md 가 **핀과 다르면 등록을 진행하지 않는다**(키도 안 읽고 릴레이에도 안 닿는다).
+
+    ★대조군: 진짜 문서(docs/skill.md)면 핀 검사를 **지나** 그 다음 전제(공개키 없음)에서 멈춘다 —
+      두 실패의 사유가 달라야 「핀 검사가 실제로 가른다」가 증명된다.
+    """
+    import tempfile
+    from agora import onboard
+    d = tempfile.mkdtemp(prefix="agora-skillpin-")
+    fake = os.path.join(d, "skill.md")
+    with open(os.path.join(_ROOT, "docs", "skill.md"), encoding="utf-8") as fh:
+        text = fh.read()
+    with open(fake, "w", encoding="utf-8") as fh:
+        fh.write(text.replace("등록을 진행하지 않는다", "등록을 계속한다"))
+    for path, want in ((fake, "skill_pin_mismatch"), (os.path.join(_ROOT, "docs", "skill.md"), None)):
+        try:
+            onboard.register(directory=d, relay_url="http://127.0.0.1:9", skill=path)
+        except AgoraError as e:
+            reason = (e.detail or {}).get("reason")
+            if want and (e.code != errors.PRECONDITION or reason != want):
+                raise AssertionError(f"가짜 문서로 등록이 막히지 않았다: code={e.code} reason={reason}")
+            if not want and reason == "skill_pin_mismatch":
+                raise AssertionError("진짜 문서를 가짜로 읽었다(핀이 낡았다)")
+        else:
+            raise AssertionError("키도 없는데 등록이 끝났다(측정 실패)")
+
+
+def _case_skill_pin_matches_the_doc() -> None:
+    """핀(config/skill-pin.txt) = sha256(docs/skill.md) — 그리고 **낡은 핀으로는 꾸러미를 안 만든다.**"""
+    import hashlib
+    import shutil
+    import tempfile
+    from agora import skillpin
+    with open(os.path.join(_ROOT, "docs", "skill.md"), "rb") as fh:
+        want = hashlib.sha256(fh.read()).hexdigest()
+    if skillpin.expected() != want:
+        raise AssertionError("핀이 문서와 다르다 — docs/skill.md 를 고쳤으면 config/skill-pin.txt 도 고쳐라")
+    import importlib.util as _util
+    spec = _util.spec_from_file_location("build_client_zip_pin", os.path.join(_ROOT, "tools", "build_client_zip.py"))
+    mod = _util.module_from_spec(spec)
+    spec.loader.exec_module(mod)                     # type: ignore[union-attr]
+    root = tempfile.mkdtemp(prefix="agora-pinroot-")
+    os.makedirs(os.path.join(root, "docs"))
+    os.makedirs(os.path.join(root, "config"))
+    shutil.copy(os.path.join(_ROOT, "docs", "skill.md"), os.path.join(root, "docs", "skill.md"))
+    with open(os.path.join(root, "config", "skill-pin.txt"), "w", encoding="utf-8") as fh:
+        fh.write("0" * 64 + "\n")
+    try:
+        mod._assert_skill_pin_fresh(root)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("낡은 핀인데 꾸러미 빌드가 거부하지 않았다")
+    with open(os.path.join(root, "config", "skill-pin.txt"), "w", encoding="utf-8") as fh:
+        fh.write(want + "\n")
+    mod._assert_skill_pin_fresh(root)                # 대조군 — 맞는 핀은 통과해야 한다
+
+
 def _case_resident_cli_entry_stands() -> None:
     """`bin/agora resident …` 가 **진입점에서** 선다(등록됐다 ≠ 동작한다 — 이 저장소가 세 번 다친 자리)."""
     import json as _json
@@ -15887,6 +16207,13 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("광장: 점수는 감쇠한다",        _case_plaza_score_decays_and_ranks, None),
     ("광장: 하루 경계는 06시",       _case_plaza_day_boundary_is_six, None),
     ("광장: 마커가 유일한 출처",     _case_plaza_markers_are_the_only_source, None),
+    ("광장v2: 피드 정렬 규칙",       _case_feed_sorts_by_the_rules, None),
+    ("광장v2: 커뮤니티 판별은 하나", _case_community_is_one_rule, None),
+    ("광장v2: 피드 py↔ts 가 같다",   _case_feed_matches_the_relay, None),
+    ("광장v2: 상주가 답글에 깬다",   _case_resident_wakes_for_an_unanswered_reply, None),
+    ("광장v2: /home 은 고르고 원장이 판정", _case_resident_home_picks_but_the_ledger_decides, None),
+    ("광장v2: skill 핀이 다르면 등록 안 함", _case_skill_pin_blocks_registration, None),
+    ("광장v2: skill 핀 = 문서 · 낡으면 빌드 거부", _case_skill_pin_matches_the_doc, None),
     ("하루 한 바퀴: 얻어야 연다",    _case_daily_plan_opens_only_when_earned, None),
     ("하루 한 바퀴: 열고 적고 접는다", _case_daily_loop_opens_marks_and_retires, None),
     ("하루 한 바퀴: 마커가 실패해도 한 번",
@@ -18050,6 +18377,71 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                         {"exception": type(e).__name__, "reason": "unexpected"})',
      '                         {"exception": str(e), "reason": "unexpected"})',
      "CLI: 뜻밖의 예외도 JSON"),
+    # ── 광장v2(2026-09-19 · 명세 A1·A2) — 피드 정렬·커뮤니티 판별의 정본(plaza.py)과 릴레이 이식(feed.ts) ──
+    ('M537-feed-tie-prefers-older', 'tools/plaza.py',
+     '        return (first, -item["_t"].timestamp())',
+     '        return (first, item["_t"].timestamp())',
+     '광장v2: 피드 정렬 규칙'),
+    ('M538-feed-reply-to-later-parent', 'tools/plaza.py',
+     '            if parent in props and props[parent]["order"] < props[pid]["order"]:',
+     '            if parent in props:',
+     '광장v2: 피드 정렬 규칙'),
+    ('M539-community-ignores-budget', 'tools/plaza.py',
+     '            and isinstance(genesis_payload.get("budget"), dict))',
+     '            and True)',
+     '광장v2: 커뮤니티 판별은 하나'),
+    ('M540-feed-hot-sorts-by-votes', 'tools/plaza.py',
+     '            first: Any = -decimal.Decimal(item["score"])',
+     '            first: Any = -item["votes"]',
+     '광장v2: 피드 정렬 규칙'),
+    ('M541-relay-community-ignores-budget', 'relay/src/lib/feed.ts',
+     '  return g.type === "debate" && !("deadlines" in g)\n    && !!b && typeof b === "object" && !Array.isArray(b);',
+     '  return g.type === "debate" && !("deadlines" in g);',
+     '광장v2: 피드 py↔ts 가 같다'),
+    ('M542-relay-feed-reply-to-later-parent', 'relay/src/lib/feed.ts',
+     '      if (parent && parent.order < prop.order)',
+     '      if (parent)',
+     '광장v2: 피드 py↔ts 가 같다'),
+    ('M543-relay-feed-score-does-not-decay', 'relay/src/lib/feed.ts',
+     '      c = Math.floor(c / 2 + 0.5) + ',
+     '      c = c + ',
+     '광장v2: 피드 py↔ts 가 같다'),
+    ('M544-relay-feed-day-starts-at-midnight', 'relay/src/lib/feed.ts',
+     'export const DAY_START_HOUR = 6;',
+     'export const DAY_START_HOUR = 0;',
+     '광장v2: 피드 py↔ts 가 같다'),
+    ('M545-relay-feed-counts-markers', 'relay/src/lib/feed.ts',
+     '      if (MARKER_RE.test(body.trim())) return;',
+     '      if (false) return;',
+     '광장v2: 피드 py↔ts 가 같다'),
+    ('M546-relay-feed-counts-self-votes', 'relay/src/lib/feed.ts',
+     '    if (target.from === v.from) continue;',
+     '    if (false) continue;',
+     '광장v2: 피드 py↔ts 가 같다'),
+    ('M547-resident-ignores-replies', 'agora/resident.py',
+     '        pending = unanswered_replies(reduced, me)\n        if pending:',
+     '        pending = []\n        if pending:',
+     '광장v2: 상주가 답글에 깬다'),
+    ('M548-resident-forgets-it-answered', 'agora/resident.py',
+     '            if parent in pending:\n                pending.remove(parent)',
+     '            if False:\n                pending.remove(parent)',
+     '광장v2: 상주가 답글에 깬다'),
+    ('M549-resident-ignores-home', 'agora/resident.py',
+     '    summary = home(ctx) if home is not None else None',
+     '    summary = None',
+     '광장v2: /home 은 고르고 원장이 판정'),
+    ('M550-register-skips-skill-pin', 'agora/onboard.py',
+     '        skill_pin = skillpin.require(skill)',
+     '        skill_pin = None',
+     '광장v2: skill 핀이 다르면 등록 안 함'),
+    ('M551-skill-pin-never-mismatches', 'agora/skillpin.py',
+     '    if got != want:',
+     '    if False:',
+     '광장v2: skill 핀이 다르면 등록 안 함'),
+    ('M552-build-ships-stale-pin', 'tools/build_client_zip.py',
+     '    if got != want:',
+     '    if False:',
+     '광장v2: skill 핀 = 문서 · 낡으면 빌드 거부'),
     ("M536-read-drops-resolution-action", "agora/reducer.py",
      '        lines.append(f"- {action[\'text\']} [execution: {action[\'execution\']}]")',
      "        pass",

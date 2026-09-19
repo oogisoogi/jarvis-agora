@@ -20,6 +20,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
@@ -372,6 +373,55 @@ def main():
         print("  %-16s -> %s %-11s %s" % (ev["kind"], code, v.get("reducer"), v.get("reason") or ""))
     results.append(("세트5 vote 포함", t8, b8))
 
+    # ── 세트 6: 커뮤니티 방 전역 상한(광장 v2 · 명세 D · master 판정 B) ────────
+    # ★세트4(일반 토론 · 의장 기계 정상 동작)와 **한 세트**다: 세트4 는 429 가 0 건이어야 하고,
+    #   여기(커뮤니티 = debate · deadlines 없음 · budget 있음)서는 같은 참가자의 연속 글·댓글이 429 여야 한다.
+    #   둘 중 하나만 재면 「상한을 모든 방에 거는」 변이와 「상한을 빼는」 변이 중 하나가 산다.
+    print("\n== 세트 6: 커뮤니티 방 전역 상한(연속 글·댓글 429) ==")
+    tc6 = new_id()
+    b6 = Builder(tc6, args.workdir, allowed, revoked, [op["id"]], now)
+    set6 = {}
+
+    def put6(label, signer, kind, payload):
+        ev, sig = b6.add(signer, kind, payload)
+        code, body = send(args.base, tc6, "debate", "커뮤니티", ev, sig, kind == "genesis")
+        if code == 429:
+            # 거절된 글은 원장에 없다 — 로컬 대조군에서도 뺀다(3자 대조가 같은 사슬을 보게).
+            b6.rows.pop()
+            b6.posted.pop()
+        detail = (body.get("detail") or {}) if isinstance(body, dict) else {}
+        set6[label] = (code, detail.get("limit"), ev)
+        v = body.get("verdict", {}) if isinstance(body, dict) else {}
+        print("  %-22s -> %s %s %s" % (label, code, v.get("reducer") or "", detail.get("limit") or ""))
+        return ev
+
+    put6("genesis", alice, "genesis", {"type": "debate", "title": "커뮤니티", "body": "광장 v2 시험",
+                                       "budget": {"posts_per_round": 50, "max_chars_per_round": 20000}})
+    a1 = put6("alice 글", alice, "post", {"round": 0, "body": "첫 글"})
+    put6("bob 글", bob, "post", {"round": 0, "body": "밥의 글"})
+    put6("bob 두 번째 글", bob, "post", {"round": 0, "body": "밥의 두 번째 글"})
+    reply = lambda ev: [{"thread_id": tc6, "message_id": ev["message_id"], "why": "reply"}]
+    br1 = put6("bob 댓글", bob, "post", {"round": 0, "body": "alice 글에 답", "refs": reply(a1)})
+    put6("bob 두 번째 댓글", bob, "post", {"round": 0, "body": "또 답", "refs": reply(a1)})
+    ar1 = put6("alice 댓글", alice, "post", {"round": 0, "body": "bob 댓글에 답", "refs": reply(br1)})
+    put6("bob 추천", bob, "vote", {"target": a1["message_id"], "value": 1})
+    results.append(("세트6 커뮤니티", tc6, b6))
+
+    # ★음성 대조 — **열려 있는** 일반 토론방(budget 없음). 세트4 는 검사 시점에 이미 닫혀 있어
+    #   목록 질의의 closed=0 조건이 먼저 걸러 버린다 — 그러면 「판별을 안 써도」 초록이다(M25 가 살아남았다).
+    #   같은 bob 이 커뮤니티에서 429 를 맞은 **직후** 여기서 글을 쓴다 — 상한이 커뮤니티에만 걸림을 함께 잰다.
+    t6b = new_id()
+    b6b = Builder(t6b, args.workdir, allowed, revoked, [op["id"]], now)
+    plain = {}
+    for label, signer, kind, payload in (
+            ("genesis", alice, "genesis", {"type": "debate", "title": "일반 토론", "body": "budget 없음"}),
+            ("bob 글", bob, "post", {"round": 0, "body": "일반 토론방 글"})):
+        ev, sig = b6b.add(signer, kind, payload)
+        code, _body = send(args.base, t6b, "debate", "일반 토론", ev, sig, kind == "genesis")
+        plain[label] = code
+        print("  일반 토론 %-12s -> %s" % (label, code))
+    results.append(("세트6b 일반 토론(열림)", t6b, b6b))
+
     # ── 3자 대조 ──────────────────────────────────────────────────────────
     print("\n== 3자 대조(파이썬 리듀서 == 서버 파생) ==")
     all_ok = True
@@ -715,6 +765,74 @@ def main():
         "checkpoint": current, "signer": op["id"], "signed_at": "2026-09-06", "signature": cp_sig})
     record("signed_at 서식 오류 = 400", 400, code,
            "code=%s" % (body.get("code") if isinstance(body, dict) else "?"))
+
+    # ── 광장 v2(세트6 · 새 읽기 경로) ──────────────────────────────────────
+    print("\n== 광장 v2: 전역 상한 · /communities · /feed · /home ==")
+    record("세트4 정상 진행 중 429 = 0(의장 기계)", 0, throttled)
+    record("세트6 첫 글 = 201", 201, set6["bob 글"][0])
+    record("세트6 같은 참가자 두 번째 글 = 429", 429, set6["bob 두 번째 글"][0],
+           "limit=%s" % set6["bob 두 번째 글"][1])
+    record("세트6 429 사유 = 새 참가자 글 버킷", "new_participant_post", set6["bob 두 번째 글"][1])
+    record("세트6 첫 댓글 = 201", 201, set6["bob 댓글"][0])
+    record("세트6 20초 안 두 번째 댓글 = 429", 429, set6["bob 두 번째 댓글"][0],
+           "limit=%s" % set6["bob 두 번째 댓글"][1])
+    record("세트6 추천(vote)은 상한 밖 = 201", 201, set6["bob 추천"][0])
+
+    code, com = http("GET", args.base + "/communities")
+    com_ids = [r["room_id"] for r in (com.get("items") or [])] if isinstance(com, dict) else []
+    record("/communities = 200", 200, code)
+    record("/communities 에 커뮤니티 방(세트6) 있음", True, tc6 in com_ids, "items=%d" % len(com_ids))
+    record("/communities 에 일반 토론방(세트4) 없음", False, t7 in com_ids)
+    record("/communities 에 열린 일반 토론방(세트6b) 없음", False, t6b in com_ids)
+    record("세트6b 커뮤니티 429 직후 일반 토론방 글 = 201", 201, plain.get("bob 글"))
+    record("/communities 캐시 표기", True, isinstance(com, dict) and com.get("cache") is True)
+
+    def tree(items, depth=0):
+        out = []
+        for it in items:
+            out.append("  " * depth + it["id"])
+            out.extend(tree(it["replies"], depth + 1))
+        return out
+
+    feeds = {}
+    for sort in ("new", "hot", "top"):
+        code, fd = http("GET", args.base + "/feed?sort=" + sort)
+        feeds[sort] = fd if isinstance(fd, dict) else {}
+        record("/feed?sort=%s = 200" % sort, 200, code,
+               "d1=%s/%s" % ((feeds[sort].get("limits") or {}).get("d1_queries_used"),
+                             (feeds[sort].get("limits") or {}).get("d1_queries_max")))
+    want_new = [set6["bob 글"][2]["message_id"], a1["message_id"], "  " + br1["message_id"],
+                "    " + ar1["message_id"]]
+    record("/feed new = 최신 글 먼저 · 댓글은 부모 아래", want_new, tree(feeds["new"].get("items") or []))
+    record("/feed top = 추천 받은 글 먼저", a1["message_id"],
+           ((feeds["top"].get("items") or [{}])[0]).get("id"))
+    code, _ = http("GET", args.base + "/feed?sort=best")
+    record("/feed 모르는 정렬 = 400", 400, code)
+
+    code, hb = http("GET", args.base + "/home?participant=" + bob["id"])
+    hb = hb if isinstance(hb, dict) else {}
+    record("/home(bob) = 200", 200, code)
+    record("/home(bob) 새 답글 = alice 댓글", [ar1["message_id"]],
+           [r["message_id"] for r in hb.get("replies") or []])
+    record("/home(bob) 내 방에 세트6", True, tc6 in [r["room_id"] for r in hb.get("rooms") or []],
+           "rooms=%d" % len(hb.get("rooms") or []))
+    lim = hb.get("limits") or {}
+    record("/home D1 질의 ≤ 상한", True,
+           isinstance(lim.get("d1_queries_used"), int) and lim["d1_queries_used"] <= lim.get("d1_queries_max", -1),
+           "d1=%s/%s" % (lim.get("d1_queries_used"), lim.get("d1_queries_max")))
+    code, ha = http("GET", args.base + "/home?participant=" + quote(alice["fingerprint"], safe=""))
+    record("/home(alice · 지문으로) 새 답글 = bob 댓글", [br1["message_id"]],
+           [r["message_id"] for r in (ha.get("replies") if isinstance(ha, dict) else None) or []])
+    due_a = [r["room_id"] for r in (ha.get("speak_due") if isinstance(ha, dict) else None) or []]
+    due_b = [r["room_id"] for r in hb.get("speak_due") or []]
+    record("/home speak_due(alice) 에 안 말한 열린 방(세트6b)", True, t6b in due_a)
+    record("/home speak_due(bob) 에 이미 말한 방(세트6b) 없음", False, t6b in due_b)
+    code, hs = http("GET", args.base + "/home?participant=%s&since=%s" % (bob["id"], hb.get("next_since")))
+    record("/home since=next_since 면 새 답글 0", 0,
+           len(hs.get("replies") or []) if isinstance(hs, dict) and code == 200 else "응답 없음",
+           "since=%s" % hb.get("next_since"))
+    code, _ = http("GET", args.base + "/home?participant=nobody-here")
+    record("/home 없는 참가자 = 404", 404, code)
 
     # 파생 캐시 자가치유(R-7) — 캐시를 지워도 조회가 다시 채운다
     subprocess.run([os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

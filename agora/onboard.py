@@ -81,7 +81,7 @@ def _lines(text: str) -> list[str]:
 # ── register ────────────────────────────────────────────────────────────────
 
 def register(*, directory: str | None = None, relay_url: str,
-             unattended: bool = False) -> dict[str, Any]:
+             unattended: bool = False, skill: str | None = None) -> dict[str, Any]:
     """공개키를 릴레이에 등록하고 설정에 릴레이 주소를 적는다.
 
     ★**키를 만들지 않는다**(그건 `keygen` 이다). 이미 있는 공개키·지문을 올릴 뿐이다.
@@ -89,6 +89,12 @@ def register(*, directory: str | None = None, relay_url: str,
       서명은 서명기 프로세스가 한다 — 여기에는 개인키를 읽는 코드가 없다.
     """
     from agora import sign
+    # ★안내 문서(skill.md)를 받고 왔으면 **무엇보다 먼저** 핀과 대조한다(명세 E).
+    #   다르면 키를 읽지도, 서명하지도, 릴레이에 닿지도 않는다 — 가짜 절차의 첫 발을 여기서 막는다.
+    skill_pin = None
+    if skill:
+        from agora import skillpin
+        skill_pin = skillpin.require(skill)
     directory = os.path.abspath(directory or config_dir())
     doc = load(directory)
     pub_path = os.path.join(directory, KEY_NAME + ".pub")
@@ -125,6 +131,7 @@ def register(*, directory: str | None = None, relay_url: str,
             #   (TRANSPORT-RELAY §15 「잔여」 첫 줄이 그것이었다 · master 채택 2026-09-06).
             "status": out.get("status", 0),
             "proof_hash": signed["hash"],
+            "skill_pin": skill_pin,
             "human_approval": cfg.get("human_approval", True),
             "config_file": CONFIG_FILENAME,
             "다음": ["agora sync-roster 로 명부 3종 사본을 받는다",

@@ -17,6 +17,8 @@ import { b64decode, checkSignatureBytes, fingerprintOf, hasArmor, parseArmored,
          parsePublicKeyBlob } from "./lib/sshsig.ts";
 import { bumpRate, deriveThread, eventIdOf, nowIso, rosterView, threadEvents,
          upsertRoom, type Env } from "./lib/store.ts";
+import { FEED_SORTS, feed, isCommunity, replyParent, type FeedEvent, type FeedSort } from "./lib/feed.ts";
+import { communityBuckets, isNewParticipant, limitsFromEnv } from "./lib/limits.ts";
 
 // 저장소의 **정본 규칙 파일**을 원문 그대로 싣는다(wrangler rules: Text).
 import rulesText from "../../config/scrub-rules-v1.json";
@@ -281,6 +283,28 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
       { status: 429, headers: { "Retry-After": String(perRoom.retryAfter) } });
   }
 
+  // (9b) 전역 상한(광장 v2 · 명세 D) — **커뮤니티 방의 post 만**(판별 = isCommunity · master 판정 B).
+  //   ★의장 기계의 genesis·advance·resolution·close 와 일반 토론방 글은 여기 안 걸린다(골든 세트4 가 잰다).
+  //   ★거절이지 격리가 아니다 — 원장에 안 들어가므로 참가자마다 상태가 갈라지지 않는다.
+  if (event.kind === "post") {
+    const g = await env.DB.prepare(
+      "SELECT canonical FROM events WHERE thread_id = ?1 AND is_genesis = 1 ORDER BY seq LIMIT 1"
+    ).bind(threadId).first<{ canonical: string }>();
+    if (g && isCommunity(genesisPayloadOf(g.canonical))) {
+      const limits = limitsFromEnv(env as unknown as Record<string, unknown>);
+      const me = roster.rows.find(r => r.participant_id === event.from);
+      const isNew = isNewParticipant(me?.created_at, Date.now(), limits);
+      const kind = replyParent(event) ? "reply" : "post";
+      for (const b of communityBuckets(kind, event.from, isNew, limits)) {
+        const r = await bumpRate(env.DB, b.bucket, b.windowS, b.max);
+        if (!r.ok) {
+          fail(STORE, "커뮤니티 속도 제한", { limit: b.label, window_s: b.windowS, max: b.max },
+            { status: 429, headers: { "Retry-After": String(r.retryAfter) } });
+        }
+      }
+    }
+  }
+
   // (10) 적재
   const createdAt = nowIso();
   let inserted: { seq: number } | null = null;
@@ -480,6 +504,195 @@ async function roomEvents(req: Request, env: Env, threadId: string): Promise<Res
     200, corsHeaders(req, env));
 }
 
+// ── 광장 v2 읽기(명세 A1·A2·G) — ★전부 **캐시**다 ─────────────────────────────
+// 응답의 글은 정본이 아니다. 클라이언트는 GET /rooms/:id/events 로 받아 서명·사슬을 **다시 검증**하고,
+// 불일치면 버린다(PROTOCOL §0 「서버가 통과시킨 글도 격리할 수 있다」와 같은 원리).
+const CACHE_NOTICE = "이 응답은 캐시다 — 글은 GET /rooms/:id/events 로 받아 서명·사슬을 다시 검증하고, 맞지 않으면 버린다.";
+const COMMUNITIES_MAX = 50;          // 한 번에 돌려주는 커뮤니티 수
+const COMMUNITY_SCAN_MAX = 100;      // 후보(열린 debate 방) 훑기 상한 — json_each 한 번에 넘긴다
+const FEED_ROOMS_MAX = 10;           // 피드 한 번에 접는 방 수
+const FEED_ITEMS_MAX = 50;
+const HOME_ROOMS_MAX = 10;           // /home 이 보는 「내 방」 수
+const HOME_ITEMS_MAX = 50;
+// ★호출당 D1 질의 상한(무료 D1 = 호출당 50). 넘으면 503 — 무한 스캔을 구조로 막는다.
+const COMMUNITIES_D1_QUERIES_MAX = 2;
+const FEED_D1_QUERIES_MAX = 2 + 1 + FEED_ROOMS_MAX;
+const HOME_D1_QUERIES_MAX = 6;
+// 알림 후보 = **원장 사실(kind)** 로만(명세 C · 작성자 판단 채택). 글 본문 문구로는 발동하지 않는다.
+const NOTIFY_KINDS: Record<string, string> = {
+  resolution: "내가 참가한 방에 권고가 도착했다(집행은 주인 승인)",
+};
+
+/** D1 질의를 세고 상한을 넘으면 거절한다 — 상한이 주석이 아니라 동작이 되게. */
+class QueryBudget {
+  used = 0;
+  constructor(private db: D1Database, readonly max: number) {}
+  prepare(sql: string): D1PreparedStatement {
+    this.used += 1;
+    if (this.used > this.max) {
+      fail(STORE, "이 경로의 D1 질의 상한을 넘었다", { max: this.max }, { status: 503 });
+    }
+    return this.db.prepare(sql);
+  }
+  get asDb(): D1Database { return this as unknown as D1Database; }
+}
+
+function genesisPayloadOf(canonical: string): unknown {
+  try { return (JSON.parse(canonical) as Record<string, any>)?.payload ?? null; }
+  catch { return null; }
+}
+
+function intParam(u: URL, name: string, dflt: number, hi: number): number {
+  const v = parseInt(u.searchParams.get(name) || String(dflt), 10);
+  return Math.min(Math.max(Number.isFinite(v) ? v : dflt, 1), hi);
+}
+
+/** 커뮤니티 방 목록(질의 2개). 판별은 isCommunity 한 곳(정본 plaza.is_community). */
+async function communityRooms(qb: QueryBudget, limit: number): Promise<any[]> {
+  const cand = (await qb.prepare(
+    `SELECT thread_id, title, chair, participants, state, round, updated_at, last_seq
+       FROM rooms WHERE type = 'debate' AND closed = 0 ORDER BY updated_at DESC LIMIT ?1`
+  ).bind(COMMUNITY_SCAN_MAX).all<any>()).results ?? [];
+  if (!cand.length) return [];
+  const gen = (await qb.prepare(
+    `SELECT thread_id, canonical FROM events
+      WHERE is_genesis = 1 AND thread_id IN (SELECT value FROM json_each(?1)) ORDER BY seq`
+  ).bind(JSON.stringify(cand.map(r => r.thread_id))).all<{ thread_id: string; canonical: string }>()).results ?? [];
+  const first = new Map<string, unknown>();
+  for (const g of gen) if (!first.has(g.thread_id)) first.set(g.thread_id, genesisPayloadOf(g.canonical));
+  return cand.filter(r => isCommunity(first.get(r.thread_id))).slice(0, limit)
+    .map(r => ({ ...r, budget: (first.get(r.thread_id) as any)?.budget ?? null }));
+}
+
+async function listCommunities(req: Request, env: Env): Promise<Response> {
+  const u = new URL(req.url);
+  const qb = new QueryBudget(env.DB, COMMUNITIES_D1_QUERIES_MAX);
+  const rows = await communityRooms(qb, intParam(u, "limit", COMMUNITIES_MAX, COMMUNITIES_MAX));
+  return json({
+    items: rows.map(r => ({
+      room_id: r.thread_id, title: r.title, chair: r.chair, participants: r.participants,
+      state: r.state, updated_at: r.updated_at, node_id: eventIdOf(r.last_seq), budget: r.budget,
+    })),
+    rule: "debate · deadlines 없음 · budget 있음",
+    cache: true, verify: CACHE_NOTICE,
+    limits: { d1_queries_used: qb.used, d1_queries_max: qb.max, scan_max: COMMUNITY_SCAN_MAX },
+  }, 200, corsHeaders(req, env));
+}
+
+async function getFeed(req: Request, env: Env): Promise<Response> {
+  const u = new URL(req.url);
+  const sort = u.searchParams.get("sort") || "new";
+  if (!(FEED_SORTS as readonly string[]).includes(sort)) {
+    fail(ARGUMENT, "sort 는 new·hot·top 중 하나다", { sort, allowed: FEED_SORTS });
+  }
+  const limit = intParam(u, "limit", 20, FEED_ITEMS_MAX);
+  const qb = new QueryBudget(env.DB, FEED_D1_QUERIES_MAX);
+  const rooms = await communityRooms(qb, FEED_ROOMS_MAX);
+  const roster = await rosterView(qb.asDb);
+  const bundle = await scrubBundle();
+  const now = nowIso();
+  const input: Array<[string, FeedEvent[]]> = [];
+  for (const r of rooms) {
+    const rows = await threadEvents(qb.asDb, r.thread_id);
+    const { derived } = await deriveThread({
+      db: qb.asDb, threadId: r.thread_id, namespace: env.AGORA_NAMESPACE, roster,
+      scrubBundle: bundle.bundle, rows, now, render: renderPost,
+    });
+    // ★받아들여진 이벤트만 — 격리·stale 은 피드에 안 오른다(클라이언트 리듀서와 같은 입력).
+    input.push([r.thread_id, (derived.reduced.events ?? []).map(e => ({ created_at: e.created_at, event: e.event }))]);
+  }
+  const items = feed(input, sort as FeedSort, Date.parse(now)).slice(0, limit);
+  return json({
+    sort, items, rooms: rooms.map(r => r.thread_id),
+    rule: "정본 = tools/plaza.py feed · 추천이 많다고 참은 아니다",
+    cache: true, verify: CACHE_NOTICE, derived_at: now,
+    limits: { d1_queries_used: qb.used, d1_queries_max: qb.max, rooms_max: FEED_ROOMS_MAX, items_max: FEED_ITEMS_MAX },
+  }, 200, corsHeaders(req, env));
+}
+
+async function getHome(req: Request, env: Env): Promise<Response> {
+  const u = new URL(req.url);
+  const who = u.searchParams.get("participant") || "";
+  if (!who) fail(ARGUMENT, "participant 가 필요하다(참가자 id 또는 공개키 지문 SHA256:…)", null);
+  const since = Math.max(parseInt(u.searchParams.get("since") || "0", 10) || 0, 0);
+  const qb = new QueryBudget(env.DB, HOME_D1_QUERIES_MAX);
+
+  // (1) 참가자 — id 또는 지문(신원 = 공개키 지문 · 명세 E)
+  const me = await qb.prepare(
+    "SELECT participant_id, fingerprint, revoked_at FROM participants WHERE participant_id = ?1 OR fingerprint = ?1"
+  ).bind(who).first<{ participant_id: string; fingerprint: string; revoked_at: string | null }>();
+  if (!me) fail(STORE, "그런 참가자가 없다", { participant: who }, { status: 404 });
+  const pid = me.participant_id;
+
+  // (2) 내 방 — 내가 한 번이라도 쓴 방(최근 순 · 상한)
+  const mine = (await qb.prepare(
+    `SELECT thread_id, MAX(seq) AS last FROM events WHERE from_id = ?1
+      GROUP BY thread_id ORDER BY last DESC LIMIT ?2`
+  ).bind(pid, HOME_ROOMS_MAX).all<{ thread_id: string; last: number }>()).results ?? [];
+  const ids = JSON.stringify(mine.map(r => r.thread_id));
+
+  // (6) 말할 차례인 방 — 열린 토론 회차(r0~r3)인데 **이 회차에 내 post 가 없는** 방(상주 목적 speak 의 후보).
+  //   ★「내 방」만이 아니라 열린 방 전체에서 고른다 — 상주는 아직 한 번도 안 쓴 방에서도 깨워야 한다.
+  const speakDue = (await qb.prepare(
+    `SELECT r.thread_id, r.round, r.state FROM rooms r
+      WHERE r.closed = 0 AND r.state IN ('r0','r1','r2','r3')
+        AND NOT EXISTS (SELECT 1 FROM events e WHERE e.from_id = ?1 AND e.thread_id = r.thread_id
+                          AND e.kind = 'post' AND json_extract(e.canonical, '$.payload.round') = r.round)
+      ORDER BY r.updated_at DESC LIMIT ?2`
+  ).bind(pid, HOME_ITEMS_MAX).all<{ thread_id: string; round: number; state: string }>()).results ?? [];
+
+  let rooms: any[] = [], replies: any[] = [], notes: any[] = [];
+  if (mine.length) {
+    // (3) 방 상태(캐시)
+    rooms = (await qb.prepare(
+      `SELECT thread_id, title, type, state, round, closed, updated_at, last_seq FROM rooms
+        WHERE thread_id IN (SELECT value FROM json_each(?1)) ORDER BY updated_at DESC`
+    ).bind(ids).all<any>()).results ?? [];
+    // (4) 내 글에 달린 새 답글 — 부모가 **같은 방·먼저 적재된 내 post** 일 때만(plaza.feed 와 같은 조건)
+    replies = (await qb.prepare(
+      `SELECT e.seq, e.thread_id, e.message_id, e.from_id, e.created_at,
+              json_extract(e.canonical, '$.payload.refs[0].message_id') AS parent,
+              EXISTS (SELECT 1 FROM events m WHERE m.from_id = ?2 AND m.thread_id = e.thread_id
+                        AND m.kind = 'post' AND m.seq > e.seq
+                        AND json_extract(m.canonical, '$.payload.refs[0].message_id') = e.message_id) AS answered
+         FROM events e
+        WHERE e.thread_id IN (SELECT value FROM json_each(?1)) AND e.seq > ?3
+          AND e.kind = 'post' AND e.from_id != ?2
+          AND json_extract(e.canonical, '$.payload.refs[0].why') = 'reply'
+          AND EXISTS (SELECT 1 FROM events p WHERE p.from_id = ?2 AND p.thread_id = e.thread_id
+                        AND p.kind = 'post' AND p.seq < e.seq
+                        AND p.message_id = json_extract(e.canonical, '$.payload.refs[0].message_id'))
+        ORDER BY e.seq DESC LIMIT ?4`
+    ).bind(ids, pid, since, HOME_ITEMS_MAX).all<any>()).results ?? [];
+    // (5) 알림 후보 — kind 로만
+    notes = (await qb.prepare(
+      `SELECT seq, thread_id, kind, from_id, created_at FROM events
+        WHERE thread_id IN (SELECT value FROM json_each(?1)) AND seq > ?2
+          AND kind IN (SELECT value FROM json_each(?3)) ORDER BY seq DESC LIMIT ?4`
+    ).bind(ids, since, JSON.stringify(Object.keys(NOTIFY_KINDS)), HOME_ITEMS_MAX).all<any>()).results ?? [];
+  }
+  const notify = notes.map(n => ({ kind: n.kind, rule: NOTIFY_KINDS[n.kind], room_id: n.thread_id,
+                                    event_id: eventIdOf(n.seq), from: n.from_id, created_at: n.created_at }));
+  if (me.revoked_at) notify.unshift({ kind: "revoked", rule: "내 키가 명부에서 폐기됐다", room_id: null as any,
+                                      event_id: null as any, from: null as any, created_at: me.revoked_at });
+  const nextSince = Math.max(since, ...rooms.map(r => Number(r.last_seq) || 0));
+  return json({
+    participant: pid, fingerprint: me.fingerprint, since, next_since: nextSince,
+    rooms: rooms.map(r => ({ room_id: r.thread_id, title: r.title, type: r.type, state: r.state,
+                             round: r.round, closed: !!r.closed, updated_at: r.updated_at })),
+    replies: replies.map(r => ({ room_id: r.thread_id, event_id: eventIdOf(r.seq), message_id: r.message_id,
+                                 from: r.from_id, parent_message_id: r.parent, created_at: r.created_at,
+                                 answered: !!r.answered })),
+    notify,
+    speak_due: speakDue.map(r => ({ room_id: r.thread_id, round: r.round, state: r.state })),
+    // ★서버가 안 재는 알림(명세 C)을 이름으로 남긴다 — 비어 있다고 「없다」로 읽지 않게.
+    not_computed_here: ["내 글 격리·서명 실패(클라이언트 리듀서가 판정)", "반응 폭증(문턱 노브 · 클라이언트)",
+                        "needs_human_input(에이전트 상태)", "주인만 답할 질문(에이전트 판단)"],
+    cache: true, verify: CACHE_NOTICE,
+    limits: { d1_queries_used: qb.used, d1_queries_max: qb.max, rooms_max: HOME_ROOMS_MAX, items_max: HOME_ITEMS_MAX },
+  }, 200, corsHeaders(req, env));
+}
+
 // ── GET /participants/* ────────────────────────────────────────────────────
 async function participantsFile(req: Request, env: Env, name: string): Promise<Response> {
   const roster = await rosterView(env.DB);
@@ -566,6 +779,9 @@ export default {
 
       if (req.method === "GET") {
         if (path === "/rooms") return await listRooms(req, env);
+        if (path === "/communities") return await listCommunities(req, env);
+        if (path === "/feed") return await getFeed(req, env);
+        if (path === "/home") return await getHome(req, env);
         if (path === "/participants/checkpoint") return await getCheckpoint(req, env);
         let m = /^\/participants\/([a-z_]+)$/.exec(path);
         if (m) return await participantsFile(req, env, m[1]);

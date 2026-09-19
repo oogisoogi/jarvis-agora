@@ -188,9 +188,10 @@ def _run_onboard(name: str, rest: list[str]) -> Any:
         relay_url = kw.get("relay") or kw.get("relay_url")
         if not relay_url:
             raise AgoraError(errors.ARGUMENT, "register 는 --relay <url> 이 필요하다",
-                             {"usage": "agora register --relay <url> [--unattended]"})
+                             {"usage": "agora register --relay <url> [--unattended] [--skill <skill.md>]"})
         return onboard.register(directory=directory, relay_url=relay_url,
-                                unattended=bool(kw.get("unattended", False)))
+                                unattended=bool(kw.get("unattended", False)),
+                                skill=kw.get("skill"))
     if name == "sync-roster":
         return onboard.sync_roster(directory=directory,
                                    relay_url=kw.get("relay") or kw.get("relay_url"),
@@ -228,7 +229,7 @@ def _run_operator(name: str, rest: list[str]) -> Any:
 #   (`--relayy` 를 주면 「--relay 가 필요하다」가 나고, 사람은 자기가 준 줄을 의심하지 않는다).
 #   ⇒ 문서를 재는 시험도, 사용자에게 이름을 말해 주는 거절도 이 표 하나를 본다.
 CLI_ONLY_ARGS: dict[str, tuple[str, ...]] = {
-    "register":     ("relay", "relay_url", "unattended", "dir"),
+    "register":     ("relay", "relay_url", "unattended", "skill", "dir"),
     "sync-roster":  ("relay", "relay_url", "yes", "dir"),
     "whoami":       ("dir",),
     "checkpoint":   ("relay", "relay_url", "signer", "dir"),
