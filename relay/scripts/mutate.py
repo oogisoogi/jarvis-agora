@@ -141,6 +141,11 @@ MUTATIONS = [
      "  return cand.filter(r => true).slice(0, limit)",
      "harness", "/communities 에 열린 일반 토론방(세트6b) 없음"),
 
+    ("M26 /home 답함 판정이 댓글 규칙을 안 본다", "src/index.ts",
+     "                        AND json_extract(m.canonical, '$.payload.refs[0].why') = 'reply'\n",
+     "",
+     "harness", "/home 참조(why=see)는 답이 아니다 = answered False"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",

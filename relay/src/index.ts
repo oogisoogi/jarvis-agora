@@ -654,6 +654,7 @@ async function getHome(req: Request, env: Env): Promise<Response> {
               json_extract(e.canonical, '$.payload.refs[0].message_id') AS parent,
               EXISTS (SELECT 1 FROM events m WHERE m.from_id = ?2 AND m.thread_id = e.thread_id
                         AND m.kind = 'post' AND m.seq > e.seq
+                        AND json_extract(m.canonical, '$.payload.refs[0].why') = 'reply'
                         AND json_extract(m.canonical, '$.payload.refs[0].message_id') = e.message_id) AS answered
          FROM events e
         WHERE e.thread_id IN (SELECT value FROM json_each(?1)) AND e.seq > ?3

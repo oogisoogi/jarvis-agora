@@ -420,7 +420,20 @@ def main():
         code, _body = send(args.base, t6b, "debate", "일반 토론", ev, sig, kind == "genesis")
         plain[label] = code
         print("  일반 토론 %-12s -> %s" % (label, code))
+    # ★「답했다」도 댓글 규칙(why=reply)으로만 — 참조(why=see)는 답이 아니다(agy 1R HIGH-3 · 2026-09-19).
     results.append(("세트6b 일반 토론(열림)", t6b, b6b))
+    #   세트6c — 따로 방을 연다(6b 에 끼우면 앞선 speak_due·답글 대조가 흔들린다).
+    t6c = new_id()
+    b6c = Builder(t6c, args.workdir, allowed, revoked, [op["id"]], now)
+    b6c.add(bob, "genesis", {"type": "debate", "title": "참조 대조", "body": "budget 없음"})
+    pa, _ = b6c.add(alice, "post", {"round": 0, "body": "alice 의 글"})
+    rb, _ = b6c.add(bob, "post", {"round": 0, "body": "alice 글에 답",
+                                  "refs": [{"thread_id": t6c, "message_id": pa["message_id"], "why": "reply"}]})
+    b6c.add(alice, "post", {"round": 0, "body": "참고로만 건다",
+                            "refs": [{"thread_id": t6c, "message_id": rb["message_id"], "why": "see"}]})
+    for ev, sig in b6c.posted:
+        send(args.base, t6c, "debate", "참조 대조", ev, sig, ev["kind"] == "genesis")
+    results.append(("세트6c 참조는 답이 아니다", t6c, b6c))
 
     # ── 3자 대조 ──────────────────────────────────────────────────────────
     print("\n== 3자 대조(파이썬 리듀서 == 서버 파생) ==")
@@ -813,7 +826,7 @@ def main():
     hb = hb if isinstance(hb, dict) else {}
     record("/home(bob) = 200", 200, code)
     record("/home(bob) 새 답글 = alice 댓글", [ar1["message_id"]],
-           [r["message_id"] for r in hb.get("replies") or []])
+           [r["message_id"] for r in hb.get("replies") or [] if r.get("room_id") == tc6])
     record("/home(bob) 내 방에 세트6", True, tc6 in [r["room_id"] for r in hb.get("rooms") or []],
            "rooms=%d" % len(hb.get("rooms") or []))
     lim = hb.get("limits") or {}
@@ -822,11 +835,16 @@ def main():
            "d1=%s/%s" % (lim.get("d1_queries_used"), lim.get("d1_queries_max")))
     code, ha = http("GET", args.base + "/home?participant=" + quote(alice["fingerprint"], safe=""))
     record("/home(alice · 지문으로) 새 답글 = bob 댓글", [br1["message_id"]],
-           [r["message_id"] for r in (ha.get("replies") if isinstance(ha, dict) else None) or []])
+           [r["message_id"] for r in (ha.get("replies") if isinstance(ha, dict) else None) or []
+            if r.get("room_id") == tc6])
     due_a = [r["room_id"] for r in (ha.get("speak_due") if isinstance(ha, dict) else None) or []]
     due_b = [r["room_id"] for r in hb.get("speak_due") or []]
     record("/home speak_due(alice) 에 안 말한 열린 방(세트6b)", True, t6b in due_a)
     record("/home speak_due(bob) 에 이미 말한 방(세트6b) 없음", False, t6b in due_b)
+    code, hx = http("GET", args.base + "/home?participant=" + alice["id"])
+    ans = [r.get("answered") for r in (hx.get("replies") if isinstance(hx, dict) else None) or []
+           if r.get("message_id") == rb["message_id"]]
+    record("/home 참조(why=see)는 답이 아니다 = answered False", [False], ans)
     code, hs = http("GET", args.base + "/home?participant=%s&since=%s" % (bob["id"], hb.get("next_since")))
     record("/home since=next_since 면 새 답글 0", 0,
            len(hs.get("replies") or []) if isinstance(hs, dict) and code == 200 else "응답 없음",
