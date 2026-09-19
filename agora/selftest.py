@@ -10495,14 +10495,55 @@ def _case_relay_honors_retry_after() -> None:
             pass
         if ctx.store.waits[:1] != [2.0]:
             raise AssertionError(f"Retry-After 를 안 들었다: {ctx.store.waits}")
-    with _relay_env(retry_after="9999") as (ctx, relay, _url):
+    # ★창의 경계(=60) 는 아직 신호다 — 존중해 기다린다. 창을 넘는 값은 벽이다(_case_relay_limit_wall_fails_fast).
+    with _relay_env(retry_after="60") as (ctx, relay, _url):
         relay.status_override = {"/rooms": 429}
         try:
             ctx.store.list_threads()
         except AgoraError:
             pass
         if ctx.store.waits[:1] != [60.0]:
-            raise AssertionError(f"상한이 없다: {ctx.store.waits}")
+            raise AssertionError(f"창 안의 Retry-After 를 안 들었다: {ctx.store.waits}")
+
+
+def _case_relay_limit_wall_fails_fast() -> None:
+    """429 의 `Retry-After` 가 **우리 재시도 창(60초)보다 길면 즉시 멈춘다** — 재시도 0 · 2초 안.
+
+    ★전역 상한(`Retry-After: 7200`)을 재시도로 분류해 60초씩 네 번 두드리고 183초 뒤 code 7 로
+      끝나던 결함(2026-09-19 실측)의 봉합이다. 상한은 창 안에서 안 풀린다 — 기다린 3분은 헛것이었다.
+    ★코드는 계약 그대로 7 · `retryable` 은 내린다 · 문구는 몇 분 뒤인지를 말한다.
+    """
+    import time
+    slept: list[float] = []
+    with _relay_env(retry_after="7200") as (ctx, relay, _url):
+        relay.status_override = {"/rooms": 429}
+        ctx.store._sleep = slept.append
+        t0 = time.monotonic()
+        try:
+            ctx.store.list_threads()
+        except AgoraError as e:
+            err = e
+        else:
+            raise AssertionError("상한 429 가 성공으로 끝났다")
+        took = time.monotonic() - t0
+        if ctx.store.calls != 1 or ctx.store.waits or slept:
+            raise AssertionError(f"벽을 재시도했다: calls={ctx.store.calls} waits={ctx.store.waits} slept={slept}")
+        if took > 2.0:
+            raise AssertionError(f"즉시 멈추지 않았다: {took:.2f}s")
+    if err.code != errors.STORE or err.retryable is not False:
+        raise AssertionError(f"계약 밖 판정: code={err.code} retryable={err.retryable}")
+    det = err.detail or {}
+    if det.get("wall") is not True or det.get("retry_after_seconds") != 7200 \
+            or det.get("retry_after_minutes") != 120:
+        raise AssertionError(f"벽 표식·시간이 다르다: {det}")
+    if "120분" not in err.message:
+        raise AssertionError(f"언제 다시 할지를 말하지 않는다: {err.message}")
+    # ★벽은 429 에만 · 숫자로 읽히는 값에만 선다 — 5xx·HTTP-date 는 종전대로 기다렸다 다시 한다.
+    from agora.store_relay import _limit_wall
+    for status, raw in ((503, "7200"), (429, "Wed, 21 Oct 2026 07:28:00 GMT"), (429, "inf")):
+        probe = AgoraError(errors.STORE, "x", {"status": status, "retry": True, "retry_after": raw})
+        if _limit_wall(probe, 1) is not None:
+            raise AssertionError(f"벽이 아닌 것을 벽으로 봤다: {status} {raw!r}")
 
 
 def _case_relay_checkpoint_absence_is_a_two_hundred() -> None:
@@ -16799,6 +16840,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("릴레이: 커서는 불투명하다",     _case_relay_cursor_is_opaque, None),
     ("릴레이: limit 은 계약 안",      _case_relay_limit_stays_inside_the_contract, None),
     ("릴레이: Retry-After 존중",      _case_relay_honors_retry_after, None),
+    ("릴레이: 창보다 긴 상한은 즉시 실패", _case_relay_limit_wall_fails_fast, None),
     ("릴레이: 체크포인트 부재는 200", _case_relay_checkpoint_absence_is_a_two_hundred, None),
     ("릴레이: verdict 는 참고값",     _case_relay_verdict_is_reported_not_obeyed, None),
     ("릴레이: 서버 valid 에 안 기댄다", _case_relay_does_not_lean_on_server_validity, None),
@@ -17656,6 +17698,18 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("M329-relay-ignores-retry-after", "agora/store_relay.py",
      '                wait = _retry_delay(e, delay)      # ★서버가 말한 값이 우리 곱보다 앞선다',
      '                wait = delay      # ★서버가 말한 값이 우리 곱보다 앞선다',
+     "릴레이: Retry-After 존중"),
+    ("M560-relay-limit-wall-retried", "agora/store_relay.py",
+     '                if wall is not None:\n                    raise wall from None',
+     '                if False:\n                    raise wall from None',
+     "릴레이: 창보다 긴 상한은 즉시 실패"),
+    ("M561-relay-wall-on-any-status", "agora/store_relay.py",
+     '    if d.get("status") != 429:\n        return None\n    try:\n        wanted = float(str(d.get("retry_after")).strip())',
+     '    if False:\n        return None\n    try:\n        wanted = float(str(d.get("retry_after")).strip())',
+     "릴레이: 창보다 긴 상한은 즉시 실패"),
+    ("M562-relay-wall-swallows-window-edge", "agora/store_relay.py",
+     '    if not math.isfinite(wanted) or wanted <= RETRY_AFTER_CAP_SECONDS:',
+     '    if not math.isfinite(wanted) or wanted < RETRY_AFTER_CAP_SECONDS:',
      "릴레이: Retry-After 존중"),
     ("M330-relay-checkpoint-null-is-present", "agora/onboard.py",
      '    if doc.get("checkpoint") is None:',

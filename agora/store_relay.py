@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import math
 import socket
 import time
 import urllib.error
@@ -211,8 +212,9 @@ def _retry_delay(err: AgoraError, fallback: float) -> float:
 
     ★429 에 `Retry-After` 를 붙이는 것은 계약이 필수로 둔 칸이다. 무시하고 우리 backoff 만
       쓰면 상한을 계속 두드리게 되고, 그것은 「한도는 벽이 아니라 신호다」를 어기는 것이다.
-    ★그러나 **상한을 둔다**: 서버가 3600 을 주면 부르는 쪽이 한 시간 멈춘다. 상한에 걸린 경우
-      우리는 그만큼만 기다리고, 그래도 429 면 시도를 소진하고 code 7 로 올린다(거짓 성공 없음).
+    ★그러나 **상한을 둔다**: 서버가 3600 을 주면 부르는 쪽이 한 시간 멈춘다. 429 가 상한을 넘는
+      값을 주면 여기까지 오지 않는다 — `_limit_wall` 이 먼저 즉시 멈춘다(2026-09-19). 이 상한은
+      숫자 `Retry-After` 를 단 5xx 에 남는다.
     ⚠HTTP-date 서식은 안 읽는다 — 숫자가 아니면 우리 backoff 로 간다(모르는 값을 지어내지 않는다).
     """
     raw = (err.detail or {}).get("retry_after")
@@ -223,6 +225,34 @@ def _retry_delay(err: AgoraError, fallback: float) -> float:
     if wanted <= 0:
         return fallback
     return min(wanted, RETRY_AFTER_CAP_SECONDS)
+
+
+def _limit_wall(err: AgoraError, attempts: int) -> AgoraError | None:
+    """429 인데 `Retry-After` 가 **우리 재시도 창(`RETRY_AFTER_CAP_SECONDS`)보다 길다** = 벽이다.
+
+    ★기다려 볼 신호가 아니라 상한이다(전역 상한 `Retry-After: 7200` 실측 2026-09-19): 60초씩
+      네 번 두드리고 183초 뒤 code 7 로 끝나던 것은 **어차피 실패할 것을 3분 기다린 것**이다.
+      상한은 창 안에서 안 풀리므로 **즉시 멈추고 언제 다시 하면 되는지를 말한다.**
+    ★코드는 계약 그대로 7 이다(429 → 7 · TRANSPORT-RELAY §5) — 새 코드를 만들지 않는다.
+      다만 **지금 다시 해도 같다**이므로 `retryable` 을 내린다(errors.AgoraError 인스턴스 칸).
+    ⚠창 안의 값(≤60)·숫자가 아닌 값(HTTP-date)·5xx 는 여기 안 온다 — 종전대로 기다렸다 다시 한다.
+    """
+    d = err.detail or {}
+    if d.get("status") != 429:
+        return None
+    try:
+        wanted = float(str(d.get("retry_after")).strip())
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(wanted) or wanted <= RETRY_AFTER_CAP_SECONDS:
+        return None
+    minutes = max(1, math.ceil(wanted / 60))
+    return AgoraError(errors.STORE,
+                      f"상한에 걸렸다 — 약 {minutes}분 뒤에 다시 해 보라",
+                      {"status": 429, "wall": True, "attempts": attempts,
+                       "retry_after_seconds": math.ceil(wanted),
+                       "retry_after_minutes": minutes, "last": d},
+                      retryable=False)
 
 
 def relay_transport(method: str, url: str, *, payload: dict[str, Any] | None = None,
@@ -369,6 +399,9 @@ class RelayStore:
                 if not is_retryable_store(e):
                     raise                 # 기다려도 그대로인 실패(그리고 code 8)는 그대로 올린다
                 last = e
+                wall = _limit_wall(e, attempt + 1)
+                if wall is not None:
+                    raise wall from None      # ★창보다 긴 상한은 기다려도 안 풀린다 — 즉시 멈춘다
                 if attempt == self._attempts - 1:
                     break
                 wait = _retry_delay(e, delay)      # ★서버가 말한 값이 우리 곱보다 앞선다
