@@ -41,6 +41,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -82,12 +83,16 @@ def http_get(url: str, timeout: float = 20.0) -> tuple[int | None, Any]:
     """GET 한 번. (상태, 본문) — 본문은 JSON 이면 객체, 아니면 문자열. 연결 실패는 (None, 사유)."""
     req = urllib.request.Request(url, method="GET",
                                  headers={"Accept": "application/json", "User-Agent": USER_AGENT})
+    # ★본문 읽기 실패(IncompleteRead 등)도 실패 결과로 바꾼다 — 예외로 죽으면 앞서 모은 경보까지 버려진다(impl codex).
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             status, raw = r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        status, raw = e.code, e.read().decode("utf-8", "replace")
-    except (urllib.error.URLError, OSError, ValueError) as e:
+        try:
+            status, raw = e.code, e.read().decode("utf-8", "replace")
+        except (OSError, ValueError, http.client.HTTPException) as e2:
+            return None, "%s: %s" % (type(e2).__name__, str(e2)[:200])
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
         return None, "%s: %s" % (type(e).__name__, str(e)[:200])
     try:
         return status, json.loads(raw)
@@ -195,7 +200,11 @@ def scan_room(fetch: Fetch, base: str, room: str, pid: str, rep: dict) -> list[d
             if who == pid:
                 ours.append({"room": room, "event_id": it.get("event_id"), "created_at": it.get("created_at"),
                              "message_id": mid, "hash": h})
-        nxt = body.get("next_cursor")
+        # ★칸 **누락**은 마지막 쪽이 아니다 — 명시적 null 만 끝으로 인정한다(impl codex).
+        if "next_cursor" not in body:
+            rep["incomplete"].append({"reason": "cursor_missing", "relay": base, "room": room})
+            return ours
+        nxt = body["next_cursor"]
         if nxt is None:
             return ours
         if not isinstance(nxt, str) or nxt == cursor:

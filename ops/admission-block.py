@@ -24,7 +24,7 @@
        (시험 릴레이는 「id 행 0 · 지문 행 0」이라 오타를 못 거른다 · 한 글자 오타 = 불가역 헛차단 + id PK 선점).
      + 시험 릴레이에서 registered 모양(원격 실측용 임시 참가자)은 id 머리 `adm-t` 만 허용.
   3. 실행 — INSERT INTO admission_blocks(…) VALUES (id, 지문, 지금, 'retired')
-  종료 코드: 0 실행·대조 성공(또는 이미 차단) · 10 계획만(쓰기 0) · 3 중단(쓰기 0) · 4 쓰기 뒤 대조 불일치 ·
+  종료 코드: 0 실행·대조 성공 · 11 이미 차단(쓰지 않음·대조 없음) · 10 계획만(쓰기 0) · 3 중단(쓰기 0) · 4 쓰기 뒤 대조 불일치 ·
             5 쓰기 뒤 대조 미완 · 6 쓰기 결과 불명(재실행으로 확인).
   4. 사후 대조 — 실행 전에 있던 명부·체크포인트 행이 **그대로**다(새 행은 동시 등록일 수 있어 따로 표시) ·
      (--relay-url 은 대상별 고정 주소만) GET /participants/* 세 파일 바이트 동일(캐시 우회). 쓰기 뒤 대조가 실패하면
@@ -196,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
                          "시험 릴레이의 원격 실측(T16)에서 임시 참가자(id 머리 adm-t)를 막을 때만 registered")
     ap.add_argument("--not-ours", action="store_true",
                     help="우리 신원이 아닌 id·지문을 막는다(시험·일반 참가자) — 없으면 입력이 우리 신원과 맞아야 한다")
+    ap.add_argument("--test-interpose-sql", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--without-identity-file", action="store_true",
                     help="상주 신원 파일 없이 진행(겹침·상주 검사 0 — 사람이 따로 대조했을 때만)")
     a = ap.parse_args(argv)
@@ -214,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
             raise Stop("participant 형식이 아니다")
         if not (a.fingerprint and FP_RE.fullmatch(a.fingerprint)):
             raise Stop("fingerprint 형식이 아니다(SHA256:+43자)")
+        if a.test_interpose_sql is not None and not a.local:
+            raise Stop("--test-interpose-sql 은 --local 시험 전용이다")
         if a.blocked_at is not None and not (a.local and ISO_MS_RE.fullmatch(a.blocked_at)):
             raise Stop("--blocked-at 은 --local 시험 전용이고 밀리초 ISO(Z) 여야 한다")
         want_url = TARGETS[a.target][4]
@@ -243,8 +246,9 @@ def main(argv: list[str] | None = None) -> int:
         if already:
             if len(already) == 1 and already[0]["participant_id"] == a.participant \
                     and already[0]["fingerprint"] == a.fingerprint:
-                print("이미 차단돼 있다(%s) — 할 일 없음" % already[0]["blocked_at"])
-                return 0
+                # ★rc 0 이 아니다 — 재실행 「성공」은 이전 실행의 대조 실패(4·5·6)가 풀렸다는 증거가 아니다(impl codex).
+                print("이미 차단돼 있다(%s) — 쓰지 않음 · 이전 실행의 사후 대조를 대신하지 않는다(rc 11)" % already[0]["blocked_at"])
+                return 11
             raise Stop("차단 표에 이 id·지문과 **엇갈린** 행이 있다: %s" % already)
         by_id = run("SELECT participant_id, fingerprint, revoked_at, is_operator FROM participants"
                     " WHERE participant_id = %s" % q(a.participant))
@@ -268,32 +272,49 @@ def main(argv: list[str] | None = None) -> int:
         p0, c0 = rows_of(run)
         files0 = relay_files(a.relay_url) if a.relay_url else None
         blocked_at = a.blocked_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-        sql = ("INSERT INTO admission_blocks (participant_id, fingerprint, blocked_at, reason) VALUES (%s, %s, %s, 'retired')"
-               % (q(a.participant), q(a.fingerprint), q(blocked_at)))
+        # ★사전 확인의 모양 조건을 **같은 INSERT 문 안에서** 다시 건다(원자적 조건부 INSERT · impl codex HIGH).
+        #   사전 SELECT 와 INSERT 사이에 누가 이 키로 다른 이름을 등록하면 행이 0 이 되고, 아래 재조회가 그것을 잡는다
+        #   (등록 트리거는 차단 커밋 **뒤**의 등록만 막으므로, 그 사이에 들어온 이름은 이 조건만이 막는다).
+        if shape == "registered":
+            cond = ("EXISTS (SELECT 1 FROM participants WHERE participant_id = %s AND fingerprint = %s AND revoked_at IS NULL)"
+                    " AND NOT EXISTS (SELECT 1 FROM participants WHERE fingerprint = %s AND participant_id != %s)"
+                    % (q(a.participant), q(a.fingerprint), q(a.fingerprint), q(a.participant)))
+        else:
+            cond = ("NOT EXISTS (SELECT 1 FROM participants WHERE participant_id = %s OR fingerprint = %s)"
+                    % (q(a.participant), q(a.fingerprint)))
+        sql = ("INSERT INTO admission_blocks (participant_id, fingerprint, blocked_at, reason) SELECT %s, %s, %s, 'retired'"
+               " WHERE %s" % (q(a.participant), q(a.fingerprint), q(blocked_at), cond))
         if not a.execute:
             print("계획만 — 쓰지 않았다(rc 10): " + sql)
             print("실행 전 명부 %d행 · 체크포인트 %d행" % (len(p0), len(c0)))
             return 10          # ★계획은 0 이 아니다 — --execute 를 빠뜨린 호출을 성공으로 읽지 않게(impl-r2 agy 1)
+        if a.test_interpose_sql:
+            run(a.test_interpose_sql)      # (--local 시험 전용) 사전 확인과 INSERT 사이에 끼어드는 쓰기를 재현한다
         print("실행 SQL: " + sql)
         attempted = True       # ★run 앞에 세운다 — 원격이 커밋한 뒤 CLI 가 실패해도 「안 썼다」고 말하지 않게(impl-r2 Fable 2)
         run(sql)
         written = True
         got = run("SELECT blocked_at FROM admission_blocks WHERE participant_id = %s AND fingerprint = %s"
                   % (q(a.participant), q(a.fingerprint)))
+        if not got:
+            written = attempted = False    # 0행이 확정됐다 — 「결과 불명」이 아니라 「안 썼다」
+            raise Stop("조건부 INSERT 가 0행 — 사전 확인 뒤 모양이 바뀌었다(누가 이 id·키로 등록했을 수 있다) · 경보 · 사전 확인부터 다시")
         p1, c1 = rows_of(run)
         kept = p0 <= p1 and c0 <= c1
         new_rows = len(p1 - p0) + len(c1 - c0)
         files1 = relay_files(a.relay_url) if a.relay_url else None
-        # 새 행(동시 등록)이 있으면 명부 파일이 달라지는 것은 예상된 차이다 — 거짓 경보로 세지 않고 따로 말한다(impl-r2 Fable 5).
-        same_files = files1 == files0 or (new_rows > 0 and files0 is not None)
+        same_files = files1 == files0
         print("실행: 차단 행 %s · 기존 명부·체크포인트 행 %s%s%s"
               % ("있음(%s)" % got[0]["blocked_at"] if got else "★없음",
                  "그대로" if kept else "★바뀜",
                  " · 새 행 %d(동시 등록 가능 — 차단과 무관한지 확인)" % new_rows if new_rows else "",
-                 "" if files0 is None else " · 명부 세 파일 " + ("동일" if files1 == files0 else
-                                                              "다름(새 행 때문 — 사람 확인)" if same_files else "★달라짐")))
+                 "" if files0 is None else " · 명부 세 파일 " + ("동일" if same_files else "★달라짐")))
         print("⚠이 D1 하나의 결과다 — 두 D1(본·시험) 모두 끝나기 전에는 「차단 완료」라고 보고하지 않는다(§5-3-5).")
-        return 0 if (got and kept and same_files) else 4
+        if kept and not same_files and new_rows:
+            # 동시 등록이 있으면 파일 차이의 원인을 이 스크립트가 가를 수 없다 — 성공이라 하지 않고 「대조 미완」(impl codex MED).
+            print("동시 등록 %d행 때문에 명부 파일 대조를 끝내지 못했다 — 사람이 새 행·파일 차이를 대조한다(rc 5)" % new_rows)
+            return 5
+        return 0 if (kept and same_files) else 4
     except Stop as e:
         if written:
             print("차단 행은 썼다 · 사후 대조 미완: %s" % e)

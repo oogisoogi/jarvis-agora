@@ -250,7 +250,7 @@ def phase_main(base, persist, wdir):
     rc, out = ops_block(persist, base, "op2", K["op2"]["fingerprint"])
     record("스크립트: 마지막 현역 운영자 = 중단(3)", 3, rc, out.strip().splitlines()[-1][:60])
     rc, out = ops_block(persist, base, "alice", K["alice"]["fingerprint"], "--execute")
-    record("스크립트: 이미 차단 = 0(할 일 없음)", 0, rc, out.strip().splitlines()[-1][:40])
+    record("스크립트: 이미 차단 = 11(쓰지 않음 · 대조를 대신하지 않음)", 11, rc, out.strip().splitlines()[-1][:40])
     # 행 없는 id(시험 릴레이 모양 · --shape absent)
     rc, out = ops_block(persist, base, "ghost", K["ghost"]["fingerprint"], "--shape", "absent", "--execute")
     record("스크립트: 행 없는 id 차단(--shape absent) = 0", 0, rc)
@@ -319,6 +319,25 @@ def phase_main(base, persist, wdir):
     code, hb = http("GET", base + "/home?participant=bob")
     record("T11 대조군 bob notify 에 retired 없음", False, any(n.get("kind") == "retired" for n in hb.get("notify") or []))
 
+    # ★명부를 바꾸는 시험이라 과거 불변(T1·T3) 대조 **뒤**, 최종 사진 **앞**에 둔다.
+    # [impl codex HIGH] 사전 확인과 INSERT 사이에 같은 키로 다른 이름이 등록되면 조건부 INSERT 가 0행 → 중단 · 행 0
+    g3 = keygen(wdir, "ghost3")
+    late = ("INSERT INTO participants (participant_id, display_name, key_type, key_b64, fingerprint, is_operator,"
+            " revoked_at, created_at) VALUES ('squatter','s','ssh-ed25519','AAAA','%s',0,NULL,'t')" % g3["fingerprint"])
+    rc, out = ops_block(persist, base, "ghost3", g3["fingerprint"], "--shape", "absent", "--execute",
+                        "--test-interpose-sql", late)
+    record("스크립트: 사전 확인 뒤 끼어든 등록 = 중단(3) · 0행 사유", (3, True), (rc, "0행" in out),
+           out.strip().splitlines()[-1][:50])
+    record("스크립트: 끼어든 등록 뒤 차단 행 0", 0,
+           count("SELECT COUNT(*) AS n FROM admission_blocks WHERE participant_id='ghost3'", persist))
+    # [impl codex MED] 동시 등록(새 행)이 있으면 명부 파일 차이를 성공으로 덮지 않는다 = 대조 미완(5)
+    g4 = keygen(wdir, "ghost4")
+    late2 = ("INSERT INTO participants (participant_id, display_name, key_type, key_b64, fingerprint, is_operator,"
+             " revoked_at, created_at) VALUES ('newcomer','n','ssh-ed25519','%s','SHA256:%s',0,NULL,'t')"
+             % (g4["pub"].split()[1], "C" * 43))
+    rc, out = ops_block(persist, base, "ghost4", g4["fingerprint"], "--shape", "absent", "--execute",
+                        "--test-interpose-sql", late2)
+    record("스크립트: 동시 등록으로 명부 파일이 바뀜 = 대조 미완(5)", 5, rc, out.strip().splitlines()[-1][:50])
     print("== 최종 사진(뒤 단계의 기준) ==")
     final = snap(base, rooms, (allowed, revoked, w["ops"]), with_clients=False)
     state = {"rooms": rooms, "final": final, "keys": {k: v for k, v in K.items()},

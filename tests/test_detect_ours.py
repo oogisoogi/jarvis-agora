@@ -208,6 +208,42 @@ def test_cursor_stuck_is_incomplete():
     assert "cursor_stuck" in reasons(rep)
 
 
+def test_cursor_field_missing_is_incomplete():
+    """[impl codex] next_cursor 칸 누락을 마지막 쪽으로 읽지 않는다 — 다음 쪽의 우리 글을 놓친다."""
+    r = Relay()
+    for _ in range(150):
+        r.add("a" * 32, ev("bob", "a" * 32))
+    orig = r.__call__
+
+    def drop(url, _orig=orig):
+        st, body = _orig(url)
+        if isinstance(body, dict) and "items" in body:
+            body = {k: v for k, v in body.items() if k != "next_cursor"}
+        return st, body
+    tmp, cfg, log, conf = setup([])
+    rep = d.run(fetch=drop, config_dir=cfg, main_url=None, trial_url=None, trial_log=log, trial_config=conf)
+    assert reasons(rep) == ["cursor_missing"], rep
+
+
+def test_http_get_incomplete_read_is_failure_not_crash():
+    """[impl codex] 본문 읽기 실패(IncompleteRead)가 예외로 새지 않고 (None, 사유)가 된다."""
+    import http.client
+    import urllib.request as ur
+
+    class Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): raise http.client.IncompleteRead(b"x", 10)
+    real = ur.urlopen
+    ur.urlopen = lambda *a, **k: Resp()
+    try:
+        st, why = d.http_get("https://x.example/y")
+    finally:
+        ur.urlopen = real
+    assert st is None and "IncompleteRead" in why
+
+
 def test_ledger_missing_is_incomplete():
     r = Relay()
     tmp, cfg, log, conf = setup([], ledger=False)
