@@ -1,6 +1,6 @@
 # HANDOFF-impl — TICKET=agora-admission-block-0929 인계
 
-worker-agoraimpl@surface:1155 · 작업트리 `~/axdev/.wt/agora-admission`(갈래 `feat/admission-block-0929` · 기반 `agora/v2-mvp` 53b21a8 + 설계 3커밋) · 갱신 2026-09-29 21:0x
+worker-agoraimpl@surface:1155 · 작업트리 `~/axdev/.wt/agora-admission`(갈래 `feat/admission-block-0929` · 기반 `agora/v2-mvp` 53b21a8 + 설계 3커밋) · 갱신 2026-09-29 21:4x
 todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 
 ## 끝난 것
@@ -16,11 +16,10 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 | 성찰 1단계분 | efd6e93 | REFLECTION-impl-s1.md |
 
 ## 미완(다음 사람이 이어서)
-1. 적대 검증 r1 — agy·Fable 가동(21:0x · 스냅숏 = 스크래치 `review-r1` detached 3da596a · 프롬프트 = 스크래치 `review-prompt-r1.md` · agy 는 도구 권한 막혀 **첨부 전문 방식**으로 재기동). 결과 → 처분표 `DISPOSITION-impl-r1.md` → 반영 → 필요 시 r2(최대 3R).
-2. codex 최종 코드 1라운드 — **호출 직전 master 인박스 「【순서 요청】 codex 1회」 → 답 받고** `codex exec … </dev/null`(주간 90% · 순서 ② · 한도 문구 실패면 재시도 금지·보고).
-3. 9단계 성찰(완료 전) = `REFLECTION-impl-s2.md` · 정밀 디버깅 계수.
-4. 【확인요청】(머리 3줄 = 성찰·검증·디버깅) → 승인 뒤 3단계 RUNBOOK 3-0~3-8(단계마다 【실행직전확인요청】).
-5. 4단계 = 원고만(RUNBOOK §4) — 본 릴레이 적용·배포는 master 판단.
+1. 적대 검증 r1(agy BLOCK·Fable REVISE)·r2(agy BLOCK·Fable REVISE) 처분 반영 완료 — `DISPOSITION-impl-r1.md`·`-r2.md` · 원문 `REVIEW-impl-*`.
+2. codex 최종 코드 1라운드 — **호출 직전 master 인박스 「【순서 요청】 codex 1회」 → 답 받고** `codex exec … </dev/null`(스크래치 detached 스냅숏 · 프롬프트 초안 = 스크래치 `review-prompt-codex.md` · 한도 문구 실패면 재시도 금지·보고).
+3. 【확인요청】(머리 3줄 = 성찰·검증·디버깅) → 승인 뒤 3단계 RUNBOOK 3-0b~3-8(단계마다 【실행직전확인요청】 · 3-7b 는 master 선택).
+4. 4단계 = 원고만(RUNBOOK §4) — 본 릴레이 적용·배포는 master 판단.
 
 ## 함정
 - ⚠launchd 탐지 작업이 **이 작업트리의 파일을 직접** 돈다 — `tools/detect_ours.py` 표적 변이는 제자리 수정 금지(사본에서). 갈래 병합·작업트리 삭제 시 경로 옮겨 재설치(master TODO).
@@ -28,7 +27,9 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 - ⚠로컬 시험은 `relay/.wrangler/state` 한 폴더를 공유 — run-admission 과 run-local 을 **동시에 돌리지 말 것**(같은 포트 8797/8787 은 달라도 D1 파일 공유).
 - ⚠워커는 master 표식 모양(대괄호+master#)을 어디에도 쓰지 않는다 — 승인 인용은 「nonce xxxxxxxx」 로.
 - A8(등록 앱 검사에서 지문 조건 제거) = 트리거가 같은 403 을 내 바깥에서 구별 불가한 **등가 변이** — 결함 아님.
-- T14 서버 층 「0001+데이터 → 0002」 는 SQL 층(test_admission_sql)만 재었다 · 로컬 서버 DB 는 0001·0002 동시 적용분.
+- T14 = SQL 층 + 서버 층(run-admission `--only upgrade` · 옛 코드+0001+데이터 → 0002 → 새 코드 · 13방 불변).
+- 운영 스크립트 종료 코드: 0 성공 · 10 계획만 · 3 중단 · 4 대조 불일치 · 5 대조 미완 · 6 쓰기 결과 불명.
+- 탐지기 꺼짐 확인 = 404 + 1042(글 또는 JSON) 만 — Cloudflare 가 Accept 에 따라 모양을 바꾼다(실측).
 
 ## 재현
 ```sh
