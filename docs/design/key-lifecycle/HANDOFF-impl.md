@@ -1,6 +1,6 @@
 # HANDOFF-impl — TICKET=agora-admission-block-0929 인계
 
-worker-agoraimpl@surface:1155 · 작업트리 `~/axdev/.wt/agora-admission`(갈래 `feat/admission-block-0929` · 기반 `agora/v2-mvp` 53b21a8 + 설계 3커밋) · 갱신 2026-09-29 21:4x
+worker-agoraimpl@surface:1155 · 작업트리 `~/axdev/.wt/agora-admission`(갈래 `feat/admission-block-0929` · 기반 `agora/v2-mvp` 53b21a8 + 설계 3커밋) · 갱신 2026-09-29 21:5x
 todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 
 ## 끝난 것
@@ -15,11 +15,13 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 | 원격 원고·계약 초안 | fb8b9e0 | RUNBOOK-admission.md · DRAFT-contract-admission.md |
 | 성찰 1단계분 | efd6e93 | REFLECTION-impl-s1.md |
 
-## 미완(다음 사람이 이어서)
-1. 적대 검증 r1(agy BLOCK·Fable REVISE)·r2(agy BLOCK·Fable REVISE) 처분 반영 완료 — `DISPOSITION-impl-r1.md`·`-r2.md` · 원문 `REVIEW-impl-*`.
-2. codex 최종 1R 완료(BLOCK · HIGH 1 · MED 4) → 반영 3a244f6 · `DISPOSITION-impl-codex.md` — codex 반영분 재검증 없음(주간 한도).
-3. 【확인요청】(머리 3줄 = 성찰·검증·디버깅) → 승인 뒤 3단계 RUNBOOK 3-0b~3-8(단계마다 【실행직전확인요청】 · 3-7b 는 master 선택).
-4. 4단계 = 원고만(RUNBOOK §4) — 본 릴레이 적용·배포는 master 판단.
+## 미완(다음 사람이 이어서) — 갱신 21:5x · 머리 68aba22 이후
+0. **이 순환 사유** = CTX 60% 매듭선(r3 반영 뒤) — master 판정 nonce d071dd16 ④ 「r3 끝났을 때 60% 이상이면 3단계 들어가지 말고 매듭 → 후임이 3단계」.
+1. (선택·권고) Fable 표적 r4 1회 — R1·R2 반영분(68aba22)만(`DISPOSITION-impl-r3.md`). 4단계 전제(두 검토자 ACCEPT)를 채우는 데 필요.
+2. **3단계 = master 가 묶음 승인해 둠(nonce d071dd16 ③)** — RUNBOOK 3-0b → 3-0 → 3-1 → 3-2 → 3-3(①~⑤) → 3-4 → 3-5 → 3-6 → 3-7 → **3-7b(결정2 = 한다)** → 되돌림(3-8)까지 단계마다 묻지 않고 진행. 조건:
+   ⑴ 대상 = agora-relay-next 만 · 본 릴레이 접촉 0 ⑵ 배포마다 `--config <절대경로>` + name 게이트(파이썬 정규식 — BSD sed 는 `\s` 를 몰라 게이트가 거짓 실패한다) ⑶ 어느 단계든 RUNBOOK 기대값과 다르면 즉시 멈추고 **공개 주소 꺼진 상태로 되돌린 뒤** 보고 ⑷ 3-7b 경합 사본은 떠 있는 시간 최소 · 끝나면 즉시 원래 코드 + workers_dev:false 배포 · **두 배포의 Version id 기록** ⑸ 끝 = /health 404(1042) · 시험 D1 상태 실측(차단 행·임시 참가자·체크포인트 잔여) · 되돌리기 경로 기록 → 【확인요청】.
+   ⚠3-5·3-6 에서 `relay/wrangler.next.jsonc` 를 true 로 바꾸면 **이 작업트리를 읽는 launchd 탐지기**가 운영 기록(verifying)과 함께 보므로, 설정 변경과 `ops/trial-relay-state.jsonl` 한 줄을 **같이** 한다(아니면 불완전 경보 · 2회 연속이면 master 인박스).
+3. 4단계 = 원고만(RUNBOOK §4) · 전제 = master 게이트 + (codex 재확인 또는 표적 두 검토자 ACCEPT + master 대조).
 
 ## 함정
 - ⚠launchd 탐지 작업이 **이 작업트리의 파일을 직접** 돈다 — `tools/detect_ours.py` 표적 변이는 제자리 수정 금지(사본에서). 갈래 병합·작업트리 삭제 시 경로 옮겨 재설치(master TODO).
