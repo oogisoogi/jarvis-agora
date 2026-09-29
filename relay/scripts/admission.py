@@ -365,12 +365,45 @@ def phase_race(base, persist, wdir):
     record("T12 체크포인트 경합(UPSERT 의 UPDATE 경로): 트리거 → 403", (403, "retired"), (code, detail(body, "why")))
 
 
+# ── 단계 upgrade(T14 서버 층) ─────────────────────────────────────────────────
+def phase_upgrade(base, persist, tw, when):
+    # ★방 목록은 **원장에서** 뽑는다 — /rooms 는 캐시라 3자 대조의 「캐시 삭제 → 자가치유」 시험 뒤엔 한 방만 남는다.
+    ledger_rooms = d1("SELECT thread_id, MAX(CASE WHEN is_genesis = 1 THEN title END) AS title FROM events"
+                      " GROUP BY thread_id", persist)
+    rooms = {r["thread_id"]: r["thread_id"] for r in ledger_rooms}
+    shot = snap(base, rooms, None, with_clients=False)
+    path = os.path.join(tw, "upgrade-before.json")
+    if when == "before":
+        record("측정 전제: 옛 코드 + 0001 DB 에 방이 있다", True, len(rooms) >= 5, "%d개" % len(rooms))
+        json.dump({"shot": shot, "titles": {r["thread_id"]: r["title"] for r in ledger_rooms}},
+                  open(path, "w"), ensure_ascii=False)
+        return
+    prev = json.load(open(path, encoding="utf-8"))
+    objs = [r["name"] for r in d1("SELECT name FROM sqlite_master WHERE name LIKE '%admission%' AND type IN ('table','trigger')", persist)]
+    record("T14 0002 적용 뒤 표 1·트리거 4", 5, len(objs))
+    same = [n for n in prev["shot"]["rooms"] if prev["shot"]["rooms"][n] == shot["rooms"].get(n)]
+    record("T14 업그레이드·코드 교체 뒤 전 방 상태·이벤트 판정 동일", len(prev["shot"]["rooms"]), len(same))
+    record("T14 명부 세 파일·체크포인트 동일", True, prev["shot"]["files"] == shot["files"])
+    w = {"dir": tw, "allowed": os.path.join(tw, "allowed_signers"), "revoked": os.path.join(tw, "revoked_keys"),
+         "ops": ["operator"]}
+    bob = keygen(tw, "bob")
+    target = [rid for rid, t in prev["titles"].items() if t == "일반 토론"]
+    record("측정 전제: 열린 일반 토론방이 있다", 1, len(target))
+    (code, body), _, _ = post_next(base, target[0], "debate", w, bob, "post", {"round": 0, "body": "업그레이드 뒤 새 글"})
+    record("T14 기존 참가자 새 글 = 201 accepted", (201, "accepted"), (code, (body.get("verdict") or {}).get("reducer")))
+    code, _ = register(base, keygen(tw, "upgnew"), tw)
+    record("T14 새 등록 = 201", 201, code)
+    code, h = http("GET", base + "/home?participant=bob")
+    record("T14 /home = 200 · retired 없음", (200, False),
+           (code, any(n.get("kind") == "retired" for n in (h.get("notify") or []))))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True)
     ap.add_argument("--persist", required=True)
     ap.add_argument("--workdir", required=True)
-    ap.add_argument("--phase", required=True, choices=("main", "mutant", "old", "race"))
+    ap.add_argument("--phase", required=True, choices=("main", "mutant", "old", "race", "upgrade-before", "upgrade-after"))
     ap.add_argument("--label", default="")
     a = ap.parse_args()
     os.makedirs(a.workdir, exist_ok=True)
@@ -379,7 +412,9 @@ def main():
     {"main": lambda: phase_main(a.base, a.persist, a.workdir),
      "mutant": lambda: phase_mutant(a.base, a.persist, a.workdir, a.label),
      "old": lambda: phase_old(a.base, a.persist, a.workdir),
-     "race": lambda: phase_race(a.base, a.persist, a.workdir)}[a.phase]()
+     "race": lambda: phase_race(a.base, a.persist, a.workdir),
+     "upgrade-before": lambda: phase_upgrade(a.base, a.persist, a.workdir, "before"),
+     "upgrade-after": lambda: phase_upgrade(a.base, a.persist, a.workdir, "after")}[a.phase]()
     ok = all(CHECKS)
     print("== 단계 %s %s: %s (%d/%d) ==" % (a.phase, a.label, "PASS" if ok else "FAIL", sum(CHECKS), len(CHECKS)))
     return 0 if ok else 1

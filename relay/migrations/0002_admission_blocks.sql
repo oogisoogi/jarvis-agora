@@ -5,6 +5,7 @@
 --   이 표를 읽지 않는다 — 읽게 만들면 그 방 전원의 쓰기가 멈춘다(설계 §1-3 경계 · 시험 T8·T13).
 -- ★트리거가 최종 집행이다: 앱 층 검사와 INSERT 사이의 경합을 닫고, 코드를 옛 판으로 되돌려도 차단이 남는다.
 -- ★차단은 되돌리지 않는다(계약). 기술적 되돌림 = 행 삭제(master).
+-- ★RAISE 문자열 'agora:admission_blocked' 의 짝 = relay/src/lib/admission.ts ADMISSION_MARK(포함 비교).
 
 CREATE TABLE IF NOT EXISTS admission_blocks (
   participant_id TEXT PRIMARY KEY,

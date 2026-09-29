@@ -80,8 +80,9 @@ def make_copy(dest: str, commit: str | None) -> str:
         shutil.rmtree(dest)
     os.makedirs(dest)
     if commit:
-        tar = subprocess.run(["git", "archive", commit, "relay/src", "relay/wrangler.jsonc", "relay/tsconfig.json",
-                              "relay/package.json", "config"], cwd=ROOT, capture_output=True, check=True).stdout
+        tar = subprocess.run(["git", "archive", commit, "relay/src", "relay/migrations", "relay/wrangler.jsonc",
+                              "relay/tsconfig.json", "relay/package.json", "config"],
+                             cwd=ROOT, capture_output=True, check=True).stdout
         subprocess.run(["tar", "-x", "-C", dest], input=tar, check=True)
     else:
         os.makedirs(os.path.join(dest, "relay"))
@@ -117,11 +118,11 @@ def wait_ready(proc, deadline_s=120):
     return False
 
 
-def with_server(relay_dir: str, fn, log_name: str) -> int:
+def with_server(relay_dir: str, fn, log_name: str, persist: str = PERSIST) -> int:
     log_path = os.path.join(tempfile.gettempdir(), "agora-admission-%s.log" % log_name)
     log = open(log_path, "w")
     proc = subprocess.Popen([os.path.join(RELAY, "node_modules/.bin/wrangler"), "dev", "--local",
-                             "--port", str(PORT), "--ip", "127.0.0.1", "--persist-to", PERSIST,
+                             "--port", str(PORT), "--ip", "127.0.0.1", "--persist-to", persist,
                              "--config", os.path.join(relay_dir, "wrangler.jsonc")],
                             cwd=relay_dir, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                             env=ENV, start_new_session=True)
@@ -143,16 +144,45 @@ def with_server(relay_dir: str, fn, log_name: str) -> int:
         log.close()
 
 
-def harness(phase: str, workdir: str, label: str = "") -> int:
+def harness(phase: str, workdir: str, label: str = "", persist: str = PERSIST) -> int:
     return subprocess.run([sys.executable, os.path.join(HERE, "admission.py"), "--base", BASE,
-                           "--persist", PERSIST, "--workdir", workdir, "--phase", phase, "--label", label],
+                           "--persist", persist, "--workdir", workdir, "--phase", phase, "--label", label],
                           cwd=ROOT, env=ENV).returncode
+
+
+def migrate(relay_dir: str, persist: str) -> str:
+    r = subprocess.run([os.path.join(RELAY, "node_modules/.bin/wrangler"), "d1", "migrations", "apply", "agora-relay",
+                        "--local", "--persist-to", persist, "--config", os.path.join(relay_dir, "wrangler.jsonc")],
+                       cwd=relay_dir, capture_output=True, text=True, env=ENV)
+    if r.returncode != 0:
+        raise SystemExit("마이그레이션 실패: " + (r.stdout + r.stderr)[-600:])
+    return r.stdout
+
+
+def upgrade(workdir: str) -> int:
+    """T14 서버 층 — 옛 코드 + 0001 DB 에 데이터(3자 대조 한 바퀴) → 0002 적용 → 새 코드로 과거 불변·새 쓰기."""
+    persist = os.path.join(workdir, "upgrade-state")
+    if os.path.exists(persist):
+        shutil.rmtree(persist)
+    old = make_copy(os.path.join(workdir, "copies", "upgrade-old"), OLD_COMMIT)
+    print(migrate(old, persist)[-300:])
+    tw = os.path.join(workdir, "upgrade-3way")
+    rc = with_server(old, lambda: subprocess.run([sys.executable, os.path.join(HERE, "threeway.py"), "--base", BASE,
+                                                  "--workdir", tw], cwd=RELAY,
+                                                 env=dict(ENV, AGORA_PERSIST_TO=persist)).returncode,
+                     "upgrade-old", persist)
+    if rc != 0:
+        print("옛 코드 + 0001 위 3자 대조 실패 — 업그레이드 전제가 안 섰다")
+        return 1
+    with_server(old, lambda: harness("upgrade-before", tw, "", persist), "upgrade-snap", persist)
+    print(migrate(RELAY, persist)[-300:])
+    return with_server(RELAY, lambda: harness("upgrade-after", tw, "", persist), "upgrade-new", persist)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", default=os.path.join(tempfile.gettempdir(), "agora-admission"))
-    ap.add_argument("--only", choices=("main", "mutant", "old", "race"), default=None)
+    ap.add_argument("--only", choices=("main", "mutant", "old", "race", "upgrade"), default=None)
     ap.add_argument("--app-mutation", choices=sorted(APP_MUTATIONS), default=None,
                     help="앱 층 변이 하나를 사본에 넣고 main·race 를 돌린다 — 적색이어야(rc≠0) 그물이 산 것이다")
     a = ap.parse_args()
@@ -191,6 +221,8 @@ def main() -> int:
         d = make_copy(os.path.join(copies, "race"), None)
         patch(d, RACE)
         results.append(("race", with_server(d, lambda: harness("race", a.workdir), "race")))
+    if a.only in (None, "upgrade"):
+        results.append(("upgrade(T14 서버 층)", upgrade(a.workdir)))
     print("\n##### 종합 #####")
     for name, rc in results:
         print("  %-50s %s" % (name, "PASS" if rc == 0 else "FAIL(rc %d)" % rc))

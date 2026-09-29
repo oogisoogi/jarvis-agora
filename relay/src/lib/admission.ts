@@ -8,7 +8,8 @@
  * ★여기의 검사는 **친절한 응답**을 위한 것이고, 최종 집행은 DB 트리거다(경합·코드 롤백에도 남는다).
  */
 
-/** 트리거가 RAISE 하는 표식. D1 은 메시지를 감싸므로 **포함**으로 비교한다(같음 비교 금지 · r2 D2-5). */
+/** 트리거가 RAISE 하는 표식. D1 은 메시지를 감싸므로 **포함**으로 비교한다(같음 비교 금지 · r2 D2-5).
+ *  ★짝 = migrations/0002_admission_blocks.sql 의 RAISE 문자열 4곳 — 한쪽만 바꾸면 catch 가 500 으로 샌다(경합 시험 race 가 잡는다). */
 export const ADMISSION_MARK = "agora:admission_blocked";
 
 export interface AdmissionBlock {
