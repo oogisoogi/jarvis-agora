@@ -12,7 +12,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": true,
+  // ★평소엔 공개 주소를 끈다(DESIGN-v3 §3 선택 강화 · 박사님 승인 2026-09-29) — 시험할 때만 true 로 켜고,
+  //   켜기 전에 받아들이기 차단 행(우리 id+지문)을 먼저 넣는다(§7 단계 3). 켜고 끌 때마다 ops/trial-relay-state.jsonl 에 한 줄.
+  //   preview_urls 를 적지 않으면 버전별 미리보기 주소(<버전>-agora-relay-next.….workers.dev)의 켜짐 여부가
+  //   서버 기본값에 맡겨진다(wrangler 4.129 subdomainDeploy · previews_enabled 미지정) — 같이 끈다.
+  "workers_dev": false,
+  "preview_urls": false,
 
   "d1_databases": [
     {
