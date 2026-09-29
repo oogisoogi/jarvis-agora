@@ -293,12 +293,14 @@ def main(argv: list[str] | None = None) -> int:
         print("실행 SQL: " + sql)
         attempted = True       # ★run 앞에 세운다 — 원격이 커밋한 뒤 CLI 가 실패해도 「안 썼다」고 말하지 않게(impl-r2 Fable 2)
         run(sql)
-        written = True
+        # ★조건부 INSERT 는 「성공 = 행 있음」이 아니다 — written 은 재조회로 행을 확인한 **뒤**에 세운다.
+        #   INSERT 성공 ~ 재조회 사이의 실패는 attempted 로 rc 6(결과 불명)에 떨어진다(impl-r3 Fable 1).
         got = run("SELECT blocked_at FROM admission_blocks WHERE participant_id = %s AND fingerprint = %s"
                   % (q(a.participant), q(a.fingerprint)))
         if not got:
             written = attempted = False    # 0행이 확정됐다 — 「결과 불명」이 아니라 「안 썼다」
             raise Stop("조건부 INSERT 가 0행 — 사전 확인 뒤 모양이 바뀌었다(누가 이 id·키로 등록했을 수 있다) · 경보 · 사전 확인부터 다시")
+        written = True
         p1, c1 = rows_of(run)
         kept = p0 <= p1 and c0 <= c1
         new_rows = len(p1 - p0) + len(c1 - c0)

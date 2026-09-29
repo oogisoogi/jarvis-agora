@@ -2,6 +2,7 @@
 
 TICKET=agora-admission-block-0929 · worker-agoraimpl@surface:1155 · 2026-09-29 · 설계 = DESIGN-v3 §5-3 · §7 단계 3·4 · §8 T16·T18
 ⚠**원고다.** 아래 한 줄 한 줄이 원격 쓰기·배포다 — 각 단계마다 워커가 【실행직전확인요청】 → master 재승인(그 1건만) → 실행 → 사후 실측 보고.
+⚠`ops/admission-block.py` 종료 코드: **0** = 차단·대조 성공(기대값) · **11** = 이미 차단(쓰지 않음 — 이전 실행이 4·5·6 이었다면 그 대조를 사람이 손으로 끝낸다) · **10** = 계획만 · **3** = 중단(쓰기 0 · 「0행」 사유면 **경보 → 멈추고 【질문】**) · **4** = 쓰기 뒤 기존 행·파일 불일치(멈춤·보고) · **5** = 쓰기 뒤 대조 미완(동시 등록 포함 · 사람 대조) · **6** = 쓰기 결과 불명(같은 명령 재실행 → 11 이면 행 있음 · 0 이면 이번에 씀).
 ⚠wrangler 는 **`--config <절대경로>` 로만** 부른다(cwd 배포 금지) · 부르기 전 `name` 게이트 · `unset NODE_OPTIONS`.
 공통: `R=/Users/oogisoogi/axdev/.wt/agora-admission` · `W="$R/relay/node_modules/.bin/wrangler"` · 우리 id = `jarvis-jk1gn50iw7` · 우리 지문 = `SHA256:u9ywSzKEEc1yMrrtWidT/p2UlZYdtkae9EAXCVyWHJI`(공개값 · /home 이 돌려준다).
 
@@ -24,7 +25,7 @@ python3 -c 'import re,sys;print(re.findall(r"^\s*\"(name|database_id)\"\s*:\s*\"
 | 3-4 | 우리 id+지문 차단 행 | `python3 "$R/ops/admission-block.py" --target trial --remote --participant jarvis-jk1gn50iw7 --fingerprint SHA256:u9ywSzKEEc1yMrrtWidT/p2UlZYdtkae9EAXCVyWHJI`(계획) → `--execute` | 사전 확인 = id 행 0 · 지문 행 0(시험 릴레이 정상) · 「차단 행 있음 · 명부·체크포인트 표 동일」 |
 | 3-5 | 켜기 전 준비 | `python3 "$R/tools/build_next_trial.py" --next-url https://agora-relay-next.oogisoogi.workers.dev` · `wrangler.next.jsonc` 의 `"workers_dev": false` → `true`(preview_urls 는 false 유지) · `ops/trial-relay-state.jsonl` 에 `verifying` 한 줄 | — |
 | 3-6 | 켜서 배포(검증 중) | `$W deploy --config "$R/relay/wrangler.next.jsonc"` | `/health` 200 ok:true · 탐지기 = 시험 릴레이 id·지문 404(정상) |
-| 3-7 | **T16·T18 HTTP 실측** — 버림 키 2개(A·B · 스크래치에서 생성 · 저장소 밖) | A 등록 → A 가 토론방 genesis·post(201) → `admission-block --target trial --remote --not-ours --shape registered --participant adm-t18-a… --fingerprint <A 지문> --execute`(registered 는 `adm-t` 머리만) → A 새 글 = **401 code 4 why=retired** · A 재전송(차단 전 글) = 200 같은 event_id · 같은 message_id 다른 내용 = 422 · A 재등록 = 403 · B 지문을 `--not-ours`(모양 absent)로 차단 → **B 키로 다른 이름 등록 = 403 · 행 0(T18)** | 전부 기대대로 · 원격 D1 에서 `SELECT COUNT(*)` 로 행 0 확인 |
+| 3-7 | **T16·T18 HTTP 실측** — 버림 키 2개(A·B · 스크래치에서 생성 · 저장소 밖) | A 등록 → A 가 토론방 genesis·post(201) → `admission-block --target trial --remote --not-ours --shape registered --participant adm-t18-a… --fingerprint <A 지문> --execute`(registered 는 `adm-t` 머리만) → A 새 글 = **401 code 4 why=retired** · A 재전송(차단 전 글) = 200 같은 event_id · 같은 message_id 다른 내용 = 422 · A 재등록 = 403 · B 지문을 `--not-ours --participant adm-t18-b`(모양 absent)로 차단(3-7b 가 이 이름을 쓴다) → **B 키로 다른 이름 등록 = 403 · 행 0(T18)** | 전부 기대대로 · 원격 D1 에서 `SELECT COUNT(*)` 로 행 0 확인 |
 | 3-7b | **(권고 · master 선택) 바인딩 오류 통로 실측** — 앱 검사를 뺀 경합 창 사본(`relay/scripts/run-admission.py` 의 `RACE` 편집)을 시험 릴레이에 한 번 배포 | 사본 폴더에서 `$W deploy --config <사본>/relay/wrangler.next.jsonc`(name 게이트) → 차단된 adm-t18-a 새 글 · **등록은 행이 없는 차단 대상으로**(B 지문으로 막은 `adm-t18-b` 이름에 새 키 C · B 키로 다른 이름 `adm-t18-x` — 이미 등록된 A 의 재등록은 byId 같은 지문 분기에서 200 이라 catch 에 안 닿는다 · impl codex) | 새 글 = **401 why=retired**(= catch 가 원격 바인딩 오류에서 표식을 찾음) · 두 등록 = 403 · 참가자 행 0 · 500 이면 표식 모양이 다르다 → 멈춤·【질문】 · 끝나면 정상 코드로 재배포 · ⚠안 하면 「바인딩 오류 모양 = 원격 미실측」이 잔존한 채 4단계로 간다 |
 | 3-8 | 끄기 | `"workers_dev": true` → `false` · `$W deploy --config …` · `ops/trial-relay-state.jsonl` 에 `off` 한 줄 | `/health` = 404 error code 1042 · 미리보기 404 · 탐지기 「꺼짐 — 건너뜀」 |
 

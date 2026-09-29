@@ -330,6 +330,23 @@ def phase_main(base, persist, wdir):
            out.strip().splitlines()[-1][:50])
     record("스크립트: 끼어든 등록 뒤 차단 행 0", 0,
            count("SELECT COUNT(*) AS n FROM admission_blocks WHERE participant_id='ghost3'", persist))
+    # [impl-r3 Fable 2] 원자 조건의 나머지 갈래 — registered(같은 지문의 다른 이름 · 대상 폐기) · absent(같은 id 선점)
+    sql_p = ("INSERT INTO participants (participant_id, display_name, key_type, key_b64, fingerprint, is_operator,"
+             " revoked_at, created_at) VALUES ('%s','x','ssh-ed25519','AAAA','%s',0,NULL,'t')")
+    for n in ("reg1", "reg2"):
+        code, _ = register(base, keygen(wdir, n), wdir)
+        assert code == 201, (n, code)
+    k1, k2, g5 = keygen(wdir, "reg1"), keygen(wdir, "reg2"), keygen(wdir, "ghost5")
+    for label, pid, fp, shape, late in (
+            # (「같은 지문의 다른 이름」은 participants.fingerprint UNIQUE 라 DB 에 존재할 수 없다 — 그 조건절은 이중 방어)
+            ("registered + 대상 id 의 지문이 바뀜", "reg1", k1["fingerprint"], "registered",
+             "UPDATE participants SET fingerprint='SHA256:%s' WHERE participant_id='reg1'" % ("E" * 43)),
+            ("registered + 대상 폐기", "reg2", k2["fingerprint"], "registered",
+             "UPDATE participants SET revoked_at='t' WHERE participant_id='reg2'"),
+            ("absent + 같은 id 선점", "ghost5", g5["fingerprint"], "absent", sql_p % ("ghost5", "SHA256:" + "D" * 43))):
+        rc, out = ops_block(persist, base, pid, fp, "--shape", shape, "--execute", "--test-interpose-sql", late)
+        record("스크립트: 끼어들기(%s) = 중단(3) · 0행" % label, (3, True, 0),
+               (rc, "0행" in out, count("SELECT COUNT(*) AS n FROM admission_blocks WHERE participant_id='%s'" % pid, persist)))
     # [impl codex MED] 동시 등록(새 행)이 있으면 명부 파일 차이를 성공으로 덮지 않는다 = 대조 미완(5)
     g4 = keygen(wdir, "ghost4")
     late2 = ("INSERT INTO participants (participant_id, display_name, key_type, key_b64, fingerprint, is_operator,"
