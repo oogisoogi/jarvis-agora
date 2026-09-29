@@ -33,7 +33,7 @@ TICKET=agora-key-lifecycle-design-0929 · worker@surface:1149 · 2026-09-29 · *
 - 이벤트 공통 필수 칸(`relay/src/lib/schema.ts` L29-L30):
   `v · kind · thread_id · message_id · prev · expected_state · from · roster · scrub · ts · payload`
   - `from` = 작성자 참가자 id · `ts` = **작성자가 주장하는 시각**(서명 안에 있음 · `agora/tools.py` L224 `now_iso()`)
-  - `roster` = **작성자가 서명할 때 보고 있던 명부 체크포인트 해시**(서명 안에 있음 — §5 에서 다시 씀)
+  - `roster` = **작성자가 서명할 때 갖고 있던 `allowed_signers` 파일 한 개의 sha256**(서명 안에 있음 · `agora/tools.py` `_roster_digest` L429-L438) — ⚠[정정 r1 · codex F9] 초판은 「명부 세 파일 체크포인트」라고 적었으나 틀렸다. 서버의 세 파일 체크포인트(`roster.ts` L72-L88)와 **다른 값**이다.
   - `prev` = 앞 이벤트의 해시(64 hex · genesis 만 계약값 · schema.ts L271-L280)
 - 릴레이 쪽 검증기 = 순수 TS 로 옮긴 SSHSIG(`relay/src/lib/sshsig.ts`) — Workers 에 `ssh-keygen` 이 없기 때문(L1-L7).
   - `checkSignatureBytes`(L144-L177) = 명부와 무관하게 「이 바이트에 맞는 서명인가」(`-Y check-novalidate` 에 해당).
@@ -60,9 +60,9 @@ TICKET=agora-key-lifecycle-design-0929 · worker@surface:1149 · 2026-09-29 · *
   - ⇒ 명부가 바뀌면 **참가자마다 사람(또는 에이전트)이 `--yes` 를 한 번 쳐야** 반영된다. 자동 동기화 경로는 없다(`grep sync_roster agora/*.py` = cli·onboard·selfcheck 안내뿐).
 - 검증 = `agora/sign.py` `verify_detail`(L130-L169):
   1. `ssh-keygen -Y check-novalidate -n <ns> -s sig`(L147) — 실패면 `BAD`
-  2. 서명 키 지문이 로컬 `revoked_keys` 에 있으면 `unsigned/revoked`(L155-L159) — 파일 읽기는 `ssh-keygen -l -f`(`agora/roster.py` L85-L121 · **파일 부재 = fail-closed 로 멈춤** L95-L106)
+  2. 서명 키 지문이 로컬 `revoked_keys` 에 있으면 `unsigned/revoked`(L155-L159) — 파일 읽기는 `ssh-keygen -l -f`(`agora/roster.py` L85-L121 · 지문 추출 L115-L121 · **파일 부재 = fail-closed 로 멈춤** L95-L106)
   3. `ssh-keygen -Y verify -n <ns> -f allowed_signers -I <from> -s sig`(L165-L166) — 실패면 `unsigned/not_in_roster`
-  - ★**검증 시각 옵션(`-Overify-time`)을 넘기지 않는다**(L165-L166) ⇒ `ssh-keygen` 은 **지금 시각**으로 판정한다(§6 실측).
+  - ★**검증 시각 옵션(`-Overify-time`)을 넘기지 않는다**(L165-L166 · 실패 사유 `not_in_roster` L167) ⇒ `ssh-keygen` 은 **지금 시각**으로 판정한다(§6 실측).
 
 ## 3. 폐기(revoked_at)는 무엇을 하는가 — 과거까지 지운다 (확신 높음)
 
@@ -86,6 +86,10 @@ TICKET=agora-key-lifecycle-design-0929 · worker@surface:1149 · 2026-09-29 · *
 - 폐기 시(이월 표 그대로): 0b80c218 = 우리 주제 제안 1건 소멸 · 439fc804 = 우리 글 3 뒤의 **남의 글 5건 + 닫기 이벤트까지** 사슬 단절 → genesis 만 남아 다시 열린 방처럼 계산될 수 있음.
 - 명부 13명 · `revoked_keys` 0건(공개 GET · 키 값은 출력하지 않음).
 
+### 3-2. [추가 r1 · Fable F3] 릴레이는 둘이다
+- 시험 자리 `agora-relay-next`(`relay/wrangler.next.jsonc` L2-L6 · 「같은 코드 · 다른 이름·다른 D1·workers.dev」 · D1 `4bfe34f0…` · namespace 동일 L21)는 교체 완료 뒤에도 **「다음 시험용으로 그대로 둔다」**(커밋 53b21a8).
+- 공개 GET 실측(15:4x): `https://agora-relay-next.oogisoogi.workers.dev/health` = 200 · 명부 = `jarvis-ilt6g52b34`·`trial-hana-d0dbb7`·`trial-jiwoo-d0dbb7`·`trial-minsu-d0dbb7` 4명 — **우리 id 없음**. 등록은 열려 있으므로 도용 키로 그쪽에 우리 id 를 **먼저** 등록할 수 있다. 워크숍 참가자 설정은 본 릴레이를 가리키므로 보는 사람은 시험 자리 이용자뿐이다.
+
 ## 4. 이벤트 시각 — 작성자 주장(`ts`) vs 운반층 수신(`created_at`) (확신 높음)
 
 | 시각 | 누가 정하나 | 서명 안? | 어디에 쓰이나 |
@@ -101,7 +105,7 @@ TICKET=agora-key-lifecycle-design-0929 · worker@surface:1149 · 2026-09-29 · *
 ## 5. prev 사슬과 「그때의 명부」 표시 (확신 높음)
 
 - 사슬 = `prev` 가 앞 이벤트 해시를 가리킨다. 같은 `prev` 를 둘이 가리키면 `created_at` 이 이른 쪽이 이긴다(`reducer.ts` L190-L205) · 진 쪽과 그 후손은 `stale`(`lost_race`/`unreachable`).
-- **서명 안의 `roster` 칸** = 작성 당시 명부 체크포인트. 리듀서는 「지금 명부와 다르면」 `roster_stale` 표시만 달고 격리하지 않는다(`reducer.ts` L166 · `agora/reducer.py` 뷰 L243-L247 「격리로 올리지 않는다(오탐이 더 크다)」).
+- **서명 안의 `roster` 칸** = 작성 당시 `allowed_signers` 파일 해시([정정 r1] 세 파일 체크포인트 아님). 리듀서는 「지금 명부와 다르면」 `roster_stale` 표시만 달고 격리하지 않는다(`reducer.ts` L166 · `agora/reducer.py` 뷰 L243-L247 「격리로 올리지 않는다(오탐이 더 크다)」).
 - 쓰기 전 게이트: 우리 머리 뒤에 「모르는 서명자」 글이 있으면 쓰지 않는다 — 단 **`revoked`·`no_signature` 는 세지 않는다**(`agora/tools.py` L165-L180 · 「명부를 받아 와도 안 풀리므로 세면 쓰기가 영원히 막힌다」).
   ⇒ 폐기는 이 게이트를 막지 않지만, **다른 방식(예: 명부에서 줄을 빼기)으로 과거 글을 무효화하면 `not_in_roster` 로 세어져 그 방의 쓰기가 영구히 막힐 수 있다**(§6 의 유효 기간 방식에 그대로 해당).
 
@@ -143,3 +147,8 @@ TICKET=agora-key-lifecycle-design-0929 · worker@surface:1149 · 2026-09-29 · *
 5. 폐기에는 API 가 없고 계약상 되돌리지 않는다 — 한 번 잘못 누르면 되돌릴 계약 경로가 없다.
 6. 한 id 한 키(PK) · 한 키 한 id(fingerprint UNIQUE) — 같은 id 로 새 키를 거는 것은 스키마 변경이다.
 7. 상주 설치본 0.1.7 < 게시본 0.1.9 — 「클라이언트 재배포」가 필요한 안은 **우리 상주부터** 판이 갈라져 있다는 점을 계산에 넣어야 한다.
+
+## 9. [추가 r1] 적대 검증이 찾아낸 기존 결함(이 설계와 별개 · 기록만)
+1. **공개키 타입 문자열 BOM 우회**(codex F1): `relay/src/lib/sshsig.ts` L19 `new TextDecoder()` 는 기본값으로 선두 BOM 을 지운다 → 타입 `\uFEFFssh-ed25519` 가 `ssh-ed25519` 로 읽히고, 지문은 원본 blob 으로 계산(L135-L137)돼 **같은 개인키가 다른 지문 = 다른 id** 로 등록될 수 있다(정적 분석 · 실행 재현 안 함). 「한 키 한 이름」 불변식(`index.ts` L168-L174)이 깨진다. 고침 = 타입 바이트 정확 비교 + 표준 blob 재직렬화 일치 검사.
+2. **멱등 200 은 verdict 를 안 준다**(codex Q7): 처음에 격리된 글도 응답 유실 뒤 재전송하면 `index.ts` L261-L267 이 200 만 돌려주고, 클라이언트는 verdict 부재를 거절로 보지 않는다(`agora/tools.py` L131-L133) → 성공처럼 처리될 수 있다.
+3. **로컬 개발 스크립트는 기존 DB 에 새 마이그레이션을 안 먹인다**(codex F6·Fable F2): `relay/scripts/run-local.py` L46-L57 은 `events` 표가 **없을 때만** `migrations apply --local` 을 돈다.
