@@ -34,8 +34,9 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 - 되돌리기: 코드 = 지금 배포(57134b71)가 정상 코드 · 경합 사본 흔적 없음. D1 = 0002 표·트리거·차단 행 4 는 남긴다(시험 릴레이 · 옛 코드와 무관) · 전체 되돌림이 필요하면 백업 SQL(위)로 새 D1 복원 — 권하지 않음.
 - 드라이버 = 스크래치 `drive.py`(저장소 밖 · 키도 거기) · 저장소 코드 변경 0.
 
-## 미완(다음 사람이 이어서) — 갱신 22:1x
-1. 4단계 = 원고만(RUNBOOK §4) · 전제 = master 게이트 + (codex 재확인 또는 표적 두 검토자 ACCEPT + master 대조) — 두 검토자 ACCEPT 는 채워졌다(agy r3 · Fable r4).
+## 미완(다음 사람이 이어서) — 갱신 22:2x
+1. 4단계 = 원고만(RUNBOOK §4) · 전제 = master 게이트 + (codex 재확인 또는 표적 두 검토자 ACCEPT + master 대조) — 두 검토자 ACCEPT 는 채워졌다(agy r3 · Fable r4) · **master 대조 끝 · 3단계 수용(nonce b9965f91)** · 4단계 = **박사님 답 대기(쓰기 0)**.
+2. 본 릴레이 기준 대조(읽기) = **일치** — RUNBOOK §4 머리 줄(배포 f49eac74 · 자산 23 대조 · 스크립트 본문은 미대조).
 
 ## 함정
 - ⚠launchd 탐지 작업이 **이 작업트리의 파일을 직접** 돈다 — `tools/detect_ours.py` 표적 변이는 제자리 수정 금지(사본에서). 갈래 병합·작업트리 삭제 시 경로 옮겨 재설치(master TODO).

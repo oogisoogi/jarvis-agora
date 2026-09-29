@@ -34,6 +34,8 @@ python3 -c 'import re,sys;print(re.findall(r"^\s*\"(name|database_id)\"\s*:\s*\"
 
 ## 4단계 — 본 릴레이(agora-relay · agora.godmeyou.kr) · master/박사님 게이트 · 워커는 원고만
 
+✅**기준 일치 확인 · 2026-09-29 22:2x KST(읽기만 · worker-agoraimpl@surface:1160)** — 본 릴레이 현재 배포 = 버전 `f49eac74`(2026-09-19 17:15:27 KST · `wrangler deployments list` 의 마지막 줄 · 태그·메시지 없음). 그 시각은 2cf9c1e 커밋(17:14:47) 40초 뒤 · 53b21a8(17:25:11)보다 앞이고, 2cf9c1e→53b21a8 은 문서 1커밋(relay 코드·자산·설정 차이 0). 자산 23개(`relay/board` @53b21a8) 대조 = JS·CSS·dev 18개 바이트 동일 · HTML 5개는 Cloudflare 엣지 주입(숨은 `/cdn-cgi/content` 링크 · `__CF$cv$params` 챌린지 스크립트 · Web Analytics 비콘)과 그것이 연 줄바꿈 1개를 걷어내면 바이트 동일. `/health` = ok:true · scrub_bundle 59507587…270e7(시험 릴레이의 같은 값과 동일). ⚠워커 스크립트 본문 자체는 읽는 경로가 없어 바이트 대조하지 않았다(배포 시각·자산·문서뿐인 차이로 추론).
+
 | # | 무엇 | 명령 | 합격 |
 |---|---|---|---|
 | 4-0 | **사전 D1 백업(필수)** — 저장소 밖 · 내보내기 동안 질의가 잠깐 막힐 수 있다【미확인】 → 조용한 시각에 | `$W d1 export agora-relay --remote --config "$R/relay/wrangler.jsonc" --output ~/.local/state/agora-detect/backup-main-<시각>.sql` | 파일 > 0 · `participants`·`events` INSERT 행 수 = 원격 `SELECT COUNT(*)` |
