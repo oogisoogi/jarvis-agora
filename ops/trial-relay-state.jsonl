@@ -1,0 +1,4 @@
+# 시험 릴레이(agora-relay-next) 운영 기록 — append 전용 · 마지막 줄 = 현재 상태(running | verifying | off)
+# 읽는 곳 = tools/detect_ours.py(설계 DESIGN-v3 §6-2). ⚠이 기록과 relay/wrangler.next.jsonc 의 workers_dev 가 어긋나면 탐지기는 「불완전」을 낸다.
+# 바꿀 때 = 배포를 끝낸 뒤 한 줄을 덧붙인다(고치지 않는다). 줄 = {"ts","state","by","note"}
+{"ts": "2026-09-19T08:15:28Z", "state": "running", "by": "master", "note": "본 릴레이 교체 뒤 다음 시험용으로 존치(53b21a8) · workers_dev true · 이 줄은 2026-09-29 탐지기 도입 때 소급 기록"}
