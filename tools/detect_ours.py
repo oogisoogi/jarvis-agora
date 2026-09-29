@@ -25,6 +25,7 @@
     0 = 일치 — 우리 이름 글이 전부 원장과 맞고, 불완전 사유 없음
     1 = 경보 — 원장 미기록 글 · 시험 릴레이에 우리 id/지문 등록 · 본 릴레이에서 우리 지문이 다른 이름에 붙음 등
     2 = 불완전 — 경보는 없지만 끝까지 보지 못했다(GET 실패 · 응답 모양 이상 · 방 상한 도달 · 원장 부재 …)
+    3 = --notify 인데 인박스 알림을 보내지 못했다(알림 상태를 안 바꿔 다음 회차가 다시 보낸다)
     (경보와 불완전이 함께 있으면 1 이고, 보고에 둘 다 싣는다.)
 
 시험 릴레이의 상태(설계 §6-2 · r2 D2-8)
@@ -43,6 +44,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -62,6 +64,9 @@ DEFAULT_TRIAL_URL = "https://agora-relay-next.oogisoogi.workers.dev"
 DEFAULT_TRIAL_LOG = os.path.join(ROOT, "ops", "trial-relay-state.jsonl")
 DEFAULT_TRIAL_CONFIG = os.path.join(ROOT, "relay", "wrangler.next.jsonc")
 DEFAULT_STATE_DIR = os.path.expanduser("~/.local/state/agora-detect")
+DEFAULT_INBOX_CMD = os.path.expanduser("~/.claude/channels/inbox-append.sh")
+NOTIFY_FROM = "agora-detector@launchd"   # master 판정 2026-09-29 — 헤더 `[agora-detector@launchd → cmux master]`
+INCOMPLETE_STREAK = 2                     # 불완전은 연속 이 횟수부터 알린다(망 흔들림 소음 방지 · master 판정)
 USER_AGENT = "agora-detect/1.0 (+https://agora.godmeyou.kr)"
 
 HOME_ROOMS_MAX = 10            # 릴레이 `index.ts` HOME_ROOMS_MAX — 이 수에 닿으면 11번째 방부터는 안 보인다
@@ -359,6 +364,94 @@ def liveness(state_dir: str, max_age_h: float, now: float | None = None) -> tupl
     return 0, "탐지기 생존 정상: 마지막 성공 %.1f시간 전" % age_h
 
 
+# ── 알림(master 판정 2026-09-29 · Q2=A) ─────────────────────────────────────
+# ★상태가 **바뀔 때만** 한 줄을 보낸다 — 같은 경보를 매시간 반복하지 않는다.
+#   경보(1) = 즉시 · 불완전(2) = 연속 INCOMPLETE_STREAK 회부터 · 일치(0) = 앞서 알린 것이 있으면 「해소」 1회.
+# ★본문 인용 0 — 릴레이·방·event_id·created_at·분류·사유만 싣는다.
+def signature(rep: dict) -> str:
+    if rep["verdict"] == "ALARM":
+        return "ALARM:" + "|".join(sorted("%s/%s/%s" % (a["kind"], a.get("relay", ""), a.get("event_id") or "")
+                                          for a in rep["alarms"]))
+    if rep["verdict"] == "INCOMPLETE":
+        return "INCOMPLETE:" + "|".join(sorted({"%s/%s" % (i["reason"], i.get("relay", "")) for i in rep["incomplete"]}))
+    return "OK"
+
+
+def _load(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            v = json.load(fh)
+        return v if isinstance(v, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save(path: str, data: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def decide_notify(rep: dict, prev: dict) -> tuple[str | None, dict]:
+    """(보낼 본문 또는 None, 새 상태). 상태 = {notified: 마지막으로 알린 서명, streak: 연속 불완전 수}."""
+    sig = signature(rep)
+    streak = prev.get("streak", 0) + 1 if rep["verdict"] == "INCOMPLETE" else 0
+    notified = prev.get("notified")
+    state = {"notified": notified, "streak": streak, "last": sig}
+    if rep["verdict"] == "OK":
+        if notified and notified != "OK":
+            state["notified"] = "OK"
+            return "【해소】 탐지기 일치로 돌아옴(%s) — 앞선 알림(%s)의 조건이 사라졌다" % (rep["checked_at"], notified[:120]), state
+        return None, state
+    if sig == notified:
+        return None, state
+    if rep["verdict"] == "INCOMPLETE" and streak < INCOMPLETE_STREAK:
+        return None, state
+    state["notified"] = sig
+    head = "【경고】 탐지기 경보" if rep["verdict"] == "ALARM" else "【경고】 탐지기 불완전(연속 %d회)" % streak
+    lines = [head + " · 참가자 %s · %s · %s" % (rep["participant"], rep["checked_at"], rep["stage"])]
+    for a in rep["alarms"]:
+        lines.append("- 경보 %s · %s" % (a["kind"], json.dumps({k: v for k, v in a.items() if k != "kind"},
+                                                              ensure_ascii=False)))
+    for i in rep["incomplete"]:
+        lines.append("- 불완전 %s" % json.dumps(i, ensure_ascii=False))
+    lines.append("- 다음 = 설계 §6-5: 상주 로그(resident.out·resident.log)로 그 시각 발신 여부 확인 · 자동 조치 없음")
+    return "\n".join(lines), state
+
+
+def send_inbox(cmd: str, body: str) -> bool:
+    try:
+        r = subprocess.run([cmd, NOTIFY_FROM], input=body, text=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def notify_scan(rep: dict, state_dir: str, inbox_cmd: str) -> bool:
+    path = os.path.join(state_dir, "notify_state.json")
+    body, state = decide_notify(rep, _load(path))
+    if body is not None and not send_inbox(inbox_cmd, body):
+        return False          # 못 보냈으면 상태를 안 바꾼다 — 다음 회차가 다시 시도한다
+    _save(path, state)
+    return True
+
+
+def notify_liveness(rc: int, msg: str, state_dir: str, inbox_cmd: str) -> bool:
+    """생존 경보는 상태가 바뀔 때 1회(master 판정 ⑶) — 정상→경보 · 경보→정상."""
+    path = os.path.join(state_dir, "liveness_state.json")
+    prev = _load(path).get("rc", 0)
+    if rc != prev:
+        body = ("【경고】 " if rc else "【해소】 ") + msg
+        if not send_inbox(inbox_cmd, body):
+            return False
+    _save(path, {"rc": rc})
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="우리 이름 글 ↔ 우리 원장 대조(1단계 · 읽기만)")
     ap.add_argument("mode", nargs="?", default="scan", choices=("scan", "liveness"))
@@ -370,15 +463,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--state-dir", default=DEFAULT_STATE_DIR)
     ap.add_argument("--max-age-h", type=float, default=3.0)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--notify", action="store_true", help="상태가 바뀔 때만 master 인박스에 한 줄(inbox-append)")
+    ap.add_argument("--inbox-cmd", default=DEFAULT_INBOX_CMD)
     args = ap.parse_args(argv)
     if args.mode == "liveness":
         rc, msg = liveness(args.state_dir, args.max_age_h)
         print(msg)
+        if args.notify and not notify_liveness(rc, msg, args.state_dir, args.inbox_cmd):
+            print("알림 실패 — 다음 회차가 다시 시도한다")
+            return 3
         return rc
     rep = run(fetch=http_get, config_dir=args.config_dir, main_url=args.relay,
               trial_url=args.trial_relay or None, trial_log=args.trial_log, trial_config=args.trial_config)
     write_success(args.state_dir, rep)
     print(json.dumps(rep, ensure_ascii=False, indent=2) if args.json else human(rep))
+    if args.notify and not notify_scan(rep, args.state_dir, args.inbox_cmd):
+        print("알림 실패 — 다음 회차가 다시 시도한다")
+        return 3
     return exit_code(rep)
 
 

@@ -273,6 +273,88 @@ def test_success_file_only_when_complete_and_liveness():
     assert d.liveness(sd, 3, now=epoch + 3 * 3600 + 60)[0] == 1
 
 
+# ── 알림(상태 변화 때만 · master 판정 2026-09-29) ──────────────────────────
+def fake_inbox(tmp, ok=True):
+    """인박스 헬퍼 대역 — 인자(보낸 이)와 본문을 파일에 남긴다. ok=False 면 실패(rc 1)."""
+    path = os.path.join(tmp, "inbox.sh")
+    out = os.path.join(tmp, "inbox.log")
+    with open(path, "w") as fh:
+        fh.write("#!/bin/sh\n%s{ printf '%%s|' \"$1\"; cat; printf '\\n=====\\n'; } >> '%s'\n"
+                 % ("" if ok else "exit 1\n", out))
+    os.chmod(path, 0o755)
+    return path, out
+
+
+def sent(out):
+    return [x for x in (open(out).read().split("\n=====\n") if os.path.exists(out) else []) if x.strip()]
+
+
+def rep_of(verdict, alarms=(), incomplete=()):
+    return {"verdict": verdict, "alarms": list(alarms), "incomplete": list(incomplete), "participant": PID,
+            "checked_at": "t", "stage": "1단계"}
+
+
+def test_notify_alarm_immediate_then_only_on_change():
+    tmp = tempfile.mkdtemp(prefix="notify-")
+    cmd, out = fake_inbox(tmp)
+    a1 = rep_of("ALARM", [{"kind": "unrecorded_our_name", "relay": MAIN, "event_id": "ev_1"}])
+    assert d.notify_scan(a1, tmp, cmd) and len(sent(out)) == 1
+    assert sent(out)[0].startswith(d.NOTIFY_FROM + "|【경고】 탐지기 경보")
+    assert d.notify_scan(a1, tmp, cmd) and len(sent(out)) == 1          # 같은 경보 = 침묵
+    a2 = rep_of("ALARM", [{"kind": "unrecorded_our_name", "relay": MAIN, "event_id": "ev_2"}])
+    assert d.notify_scan(a2, tmp, cmd) and len(sent(out)) == 2          # 다른 경보 = 알림
+    assert d.notify_scan(rep_of("OK"), tmp, cmd) and "【해소】" in sent(out)[2]
+    assert d.notify_scan(rep_of("OK"), tmp, cmd) and len(sent(out)) == 3
+
+
+def test_notify_incomplete_needs_two_in_a_row():
+    tmp = tempfile.mkdtemp(prefix="notify-")
+    cmd, out = fake_inbox(tmp)
+    inc = rep_of("INCOMPLETE", incomplete=[{"reason": "home_get_failed", "relay": MAIN}])
+    d.notify_scan(inc, tmp, cmd)
+    assert sent(out) == []                                              # 1회 = 침묵
+    d.notify_scan(rep_of("OK"), tmp, cmd)                               # 끊기면 연속 수 초기화
+    d.notify_scan(inc, tmp, cmd)
+    assert sent(out) == []
+    d.notify_scan(inc, tmp, cmd)
+    assert len(sent(out)) == 1 and "연속 2회" in sent(out)[0]
+    d.notify_scan(inc, tmp, cmd)
+    assert len(sent(out)) == 1                                          # 같은 불완전 반복 = 침묵
+
+
+def test_notify_first_ok_is_silent_and_failure_retries():
+    tmp = tempfile.mkdtemp(prefix="notify-")
+    cmd, out = fake_inbox(tmp)
+    d.notify_scan(rep_of("OK"), tmp, cmd)
+    assert sent(out) == []
+    bad, _ = fake_inbox(tempfile.mkdtemp(), ok=False)
+    a = rep_of("ALARM", [{"kind": "trial_registered_id", "relay": TRIAL}])
+    assert d.notify_scan(a, tmp, bad) is False                          # 못 보냄 → 상태 안 바뀜
+    assert d.notify_scan(a, tmp, cmd) and len(sent(out)) == 1           # 다음 회차가 보낸다
+
+
+def test_notify_liveness_on_change_only():
+    tmp = tempfile.mkdtemp(prefix="notify-")
+    cmd, out = fake_inbox(tmp)
+    assert d.notify_liveness(0, "정상", tmp, cmd) and sent(out) == []
+    d.notify_liveness(1, "★경보 탐지기 생존: …", tmp, cmd)
+    d.notify_liveness(1, "★경보 탐지기 생존: …", tmp, cmd)
+    assert len(sent(out)) == 1 and "【경고】" in sent(out)[0]
+    d.notify_liveness(0, "정상", tmp, cmd)
+    assert len(sent(out)) == 2 and "【해소】" in sent(out)[1]
+
+
+def test_notify_body_has_no_event_body():
+    tmp = tempfile.mkdtemp(prefix="notify-")
+    cmd, out = fake_inbox(tmp)
+    r = Relay()
+    orphan = ev(PID, "d" * 32, body="비밀스러운-본문-문자열")
+    r.add("d" * 32, orphan)
+    _, cfg, log, conf = setup([])
+    d.notify_scan(scan(r, cfg, log, conf), tmp, cmd)
+    assert len(sent(out)) == 1 and "비밀스러운-본문-문자열" not in sent(out)[0]
+
+
 def _run_all():
     names = [n for n in sorted(globals()) if n.startswith("test_")]
     bad = 0
