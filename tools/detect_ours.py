@@ -276,14 +276,21 @@ def scan_trial(fetch: Fetch, base: str, pid: str, fp: str, state: str | None, wh
     if state == "off":
         # ★꺼짐은 운영 기록이 말한다 — 실패를 「꺼짐 성공」으로 읽지 않는다.
         #   다만 기록은 이 체크아웃의 파일이라 다른 곳에서 켠 배포를 모른다(impl-r1 Fable 3·agy) → /health 를 1회 본다:
-        #   우리 릴레이 응답(200 · ok:true)이면 「기록은 꺼짐인데 켜져 있다」 경보 · 실패는 아무 판정도 하지 않는다(비대칭).
-        status, body = fetch("%s/health" % base)
+        #   우리 릴레이 응답(200 · ok:true)이면 「기록은 꺼짐인데 켜져 있다」 경보 · 「꺼짐 확인」은 Cloudflare 의
+        #   workers.dev 비활성 응답(404 + 1042)만 인정하고, 그 밖(시간 초과·500·이상한 200)은 불완전(impl-r2 Fable 6).
+        #   ★캐시 우회 질의 문자열(impl-r2 agy 2) — 켜져 있던 때의 200 이 남아 거짓 경보를 내지 않게.
+        status, body = fetch("%s/health?nocache=%d" % (base, time.time_ns()))
         if status == 200 and isinstance(body, dict) and body.get("ok") is True:
             rep["alarms"].append({"kind": "trial_up_while_recorded_off", "relay": base,
                                   "detail": "운영 기록은 꺼짐인데 시험 릴레이가 응답한다 — 켜진 채 탐지가 빠질 뻔했다"})
-            state = "running"
+            state = rel["state"] = "running"
+        elif status == 404 and ((isinstance(body, str) and "1042" in body)
+                                or (isinstance(body, dict) and body.get("error_code") == 1042)):
+            # ★Cloudflare 는 Accept 에 따라 1042 를 글(「error code: 1042」) 또는 JSON(error_code: 1042)으로 준다 — 둘 다 실측.
+            rel["skipped"] = "운영 기록상 의도적 종료 — 이번 탐지에서 건너뜀(/health = 404·1042 확인)"
+            return
         else:
-            rel["skipped"] = "운영 기록상 의도적 종료 — 이번 탐지에서 건너뜀(/health 비응답 확인)"
+            rep["incomplete"].append({"reason": "trial_off_unconfirmed", "relay": base, "status": status})
             return
     if state is None:
         return

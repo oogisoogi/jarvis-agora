@@ -54,7 +54,7 @@ class Relay:
             if f in url:
                 return None, "URLError: fake"
         if url.startswith(TRIAL):
-            if url.endswith("/health"):
+            if "/health" in url:
                 return self.trial_health
             who = unquote(url.split("participant=", 1)[1])
             if who in self.trial_ids:
@@ -248,9 +248,19 @@ def test_trial_off_is_skipped_and_marked_without_get():
     tmp, cfg, log, conf = setup([], trial_state="off", workers_dev="false")
     rep = scan(r, cfg, log, conf)
     assert rep["verdict"] == "OK", rep
-    assert [c for c in r.calls if c.startswith(TRIAL)] == [TRIAL + "/health"]   # /health 1회만 · 참가자 질의 0
+    trial_calls = [c for c in r.calls if c.startswith(TRIAL)]
+    assert len(trial_calls) == 1 and "/health?nocache=" in trial_calls[0]    # /health 1회만(캐시 우회) · 참가자 질의 0
     trial = [x for x in rep["relays"] if x["role"] == "trial"][0]
     assert trial["state"] == "off" and "건너뜀" in trial["skipped"]
+
+
+def test_trial_off_confirmed_by_json_1042():
+    """[실측 2026-09-29] Accept: application/json 이면 Cloudflare 가 1042 를 JSON 본문으로 준다."""
+    r = Relay()
+    r.trial_health = (404, {"error_code": 1042, "error_name": "workers_dev_script_not_found"})
+    tmp, cfg, log, conf = setup([], trial_state="off", workers_dev="false")
+    rep = scan(r, cfg, log, conf)
+    assert rep["verdict"] == "OK", rep
 
 
 def test_trial_off_but_answering_is_alarm():
@@ -261,11 +271,13 @@ def test_trial_off_but_answering_is_alarm():
     tmp, cfg, log, conf = setup([], trial_state="off", workers_dev="false")
     rep = scan(r, cfg, log, conf)
     assert kinds(rep) == ["trial_registered_id", "trial_up_while_recorded_off"], rep
-    for st in ((None, "URLError"), (500, "x"), (200, "not json")):            # 실패·이상은 판정하지 않는다
+    trial = [x for x in rep["relays"] if x["role"] == "trial"][0]
+    assert trial["state"] == "running"
+    for st in ((None, "URLError"), (500, "x"), (200, "not json"), (404, "not found")):   # 꺼짐 확인 = 404+1042 만
         r2 = Relay()
         r2.trial_health = st
         rep2 = scan(r2, *setup([], trial_state="off", workers_dev="false")[1:])
-        assert rep2["verdict"] == "OK", (st, rep2)
+        assert reasons(rep2) == ["trial_off_unconfirmed"] and rep2["verdict"] == "INCOMPLETE", (st, rep2)
 
 
 def test_unverified_hash_match_is_incomplete():
