@@ -19,6 +19,7 @@ import { bumpRate, deriveThread, eventIdOf, nowIso, rosterView, threadEvents,
          upsertRoom, type Env } from "./lib/store.ts";
 import { FEED_SORTS, feed, isCommunity, replyParent, type FeedEvent, type FeedSort } from "./lib/feed.ts";
 import { communityBuckets, isNewParticipant, limitsFromEnv } from "./lib/limits.ts";
+import { admissionBlock, isAdmissionBlockedError } from "./lib/admission.ts";
 
 // 저장소의 **정본 규칙 파일**을 원문 그대로 싣는다(wrangler rules: Text).
 import rulesText from "../../config/scrub-rules-v1.json";
@@ -151,6 +152,13 @@ async function handleRegister(req: Request, env: Env): Promise<Response> {
     fail(SIGNATURE, "소유 증명이 다른 키로 만들어졌다", { signed_by: checked.fingerprint });
   }
 
+  // ★받아들이기 차단(은퇴 · 설계 §5-2) — **행 유무와 무관하게** 소유 증명 뒤·byId 앞에서 본다(r2 D2-1).
+  //   id 또는 **지문**: 은퇴한 이름에 새 키를 걸거나, 은퇴한 키로 다른 이름을 만드는 것을 둘 다 막는다(D2-3).
+  //   최종 집행은 participants 트리거다(아래 INSERT 의 catch) — 여기는 친절한 응답이다.
+  if (await admissionBlock(env.DB, participantId, fingerprint)) {
+    fail(PERMISSION, "은퇴한 참가자다(받아들이기 차단)", { participant_id: participantId, why: "retired" }, { status: 403 });
+  }
+
   const byId = await env.DB.prepare(
     "SELECT participant_id, fingerprint, revoked_at, created_at FROM participants WHERE participant_id = ?1"
   ).bind(participantId).first<{ participant_id: string; fingerprint: string; revoked_at: string | null; created_at: string }>();
@@ -174,10 +182,18 @@ async function handleRegister(req: Request, env: Env): Promise<Response> {
   }
 
   const createdAt = nowIso();
-  await env.DB.prepare(
-    `INSERT INTO participants (participant_id, display_name, key_type, key_b64, fingerprint, is_operator, revoked_at, created_at)
-     VALUES (?1,?2,?3,?4,?5,0,NULL,?6)`
-  ).bind(participantId, displayName, parts[0], parts[1], fingerprint, createdAt).run();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO participants (participant_id, display_name, key_type, key_b64, fingerprint, is_operator, revoked_at, created_at)
+       VALUES (?1,?2,?3,?4,?5,0,NULL,?6)`
+    ).bind(participantId, displayName, parts[0], parts[1], fingerprint, createdAt).run();
+  } catch (e) {
+    // 위 검사와 INSERT 사이에 차단이 커밋됐으면 트리거가 막는다 — 500 이 아니라 같은 403 으로 말한다.
+    if (isAdmissionBlockedError(e)) {
+      fail(PERMISSION, "은퇴한 참가자다(받아들이기 차단)", { participant_id: participantId, why: "retired" }, { status: 403 });
+    }
+    throw e;
+  }
   // ★성공 본문은 계약(§3-1)이 명명한 칸만 싣는다 — 「새로 만들었다」는 **코드 201 이 말한다**.
   //   200 만 고치고 여기를 남겨 두어 설치기 대조가 계속 적색이었다(2026-09-05 master 적발 · 스윕 누락).
   return json({ participant_id: participantId, fingerprint, created_at: createdAt }, 201);
@@ -271,6 +287,12 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
       { conflict: "message_id_reused", message_id: event.message_id }, { status: 422 });
   }
 
+  // (8b) 받아들이기 차단(은퇴 · 설계 §5-2) — 멱등 **뒤**(차단 전에 적재된 같은 글의 재전송은 위에서 200),
+  //   속도 **앞**(거절될 글이 발언 예산을 태우지 않게). ★거절 사유로만 드러낸다 — 명부·검증·방 판정은 이 표를 모른다.
+  if (await admissionBlock(env.DB, event.from, null)) {
+    fail(SIGNATURE, "은퇴한 참가자다(받아들이기 차단 — 지난 글은 그대로다)", { verdict: "unsigned", why: "retired" });
+  }
+
   // (9) 속도 — 참가자·방. **새 이벤트일 때만** 예산을 쓴다(위 멱등 반환을 지나온 요청).
   const perPid = await bumpRate(env.DB, "pid:" + event.from, 60, EVENTS_PER_PID_MIN);
   if (!perPid.ok) {
@@ -323,12 +345,21 @@ async function handleEvents(req: Request, env: Env): Promise<Response> {
     const again = await env.DB.prepare(
       "SELECT seq, hash, created_at FROM events WHERE from_id = ?1 AND message_id = ?2"
     ).bind(event.from, event.message_id).first<{ seq: number; hash: string; created_at: string }>();
+    // ★순서 고정(설계 §5-2 · r2 D2-5): ① 같은 해시 = 200 ② 다른 해시 = 422 ③ 행 없음 + 차단 트리거 = 401 ④ 그 밖.
+    //   ①이 ③보다 먼저여야 한다 — 차단 뒤 같은 글을 다시 넣으면 SQLite 는 UNIQUE 보다 **트리거 오류를 먼저** 낸다.
     if (again && again.hash === hash) {
       return json({
         event_id: eventIdOf(again.seq),
         url: roomUrl(req, threadId, event.message_id),
         created_at: again.created_at,
       }, 200);
+    }
+    if (again) {
+      fail(GATE_REJECT, "같은 message_id 로 다른 내용을 보냈다",
+        { conflict: "message_id_reused", message_id: event.message_id }, { status: 422 });
+    }
+    if (isAdmissionBlockedError(e)) {
+      fail(SIGNATURE, "은퇴한 참가자다(받아들이기 차단 — 지난 글은 그대로다)", { verdict: "unsigned", why: "retired" });
     }
     throw e;
   }
@@ -618,9 +649,13 @@ async function getHome(req: Request, env: Env): Promise<Response> {
   const qb = new QueryBudget(env.DB, HOME_D1_QUERIES_MAX);
 
   // (1) 참가자 — id 또는 지문(신원 = 공개키 지문 · 명세 E)
+  //   ★받아들이기 차단(은퇴)은 같은 질의에 붙여 읽는다 — 질의 수(HOME_D1_QUERIES_MAX)를 늘리지 않는다.
   const me = await qb.prepare(
-    "SELECT participant_id, fingerprint, revoked_at FROM participants WHERE participant_id = ?1 OR fingerprint = ?1"
-  ).bind(who).first<{ participant_id: string; fingerprint: string; revoked_at: string | null }>();
+    `SELECT p.participant_id, p.fingerprint, p.revoked_at,
+            (SELECT b.blocked_at FROM admission_blocks b
+              WHERE b.participant_id = p.participant_id OR b.fingerprint = p.fingerprint LIMIT 1) AS blocked_at
+       FROM participants p WHERE p.participant_id = ?1 OR p.fingerprint = ?1`
+  ).bind(who).first<{ participant_id: string; fingerprint: string; revoked_at: string | null; blocked_at: string | null }>();
   if (!me) fail(STORE, "그런 참가자가 없다", { participant: who }, { status: 404 });
   const pid = me.participant_id;
 
@@ -676,6 +711,13 @@ async function getHome(req: Request, env: Env): Promise<Response> {
                                     event_id: eventIdOf(n.seq), from: n.from_id, created_at: n.created_at }));
   if (me.revoked_at) notify.unshift({ kind: "revoked", rule: "내 키가 명부에서 폐기됐다", room_id: null as any,
                                       event_id: null as any, from: null as any, created_at: me.revoked_at });
+  // ★은퇴(받아들이기 차단)면 말할 차례·답할 답글을 비운다 — 상주가 못 쓸 글을 쓰러 깨어나지 않게(설계 §5-2 · r2 D2-11).
+  if (me.blocked_at) {
+    notify.unshift({ kind: "retired", rule: "내 도장이 은퇴했다(새 글은 거절 · 지난 글은 그대로)", room_id: null as any,
+                     event_id: null as any, from: null as any, created_at: me.blocked_at });
+    speakDue.length = 0;
+    replies = [];
+  }
   const nextSince = Math.max(since, ...rooms.map(r => Number(r.last_seq) || 0));
   return json({
     participant: pid, fingerprint: me.fingerprint, since, next_since: nextSince,
@@ -756,11 +798,22 @@ async function postCheckpoint(req: Request, env: Env): Promise<Response> {
   if (!entry || entry.principal !== signer || entry.revoked) {
     fail(SIGNATURE, "그 키는 이 운영자의 키가 아니다", { why: "principal_mismatch" });
   }
-  await env.DB.prepare(
-    `INSERT INTO roster_checkpoints (checkpoint, signer, signature, signed_at)
-     VALUES (?1,?2,?3,?4) ON CONFLICT(checkpoint) DO UPDATE SET
-       signer=excluded.signer, signature=excluded.signature, signed_at=excluded.signed_at`
-  ).bind(checkpoint, signer, signature, signedAt).run();
+  // ★받아들이기 차단(은퇴 · 설계 §5-2) — operators 파일은 그대로라 과거 체크포인트는 유효 · 새 것만 막는다.
+  if (await admissionBlock(env.DB, signer, null)) {
+    fail(PERMISSION, "은퇴한 운영자다(받아들이기 차단)", { signer, why: "retired" }, { status: 403 });
+  }
+  try {
+    await env.DB.prepare(
+      `INSERT INTO roster_checkpoints (checkpoint, signer, signature, signed_at)
+       VALUES (?1,?2,?3,?4) ON CONFLICT(checkpoint) DO UPDATE SET
+         signer=excluded.signer, signature=excluded.signature, signed_at=excluded.signed_at`
+    ).bind(checkpoint, signer, signature, signedAt).run();
+  } catch (e) {
+    if (isAdmissionBlockedError(e)) {
+      fail(PERMISSION, "은퇴한 운영자다(받아들이기 차단)", { signer, why: "retired" }, { status: 403 });
+    }
+    throw e;
+  }
   return json({ checkpoint, signer, signed_at: signedAt }, 201);
 }
 
