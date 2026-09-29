@@ -330,7 +330,7 @@ def phase_main(base, persist, wdir):
            out.strip().splitlines()[-1][:50])
     record("스크립트: 끼어든 등록 뒤 차단 행 0", 0,
            count("SELECT COUNT(*) AS n FROM admission_blocks WHERE participant_id='ghost3'", persist))
-    # [impl-r3 Fable 2] 원자 조건의 나머지 갈래 — registered(같은 지문의 다른 이름 · 대상 폐기) · absent(같은 id 선점)
+    # [impl-r3 Fable 2] 원자 조건의 나머지 갈래 — registered(대상 id 의 지문 변경 · 대상 폐기) · absent(같은 id 선점)
     sql_p = ("INSERT INTO participants (participant_id, display_name, key_type, key_b64, fingerprint, is_operator,"
              " revoked_at, created_at) VALUES ('%s','x','ssh-ed25519','AAAA','%s',0,NULL,'t')")
     for n in ("reg1", "reg2"):

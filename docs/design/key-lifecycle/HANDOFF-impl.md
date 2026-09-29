@@ -1,6 +1,6 @@
 # HANDOFF-impl — TICKET=agora-admission-block-0929 인계
 
-worker-agoraimpl@surface:1155 · 작업트리 `~/axdev/.wt/agora-admission`(갈래 `feat/admission-block-0929` · 기반 `agora/v2-mvp` 53b21a8 + 설계 3커밋) · 갱신 2026-09-29 21:5x
+worker-agoraimpl@surface:1155 · 작업트리 `~/axdev/.wt/agora-admission`(갈래 `feat/admission-block-0929` · 기반 `agora/v2-mvp` 53b21a8 + 설계 3커밋) · 갱신 2026-09-29 21:5x · 후임 worker-agoraimpl@surface:1160 갱신 22:1x(Fable r4 · 3단계)
 todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 
 ## 끝난 것
@@ -14,14 +14,28 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 | 차단 스크립트 `ops/admission-block.py` + 하네스 `relay/scripts/{admission,run-admission}.py` | ef25aac · 3da596a · 2aaedbe | main 54/54 · 누수 변이 3(T8) 적색 · 옛 코드(T6⑷·T15) 6/6 · 경합(T12) 8/8 · 앱 변이 8 중 7 적색 + A8 등가 변이 |
 | 원격 원고·계약 초안 | fb8b9e0 | RUNBOOK-admission.md · DRAFT-contract-admission.md |
 | 성찰 1단계분 | efd6e93 | REFLECTION-impl-s1.md |
+| Fable 표적 r4(R1·R2 반영분) = **ACCEPT** · LOW 3 반영 | 이 갱신 커밋 | REVIEW-impl-fable-r4.md · DISPOSITION-impl-r4.md |
+| **3단계(시험 릴레이 원격) 3-0b~3-8 전부 기대값 일치** | 0daeb18 · 이 갱신 커밋(운영 기록) | 아래 「3단계 실측」 |
 
-## 미완(다음 사람이 이어서) — 갱신 21:5x · 머리 68aba22 이후
-0. **이 순환 사유** = CTX 60% 매듭선(r3 반영 뒤) — master 판정 nonce d071dd16 ④ 「r3 끝났을 때 60% 이상이면 3단계 들어가지 말고 매듭 → 후임이 3단계」.
-1. (선택·권고) Fable 표적 r4 1회 — R1·R2 반영분(68aba22)만(`DISPOSITION-impl-r3.md`). 4단계 전제(두 검토자 ACCEPT)를 채우는 데 필요.
-2. **3단계 = master 가 묶음 승인해 둠(nonce d071dd16 ③)** — RUNBOOK 3-0b → 3-0 → 3-1 → 3-2 → 3-3(①~⑤) → 3-4 → 3-5 → 3-6 → 3-7 → **3-7b(결정2 = 한다)** → 되돌림(3-8)까지 단계마다 묻지 않고 진행. 조건:
-   ⑴ 대상 = agora-relay-next 만 · 본 릴레이 접촉 0 ⑵ 배포마다 `--config <절대경로>` + name 게이트(파이썬 정규식 — BSD sed 는 `\s` 를 몰라 게이트가 거짓 실패한다) ⑶ 어느 단계든 RUNBOOK 기대값과 다르면 즉시 멈추고 **공개 주소 꺼진 상태로 되돌린 뒤** 보고 ⑷ 3-7b 경합 사본은 떠 있는 시간 최소 · 끝나면 즉시 원래 코드 + workers_dev:false 배포 · **두 배포의 Version id 기록** ⑸ 끝 = /health 404(1042) · 시험 D1 상태 실측(차단 행·임시 참가자·체크포인트 잔여) · 되돌리기 경로 기록 → 【확인요청】.
-   ⚠3-5·3-6 에서 `relay/wrangler.next.jsonc` 를 true 로 바꾸면 **이 작업트리를 읽는 launchd 탐지기**가 운영 기록(verifying)과 함께 보므로, 설정 변경과 `ops/trial-relay-state.jsonl` 한 줄을 **같이** 한다(아니면 불완전 경보 · 2회 연속이면 master 인박스).
-3. 4단계 = 원고만(RUNBOOK §4) · 전제 = master 게이트 + (codex 재확인 또는 표적 두 검토자 ACCEPT + master 대조).
+## 3단계 실측(후임 worker-agoraimpl@surface:1160 · 2026-09-29 22:00~22:08 · master 묶음 d071dd16 ③ + 재개 판정 81c7a057)
+| # | 결과 |
+|---|---|
+| 3-0b | migrations list = 0002 대기 · check-schema rc 3(없음 5) · 프롬프트 없음 |
+| 3-0 | 백업 `~/.local/state/agora-detect/backup-next-20260929-220026.sql` 34,683 B · sha256 2613cb3a…c42b · 기준선 참가자 4 · 글 17 · 체크포인트 0 · 방 3 |
+| 3-1·3-2 | 0002 ✅ · 표 1 + 트리거 4 · check-schema rc 0 |
+| 3-3 | adm-t16-probe 차단 rc 0 → ②③④⑤ 직접 쓰기 전부 rc 1 · 원문 `agora:admission_blocked: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER) [code: 7500]` · 보조 행 삭제 · 잔여 0 |
+| 3-4 | 우리 id+지문 차단 rc 0(사전 id 0·지문 0 · 기존 행 그대로) |
+| 3-5·3-6 | 1차 켬 Version 3fe136c6 → **3-7 첫 요청 403 으로 멈춤·끔**(4a1df331 · 켜진 창 22:02:02~46) → 원인 = 드라이버 UA 누락(Cloudflare 1010) → master 재개 판정 → 재켬 **1fc95b66** · /health 200 · 시험 /home 우리 id·지문 404 code 7 |
+| 3-7 | UA 단 첫 요청 A 등록 201(가설 확정) · genesis·post 201 · A registered 차단 rc 0 · T4 401 code 4 why=retired · 원장 행 불변 · T5 재전송 200 같은 event_id · 같은 message_id 다른 내용 422 · T6⑴ 재등록 403 code 5 · B absent 차단 rc 0 · T18 B 키 다른 이름 403 code 5 · 행 0 = **8/8** |
+| 3-7b | 경합 사본(RACE 4줄만 · 스크래치) 배포 **4e0e46f9** → A 새 글 401 why=retired · 원장 불변 · C 키로 adm-t18-b 403 retired · B 키로 adm-t18-x 403 retired · 행 수 불변 = **5/5**(원격 바인딩 오류 모양 = 표식 포함 확인) |
+| 3-8 | 원래 코드 + workers_dev false **57134b71** · No targets · /health 404 1042(글·JSON 요청 모두 · 22:07:14 부터 5연속) · 미리보기(4e0e46f9·57134b71·1fc95b66) 404 1042 |
+| 사후 D1 | 차단 행 4(adm-t16-probe · jarvis-jk1gn50iw7 · adm-t18-a · adm-t18-b) · 참가자 5(+adm-t18-a) · 글 19(+adm 2) · 체크포인트 0 · 방 4 · 우리 신원 참가자 행 0 · 마이그레이션 적용 대기 0 |
+
+- 되돌리기: 코드 = 지금 배포(57134b71)가 정상 코드 · 경합 사본 흔적 없음. D1 = 0002 표·트리거·차단 행 4 는 남긴다(시험 릴레이 · 옛 코드와 무관) · 전체 되돌림이 필요하면 백업 SQL(위)로 새 D1 복원 — 권하지 않음.
+- 드라이버 = 스크래치 `drive.py`(저장소 밖 · 키도 거기) · 저장소 코드 변경 0.
+
+## 미완(다음 사람이 이어서) — 갱신 22:1x
+1. 4단계 = 원고만(RUNBOOK §4) · 전제 = master 게이트 + (codex 재확인 또는 표적 두 검토자 ACCEPT + master 대조) — 두 검토자 ACCEPT 는 채워졌다(agy r3 · Fable r4).
 
 ## 함정
 - ⚠launchd 탐지 작업이 **이 작업트리의 파일을 직접** 돈다 — `tools/detect_ours.py` 표적 변이는 제자리 수정 금지(사본에서). 갈래 병합·작업트리 삭제 시 경로 옮겨 재설치(master TODO).
@@ -33,6 +47,9 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 - 운영 스크립트 종료 코드: 0 성공 · 11 이미 차단(대조 없음) · 10 계획만 · 3 중단 · 4 대조 불일치 · 5 대조 미완(동시 등록 포함) · 6 쓰기 결과 불명.
 - 차단 INSERT 는 원자적 조건부(`INSERT … SELECT … WHERE 모양 조건`) — 0행이면 중단.
 - 탐지기 꺼짐 확인 = 404 + 1042(글 또는 JSON) 만 — Cloudflare 가 Accept 에 따라 모양을 바꾼다(실측).
+- ⚠원격 HTTP 쓰기 드라이버는 **UA `agora-client/…` 필수** — `threeway.http()` 는 UA 를 안 달아 workers.dev 에서 Cloudflare 1010 403(본문 = JSON 아닌 글). 로컬 하네스는 Cloudflare 를 안 거쳐 안 드러난다(docs/TRANSPORT-RELAY.md:297 · 3단계 1차 멈춤 원인).
+- ⚠끄는 배포(workers_dev false) 뒤 약 25초는 엣지마다 200·404 가 섞인다(22:06:38 배포 → 22:06:48 200 → 22:07:03 404 → 200 → 22:07:14 부터 안정). 이 창에 탐지기가 돌면 「기록 off 인데 응답」 경보가 날 수 있다 — 끔 확인은 연속 몇 회로.
+- 3-7b 경합 사본은 `tsc` 에서 `existing possibly null` 3건이 나지만 wrangler 번들은 형 검사를 안 해 배포·동작에 무관(로컬 race 단계와 같은 코드).
 
 ## 재현
 ```sh

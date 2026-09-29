@@ -322,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
             print("차단 행은 썼다 · 사후 대조 미완: %s" % e)
             return 5
         if attempted:
-            print("쓰기 결과 불명(쓰기 명령이 실패했지만 원격이 이미 커밋했을 수 있다): %s — 같은 명령을 다시 돌려 "
+            print("쓰기 결과 불명(쓰기 명령 또는 그 확인 재조회가 실패했다 — 원격에 행이 있는지 모른다): %s — 같은 명령을 다시 돌려 "
                   "「이미 차단」 또는 엇갈림으로 확인한다" % e)
             return 6
         print("중단: %s" % e)

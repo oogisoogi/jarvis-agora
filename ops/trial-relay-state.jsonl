@@ -5,3 +5,5 @@
 {"ts": "2026-09-29T11:33:00Z", "state": "off", "by": "worker-agoraimpl (master 승인 · nonce 6ec26264)", "note": "workers_dev false + preview_urls false 배포 · 버전 17ba9537 · wrangler 「No targets deployed」 · /health = 404 error code 1042 · 미리보기 주소 404 · D1 무변경"}
 {"ts": "2026-09-29T13:02:02Z", "state": "verifying", "by": "worker-agoraimpl@surface:1160 (master 묶음 승인 · nonce d071dd16 ③)", "note": "3단계 3-5·3-6 — 차단 행(우리 id+지문 · adm-t16-probe) 먼저 넣고 workers_dev true 배포 · T16·T18 HTTP 실측용 · 3-8 에서 off"}
 {"ts": "2026-09-29T13:02:51Z", "state": "off", "by": "worker-agoraimpl@surface:1160 (master 묶음 승인 · nonce d071dd16 ③ · 조건 ⑶)", "note": "3-7 첫 단계(A 등록) 403 — 기대 201 불일치로 중단 · workers_dev false 재배포"}
+{"ts": "2026-09-29T13:04:51Z", "state": "verifying", "by": "worker-agoraimpl@surface:1160 (master 재개 판정 nonce 81c7a057 · 묶음 d071dd16 ③)", "note": "3-5 재개 — 드라이버 UA 수정 뒤 3-7·3-7b 실측용 · 3-8 에서 off"}
+{"ts": "2026-09-29T13:06:43Z", "state": "off", "by": "worker-agoraimpl@surface:1160 (master 재개 판정 nonce 81c7a057 · 묶음 d071dd16 ③)", "note": "3-8 — 원래 코드 + workers_dev false 재배포 · 3-7 8/8 · 3-7b 5/5(경합 사본 4e0e46f9) · /health 404 1042 확인은 다음 줄 없이 보고서에"}
