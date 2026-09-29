@@ -231,9 +231,11 @@ def phase_main(base, persist, wdir):
     record("스크립트: 마지막 현역 운영자 = 중단(3)", 3, rc, out.strip().splitlines()[-1][:60])
     rc, out = ops_block(persist, base, "alice", K["alice"]["fingerprint"], "--execute")
     record("스크립트: 이미 차단 = 0(할 일 없음)", 0, rc, out.strip().splitlines()[-1][:40])
-    # 행 없는 id(시험 릴레이 모양) — 스크립트의 본 릴레이 게이트가 막으므로 표에 직접 넣는다.
-    d1("INSERT INTO admission_blocks VALUES ('ghost', '%s', '2026-09-29T00:00:00.000Z', 'retired')"
-       % K["ghost"]["fingerprint"], persist)
+    # 행 없는 id(시험 릴레이 모양 · --shape absent)
+    rc, out = ops_block(persist, base, "ghost", K["ghost"]["fingerprint"], "--shape", "absent", "--execute")
+    record("스크립트: 행 없는 id 차단(--shape absent) = 0", 0, rc)
+    rc, out = ops_block(persist, base, "bob", K["bob"]["fingerprint"], "--shape", "absent")
+    record("스크립트: absent 기대인데 id 행 있음 = 중단(3)", 3, rc, out.strip().splitlines()[-1][:60])
 
     print("== 차단 뒤 사진 · 과거 불변 ==")
     after = snap(base, rooms, (allowed, revoked, w["ops"]))

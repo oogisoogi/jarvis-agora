@@ -99,12 +99,16 @@ def snapshot(run) -> str:
 
 
 def relay_files(url: str) -> str:
+    """공개 GET 세 파일의 해시. 못 받으면 멈춘다 — 사후 대조를 못 하면 「동일」이라고 말할 수 없다."""
     h = hashlib.sha256()
     for name in ("allowed_signers", "revoked_keys", "operators"):
         req = urllib.request.Request(url.rstrip("/") + "/participants/" + name,
                                      headers={"User-Agent": "agora-admission-block/1.0"})
-        with urllib.request.urlopen(req, timeout=20) as r:
-            h.update(name.encode() + b"\0" + r.read() + b"\0")
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                h.update(name.encode() + b"\0" + r.read() + b"\0")
+        except (OSError, ValueError) as e:
+            raise Stop("명부 파일 GET 실패(%s): %s — 공개 주소가 꺼진 릴레이면 --relay-url 을 빼라" % (name, e)) from None
     return h.hexdigest()
 
 
@@ -121,8 +125,11 @@ def our_resident_id() -> str | None:
         return None
 
 
-def classify(target: str, pid: str, fp: str, by_id: list[dict], by_fp: list[dict]) -> str:
-    """사전 확인 네 갈래(r2 D2-4). 정상이면 'ok', 아니면 멈출 사유."""
+def classify(shape: str, pid: str, fp: str, by_id: list[dict], by_fp: list[dict]) -> str:
+    """사전 확인 네 갈래(r2 D2-4). 정상이면 'ok', 아니면 멈출 사유.
+
+    shape = 기대 모양 — registered(id 행 1 · 본 릴레이의 우리 id) · absent(id 행 0 · 시험 릴레이의 우리 id).
+    """
     if len(by_id) > 1:
         return "id 행이 2개 이상 — 스키마가 기대와 다르다"
     if by_id and by_id[0]["fingerprint"] != fp:
@@ -132,10 +139,10 @@ def classify(target: str, pid: str, fp: str, by_id: list[dict], by_fp: list[dict
         return "경보: 이 지문이 다른 이름(%s)에 붙어 있다 — 누가 이 키로 다른 이름을 등록했다" % others
     if by_id and by_id[0].get("revoked_at"):
         return "이미 폐기된 참가자다 — 차단이 아니라 폐기 상태를 먼저 보고한다"
-    if target == "main" and not by_id:
-        return "본 릴레이인데 id 행이 없다 — 기대 모양(id 행 1)과 다르다"
-    if target == "trial" and by_id:
-        return "경보: 시험 릴레이에 이 id 가 (이 키로) 등록돼 있다 — 기대 모양(id 행 0)과 다르다"
+    if shape == "registered" and not by_id:
+        return "기대 모양(id 행 1)인데 id 행이 없다"
+    if shape == "absent" and by_id:
+        return "경보: 기대 모양(id 행 0)인데 이 id 가 (이 키로) 등록돼 있다"
     return "ok"
 
 
@@ -153,6 +160,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--allow-no-operator", action="store_true")
     ap.add_argument("--allow-resident-running", action="store_true")
     ap.add_argument("--blocked-at", default=None, help="(시험용) 효력 시각 고정 — 기본 = 지금")
+    ap.add_argument("--shape", choices=("registered", "absent"), default=None,
+                    help="사전 확인의 기대 모양 — 기본 = 본(main) registered · 시험(trial) absent. "
+                         "시험 릴레이의 원격 실측(T16)에서 임시 참가자를 막을 때만 registered 로 바꾼다")
     a = ap.parse_args(argv)
     try:
         if not ID_RE.match(a.participant):
@@ -175,7 +185,8 @@ def main(argv: list[str] | None = None) -> int:
         by_id = run("SELECT participant_id, fingerprint, revoked_at, is_operator FROM participants"
                     " WHERE participant_id = %s" % q(a.participant))
         by_fp = run("SELECT participant_id FROM participants WHERE fingerprint = %s" % q(a.fingerprint))
-        verdict = classify(a.target, a.participant, a.fingerprint, by_id, by_fp)
+        shape = a.shape or ("registered" if a.target == "main" else "absent")
+        verdict = classify(shape, a.participant, a.fingerprint, by_id, by_fp)
         print("사전 확인: id 행 %d · 지문 행 %s → %s" % (len(by_id), [r["participant_id"] for r in by_fp], verdict))
         if verdict != "ok":
             raise Stop(verdict)
