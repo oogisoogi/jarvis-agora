@@ -17,7 +17,7 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 
 ## 미완(다음 사람이 이어서)
 1. 적대 검증 r1(agy BLOCK·Fable REVISE)·r2(agy BLOCK·Fable REVISE) 처분 반영 완료 — `DISPOSITION-impl-r1.md`·`-r2.md` · 원문 `REVIEW-impl-*`.
-2. codex 최종 코드 1라운드 — **호출 직전 master 인박스 「【순서 요청】 codex 1회」 → 답 받고** `codex exec … </dev/null`(스크래치 detached 스냅숏 · 프롬프트 초안 = 스크래치 `review-prompt-codex.md` · 한도 문구 실패면 재시도 금지·보고).
+2. codex 최종 1R 완료(BLOCK · HIGH 1 · MED 4) → 반영 3a244f6 · `DISPOSITION-impl-codex.md` — codex 반영분 재검증 없음(주간 한도).
 3. 【확인요청】(머리 3줄 = 성찰·검증·디버깅) → 승인 뒤 3단계 RUNBOOK 3-0b~3-8(단계마다 【실행직전확인요청】 · 3-7b 는 master 선택).
 4. 4단계 = 원고만(RUNBOOK §4) — 본 릴레이 적용·배포는 master 판단.
 
@@ -28,7 +28,8 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 - ⚠워커는 master 표식 모양(대괄호+master#)을 어디에도 쓰지 않는다 — 승인 인용은 「nonce xxxxxxxx」 로.
 - A8(등록 앱 검사에서 지문 조건 제거) = 트리거가 같은 403 을 내 바깥에서 구별 불가한 **등가 변이** — 결함 아님.
 - T14 = SQL 층 + 서버 층(run-admission `--only upgrade` · 옛 코드+0001+데이터 → 0002 → 새 코드 · 13방 불변).
-- 운영 스크립트 종료 코드: 0 성공 · 10 계획만 · 3 중단 · 4 대조 불일치 · 5 대조 미완 · 6 쓰기 결과 불명.
+- 운영 스크립트 종료 코드: 0 성공 · 11 이미 차단(대조 없음) · 10 계획만 · 3 중단 · 4 대조 불일치 · 5 대조 미완(동시 등록 포함) · 6 쓰기 결과 불명.
+- 차단 INSERT 는 원자적 조건부(`INSERT … SELECT … WHERE 모양 조건`) — 0행이면 중단.
 - 탐지기 꺼짐 확인 = 404 + 1042(글 또는 JSON) 만 — Cloudflare 가 Accept 에 따라 모양을 바꾼다(실측).
 
 ## 재현
