@@ -24,6 +24,8 @@
        (시험 릴레이는 「id 행 0 · 지문 행 0」이라 오타를 못 거른다 · 한 글자 오타 = 불가역 헛차단 + id PK 선점).
      + 시험 릴레이에서 registered 모양(원격 실측용 임시 참가자)은 id 머리 `adm-t` 만 허용.
   3. 실행 — INSERT INTO admission_blocks(…) VALUES (id, 지문, 지금, 'retired')
+  종료 코드: 0 실행·대조 성공(또는 이미 차단) · 10 계획만(쓰기 0) · 3 중단(쓰기 0) · 4 쓰기 뒤 대조 불일치 ·
+            5 쓰기 뒤 대조 미완 · 6 쓰기 결과 불명(재실행으로 확인).
   4. 사후 대조 — 실행 전에 있던 명부·체크포인트 행이 **그대로**다(새 행은 동시 등록일 수 있어 따로 표시) ·
      (--relay-url 은 대상별 고정 주소만) GET /participants/* 세 파일 바이트 동일(캐시 우회). 쓰기 뒤 대조가 실패하면
      「차단 행 있음 · 대조 미완」(rc 5)으로 말한다 — 트레이스백으로 끝내지 않는다.
@@ -35,6 +37,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -134,7 +137,7 @@ def relay_files(url: str) -> dict:
         try:
             with urllib.request.urlopen(req, timeout=20) as r:
                 out[name] = r.read()
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             raise Stop("명부 파일 GET 실패(%s): %s — 공개 주소가 꺼진 릴레이면 --relay-url 을 빼라" % (name, e)) from None
     return out
 
@@ -193,8 +196,10 @@ def main(argv: list[str] | None = None) -> int:
                          "시험 릴레이의 원격 실측(T16)에서 임시 참가자(id 머리 adm-t)를 막을 때만 registered")
     ap.add_argument("--not-ours", action="store_true",
                     help="우리 신원이 아닌 id·지문을 막는다(시험·일반 참가자) — 없으면 입력이 우리 신원과 맞아야 한다")
+    ap.add_argument("--without-identity-file", action="store_true",
+                    help="상주 신원 파일 없이 진행(겹침·상주 검사 0 — 사람이 따로 대조했을 때만)")
     a = ap.parse_args(argv)
-    written = False
+    attempted = written = False
     try:
         config, db = gate_config(a.target)
         wflag = "--remote" if a.remote else "--local"
@@ -212,15 +217,20 @@ def main(argv: list[str] | None = None) -> int:
         if a.blocked_at is not None and not (a.local and ISO_MS_RE.fullmatch(a.blocked_at)):
             raise Stop("--blocked-at 은 --local 시험 전용이고 밀리초 ISO(Z) 여야 한다")
         want_url = TARGETS[a.target][4]
-        if a.relay_url and not (a.relay_url.rstrip("/") == want_url or (a.local and LOCAL_URL_RE.fullmatch(a.relay_url))):
-            raise Stop("--relay-url 은 대상(%s)의 고정 주소 %s 여야 한다" % (a.target, want_url))
+        if a.relay_url and not ((a.remote and a.relay_url.rstrip("/") == want_url)
+                                or (a.local and LOCAL_URL_RE.fullmatch(a.relay_url))):
+            raise Stop("--relay-url 은 원격이면 대상(%s)의 고정 주소 %s · 로컬이면 127.0.0.1 이어야 한다" % (a.target, want_url))
         shape = a.shape or ("registered" if a.target == "main" else "absent")
         if a.target == "trial" and shape == "registered" and not a.participant.startswith(TEST_ID_PREFIX):
             raise Stop("시험 릴레이의 registered 모양은 원격 실측용 임시 참가자(id 머리 %s)만 허용한다" % TEST_ID_PREFIX)
         ours = our_identity()
+        if ours is None and not a.without_identity_file:
+            # ★--not-ours 여도 멈춘다 — 파일이 없으면 「우리 것과 겹치는지」도 「상주가 떠 있는지」도 못 잰다(impl-r2 Fable 1).
+            raise Stop("상주 신원 파일(%s)을 못 읽었다 — 대조 불가(사람이 따로 대조했다면 --without-identity-file)"
+                       % RESIDENT_ID_FILE)
         if not a.not_ours:
             if ours is None:
-                raise Stop("상주 신원 파일(%s)을 못 읽었다 — 우리 신원 대조 불가(다른 참가자면 --not-ours)" % RESIDENT_ID_FILE)
+                raise Stop("우리 신원 대조 불가 — 우리 id 를 막으려면 신원 파일이 있어야 한다")
             if (a.participant, a.fingerprint) != ours:
                 raise Stop("입력 id·지문이 우리 신원(%s · %s)과 다르다 — 오타면 고치고, 다른 참가자면 --not-ours" % ours)
         elif ours and (a.participant == ours[0] or a.fingerprint == ours[1]):
@@ -261,9 +271,11 @@ def main(argv: list[str] | None = None) -> int:
         sql = ("INSERT INTO admission_blocks (participant_id, fingerprint, blocked_at, reason) VALUES (%s, %s, %s, 'retired')"
                % (q(a.participant), q(a.fingerprint), q(blocked_at)))
         if not a.execute:
-            print("계획(쓰기 0): " + sql)
+            print("계획만 — 쓰지 않았다(rc 10): " + sql)
             print("실행 전 명부 %d행 · 체크포인트 %d행" % (len(p0), len(c0)))
-            return 0
+            return 10          # ★계획은 0 이 아니다 — --execute 를 빠뜨린 호출을 성공으로 읽지 않게(impl-r2 agy 1)
+        print("실행 SQL: " + sql)
+        attempted = True       # ★run 앞에 세운다 — 원격이 커밋한 뒤 CLI 가 실패해도 「안 썼다」고 말하지 않게(impl-r2 Fable 2)
         run(sql)
         written = True
         got = run("SELECT blocked_at FROM admission_blocks WHERE participant_id = %s AND fingerprint = %s"
@@ -272,18 +284,24 @@ def main(argv: list[str] | None = None) -> int:
         kept = p0 <= p1 and c0 <= c1
         new_rows = len(p1 - p0) + len(c1 - c0)
         files1 = relay_files(a.relay_url) if a.relay_url else None
-        same_files = files1 == files0
+        # 새 행(동시 등록)이 있으면 명부 파일이 달라지는 것은 예상된 차이다 — 거짓 경보로 세지 않고 따로 말한다(impl-r2 Fable 5).
+        same_files = files1 == files0 or (new_rows > 0 and files0 is not None)
         print("실행: 차단 행 %s · 기존 명부·체크포인트 행 %s%s%s"
               % ("있음(%s)" % got[0]["blocked_at"] if got else "★없음",
                  "그대로" if kept else "★바뀜",
                  " · 새 행 %d(동시 등록 가능 — 차단과 무관한지 확인)" % new_rows if new_rows else "",
-                 "" if files0 is None else " · 명부 세 파일 " + ("동일" if same_files else "★달라짐")))
+                 "" if files0 is None else " · 명부 세 파일 " + ("동일" if files1 == files0 else
+                                                              "다름(새 행 때문 — 사람 확인)" if same_files else "★달라짐")))
         print("⚠이 D1 하나의 결과다 — 두 D1(본·시험) 모두 끝나기 전에는 「차단 완료」라고 보고하지 않는다(§5-3-5).")
         return 0 if (got and kept and same_files) else 4
     except Stop as e:
         if written:
             print("차단 행은 썼다 · 사후 대조 미완: %s" % e)
             return 5
+        if attempted:
+            print("쓰기 결과 불명(쓰기 명령이 실패했지만 원격이 이미 커밋했을 수 있다): %s — 같은 명령을 다시 돌려 "
+                  "「이미 차단」 또는 엇갈림으로 확인한다" % e)
+            return 6
         print("중단: %s" % e)
         return 3
 

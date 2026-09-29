@@ -175,7 +175,9 @@ def upgrade(workdir: str) -> int:
     if rc != 0:
         print("옛 코드 + 0001 위 3자 대조 실패 — 업그레이드 전제가 안 섰다")
         return 1
-    with_server(old, lambda: harness("upgrade-before", tw, "", persist), "upgrade-snap", persist)
+    if with_server(old, lambda: harness("upgrade-before", tw, "", persist), "upgrade-snap", persist) != 0:
+        print("업그레이드 「전」 사진 단계 실패 — 전제가 안 섰다(impl-r2 Fable 7)")
+        return 1
     print(migrate(RELAY, persist)[-300:])
     return with_server(RELAY, lambda: harness("upgrade-after", tw, "", persist), "upgrade-new", persist)
 

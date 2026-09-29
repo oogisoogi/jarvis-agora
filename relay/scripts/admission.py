@@ -224,22 +224,24 @@ def phase_main(base, persist, wdir):
     r = subprocess.run([sys.executable, os.path.join(ROOT, "ops", "admission-block.py"), "--target", "main", "--local",
                         "--persist-to", persist, "--participant", "jarvis-jk1gn50iw7",
                         "--fingerprint", "SHA256:" + "A" * 43, "--execute"], capture_output=True, text=True, env=ENV_NO_NODE)
-    record("스크립트: 우리 id + 다른 지문(오타) = 중단(3)", 3, r.returncode, r.stdout.strip().splitlines()[-1][:50])
+    # ★rc 만 보지 않는다 — 뒤의 다른 중단도 rc 3 이라, 그 검사를 지워도 초록이 된다(impl-r2 Fable 3). 사유 문자열까지.
+    record("스크립트: 우리 id + 다른 지문(오타) = 중단(3) · 사유 = 신원 대조", (3, True),
+           (r.returncode, "우리 신원" in r.stdout), r.stdout.strip().splitlines()[-1][:50])
     r = subprocess.run([sys.executable, os.path.join(ROOT, "ops", "admission-block.py"), "--target", "trial", "--local",
                         "--participant", "not-a-test-id", "--fingerprint", "SHA256:" + "B" * 43, "--shape", "registered",
                         "--not-ours", "--execute"], capture_output=True, text=True, env=ENV_NO_NODE)
-    record("스크립트: 시험 릴레이 registered 인데 adm-t 머리 아님 = 중단(3)", 3, r.returncode,
-           r.stdout.strip().splitlines()[-1][:50])
+    record("스크립트: 시험 릴레이 registered 인데 adm-t 머리 아님 = 중단(3) · 사유 = 머리", (3, True),
+           (r.returncode, "adm-t" in r.stdout), r.stdout.strip().splitlines()[-1][:50])
     r = subprocess.run([sys.executable, os.path.join(ROOT, "ops", "admission-block.py"), "--target", "main", "--local",
                         "--persist-to", persist, "--participant", "alice\n", "--fingerprint", "SHA256:" + "A" * 43,
                         "--not-ours"], capture_output=True, text=True, env=ENV_NO_NODE)
-    record("스크립트: id 끝 개행 = 중단(3)", 3, r.returncode)
+    record("스크립트: id 끝 개행 = 중단(3) · 사유 = 형식", (3, True), (r.returncode, "participant 형식" in r.stdout))
     rc, out = ops_block(persist, base, "bobalias", K["bob"]["fingerprint"], "--execute")
     record("스크립트: 지문이 다른 이름에 붙음 = 중단(3)", 3, rc, out.strip().splitlines()[-1][:60])
     rc, out = ops_block(persist, base, "carol", K["bob"]["fingerprint"], "--execute")
     record("스크립트: id 행 지문 불일치 = 중단(3)", 3, rc, out.strip().splitlines()[-1][:60])
     rc, out = ops_block(persist, base, "alice", K["alice"]["fingerprint"])
-    record("스크립트: --execute 없으면 계획만(0) · 행 0", (0, 0),
+    record("스크립트: --execute 없으면 계획만(10) · 행 0", (10, 0),
            (rc, count("SELECT COUNT(*) AS n FROM admission_blocks", persist)))
     rc, out = ops_block(persist, base, "alice", K["alice"]["fingerprint"], "--execute")
     record("스크립트: alice 차단 = 0 · 명부 표·세 파일 동일", 0, rc, out.strip().splitlines()[-2][:70])
