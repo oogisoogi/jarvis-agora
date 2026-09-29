@@ -27,13 +27,16 @@ export async function admissionBlock(db: D1Database, participantId: string | nul
   return row ?? null;
 }
 
-/** INSERT 가 차단 트리거에 걸려 실패했는가(원인 사슬까지 본다). */
+/** INSERT 가 차단 트리거에 걸려 실패했는가(원인 사슬까지 본다).
+ *  ★`instanceof Error` 에 기대지 않는다 — 바인딩 경계를 넘은 오류는 프로토타입을 잃은 객체일 수 있다(impl-r1 agy).
+ *    message·cause 칸이 있으면 그것을, 없으면 문자열 표현을 본다. */
 export function isAdmissionBlockedError(e: unknown): boolean {
   let cur: unknown = e;
-  for (let i = 0; i < 4 && cur; i++) {
-    const msg = cur instanceof Error ? cur.message : String(cur);
+  for (let i = 0; i < 4 && cur != null; i++) {
+    const o = typeof cur === "object" ? cur as { message?: unknown; cause?: unknown } : null;
+    const msg = o && "message" in o ? String(o.message) : String(cur);
     if (msg.includes(ADMISSION_MARK)) return true;
-    cur = cur instanceof Error ? (cur as Error & { cause?: unknown }).cause : null;
+    cur = o && "cause" in o ? o.cause : null;
   }
   return false;
 }

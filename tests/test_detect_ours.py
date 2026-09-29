@@ -43,6 +43,7 @@ class Relay:
         self.id_fp = FP                                # 본 릴레이에서 우리 id 의 지문
         self.trial_ids: dict[str, str] = {}            # 시험 릴레이에 등록된 {질의값: 참가자}
         self.calls: list[str] = []
+        self.trial_health = (404, "error code: 1042")  # 공개 주소 꺼짐(Cloudflare 1042)
 
     def add(self, room, e):
         self.rooms.setdefault(room, []).append(e)
@@ -53,6 +54,8 @@ class Relay:
             if f in url:
                 return None, "URLError: fake"
         if url.startswith(TRIAL):
+            if url.endswith("/health"):
+                return self.trial_health
             who = unquote(url.split("participant=", 1)[1])
             if who in self.trial_ids:
                 return 200, {"participant": self.trial_ids[who]}
@@ -245,9 +248,35 @@ def test_trial_off_is_skipped_and_marked_without_get():
     tmp, cfg, log, conf = setup([], trial_state="off", workers_dev="false")
     rep = scan(r, cfg, log, conf)
     assert rep["verdict"] == "OK", rep
-    assert not any(c.startswith(TRIAL) for c in r.calls)
+    assert [c for c in r.calls if c.startswith(TRIAL)] == [TRIAL + "/health"]   # /health 1회만 · 참가자 질의 0
     trial = [x for x in rep["relays"] if x["role"] == "trial"][0]
     assert trial["state"] == "off" and "건너뜀" in trial["skipped"]
+
+
+def test_trial_off_but_answering_is_alarm():
+    """[impl-r1] 기록은 꺼짐인데 /health 가 우리 응답 — 경보 + 켜짐 기준으로 참가자 질의까지 한다."""
+    r = Relay()
+    r.trial_health = (200, {"ok": True, "namespace": "x"})
+    r.trial_ids[PID] = "thief"
+    tmp, cfg, log, conf = setup([], trial_state="off", workers_dev="false")
+    rep = scan(r, cfg, log, conf)
+    assert kinds(rep) == ["trial_registered_id", "trial_up_while_recorded_off"], rep
+    for st in ((None, "URLError"), (500, "x"), (200, "not json")):            # 실패·이상은 판정하지 않는다
+        r2 = Relay()
+        r2.trial_health = st
+        rep2 = scan(r2, *setup([], trial_state="off", workers_dev="false")[1:])
+        assert rep2["verdict"] == "OK", (st, rep2)
+
+
+def test_unverified_hash_match_is_incomplete():
+    r = Relay()
+    mine = ev(PID, "a" * 32)
+    r.add("a" * 32, mine)
+    tmp, cfg, log, conf = setup([])
+    with open(os.path.join(cfg, "ledger.jsonl"), "w") as fh:              # 옛 행 — hash_of 없음
+        fh.write(json.dumps({"dir": "sent", "stage": "sent", "message_id": mine["message_id"], "hash": "x"}) + "\n")
+    rep = scan(r, cfg, log, conf)
+    assert reasons(rep) == ["hash_unverified"] and rep["verdict"] == "INCOMPLETE", rep
 
 
 def test_trial_log_config_mismatch_is_incomplete():

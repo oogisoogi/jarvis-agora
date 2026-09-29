@@ -60,7 +60,7 @@ def count(sql, persist):
 def ops_block(persist, base, pid, fp, *extra):
     r = subprocess.run([sys.executable, os.path.join(ROOT, "ops", "admission-block.py"), "--target", "main",
                         "--local", "--persist-to", persist, "--participant", pid, "--fingerprint", fp,
-                        "--relay-url", base, "--blocked-at", "2026-09-29T00:00:00.000Z", *extra],
+                        "--relay-url", base, "--blocked-at", "2026-09-29T00:00:00.000Z", "--not-ours", *extra],
                        capture_output=True, text=True, env=ENV_NO_NODE)
     return r.returncode, r.stdout + r.stderr
 
@@ -168,6 +168,7 @@ def phase_main(base, persist, wdir):
     print("== 골든 세트 ==")
     rooms = {}
     posted = {}
+    ids = {}
 
     def room(name, category, title, seq):
         t = new_id()
@@ -180,6 +181,7 @@ def phase_main(base, persist, wdir):
             print("  %-4s %-22s %-8s -> %s %s" % (name, label, signer, code, v))
             assert code == 201, (name, label, code, body)
             posted[name + ":" + label] = (ev, sig)
+            ids[name + ":" + label] = body["event_id"]          # 적재 때 받은 값 — 뒤 대조의 기대값(서버 목록에서 뽑지 않는다)
 
     room("R1", "debate", "은퇴 전 토론", lambda b, t: [
         ("alice", "genesis", {"type": "debate", "title": "은퇴 전 토론", "body": "쟁점"}, "genesis"),
@@ -216,6 +218,22 @@ def phase_main(base, persist, wdir):
            before["rooms"]["R2"]["status"].get("close_reason"))
 
     print("== 차단 스크립트(ops/admission-block.py · --local) ==")
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "ops", "admission-block.py"), "--target", "main", "--local",
+                        "--persist-to", persist, "--check-schema"], capture_output=True, text=True, env=ENV_NO_NODE)
+    record("스크립트: --check-schema(표 1·트리거 4) = 0", 0, r.returncode)
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "ops", "admission-block.py"), "--target", "main", "--local",
+                        "--persist-to", persist, "--participant", "jarvis-jk1gn50iw7",
+                        "--fingerprint", "SHA256:" + "A" * 43, "--execute"], capture_output=True, text=True, env=ENV_NO_NODE)
+    record("스크립트: 우리 id + 다른 지문(오타) = 중단(3)", 3, r.returncode, r.stdout.strip().splitlines()[-1][:50])
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "ops", "admission-block.py"), "--target", "trial", "--local",
+                        "--participant", "not-a-test-id", "--fingerprint", "SHA256:" + "B" * 43, "--shape", "registered",
+                        "--not-ours", "--execute"], capture_output=True, text=True, env=ENV_NO_NODE)
+    record("스크립트: 시험 릴레이 registered 인데 adm-t 머리 아님 = 중단(3)", 3, r.returncode,
+           r.stdout.strip().splitlines()[-1][:50])
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "ops", "admission-block.py"), "--target", "main", "--local",
+                        "--persist-to", persist, "--participant", "alice\n", "--fingerprint", "SHA256:" + "A" * 43,
+                        "--not-ours"], capture_output=True, text=True, env=ENV_NO_NODE)
+    record("스크립트: id 끝 개행 = 중단(3)", 3, r.returncode)
     rc, out = ops_block(persist, base, "bobalias", K["bob"]["fingerprint"], "--execute")
     record("스크립트: 지문이 다른 이름에 붙음 = 중단(3)", 3, rc, out.strip().splitlines()[-1][:60])
     rc, out = ops_block(persist, base, "carol", K["bob"]["fingerprint"], "--execute")
@@ -258,7 +276,7 @@ def phase_main(base, persist, wdir):
            count("SELECT COALESCE(SUM(count),0) AS n FROM rate_windows WHERE bucket='pid:alice'", persist))
     ev, sig = posted["R1:alice r0"]
     code, body = send(base, rooms["R1"], "debate", "", ev, sig, False)
-    code0 = [e["event_id"] for e in after["rooms"]["R1"]["events"]][2]
+    code0 = ids["R1:alice r0"]
     record("T5 차단 전 적재된 같은 글 재전송 = 200 같은 event_id", (200, code0), (code, body.get("event_id")))
     ev2 = json.loads(json.dumps(ev))
     ev2["payload"]["body"] = "같은 message_id 다른 내용"
@@ -318,7 +336,11 @@ def phase_mutant(base, persist, wdir, label):
     files = now["files"] != st["final"]["files"]
     red = bool(diffs) or files
     print("  변이 %s: 방 차이 %s · 명부 파일 차이 %s" % (label, diffs, files))
-    record("T8 %s 가 T1/T3 을 적색으로 만든다" % label, True, red)
+    if label.startswith("M-0"):
+        # 대조군(변이 0 사본) — 같은 시점에 차이가 **없어야** 뒤의 적색이 변이 때문임을 말할 수 있다(impl-r1 Fable 5).
+        record("T8 대조군(변이 없음) = 최종 사진과 동일", False, red)
+    else:
+        record("T8 %s 가 T1/T3 을 적색으로 만든다" % label, True, red)
 
 
 # ── 단계 old(T6⑷·T15) ───────────────────────────────────────────────────────
@@ -362,7 +384,7 @@ def phase_race(base, persist, wdir):
     record("T12 등록 경합: 차단 지문 → 403", (403, "retired"), (code, detail(body, "why")))
     record("T12 등록 경합: 새 행 0", n_p, count("SELECT COUNT(*) AS n FROM participants", persist))
     code, body = checkpoint_post(base, K["op"], w, "2026-09-29T02:00:00.000Z")
-    record("T12 체크포인트 경합(UPSERT 의 UPDATE 경로): 트리거 → 403", (403, "retired"), (code, detail(body, "why")))
+    record("T12 체크포인트 경합(충돌 키 UPSERT · BEFORE INSERT 트리거가 먼저): 403", (403, "retired"), (code, detail(body, "why")))
 
 
 # ── 단계 upgrade(T14 서버 층) ─────────────────────────────────────────────────
@@ -409,15 +431,25 @@ def main():
     os.makedirs(a.workdir, exist_ok=True)
     os.chmod(a.workdir, 0o700)
     print("\n##### 단계 %s %s #####" % (a.phase, a.label))
+    try:
+        _dispatch(a)
+    except BaseException as e:                  # noqa: BLE001 — 하네스 자체의 사고는 검사 불일치(1)와 가른다
+        import traceback
+        traceback.print_exc()
+        print("== 단계 %s %s: 하네스 오류(%s) — 검사 판정 아님 ==" % (a.phase, a.label, type(e).__name__))
+        return 2
+    ok = all(CHECKS)
+    print("== 단계 %s %s: %s (%d/%d) ==" % (a.phase, a.label, "PASS" if ok else "FAIL", sum(CHECKS), len(CHECKS)))
+    return 0 if ok else 1
+
+
+def _dispatch(a):
     {"main": lambda: phase_main(a.base, a.persist, a.workdir),
      "mutant": lambda: phase_mutant(a.base, a.persist, a.workdir, a.label),
      "old": lambda: phase_old(a.base, a.persist, a.workdir),
      "race": lambda: phase_race(a.base, a.persist, a.workdir),
      "upgrade-before": lambda: phase_upgrade(a.base, a.persist, a.workdir, "before"),
      "upgrade-after": lambda: phase_upgrade(a.base, a.persist, a.workdir, "after")}[a.phase]()
-    ok = all(CHECKS)
-    print("== 단계 %s %s: %s (%d/%d) ==" % (a.phase, a.label, "PASS" if ok else "FAIL", sum(CHECKS), len(CHECKS)))
-    return 0 if ok else 1
 
 
 if __name__ == "__main__":

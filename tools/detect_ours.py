@@ -252,6 +252,9 @@ def scan_main(fetch: Fetch, base: str, pid: str, fp: str, sent: dict, rep: dict)
         else:
             cls, why = "unrecorded", "원장과 내용(해시) 불일치 — 출처 미확정"
         rep["counts"][cls] = rep["counts"].get(cls, 0) + 1
+        if cls == "match_unverified_hash":
+            # 못 잰 일치는 일치가 아니다 — 불완전으로 올린다(impl-r1 Fable 13).
+            rep["incomplete"].append({"reason": "hash_unverified", "relay": base, "message_id": o["message_id"]})
         if cls == "unrecorded":
             rep["alarms"].append({"kind": "unrecorded_our_name", "relay": base, "room": o["room"],
                                   "event_id": o["event_id"], "created_at": o["created_at"],
@@ -271,9 +274,17 @@ def scan_trial(fetch: Fetch, base: str, pid: str, fp: str, state: str | None, wh
     if why:
         rep["incomplete"].append({"reason": why, "relay": base})
     if state == "off":
-        # ★꺼짐은 운영 기록이 말한다. 여기서 GET 을 부르지 않는다 — 실패를 성공으로 읽을 틈을 만들지 않는다.
-        rel["skipped"] = "운영 기록상 의도적 종료 — 이번 탐지에서 건너뜀"
-        return
+        # ★꺼짐은 운영 기록이 말한다 — 실패를 「꺼짐 성공」으로 읽지 않는다.
+        #   다만 기록은 이 체크아웃의 파일이라 다른 곳에서 켠 배포를 모른다(impl-r1 Fable 3·agy) → /health 를 1회 본다:
+        #   우리 릴레이 응답(200 · ok:true)이면 「기록은 꺼짐인데 켜져 있다」 경보 · 실패는 아무 판정도 하지 않는다(비대칭).
+        status, body = fetch("%s/health" % base)
+        if status == 200 and isinstance(body, dict) and body.get("ok") is True:
+            rep["alarms"].append({"kind": "trial_up_while_recorded_off", "relay": base,
+                                  "detail": "운영 기록은 꺼짐인데 시험 릴레이가 응답한다 — 켜진 채 탐지가 빠질 뻔했다"})
+            state = "running"
+        else:
+            rel["skipped"] = "운영 기록상 의도적 종료 — 이번 탐지에서 건너뜀(/health 비응답 확인)"
+            return
     if state is None:
         return
     for label, who in (("id", pid), ("fingerprint", fp)):

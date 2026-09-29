@@ -34,6 +34,7 @@ ENV = {k: v for k, v in os.environ.items() if k != "NODE_OPTIONS"}
 LEAK_BLK = ('  const table = lookupTable(rows);\n',
             '  const table = lookupTable(rows);\n  const blk = new Set(((await db.prepare("SELECT participant_id FROM admission_blocks").all<any>()).results ?? []).map((r: any) => r.participant_id));\n')
 MUTANTS = {
+    "M-0 대조군(변이 없음)": [],
     "M-allParticipants(명부 행에 은퇴를 폐기로 섞음)": [
         ("src/lib/store.ts",
          '"SELECT participant_id, display_name, key_type, key_b64, fingerprint, is_operator, revoked_at, created_at FROM participants"',
@@ -57,7 +58,7 @@ APP_MUTATIONS = {
     "A5 /checkpoint catch 제거": [("src/index.ts", "    if (isAdmissionBlockedError(e)) {\n      fail(PERMISSION, \"은퇴한 운영자다", "    if (false) {\n      fail(PERMISSION, \"은퇴한 운영자다")],
     "A6 /home retired 알림 제거": [("src/index.ts", "  if (me.blocked_at) {\n", "  if (false) {\n")],
     "A7 catch 의 같은 해시 200 제거": [("src/index.ts", "    if (again && again.hash === hash) {\n", "    if (false) {\n")],
-    "A8 /register 지문 검사 제거(id 만)": [("src/index.ts", "  if (await admissionBlock(env.DB, participantId, fingerprint)) {\n", "  if (await admissionBlock(env.DB, participantId, null)) {\n")],
+    "E8 (등가 변이 · 초록이 정상) /register 지문 검사 제거(id 만)": [("src/index.ts", "  if (await admissionBlock(env.DB, participantId, fingerprint)) {\n", "  if (await admissionBlock(env.DB, participantId, null)) {\n")],
 }
 RACE = [
     ("src/index.ts", "  if (await admissionBlock(env.DB, event.from, null)) {\n", "  if (false) {\n"),
@@ -199,9 +200,16 @@ def main() -> int:
         patch(race, APP_MUTATIONS[a.app_mutation])
         patch(race, [e for e in RACE if all(e[1] != m[1] for m in APP_MUTATIONS[a.app_mutation])])
         rcs.append(with_server(race, lambda: harness("race", a.workdir, a.app_mutation), "appmut-race"))
-        killed = any(rc != 0 for rc in rcs)
+        # ★검사 불일치(rc 1)만 「잡힘」으로 센다 — 서버 기동 실패(2)·하네스 오류(2)를 적색으로 세지 않는다(impl-r1 Fable 4).
+        if any(rc not in (0, 1) for rc in rcs):
+            print("\n##### 앱 변이 %s: 측정 실패(main rc %d · race rc %d) — 판정 없음 #####" % (a.app_mutation, *rcs))
+            return 2
+        killed = any(rc == 1 for rc in rcs)
+        equivalent = a.app_mutation.startswith("E")
         print("\n##### 앱 변이 %s: %s (main rc %d · race rc %d) #####"
-              % (a.app_mutation, "적색 = 잡힘" if killed else "★초록 = 안 잡힘", rcs[0], rcs[1]))
+              % (a.app_mutation, "적색 = 잡힘" if killed else "초록", rcs[0], rcs[1]))
+        if equivalent:
+            return 0 if not killed else 1        # 등가 변이는 초록이 정상 — 적색이면 앞의 등가 판단이 틀렸다
         return 0 if killed else 1
     copies = os.path.join(a.workdir, "copies")
     results: list[tuple[str, int]] = []

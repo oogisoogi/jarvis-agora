@@ -650,10 +650,11 @@ async function getHome(req: Request, env: Env): Promise<Response> {
 
   // (1) 참가자 — id 또는 지문(신원 = 공개키 지문 · 명세 E)
   //   ★받아들이기 차단(은퇴)은 같은 질의에 붙여 읽는다 — 질의 수(HOME_D1_QUERIES_MAX)를 늘리지 않는다.
+  //   ★기준 = **id**(글 수락·events 트리거와 같다 · impl-r1 Fable 11) — 지문으로 물어도 그 지문의 행의 id 로 본다.
   const me = await qb.prepare(
     `SELECT p.participant_id, p.fingerprint, p.revoked_at,
             (SELECT b.blocked_at FROM admission_blocks b
-              WHERE b.participant_id = p.participant_id OR b.fingerprint = p.fingerprint LIMIT 1) AS blocked_at
+              WHERE b.participant_id = p.participant_id LIMIT 1) AS blocked_at
        FROM participants p WHERE p.participant_id = ?1 OR p.fingerprint = ?1`
   ).bind(who).first<{ participant_id: string; fingerprint: string; revoked_at: string | null; blocked_at: string | null }>();
   if (!me) fail(STORE, "그런 참가자가 없다", { participant: who }, { status: 404 });
