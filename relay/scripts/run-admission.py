@@ -48,6 +48,17 @@ MUTANTS = {
          "  const allowedText = renderAllowedSigners(rows.filter(r => !blk.has(r.participant_id)));\n")],
 }
 # 경합 창(T12): 앱 층 검사와 멱등 사전 조회를 뺀다 = 「검사를 통과한 뒤 INSERT 전에 차단이 커밋된」 요청.
+# 앱 층 표적 변이 — 하네스(main·race)가 **빨개지는지** 잰다(`--app-mutation`). 안 빨개지면 그 축은 상시 초록이다.
+APP_MUTATIONS = {
+    "A1 /events 앱 검사 제거(속도 예산 소모)": [("src/index.ts", "  if (await admissionBlock(env.DB, event.from, null)) {\n", "  if (false) {\n")],
+    "A2 catch 순서 뒤집기(401 을 422 앞에)": [("src/index.ts", "    if (again) {\n      fail(GATE_REJECT,", "    if (again && !isAdmissionBlockedError(e)) {\n      fail(GATE_REJECT,")],
+    "A3 /home replies 안 비움": [("src/index.ts", "    replies = [];\n", "")],
+    "A4 /register catch 제거": [("src/index.ts", "    if (isAdmissionBlockedError(e)) {\n      fail(PERMISSION, \"은퇴한 참가자다(받아들이기 차단)\"", "    if (false) {\n      fail(PERMISSION, \"은퇴한 참가자다(받아들이기 차단)\"")],
+    "A5 /checkpoint catch 제거": [("src/index.ts", "    if (isAdmissionBlockedError(e)) {\n      fail(PERMISSION, \"은퇴한 운영자다", "    if (false) {\n      fail(PERMISSION, \"은퇴한 운영자다")],
+    "A6 /home retired 알림 제거": [("src/index.ts", "  if (me.blocked_at) {\n", "  if (false) {\n")],
+    "A7 catch 의 같은 해시 200 제거": [("src/index.ts", "    if (again && again.hash === hash) {\n", "    if (false) {\n")],
+    "A8 /register 지문 검사 제거(id 만)": [("src/index.ts", "  if (await admissionBlock(env.DB, participantId, fingerprint)) {\n", "  if (await admissionBlock(env.DB, participantId, null)) {\n")],
+}
 RACE = [
     ("src/index.ts", "  if (await admissionBlock(env.DB, event.from, null)) {\n", "  if (false) {\n"),
     ("src/index.ts", "  if (existing) {\n    if (existing.hash === hash) {\n", "  if (false && existing) {\n    if (existing.hash === hash) {\n"),
@@ -142,10 +153,26 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", default=os.path.join(tempfile.gettempdir(), "agora-admission"))
     ap.add_argument("--only", choices=("main", "mutant", "old", "race"), default=None)
+    ap.add_argument("--app-mutation", choices=sorted(APP_MUTATIONS), default=None,
+                    help="앱 층 변이 하나를 사본에 넣고 main·race 를 돌린다 — 적색이어야(rc≠0) 그물이 산 것이다")
     a = ap.parse_args()
     rl = run_local_module()
     if not rl.ensure_local_schema(ENV):
         return 3
+    if a.app_mutation:
+        d = make_copy(os.path.join(a.workdir, "copies", "app-mutant"), None)
+        patch(d, APP_MUTATIONS[a.app_mutation])
+        if not rl.reset_local_db(ENV):
+            return 3
+        rcs = [with_server(d, lambda: harness("main", a.workdir, a.app_mutation), "appmut-main")]
+        race = make_copy(os.path.join(a.workdir, "copies", "app-mutant-race"), None)
+        patch(race, APP_MUTATIONS[a.app_mutation])
+        patch(race, [e for e in RACE if all(e[1] != m[1] for m in APP_MUTATIONS[a.app_mutation])])
+        rcs.append(with_server(race, lambda: harness("race", a.workdir, a.app_mutation), "appmut-race"))
+        killed = any(rc != 0 for rc in rcs)
+        print("\n##### 앱 변이 %s: %s (main rc %d · race rc %d) #####"
+              % (a.app_mutation, "적색 = 잡힘" if killed else "★초록 = 안 잡힘", rcs[0], rcs[1]))
+        return 0 if killed else 1
     copies = os.path.join(a.workdir, "copies")
     results: list[tuple[str, int]] = []
     if a.only in (None, "main"):
