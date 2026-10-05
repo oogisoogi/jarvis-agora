@@ -91,7 +91,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
     "mail-send":      {"core": True,  "built": True,  "slice": "S10-1"},
     "mail":           {"core": False, "built": True,  "slice": "S10-1"},
     # ★계약 확장 10(master 발주 2026-10-05 · TICKET=agora-desk-t2) — **상담소 데스크의 배치·게시**.
-    #   `batch` = 하루(설정 주) 1호출 분석 → 보고서·답 초안(게시 0) · `publish` = master 가 읽은 뒤 초안 게시.
+    #   `batch` = 하루(설정 주) 한 번 = 분석 1호출 + 공개 답 ≤1호출(입력 = 공개 글만) → 보고서·답 초안(게시 0) · `publish` = master 가 읽은 뒤 초안 게시.
     #   도구가 아니다: MCP 에 올리면 대리인 손에 「모델 호출 비용을 써라」·「남에게 답을 보내라」가 쥐어진다.
     "counsel":        {"core": False, "built": True,  "slice": "S11-1"},
 }

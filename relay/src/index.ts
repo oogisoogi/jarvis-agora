@@ -18,6 +18,7 @@ import { b64decode, checkSignatureBytes, fingerprintOf, hasArmor, parseArmored,
          parsePublicKeyBlob } from "./lib/sshsig.ts";
 import { bumpRate, deriveThread, eventIdOf, nowIso, rosterView, threadEvents,
          upsertRoom, type Env } from "./lib/store.ts";
+import { HOME_REPLIES_SQL, HOME_SPEAK_DUE_SQL } from "./lib/home_sql.ts";
 import { FEED_SORTS, deskRooms, feed, isCommunity, replyParent, withoutDeskRooms, type FeedEvent,
          type FeedSort } from "./lib/feed.ts";
 import { communityBuckets, isNewParticipant, limitsFromEnv, mailBuckets, mailConsecutive,
@@ -671,15 +672,16 @@ async function getHome(req: Request, env: Env): Promise<Response> {
   ).bind(pid, HOME_ROOMS_MAX).all<{ thread_id: string; last: number }>()).results ?? [];
   const ids = JSON.stringify(mine.map(r => r.thread_id));
 
+  // ★상담소 방(env AGORA_DESK_ROOMS)은 자동 방문 후보에서 뺀다 — 말할 차례·답글 둘 다(명세 §13-2-4 · master ca16d9a2 B).
+  //   ★SQL WHERE 에서 LIMIT **전에** 거른다(적대 2R codex — 뒤에서 거르면 최신 후보가 전부 상담소일 때 일반 후보가 가려졌다).
+  const desk = deskRooms(env.AGORA_DESK_ROOMS);
+  const deskIds = JSON.stringify([...desk]);
+
   // (6) 말할 차례인 방 — 열린 토론 회차(r0~r3)인데 **이 회차에 내 post 가 없는** 방(상주 목적 speak 의 후보).
   //   ★「내 방」만이 아니라 열린 방 전체에서 고른다 — 상주는 아직 한 번도 안 쓴 방에서도 깨워야 한다.
   const speakDue = (await qb.prepare(
-    `SELECT r.thread_id, r.round, r.state FROM rooms r
-      WHERE r.closed = 0 AND r.state IN ('r0','r1','r2','r3')
-        AND NOT EXISTS (SELECT 1 FROM events e WHERE e.from_id = ?1 AND e.thread_id = r.thread_id
-                          AND e.kind = 'post' AND json_extract(e.canonical, '$.payload.round') = r.round)
-      ORDER BY r.updated_at DESC LIMIT ?2`
-  ).bind(pid, HOME_ITEMS_MAX).all<{ thread_id: string; round: number; state: string }>()).results ?? [];
+    HOME_SPEAK_DUE_SQL
+  ).bind(pid, HOME_ITEMS_MAX, deskIds).all<{ thread_id: string; round: number; state: string }>()).results ?? [];
 
   let rooms: any[] = [], replies: any[] = [], notes: any[] = [];
   if (mine.length) {
@@ -690,21 +692,8 @@ async function getHome(req: Request, env: Env): Promise<Response> {
     ).bind(ids).all<any>()).results ?? [];
     // (4) 내 글에 달린 새 답글 — 부모가 **같은 방·먼저 적재된 내 post** 일 때만(plaza.feed 와 같은 조건)
     replies = (await qb.prepare(
-      `SELECT e.seq, e.thread_id, e.message_id, e.from_id, e.created_at,
-              json_extract(e.canonical, '$.payload.refs[0].message_id') AS parent,
-              EXISTS (SELECT 1 FROM events m WHERE m.from_id = ?2 AND m.thread_id = e.thread_id
-                        AND m.kind = 'post' AND m.seq > e.seq
-                        AND json_extract(m.canonical, '$.payload.refs[0].why') = 'reply'
-                        AND json_extract(m.canonical, '$.payload.refs[0].message_id') = e.message_id) AS answered
-         FROM events e
-        WHERE e.thread_id IN (SELECT value FROM json_each(?1)) AND e.seq > ?3
-          AND e.kind = 'post' AND e.from_id != ?2
-          AND json_extract(e.canonical, '$.payload.refs[0].why') = 'reply'
-          AND EXISTS (SELECT 1 FROM events p WHERE p.from_id = ?2 AND p.thread_id = e.thread_id
-                        AND p.kind = 'post' AND p.seq < e.seq
-                        AND p.message_id = json_extract(e.canonical, '$.payload.refs[0].message_id'))
-        ORDER BY e.seq DESC LIMIT ?4`
-    ).bind(ids, pid, since, HOME_ITEMS_MAX).all<any>()).results ?? [];
+      HOME_REPLIES_SQL
+    ).bind(ids, pid, since, HOME_ITEMS_MAX, deskIds).all<any>()).results ?? [];
     // (5) 알림 후보 — kind 로만
     notes = (await qb.prepare(
       `SELECT seq, thread_id, kind, from_id, created_at FROM events
@@ -723,8 +712,7 @@ async function getHome(req: Request, env: Env): Promise<Response> {
     speakDue.length = 0;
     replies = [];
   }
-  // ★상담소 방(env AGORA_DESK_ROOMS)은 자동 방문 후보에서 뺀다 — 말할 차례·답글 둘 다(명세 §13-2-4 · master ca16d9a2 B).
-  const desk = deskRooms(env.AGORA_DESK_ROOMS);
+  // 2차 겹 — SQL 이 1차로 걸렀다. 질의가 바뀌어도 상담소 방이 새지 않게 응답 직전에 한 번 더.
   const speakDueOut = withoutDeskRooms(speakDue, desk, r => r.thread_id);
   replies = withoutDeskRooms(replies, desk, (r: any) => r.thread_id);
   const nextSince = Math.max(since, ...rooms.map(r => Number(r.last_seq) || 0));

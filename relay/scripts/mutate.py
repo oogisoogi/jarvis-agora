@@ -210,6 +210,16 @@ MUTATIONS = [
      "  return items;",
      "vitest", "상담소 방 자동 방문 제외(AGORA_DESK_ROOMS)"),
 
+    ("M40 상담소 방 제외를 LIMIT 뒤로(말할 차례 SQL)", "src/lib/home_sql.ts",
+     "        AND r.thread_id NOT IN (SELECT value FROM json_each(?3))\n",
+     "",
+     "vitest", "제외는 LIMIT 전(SQL WHERE)"),
+
+    ("M41 상담소 방 제외를 LIMIT 뒤로(답글 SQL)", "src/lib/home_sql.ts",
+     "          AND e.thread_id NOT IN (SELECT value FROM json_each(?5))\n",
+     "",
+     "vitest", "제외는 LIMIT 전(SQL WHERE)"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",

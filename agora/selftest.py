@@ -4479,7 +4479,9 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M632-resident-visits-desk-room", "M633-desk-exempt-on-resident-path",
                "M634-resident-env-unmarked", "M635-desk-batch-lock-ignored", "M636-desk-leak-body-only",
                "M637-desk-cap-per-group", "M638-desk-urgent-reflects-token",
-               "M639-desk-public-threshold-loose"),
+               "M639-desk-public-threshold-loose", "M640-desk-public-sees-private",
+               "M641-desk-analysis-writes-public", "M642-desk-cap-skips-wrapping", "M643-desk-fleet-outside-cap",
+               "M644-desk-trimmed-notes-done", "M645-desk-final-size-unchecked"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17538,6 +17540,129 @@ def _case_desk_settings_fall_back() -> None:
         raise AssertionError("enabled true 를 못 읽었다")
 
 
+def _desk_plaza_events(room: str, posts: list[tuple[str, str]]) -> dict[str, Any]:
+    from agora import mail
+    return {"events": [{"event": {"kind": "post", "message_id": mid, "from": "operator-b", "ts": mail.now_ms_iso(),
+                                  "payload": {"round": 0, "body": body}}} for mid, body in posts]}
+
+
+def _desk_ok_caller(seen: list[tuple[list[str], str]], replies: Callable[[list[str], str], list[dict[str, Any]]]
+                    ) -> Callable[[list[str], str], dict[str, Any]]:
+    def caller(argv: list[str], prompt: str) -> dict[str, Any]:
+        seen.append((argv, prompt))
+        inner = {"summary": "s", "topics": [], "backlog": [], "human_needed": [], "replies": replies(argv, prompt)}
+        return {"rc": 0, "stdout": json.dumps({"result": json.dumps(inner, ensure_ascii=False)})}
+    return caller
+
+
+def _case_desk_prompt_cap_is_final_bytes() -> None:
+    """적대 2R codex ① — 상한 = **최종 프롬프트 바이트**(함대 표·묶음 포장·직렬화 포함) · 계산값 = 실제 입력 바이트.
+    ①큰 함대 표 + 공개 글 하나 ②작은 공개 글 12묶음 ③계산이 어긋나면(입력을 부풀리면) 부르지 않는다(code 3·호출 0)."""
+    from agora import counsel, mail
+    cap = 1024
+    config = {"human_approval": False, "desk": {"enabled": True, "batch_max_bytes": cap}}
+    daily = _mail_doc(payload={"intent": "daily", "daily": {"day": mail.now_ms_iso()[:10], "os": "macos-15.6",
+                      "doctor": {"ok": 1, "warn": 0, "fail": 60, "skip": 0, "warn_ids": [],
+                                 "fail_ids": [f"check-item-{i:03d}" for i in range(60)]}}})
+    ctx, _store = _desk_world([daily], config=config)
+    room = sorted(mail.desk_pin()["rooms"])[0]
+    one = _desk_plaza_events(room, [("1" * 32, "help")])
+    _desk_cycle(ctx, reduce=lambda _c, r: one if r == room else {"events": []},
+                notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    data = counsel.collect(ctx, max_bytes=cap)
+    real = counsel.prompt_len(counsel.model_payload(data))
+    if real != data["bytes"] or real > cap or data["fleet_trimmed"] != 1 or len(data["fleet_md"].encode()) <= cap:
+        raise AssertionError(f"함대 표가 상한 밖이다: 계산 {data['bytes']} 실제 {real} trimmed={data['fleet_trimmed']}")
+    seen: list[tuple[list[str], str]] = []
+    counsel.batch(ctx, caller=_desk_ok_caller(seen, lambda a, p: []), notifier=lambda *a, **k: None)
+    if len(seen) != 2 or any(len(p.encode("utf-8")) > cap for _a, p in seen):
+        raise AssertionError(f"실제 입력이 상한을 넘었다: {[len(p.encode()) for _a, p in seen]}")
+    ctx2, _s2 = _desk_world([], config=config)
+    many = _desk_plaza_events(room, [("%032x" % (i + 1), f"짧은 글 {i}") for i in range(12)])
+    _desk_cycle(ctx2, reduce=lambda _c, r: many if r == room else {"events": []},
+                notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    d2 = counsel.collect(ctx2, max_bytes=cap)
+    real2 = counsel.prompt_len(counsel.model_payload(d2))
+    if real2 != d2["bytes"] or real2 > cap or not d2["carried"]:
+        raise AssertionError(f"묶음 포장이 상한 밖이다: 계산 {d2['bytes']} 실제 {real2} 이월 {d2['carried']}")
+    orig = counsel.collect
+
+    def bloated(c: Any, *, max_bytes: int) -> dict[str, Any]:
+        d = orig(c, max_bytes=max_bytes)
+        d["items"] = d["items"] + [{"key": "P99", "layer": "공개 방 글", "posts": [{"body": "가" * cap}]}]
+        return d
+    counsel.collect = bloated
+    try:
+        counsel.batch(ctx2, caller=lambda *_a: (_ for _ in ()).throw(AssertionError("상한을 넘은 입력으로 불렀다")),
+                      notifier=lambda *a, **k: None)
+    except AgoraError as e:
+        if e.code != 3:
+            raise
+    else:
+        raise AssertionError("상한을 넘은 입력을 거르지 않았다")
+    finally:
+        counsel.collect = orig
+
+
+def _case_desk_owner_notes_carried() -> None:
+    """적대 2R codex ③ — 상한으로 모델 입력에서 빠진 오너 한 줄은 **이월**(처리 완료로 적지 않는다) ·
+    보고서 §3 에는 전부 · 다음 기간 수집에 다시 나온다."""
+    from agora import counsel, mail
+    cap = 1024
+    config = {"human_approval": False, "desk": {"enabled": True, "batch_max_bytes": cap}}
+    notes = [f"오너메모{i} " + "나" * 120 for i in range(4)]
+    dailies = [_mail_doc(payload={"intent": "daily", "daily": {"day": mail.now_ms_iso()[:10], "os": "macos-15.6",
+                                                                "owner_note": n}}) for n in notes]
+    ctx, _store = _desk_world(dailies, config=config)
+    _desk_cycle(ctx, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    data = counsel.collect(ctx, max_bytes=cap)
+    if not data["notes_trimmed"] or len(data["daily_notes"]) + data["notes_trimmed"] != 4:
+        raise AssertionError(f"오너 한 줄 상한 계산이 다르다: in={len(data['daily_notes'])} trimmed={data['notes_trimmed']}")
+    trimmed = data["notes_trimmed"]
+    out = counsel.batch(ctx, caller=_desk_ok_caller([], lambda a, p: []), notifier=lambda *a, **k: None)
+    report = open(out["report"], encoding="utf-8").read()
+    if any(f"오너메모{i}" not in report for i in range(4)) or report.count("다음 기간 이월") < trimmed:
+        raise AssertionError("보고서에 오너 한 줄이 전부 실리지 않았다")
+    again = counsel.collect(ctx, max_bytes=cap)
+    if len(again["notes_all"]) != trimmed or again["counts"]["dailies"] != trimmed:
+        raise AssertionError(f"빠진 오너 한 줄이 처리 완료로 사라졌다: 다음 수집 {len(again['notes_all'])} / 빠짐 {trimmed}")
+
+
+def _case_desk_public_call_isolated() -> None:
+    """master e8eeb8f6 ⓐ(적대 2R codex ②) — 공개 답 초안은 **둘째 호출**이 쓰고 그 입력엔 비공개 우편 0바이트 ·
+    분석 호출(비공개를 읽은 호출)이 쓴 공개 답은 버린다 · 공개 글 0 이면 둘째 호출 0(→ 배치 1호출 케이스)."""
+    from agora import counsel, mail
+    token = "QZX7SECRET 내일계약해지"
+    m = _mail_doc(subject="비공개", body=f"이건 저만 아는 사정입니다 {token}")
+    ctx, _store = _desk_world([m])
+    room = sorted(mail.desk_pin()["rooms"])[0]
+    posts = _desk_plaza_events(room, [("1" * 32, "설치가 멈춰요")])
+    _desk_cycle(ctx, reduce=lambda _c, r: posts if r == room else {"events": []},
+                publish=lambda c, d: {"status": 201, "message_id": d["message_id"]},
+                notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    seen: list[tuple[list[str], str]] = []
+
+    def replies(argv: list[str], prompt: str) -> list[dict[str, Any]]:
+        if argv[argv.index("--system-prompt") + 1] == counsel.PUBLIC_SYSTEM_PROMPT:
+            return [{"key": "P1", "body": "공개 답: " + prompt}]          # 본 것을 통째로 베끼는 모델
+        return [{"key": "M1", "body": "우편 답"}, {"key": "P1", "body": f"분석 호출의 공개 답 {token}"}]
+    out = counsel.batch(ctx, caller=_desk_ok_caller(seen, replies), notifier=lambda *a, **k: None)
+    kinds = [a[a.index("--system-prompt") + 1] == counsel.PUBLIC_SYSTEM_PROMPT for a, _p in seen]
+    if kinds != [False, True]:
+        raise AssertionError(f"분석 1 + 공개 답 1 이 아니다: {kinds}")
+    if "QZX7SECRET" not in seen[0][1] or "QZX7SECRET" in seen[1][1] or "비공개 우편" in seen[1][1]:
+        raise AssertionError("공개 답 호출 입력에 비공개 우편이 섞였다")
+    drafts = json.load(open(os.path.join(out["dir"], "drafts.json"), encoding="utf-8"))
+    pub = [r for r in drafts["replies"] if r["key"] == "P1"]
+    if len(pub) != 1 or "QZX7SECRET" in pub[0]["body"] or "설치가 멈춰요" not in pub[0]["body"] \
+            or [r["key"] for r in drafts["replies"]] != ["M1", "P1"]:
+        raise AssertionError(f"공개 답 초안의 출처가 다르다: {drafts['replies']}")
+    calls = [r.get("call") for r in mail._rows(os.path.join(counsel.counsel_dir(ctx), counsel.CALLS_FILE))
+             if r.get("phase") == "start"]
+    if calls != ["analysis", "public"]:
+        raise AssertionError(f"호출 원장이 다르다: {calls}")
+
+
 def _case_scrub_our_two_hosts_only() -> None:
     """허용 도메인 = 우리 정확한 호스트 둘만(master 0a9ded7f · 하위·형제·상위·꼬리 붙인 호스트 차단)."""
     from agora import scrub
@@ -18145,6 +18270,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("상담소: 게시 검사·멱등",                  _case_desk_publish_checks_and_idempotent, None),
     ("상담소: 함대 일지 표",                    _case_desk_fleet_table, None),
     ("상담소: 설정 칸 기본값",                  _case_desk_settings_fall_back, None),
+    ("상담소: 상한 = 최종 프롬프트 바이트",      _case_desk_prompt_cap_is_final_bytes, None),
+    ("상담소: 빠진 오너 한 줄은 이월",          _case_desk_owner_notes_carried, None),
+    ("상담소: 공개 답은 공개 글만 본다",        _case_desk_public_call_isolated, None),
     ("스크럽: 우리 도메인은 정확한 두 호스트",  _case_scrub_our_two_hosts_only, None),
     ("상주: 데스크면 깨움 0",                   _case_resident_desk_branch_never_wakes, None),
 )
@@ -18175,12 +18303,12 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      'if type(r) is dict and r["key"] not in seen',
      "상담소: 배치 1호출·주소는 코드가"),
     ("M626-desk-publish-no-leak-check", "agora/counsel.py",
-     '        elif leaks(body, [bodies[m] for m in batch_mail_ids if m in bodies]):',
-     '        elif False:',
+     '        elif leaks(body, [bodies[m] for m in batch_mail_ids if m in bodies] + [n for ns',
+     '        elif False and leaks(body, [bodies[m] for m in batch_mail_ids if m in bodies] + [n for ns',
      "상담소: 게시 검사·멱등"),
     ("M627-desk-empty-batch-calls", "agora/counsel.py",
-     '    if not human and not data["signals"] and not data["daily_notes"]:',
-     '    if False:',
+     '    need_analysis = bool(human or data["signals"] or data["daily_notes"])',
+     '    need_analysis = True',
      "상담소: 배치 입력 0 = 호출 0"),
     ("M628-desk-ack-no-downgrade", "agora/counsel.py",
      '        if not (links and e.code == errors.GATE_REJECT):',
@@ -18226,6 +18354,30 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '                   LEAK_RUN_PUBLIC):',
      '                   LEAK_RUN):',
      "상담소: 상한·잠금·제목 대조"),
+    ("M640-desk-public-sees-private", "agora/counsel.py",
+     '    return {"items": [b for b in data["items"] if data["addresses"].get(b["key"], {}).get("layer") == "plaza"]}',
+     '    return {"items": data["items"]}',
+     "상담소: 공개 답은 공개 글만 본다"),
+    ("M641-desk-analysis-writes-public", "agora/counsel.py",
+     ' \\\n                and addresses[r["key"]].get("layer") == reply_layer:',
+     ':',
+     "상담소: 공개 답은 공개 글만 본다"),
+    ("M642-desk-cap-skips-wrapping", "agora/counsel.py",
+     '            size = _jlen(t) + (1 if taken else _jlen(head) + (1 if bundle else 0))',
+     '            size = _jlen(t)',
+     "상담소: 상한 = 최종 프롬프트 바이트"),
+    ("M643-desk-fleet-outside-cap", "agora/counsel.py",
+     '        if used + _jlen(cand) - 2 > max_bytes:',
+     '        if False:',
+     "상담소: 상한 = 최종 프롬프트 바이트"),
+    ("M644-desk-trimmed-notes-done", "agora/counsel.py",
+     '                    and r["key"] not in notes_out]',
+     '                    ]',
+     "상담소: 빠진 오너 한 줄은 이월"),
+    ("M645-desk-final-size-unchecked", "agora/counsel.py",
+     '        if len(p.encode("utf-8")) > max(s["batch_max_bytes"], data["over_first"]):',
+     '        if False:',
+     "상담소: 상한 = 최종 프롬프트 바이트"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',
      '\n.jarvis.godmeyou.kr\n.godmeyou.kr\n',

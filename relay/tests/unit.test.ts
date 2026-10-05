@@ -19,6 +19,8 @@ import { checkpointOf } from "../src/lib/roster.ts";
 import { loadBundle, check as scrubCheck } from "../src/lib/scrub.ts";
 import { bumpRate, eventIdOf, nowIso } from "../src/lib/store.ts";
 import { prefersHtml } from "../src/lib/accept.ts";
+import * as homeSql from "../src/lib/home_sql.ts";
+import { DatabaseSync } from "node:sqlite";
 
 const REPO = new URL("../../", import.meta.url).pathname;
 const GOLDEN = JSON.parse(readFileSync(REPO + "tests/golden/canonical-vectors.json", "utf8"));
@@ -828,5 +830,33 @@ describe("상담소 방 자동 방문 제외(AGORA_DESK_ROOMS · master ca16d9a2
     const rows = [{ thread_id: desk }, { thread_id: "e".repeat(32) }];
     expect(feedTs.withoutDeskRooms(rows, feedTs.deskRooms(desk), r => r.thread_id)).toEqual([{ thread_id: "e".repeat(32) }]);
     expect(feedTs.withoutDeskRooms(rows, feedTs.deskRooms(""), r => r.thread_id)).toEqual(rows);
+  });
+  // ★적대 2R codex — 제외가 LIMIT 뒤면 최신 후보가 전부 상담소일 때 일반 후보가 가려졌다. 실제 SQL 을 메모리 SQLite 에서 LIMIT 2 로.
+  it("제외는 LIMIT 전(SQL WHERE) — 최신 둘이 상담소여도 일반 방·일반 답글이 나온다", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(`CREATE TABLE rooms (thread_id TEXT, round INTEGER, state TEXT, closed INTEGER, updated_at TEXT);
+             CREATE TABLE events (seq INTEGER, thread_id TEXT, message_id TEXT, from_id TEXT, created_at TEXT,
+                                  kind TEXT, canonical TEXT);`);
+    const d1 = "d1".repeat(16), d2 = "d2".repeat(16), plain = "a0".repeat(16);
+    const deskJson = JSON.stringify([d1, d2]);
+    // node:sqlite 는 ?N 을 위치 인자로 못 묶는다 — 같은 SQL 의 ?N 을 :pN 이름으로만 바꿔 돌린다(질의 본문은 그대로).
+    const run = (sql: string, ...args: unknown[]) => db.prepare(sql.replace(/\?(\d+)/g, ":p$1"))
+      .all(Object.fromEntries(args.map((v, i) => [`p${i + 1}`, v])) as any);
+    for (const [t, at] of [[plain, "2026-10-05T01"], [d1, "2026-10-05T02"], [d2, "2026-10-05T03"]])
+      db.prepare("INSERT INTO rooms VALUES (?, 0, 'r0', 0, ?)").run(t, at);
+    const due = run(homeSql.HOME_SPEAK_DUE_SQL, "me", 2, deskJson).map((r: any) => r.thread_id);
+    expect(due).toEqual([plain]);
+    const post = (seq: number, t: string, mid: string, from: string, parent?: string) =>
+      db.prepare("INSERT INTO events VALUES (?, ?, ?, ?, '', 'post', ?)").run(seq, t, mid, from, JSON.stringify(
+        { payload: parent ? { refs: [{ message_id: parent, why: "reply" }] } : {} }));
+    post(1, plain, "p".repeat(32), "me"); post(2, d1, "q".repeat(32), "me"); post(3, d2, "r".repeat(32), "me");
+    post(4, plain, "x".repeat(32), "you", "p".repeat(32));
+    post(5, d1, "y".repeat(32), "you", "q".repeat(32)); post(6, d2, "z".repeat(32), "you", "r".repeat(32));
+    const mine = JSON.stringify([plain, d1, d2]);
+    const got = run(homeSql.HOME_REPLIES_SQL, mine, "me", 0, 2, deskJson).map((r: any) => r.message_id);
+    expect(got).toEqual(["x".repeat(32)]);
+    // 대조군 — 상담소 목록이 비면 LIMIT 2 = 최신 상담소 답글 둘(제외가 SQL 에 있다는 증거)
+    expect(run(homeSql.HOME_REPLIES_SQL, mine, "me", 0, 2, "[]").map((r: any) => r.message_id))
+      .toEqual(["z".repeat(32), "y".repeat(32)]);
   });
 });
