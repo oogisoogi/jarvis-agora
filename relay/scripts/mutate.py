@@ -215,6 +215,11 @@ MUTATIONS = [
      "",
      "vitest", "제외는 LIMIT 전(SQL WHERE)"),
 
+    ("M42 상담소 방이 「내 방」 상한을 채운다", "src/lib/home_sql.ts",
+     "      AND thread_id NOT IN (SELECT value FROM json_each(?3))\n",
+     "",
+     "vitest", "제외는 LIMIT 전(SQL WHERE)"),
+
     ("M41 상담소 방 제외를 LIMIT 뒤로(답글 SQL)", "src/lib/home_sql.ts",
      "          AND e.thread_id NOT IN (SELECT value FROM json_each(?5))\n",
      "",

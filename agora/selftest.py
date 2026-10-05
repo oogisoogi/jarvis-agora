@@ -4481,7 +4481,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M637-desk-cap-per-group", "M638-desk-urgent-reflects-token",
                "M639-desk-public-threshold-loose", "M640-desk-public-sees-private",
                "M641-desk-analysis-writes-public", "M642-desk-cap-skips-wrapping", "M643-desk-fleet-outside-cap",
-               "M644-desk-trimmed-notes-done", "M645-desk-final-size-unchecked"),
+               "M644-desk-trimmed-notes-done", "M645-desk-final-size-unchecked",
+               "M646-desk-note-stops-at-first-overflow", "M647-desk-oversize-note-not-trimmed"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17626,6 +17627,34 @@ def _case_desk_owner_notes_carried() -> None:
     again = counsel.collect(ctx, max_bytes=cap)
     if len(again["notes_all"]) != trimmed or again["counts"]["dailies"] != trimmed:
         raise AssertionError(f"빠진 오너 한 줄이 처리 완료로 사라졌다: 다음 수집 {len(again['notes_all'])} / 빠짐 {trimmed}")
+    # 다음 기간의 **실제 분석**(적대 3R codex) — 이월된 한 줄이 그 기간 호출 입력에 들고, 그 뒤엔 남지 않는다
+    import datetime as _dt
+    left = [n["note"].split(" ", 1)[0] for n in again["notes_all"]]
+    for day in range(1, 5):
+        if not left:
+            break
+        seen: list[tuple[list[str], str]] = []
+        counsel.batch(ctx, caller=_desk_ok_caller(seen, lambda a, p: []), notifier=lambda *a, **k: None,
+                      now=counsel._now() + _dt.timedelta(days=day))
+        if len(seen) != 1 or left[0] not in seen[0][1]:
+            raise AssertionError(f"이월된 오너 한 줄이 {day}일 뒤 분석되지 않았다: 호출 {len(seen)} {left}")
+        left = [n["note"].split(" ", 1)[0] for n in counsel.collect(ctx, max_bytes=cap)["notes_all"]]
+    if left:
+        raise AssertionError(f"이월된 오너 한 줄이 4기간 안에 다 안 읽혔다: {left}")
+    # 큰 한 줄 뒤의 짧은 한 줄은 남은 자리에 든다 · 혼자서도 안 들어가는 한 줄은 모델용 사본만 줄인다
+    big = [_mail_doc(payload={"intent": "daily", "daily": {"day": mail.now_ms_iso()[:10], "os": "macos-15.6",
+                                                            "owner_note": n}})
+           for n in ("큰메모A " + "다" * 190, "큰메모B " + "다" * 190, "짧은메모C")]
+    ctx2, _s2 = _desk_world(big, config=config)
+    _desk_cycle(ctx2, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    d2 = counsel.collect(ctx2, max_bytes=1000)
+    got = [v["note"].split(" ", 1)[0] for v in d2["daily_notes"]]
+    if got != ["큰메모A", "짧은메모C"] or d2["notes_trimmed"] != 1:
+        raise AssertionError(f"큰 한 줄이 뒤의 짧은 한 줄을 막았다: {got} trimmed={d2['notes_trimmed']}")
+    d3 = counsel.collect(ctx2, max_bytes=600)
+    if not d3["daily_notes"] or not d3["daily_notes"][0]["note"].endswith("…(잘림)") or d3["bytes"] > 600 \
+            or d3["bytes"] != counsel.prompt_len(counsel.model_payload(d3)):
+        raise AssertionError(f"혼자 넘치는 한 줄 처리가 다르다: {d3['daily_notes'][:1]} bytes={d3['bytes']}")
 
 
 def _case_desk_public_call_isolated() -> None:
@@ -18378,6 +18407,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if len(p.encode("utf-8")) > max(s["batch_max_bytes"], data["over_first"]):',
      '        if False:',
      "상담소: 상한 = 최종 프롬프트 바이트"),
+    ("M646-desk-note-stops-at-first-overflow", "agora/counsel.py",
+     '        if used + size > max_bytes:\n            notes_out.append(n["key"])',
+     '        if notes_out or used + size > max_bytes:\n            notes_out.append(n["key"])',
+     "상담소: 빠진 오너 한 줄은 이월"),
+    ("M647-desk-oversize-note-not-trimmed", "agora/counsel.py",
+     '        while k > 0 and alone + _jlen(view) > max_bytes:',
+     '        while False:',
+     "상담소: 빠진 오너 한 줄은 이월"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',
      '\n.jarvis.godmeyou.kr\n.godmeyou.kr\n',

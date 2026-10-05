@@ -680,11 +680,18 @@ def collect(ctx: Any, *, max_bytes: int) -> dict[str, Any]:
         sig_llm.append(row)
     # ★오너 한 줄은 상한으로 빠지면 **이월**한다(적대 2R codex — 빠진 한 줄의 일일 보고가 처리 완료로 사라졌다).
     #   보고서에는 전부 결정론으로 싣는다(§3 오너 한 줄) · 모델이 못 읽은 것만 다음 기간에 다시 읽힌다.
+    #   ★넘친 한 줄 뒤에서 멈추지 않는다 — 뒤의 짧은 한 줄은 남은 자리에 담는다(적대 3R codex — 큰 한 줄 하나가 뒤를 다 막았다).
+    #   ★혼자서도 빈 프롬프트에 안 들어가는 한 줄은 **모델용 사본만** 줄여 담는다(원문은 보고서 §3) — 안 그러면 기간마다 영영 이월된다.
     notes_out: list[str] = []
+    alone = prompt_len(_empty_payload())
     for n in notes:
         view = {"from": n["from"], "note": n["note"]}
+        k = len(n["note"])
+        while k > 0 and alone + _jlen(view) > max_bytes:
+            k -= 1
+            view = {"from": n["from"], "note": n["note"][:k] + "…(잘림)"}
         size = _jlen(view) + (1 if notes_llm else 0)
-        if notes_out or used + size > max_bytes:
+        if used + size > max_bytes:
             notes_out.append(n["key"])
             continue
         used += size
