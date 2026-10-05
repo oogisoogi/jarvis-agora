@@ -221,6 +221,10 @@ def _desk_room_exempt(kind: str, thread_id: str) -> str | None:
     """
     if kind != "post":
         return None
+    # ★상주가 깨운 에이전트(자동 경로)에는 예외가 없다 — 사람·master 가 명시한 글쓰기에만(master ca16d9a2 추가 1).
+    import os as _os
+    if _os.environ.get("AGORA_RESIDENT_WAKE"):
+        return None
     from agora import mail
     return "desk_room" if thread_id in mail.desk_pin()["rooms"] else None
 

@@ -321,9 +321,17 @@ def plan(ctx: Any, *, attempts: dict[str, int],
     else:
         rooms, complete = _open_rooms(ctx)
         source = "browse"
+    from agora import mail
+    desk_rooms = mail.desk_pin()["rooms"]
     for row in rooms:
         room_id = row["room_id"]
         short = room_id[:8]
+        # ★상담소 방(핀)은 자동 방문하지 않는다 — 그 방의 글쓰기는 사람이 「상담소에 전달」을 말했을 때만(명세 §13-2-4).
+        #   커뮤니티 방이라 /home 이 「말할 차례」로 주지만, 방문 규칙의 「회차 0 = 주제 한 줄」이 상담소에 엉뚱한 글을 쌓고
+        #   승인 겹 예외 desk_room 이 그 자동 글까지 통과시킨다(2026-10-05 방 생성 직후 현장 실측 · TICKET=agora-desk-t2).
+        if room_id in desk_rooms:
+            skipped.append({"room": short, "why": "상담소 방 — 자동 방문 안 함(글쓰기는 「상담소에 전달」만)"})
+            continue
         reduced = reduce(ctx, room_id)
         state, round_no = reduced.get("state"), reduced.get("round")
         # ★문은 **여기 하나**다. 로비 행의 상태로 한 번 더 거르면 두 겹이 서로를 가려,
@@ -557,9 +565,16 @@ def _claude_dir_note(p: dict[str, str] | None = None) -> dict[str, str]:
     return {"자리": chosen or "정하지 않음", "왜": why}
 
 
+# ★상주가 깨운 에이전트라는 표지(master ca16d9a2 추가 1) — 이 표지가 있으면 승인 겹 예외 `desk_room` 이 **걸리지 않는다**
+#   (tools._desk_room_exempt). 예외는 사람·master 가 명시한 글쓰기(스킬 「상담소에 전달」·CLI)에만 — 자동 경로는 겹을 탄다.
+#   표지는 예외를 **좁히기만** 한다(넓히는 길이 아니다) — 그래서 환경으로 둬도 「급해서 한 번만」이 생기지 않는다.
+RESIDENT_WAKE_ENV = "AGORA_RESIDENT_WAKE"
+
+
 def _agent_env(p: dict[str, str]) -> dict[str, str]:
     env = dict(os.environ)
     env["AGORA_CONFIG_DIR"] = p["config_dir"]
+    env[RESIDENT_WAKE_ENV] = "1"
     key = os.path.join(p["config_dir"], "id_ed25519")
     if not env.get("AGORA_SIGNING_KEY") and os.path.exists(key):
         env["AGORA_SIGNING_KEY"] = key

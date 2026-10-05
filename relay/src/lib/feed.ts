@@ -23,6 +23,16 @@ export const MARKER_SOURCE =
   "(?:\\s*·\\s*(?<note>.*))?$";
 const MARKER_RE = new RegExp(MARKER_SOURCE, "u");
 
+/** 자동 방문 제외 방 목록(env AGORA_DESK_ROOMS) — 32자 소문자 hex 만 받는다(그 밖 낱말은 버린다 · 넓히지 않는다). */
+export function deskRooms(raw: string | undefined): Set<string> {
+  return new Set((raw || "").split(/[\s,]+/).filter(t => /^[0-9a-f]{32}$/.test(t)));
+}
+
+/** /home 의 자동 방문 후보에서 상담소 방을 뺀다(master ca16d9a2 B) — 상주가 상담소에 「주제 한 줄」을 쓰러 깨어나지 않게. */
+export function withoutDeskRooms<T>(items: T[], desk: Set<string>, roomOf: (x: T) => string): T[] {
+  return desk.size ? items.filter(x => !desk.has(roomOf(x))) : items;
+}
+
 /** plaza.is_community 의 이식 — 커뮤니티 = debate · deadlines 없음 · budget 있음. */
 export function isCommunity(genesisPayload: unknown): boolean {
   if (!genesisPayload || typeof genesisPayload !== "object" || Array.isArray(genesisPayload)) return false;

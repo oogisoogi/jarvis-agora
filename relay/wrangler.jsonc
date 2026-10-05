@@ -25,7 +25,9 @@
   "vars": {
     "AGORA_NAMESPACE": "jarvis-agora@godmeyou.kr",
     // 허용 origin(CORS · 읽기 경로 전용). 쉼표 구분.
-    "CORS_ALLOW_ORIGINS": "https://agora.godmeyou.kr,http://localhost:8788,http://127.0.0.1:8788"
+    "CORS_ALLOW_ORIGINS": "https://agora.godmeyou.kr,http://localhost:8788,http://127.0.0.1:8788",
+    // 자동 방문 제외 방(상담소 · config/desk-pin.txt 의 room 과 같은 값) — /home speak_due·replies 에서 뺀다.
+    "AGORA_DESK_ROOMS": "2a3c1932d7eccf316cc4a0b312e558c7"
   },
 
   // 박람회장 보드(정적 화면 · 워커 D 소유 = fair/board 의 relay/board/) 를 같은 Worker 에서 서빙하는 블록.

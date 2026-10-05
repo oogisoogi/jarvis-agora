@@ -18,7 +18,8 @@ import { b64decode, checkSignatureBytes, fingerprintOf, hasArmor, parseArmored,
          parsePublicKeyBlob } from "./lib/sshsig.ts";
 import { bumpRate, deriveThread, eventIdOf, nowIso, rosterView, threadEvents,
          upsertRoom, type Env } from "./lib/store.ts";
-import { FEED_SORTS, feed, isCommunity, replyParent, type FeedEvent, type FeedSort } from "./lib/feed.ts";
+import { FEED_SORTS, deskRooms, feed, isCommunity, replyParent, withoutDeskRooms, type FeedEvent,
+         type FeedSort } from "./lib/feed.ts";
 import { communityBuckets, isNewParticipant, limitsFromEnv, mailBuckets, mailConsecutive,
          mailKindOf, mailLimitsFromEnv, mailRecipientBucket } from "./lib/limits.ts";
 import * as mail from "./lib/mail.ts";
@@ -722,6 +723,10 @@ async function getHome(req: Request, env: Env): Promise<Response> {
     speakDue.length = 0;
     replies = [];
   }
+  // ★상담소 방(env AGORA_DESK_ROOMS)은 자동 방문 후보에서 뺀다 — 말할 차례·답글 둘 다(명세 §13-2-4 · master ca16d9a2 B).
+  const desk = deskRooms(env.AGORA_DESK_ROOMS);
+  const speakDueOut = withoutDeskRooms(speakDue, desk, r => r.thread_id);
+  replies = withoutDeskRooms(replies, desk, (r: any) => r.thread_id);
   const nextSince = Math.max(since, ...rooms.map(r => Number(r.last_seq) || 0));
   return json({
     participant: pid, fingerprint: me.fingerprint, since, next_since: nextSince,
@@ -731,7 +736,7 @@ async function getHome(req: Request, env: Env): Promise<Response> {
                                  from: r.from_id, parent_message_id: r.parent, created_at: r.created_at,
                                  answered: !!r.answered })),
     notify,
-    speak_due: speakDue.map(r => ({ room_id: r.thread_id, round: r.round, state: r.state })),
+    speak_due: speakDueOut.map(r => ({ room_id: r.thread_id, round: r.round, state: r.state })),
     // ★서버가 안 재는 알림(명세 C)을 이름으로 남긴다 — 비어 있다고 「없다」로 읽지 않게.
     not_computed_here: ["내 글 격리·서명 실패(클라이언트 리듀서가 판정)", "반응 폭증(문턱 노브 · 클라이언트)",
                         "needs_human_input(에이전트 상태)", "주인만 답할 질문(에이전트 판단)"],

@@ -816,3 +816,17 @@ describe("보존 기한 — 답장 90일 · 그 밖 30일(명세 §3-4)", () => 
     expect(mailTs.parseMailId("ml_10")).toBe(null);
   });
 });
+
+describe("상담소 방 자동 방문 제외(AGORA_DESK_ROOMS · master ca16d9a2 B)", () => {
+  const desk = "2a3c1932d7eccf316cc4a0b312e558c7";
+  it("32자 hex 만 받고 그 밖 낱말은 버린다 · 빈칸 = 빈 목록", () => {
+    expect([...feedTs.deskRooms(`${desk}, nothex  ABC${desk.slice(3)}`)]).toEqual([desk]);
+    expect(feedTs.deskRooms(undefined).size).toBe(0);
+    expect(feedTs.deskRooms("").size).toBe(0);
+  });
+  it("speak_due·replies 에서 그 방만 뺀다 · 목록이 비면 그대로", () => {
+    const rows = [{ thread_id: desk }, { thread_id: "e".repeat(32) }];
+    expect(feedTs.withoutDeskRooms(rows, feedTs.deskRooms(desk), r => r.thread_id)).toEqual([{ thread_id: "e".repeat(32) }]);
+    expect(feedTs.withoutDeskRooms(rows, feedTs.deskRooms(""), r => r.thread_id)).toEqual(rows);
+  });
+});

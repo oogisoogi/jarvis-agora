@@ -4475,7 +4475,9 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     "상담소": ("M621-desk-acks-every-mail", "M622-desk-urgent-no-thread-cap", "M623-desk-batch-twice-a-period",
                "M624-desk-batch-unmasked", "M625-desk-model-picks-address", "M626-desk-publish-no-leak-check",
                "M627-desk-empty-batch-calls", "M628-desk-ack-no-downgrade", "M629-resident-desk-wakes",
-               "M630-allow-our-subdomains", "M631-mail-index-not-updated"),
+               "M630-allow-our-subdomains", "M631-mail-index-not-updated",
+               "M632-resident-visits-desk-room", "M633-desk-exempt-on-resident-path",
+               "M634-resident-env-unmarked"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17308,6 +17310,41 @@ def _case_desk_comment_injection_ten() -> None:
         raise AssertionError("주입 댓글이 데이터 틀을 벗어났다")
 
 
+def _case_resident_skips_desk_room() -> None:
+    """상주는 핀의 상담소 방을 **말할 차례·답글 둘 다** 건너뛴다 — 다른 방은 그대로 고른다(대조군)."""
+    from agora import mail, resident
+    desk = sorted(mail.desk_pin()["rooms"])[0]
+    other = "e" * 32
+    ctx = type("C", (), {"participant_id": "operator-b"})()
+    reduced = {"state": "r0", "round": 0, "events": []}
+    found = resident.plan(ctx, attempts={}, reduce=lambda _c, _r: reduced,
+                          home=lambda _c: {"speak_due": [{"room_id": desk}, {"room_id": other}],
+                                           "replies": [{"room_id": desk, "answered": False}]})
+    rooms = [d["room_id"] for d in found["due"]]
+    if rooms != [other] or not any("상담소 방" in s["why"] for s in found["skipped"]):
+        raise AssertionError(f"상담소 방을 자동 방문 대상으로 골랐다: {rooms} {found['skipped']}")
+
+
+def _case_desk_room_exempt_not_on_resident_path() -> None:
+    """desk_room 예외는 사람·master 의 명시 글쓰기에만 — 상주가 깨운 에이전트(표지 환경)에는 없다(master ca16d9a2 추가 1)."""
+    from agora import mail, resident, tools
+    room = sorted(mail.desk_pin()["rooms"])[0]
+    old = os.environ.pop(resident.RESIDENT_WAKE_ENV, None)
+    try:
+        if tools._desk_room_exempt("post", room) != "desk_room":
+            raise AssertionError("사람 경로에서 상담소 방 예외가 사라졌다(대조군)")
+        env = resident._agent_env(resident.paths("/nonexistent-agora"))
+        if env.get(resident.RESIDENT_WAKE_ENV) != "1":
+            raise AssertionError("상주가 깨우는 환경에 표지가 없다")
+        os.environ[resident.RESIDENT_WAKE_ENV] = "1"
+        if tools._desk_room_exempt("post", room) is not None:
+            raise AssertionError("상주 자동 경로에서 desk_room 예외가 걸렸다")
+    finally:
+        os.environ.pop(resident.RESIDENT_WAKE_ENV, None)
+        if old is not None:
+            os.environ[resident.RESIDENT_WAKE_ENV] = old
+
+
 def _case_desk_ack_downgrades_when_links_blocked() -> None:
     """릴레이 백스톱이 링크를 막으면(code 3) 링크 없는 문구로 1회 낮춘다(판 어긋남 창 안전망 · master 0a9ded7f)."""
     from agora import errors as err
@@ -18047,6 +18084,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("상담소: 신호·일일은 회신 없이 접수",      _case_desk_machine_mail_no_reply, None),
     ("상담소: 공개 방 글 접수·회신 0",          _case_desk_plaza_intake_no_reply, None),
     ("상담소: 댓글 주입 10 → 접수만",          _case_desk_comment_injection_ten, None),
+    ("상주: 상담소 방은 자동 방문 안 함",       _case_resident_skips_desk_room, None),
+    ("상담소: 방 예외는 상주 경로에 없다",       _case_desk_room_exempt_not_on_resident_path, None),
     ("상담소: 링크가 막히면 링크 없는 문구",    _case_desk_ack_downgrades_when_links_blocked, None),
     ("상담소: 배치 입력 0 = 호출 0",            _case_desk_batch_empty_no_call, None),
     ("상담소: 배치 1호출·주소는 코드가",        _case_desk_batch_one_call_addresses_by_code, None),
@@ -18102,6 +18141,18 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            inbox_rows.append(row)\n            index.add(row)',
      '            inbox_rows.append(row)',
      "우편: 색인은 같은 회차 적재분도 본다"),
+    ("M632-resident-visits-desk-room", "agora/resident.py",
+     '        if room_id in desk_rooms:',
+     '        if False:',
+     "상주: 상담소 방은 자동 방문 안 함"),
+    ("M633-desk-exempt-on-resident-path", "agora/tools.py",
+     '    if _os.environ.get("AGORA_RESIDENT_WAKE"):',
+     '    if False:',
+     "상담소: 방 예외는 상주 경로에 없다"),
+    ("M634-resident-env-unmarked", "agora/resident.py",
+     '    env[RESIDENT_WAKE_ENV] = "1"',
+     '    pass',
+     "상담소: 방 예외는 상주 경로에 없다"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',
      '\n.jarvis.godmeyou.kr\n.godmeyou.kr\n',

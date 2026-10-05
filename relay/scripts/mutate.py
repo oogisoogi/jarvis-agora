@@ -205,6 +205,11 @@ MUTATIONS = [
      "  if (false) {\n    const b = mailRecipientBucket(d.to, limits);",
      "harness", "우편 12: 하루 유입 201통째 = 429 mail_in_day"),
 
+    ("M39 상담소 방 자동 방문 제외 무력화", "src/lib/feed.ts",
+     "  return desk.size ? items.filter(x => !desk.has(roomOf(x))) : items;",
+     "  return items;",
+     "vitest", "상담소 방 자동 방문 제외(AGORA_DESK_ROOMS)"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",

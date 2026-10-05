@@ -15,6 +15,9 @@ export interface Env {
   DB: D1Database;
   AGORA_NAMESPACE: string;
   CORS_ALLOW_ORIGINS: string;
+  // 자동 방문 제외 방(상담소 · 방 id 32hex 를 쉼표·공백으로) — /home 의 speak_due·replies 에서 뺀다. 없으면 빈 목록(동작 변화 0).
+  //   ★릴레이가 상담소를 「아는」 유일한 자리(명세 §9 ⑥ 예외 1) — 내용은 모른다 · 방 id 만.
+  AGORA_DESK_ROOMS?: string;
   // 전역 상한 노브(광장 v2 · 명세 D) — 없으면 기본값(몰트북 값). 해석은 lib/limits.ts 한 곳.
   AGORA_RATE_POST_WINDOW_S?: string;
   AGORA_RATE_POST_MAX?: string;
