@@ -235,6 +235,47 @@ MUTATIONS = [
      "",
      "vitest", "제외는 LIMIT 전(SQL WHERE)"),
 
+    # ── 주간 성찰 보고(명세 §1-3 · TICKET=agora-spec-weekly) ──
+    ("M45 주간 보고 주 버킷 제거(주기 위반 통과)", "src/lib/limits.ts",
+     '    return [{ bucket: "gmail-weekly-week:" + from, windowS: WEEK_S, max: l.weeklyWeekMax, label: "mail_weekly_week",',
+     '    return []; void [{ bucket: "gmail-weekly-week:" + from, windowS: WEEK_S, max: l.weeklyWeekMax, label: "mail_weekly_week",',
+     "harness", "우편 9-c: 같은 ISO 주 두 번째 주간 보고 = 429 mail_weekly_week"),
+
+    ("M46 주 칸 경계 이동 제거(목요일 경계)", "src/lib/store.ts",
+     "  const windowStart = Math.floor((atMs / 1000 - offsetSeconds) / windowSeconds) * windowSeconds + offsetSeconds;",
+     "  const windowStart = Math.floor(atMs / 1000 / windowSeconds) * windowSeconds;",
+     "vitest", "주 칸 경계 = 월요일 00:00Z"),
+
+    ("M47 근거 인용 빈 값 허용", "src/lib/mail.ts",
+     '      if (isBlank(ev)) bad("evidence 가 비었다 — 근거 인용 의무", { where: `${ww}.evidence`, why: "evidence_required" });',
+     "      void ev;",
+     "vitest", "근거 인용 의무 — evidence 빈 값 = 10"),
+
+    ("M48 섹션 항목 상한 3 → 4", "src/lib/mail.ts",
+     "export const WEEKLY_SECTION_MAX = 3;",
+     "export const WEEKLY_SECTION_MAX = 4;",
+     "vitest", "섹션 4항목 = 10"),
+
+    ("M49 빈 주간 보고 허용", "src/lib/mail.ts",
+     '  if (filled === 0) bad("빈 주간 보고는 보내지 않는다(다섯 칸이 전부 비었다)", { where: w, why: "weekly_empty" });',
+     "  void filled;",
+     "vitest", "빈 보고 = 10 weekly_empty"),
+
+    ("M50 week 의 봉투 ts ±1주 검사 제거", "src/lib/mail.ts",
+     '  if (Math.abs((mon as number) - tsMon) > 7 * DAY_MS) bad(',
+     '  if (false) bad(',
+     "vitest", "week = 봉투 ts 의 주 ±1주"),
+
+    ("M51 미읽음 계수에서 주간 보고를 뺀다(세게 된다)", "src/index.ts",
+     "  const UNREAD = `to_id = ?1 AND acked_at IS NULL AND purged_at IS NULL AND keep_until > ?2 AND intent NOT IN ('signal', 'daily', 'weekly')`;",
+     "  const UNREAD = `to_id = ?1 AND acked_at IS NULL AND purged_at IS NULL AND keep_until > ?2 AND intent NOT IN ('signal', 'daily')`;",
+     "harness", "우편 9-c: 주간 보고 뒤 unread_count 그대로 1"),
+
+    ("M52 evidence 길이 상한 120 → 121", "src/lib/mail.ts",
+     "export const WEEKLY_EVIDENCE_MAX_CHARS = 120;",
+     "export const WEEKLY_EVIDENCE_MAX_CHARS = 121;",
+     "vitest", "evidence 121자 = 10"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",

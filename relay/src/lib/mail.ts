@@ -20,6 +20,16 @@ export const SIGNAL_SOURCES = ["master", "worker", "cso", "pack", "update"] as c
 export const DAILY_INTENT = "daily";              // 일일 보고(명세 §1-2 · 증보 8) — 신호와 다른 통
 export const DAILY_MAX_BYTES = 32 * 1024;        // 일일 보고 canonical 상한(일반 우편 64KB 보다 작다 · 넘으면 413/3)
 export const DAILY_NOTE_MAX_CHARS = 200;         // owner_note = 유일한 자유문 · 코드포인트
+export const WEEKLY_INTENT = "weekly";            // 주간 성찰 보고(명세 §1-3 · 10-06 개정) — 신호·일일과 다른 통
+export const WEEKLY_MAX_BYTES = 32 * 1024;       // 주간 보고 canonical 상한(일일과 같다 · 넘으면 413/3)
+export const WEEKLY_SECTIONS = ["blocked", "workarounds", "wishes"] as const;   // 각 ≤3 항목
+export const WEEKLY_SECTION_MAX = 3;
+export const WEEKLY_TEXT_MAX_CHARS = 200;        // 항목 text · 코드포인트 1~200
+export const WEEKLY_EVIDENCE_MAX_CHARS = 120;    // 항목 evidence(근거 인용 의무) · 코드포인트 1~120 · 빈 값 거부
+export const WEEKLY_ITEM_SIGS_MAX = 5;
+export const WEEKLY_FEATURES_MAX = 5;
+/** 신호·일일·주간 = 기계가 보내는 통 — 미읽음·연속·받는 이 축에 안 센다(명세 §1-1 (6) · §1-2 (4) · §1-3 (6)). */
+export const MACHINE_INTENTS = ["signal", "daily", "weekly"] as const;
 
 export const MAX_SUBJECT_CHARS = 200;          // 코드포인트 수(UTF-16 길이 아님)
 export const MAX_BODY_BYTES = 16 * 1024;       // UTF-8
@@ -60,7 +70,16 @@ const MAIL_ID_RE = /^ml_(\d{16})$/;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ROLE_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const CHECK_ID_RE = /^[a-z0-9-]{1,40}$/;
-const DAILY_KEYS = ["day", "version", "os", "seats", "doctor", "errors", "updates", "depts", "uptime", "owner_note"];
+const DAILY_KEYS = ["day", "version", "os", "seats", "doctor", "errors", "updates", "depts", "uptime", "owner_note",
+  "weekly_skipped"];
+const WEEK_RE = /^(\d{4})-W(\d{2})$/;
+const WEEKLY_KEYS = ["week", "version", "os", ...WEEKLY_SECTIONS, "top_features", "owner_note"];
+const WEEKLY_ITEM_KEYS = ["text", "evidence", "signatures"];
+const DAY_MS = 86_400_000;
+// ★「빈 값」 = 아래 글자만으로 된 문자열(클라이언트 agora/mail.py BLANK_RE 와 **같은 목록**) — JS trim() 과 파이썬 strip() 은
+//   공백 집합이 다르다(U+FEFF ↔ \x1c-\x1f·U+0085) · 한쪽만 「빈 값」이라 하면 릴레이가 받은 것을 받는 쪽이 격리한다.
+const BLANK_RE = /^[\t\n\v\f\r \x1c-\x1f\x85\xa0\u1680\u2000-\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff]*$/;
+export function isBlank(s: string): boolean { return BLANK_RE.test(s); }
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -262,13 +281,107 @@ function checkDaily(p: Obj, bases: number[]): void {
     const n = [...need<string>(d, "owner_note", "string", w)].length;
     if (n > DAILY_NOTE_MAX_CHARS) bad("owner_note 는 200자까지", { where: `${w}.owner_note`, chars: n, max: DAILY_NOTE_MAX_CHARS });
   }
+  // ★주간 보고를 빈 보고라 생략한 날의 표지(명세 §1-3 (3)) — 값은 true 뿐(생략 안 한 날 = 칸을 뺀다 · 「안 온 것/꺼진 것」 구분).
+  if ("weekly_skipped" in d && d["weekly_skipped"] !== true) bad("weekly_skipped 는 true 만(아니면 칸을 뺀다)", { where: `${w}.weekly_skipped` });
+}
+
+/** ISO 주 `YYYY-Www` → 그 주 월요일 00:00Z(ms). 없는 주(W00 · 53주가 없는 해의 W53)는 null. */
+export function isoWeekMonday(week: string): number | null {
+  const m = WEEK_RE.exec(week);
+  if (!m || m[1] === "0000") return null;
+  const year = parseInt(m[1], 10), wk = parseInt(m[2], 10);
+  if (wk < 1 || wk > 53) return null;
+  // 1월 4일이 든 주가 1주(ISO 8601). 그 주 월요일에서 (wk−1)주.
+  const jan4 = Date.UTC(year, 0, 4);
+  const mon1 = jan4 - ((new Date(jan4).getUTCDay() + 6) % 7) * DAY_MS;
+  const mon = mon1 + (wk - 1) * 7 * DAY_MS;
+  return isoWeekOf(mon) === week ? mon : null;   // 되돌려 같은 글자인지(W53 이 없는 해 차단)
+}
+
+/** 시각 → 그 시각이 든 ISO 주 `YYYY-Www`(UTC). */
+export function isoWeekOf(ms: number): string {
+  const d = new Date(ms);
+  const day = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dow = (day.getUTCDay() + 6) % 7;                 // 월 = 0
+  const thu = new Date(day.getTime() + (3 - dow) * DAY_MS); // 그 주 목요일의 해 = ISO 해
+  const year = thu.getUTCFullYear();
+  const jan1 = Date.UTC(year, 0, 1);
+  const wk = 1 + Math.floor((thu.getTime() - jan1) / (7 * DAY_MS));
+  return `${String(year).padStart(4, "0")}-W${String(wk).padStart(2, "0")}`;
+}
+
+function cpLen(s: string): number { return [...s].length; }
+
+/**
+ * 주간 성찰 보고(명세 §1-3) — 닫힌 모양 · `week` 만 필수 · 섹션 5 = 막힌 곳·우회·바라는 것(각 ≤3) · 자주 쓴 기능(≤5 · 기계 집계) · owner_note.
+ * ★자유문 = 항목 `text`(≤200)·`evidence`(≤120 · 근거 인용 의무 = 빈 값 거부)·`owner_note`(≤200) — 그 밖은 기계 값.
+ * ★다섯 칸이 전부 비면 거부(빈 보고 생략 = 보내는 쪽 규칙의 서버 쪽 짝 · `weekly_empty`).
+ */
+function checkWeekly(p: Obj, bases: number[]): void {
+  closed(p, ["intent", "weekly"], "payload");
+  const w = "payload.weekly";
+  const d = need<Obj>(p, "weekly", "dict", "payload");
+  closed(d, WEEKLY_KEYS, w);
+  const week = need<string>(d, "week", "string", w);
+  const mon = isoWeekMonday(week);
+  if (mon === null) bad("week 는 실제 ISO 주 YYYY-Www", { where: `${w}.week` });
+  // ★봉투 ts 의 ISO 주 ±1주(= 월요일끼리 ±7일) — 06:00 KST 경계·전송 지연으로 한 주 어긋날 수 있다 · 그 이상은 엉뚱한 주 합산.
+  const tsMon = isoWeekMonday(isoWeekOf(bases[0])) as number;
+  if (Math.abs((mon as number) - tsMon) > 7 * DAY_MS) bad("week 는 봉투 ts 의 주 ±1주", { where: `${w}.week`, why: "week_far_from_ts" });
+  if ("version" in d && !VERSION_RE.test(need<string>(d, "version", "string", w))) bad("version 형식이 아니다", { where: `${w}.version` });
+  if ("os" in d && !OS_RE.test(need<string>(d, "os", "string", w))) bad("os 형식이 아니다", { where: `${w}.os` });
+  let filled = 0;
+  for (const sec of WEEKLY_SECTIONS) {
+    if (!(sec in d)) continue;
+    const list = need<unknown[]>(d, sec, "list", w);
+    if (list.length > WEEKLY_SECTION_MAX) bad("섹션 항목은 최대 3개", { where: `${w}.${sec}`, count: list.length, max: WEEKLY_SECTION_MAX });
+    filled += list.length;
+    list.forEach((it, i) => {
+      const ww = `${w}.${sec}[${i}]`;
+      if (typeof it !== "object" || it === null || Array.isArray(it)) bad("섹션 항목은 객체여야 한다", { where: ww });
+      const o = it as Obj;
+      closed(o, WEEKLY_ITEM_KEYS, ww);
+      const text = need<string>(o, "text", "string", ww);
+      const ev = need<string>(o, "evidence", "string", ww);
+      if (isBlank(text) || cpLen(text) > WEEKLY_TEXT_MAX_CHARS) bad("text 는 1~200자(공백만 = 빈 값)", { where: `${ww}.text`, max: WEEKLY_TEXT_MAX_CHARS });
+      if (isBlank(ev)) bad("evidence 가 비었다 — 근거 인용 의무", { where: `${ww}.evidence`, why: "evidence_required" });
+      if (cpLen(ev) > WEEKLY_EVIDENCE_MAX_CHARS) bad("evidence 는 120자까지", { where: `${ww}.evidence`, max: WEEKLY_EVIDENCE_MAX_CHARS });
+      if ("signatures" in o) {
+        const sigs = strList(o, "signatures", ww, WEEKLY_ITEM_SIGS_MAX, SIG_KEY);
+        if (new Set(sigs).size !== sigs.length) bad("같은 signature 가 두 번 나왔다", { where: `${ww}.signatures`, why: "duplicate_signature" });
+      }
+    });
+  }
+  if ("top_features" in d) {
+    const list = need<unknown[]>(d, "top_features", "list", w);
+    if (list.length > WEEKLY_FEATURES_MAX) bad("top_features 는 최대 5개", { where: `${w}.top_features`, count: list.length, max: WEEKLY_FEATURES_MAX });
+    filled += list.length;
+    const ops = new Set<string>();
+    list.forEach((it, i) => {
+      const ww = `${w}.top_features[${i}]`;
+      if (typeof it !== "object" || it === null || Array.isArray(it)) bad("top_features 항목은 객체여야 한다", { where: ww });
+      const o = it as Obj;
+      closed(o, ["op", "count"], ww);
+      const op = need<string>(o, "op", "string", ww);
+      if (!OP_RE.test(op)) bad("op 형식이 아니다", { where: `${ww}.op` });
+      if (ops.has(op)) bad("같은 op 가 두 번 나왔다", { where: `${ww}.op`, why: "duplicate_op" });
+      ops.add(op);
+      intIn(o, "count", ww, 1, SIGNAL_COUNT_MAX);
+    });
+  }
+  if ("owner_note" in d) {
+    const n = cpLen(need<string>(d, "owner_note", "string", w));
+    if (n > DAILY_NOTE_MAX_CHARS) bad("owner_note 는 200자까지", { where: `${w}.owner_note`, chars: n, max: DAILY_NOTE_MAX_CHARS });
+    if (!isBlank(d["owner_note"] as string)) filled += 1;
+  }
+  if (filled === 0) bad("빈 주간 보고는 보내지 않는다(다섯 칸이 전부 비었다)", { where: w, why: "weekly_empty" });
 }
 
 function checkLetter(p: Obj): void {
   closed(p, ["subject", "body", "intent", "refs"], "payload");
   const intent = need<string>(p, "intent", "string", "payload");
   if (!(MAIL_INTENTS as readonly string[]).includes(intent)) {
-    bad("intent 가 계약 밖", { where: "payload.intent", intent, allowed: [...MAIL_INTENTS, SIGNAL_INTENT, DAILY_INTENT] });
+    bad("intent 가 계약 밖", { where: "payload.intent", intent, allowed: [...MAIL_INTENTS, ...MACHINE_INTENTS] });
   }
   const subject = need<string>(p, "subject", "string", "payload");
   const n = [...subject].length;
@@ -346,6 +459,12 @@ export async function validateMail(doc: unknown, nowMs: number): Promise<Obj> {
     const bytes = canonicalBytes(d).length;
     if (bytes > DAILY_MAX_BYTES) {
       fail(GATE_REJECT, "일일 보고 크기 상한 초과", { where: "mail", bytes, limit: DAILY_MAX_BYTES }, { status: 413 });
+    }
+  } else if (intent === WEEKLY_INTENT) {
+    checkWeekly(p, bases);
+    const bytes = canonicalBytes(d).length;
+    if (bytes > WEEKLY_MAX_BYTES) {
+      fail(GATE_REJECT, "주간 보고 크기 상한 초과", { where: "mail", bytes, limit: WEEKLY_MAX_BYTES }, { status: 413 });
     }
   } else checkLetter(p);
   return d;

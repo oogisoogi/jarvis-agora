@@ -448,6 +448,33 @@ def main():
     record("C 수신함에 일일 보고 있음 · unread_count 그대로 1(세지 않는다)", (True, 1),
            (find(boxc, dy1["message_id"]) is not None, boxc.get("unread_count") if isinstance(boxc, dict) else None))
 
+    # ── 9-c. 주간 성찰 보고(intent=weekly · 명세 §1-3 · 10-06 개정) ───────────
+    print("\n== 우편 9-c. 주간 성찰 보고(intent=weekly) ==")
+    TWk = new_id()
+    y, w, _ = dt.datetime.now(dt.timezone.utc).date().isocalendar()
+    wk_item = {"text": "업데이트 뒤 같은 경고가 이어졌다", "evidence": "doctor warn 1 · dept-awakening-seed"}
+    weekly = {"week": "%04d-W%02d" % (y, w), "version": "1.1.8", "os": "macos-15.6",
+              "blocked": [wk_item], "top_features": [{"op": "host.update", "count": 3}], "owner_note": ""}
+    _, _, code, body, _ = M.send(A, C["id"], TWk, {"intent": "weekly", "weekly": dict(weekly, blocked=[dict(wk_item, evidence="")])})
+    record("주간 보고 근거 빈 값 = 400/10 evidence_required", (400, 10, "evidence_required"), (code, code_of(body), why_of(body)))
+    _, _, code, body, _ = M.send(A, C["id"], TWk, {"intent": "weekly", "weekly": {"week": weekly["week"], "owner_note": ""}})
+    record("빈 주간 보고 = 400/10 weekly_empty", (400, 10, "weekly_empty"), (code, code_of(body), why_of(body)))
+    _, _, code, body, _ = M.send(A, C["id"], TWk, {"intent": "weekly",
+                                                    "weekly": dict(weekly, blocked=[dict(wk_item, text="연락은 someone@example.com 으로")])})
+    record("주간 보고 자유문 스크럽 백스톱 = 422/3", (422, 3), (code, code_of(body)))
+    wk1, _, code, body, _ = M.send(A, C["id"], TWk, {"intent": "weekly", "weekly": weekly})
+    record("주간 보고 첫 통 = 201(신호·일일 버킷과 따로)", 201, code)
+    _, _, code, body, hdrs = M.send(A, C["id"], TWk, {"intent": "weekly", "weekly": dict(weekly, owner_note="둘째")})
+    record("같은 ISO 주 두 번째 주간 보고 = 429 mail_weekly_week", (429, 7, "mail_weekly_week"),
+           (code, code_of(body), (body.get("detail") or {}).get("limit") if isinstance(body, dict) else None))
+    ra = int(hdrs.get("retry-after") or 0)
+    mon = dt.datetime.fromisocalendar(y, w, 1).replace(tzinfo=dt.timezone.utc) + dt.timedelta(days=7)
+    left = int(mon.timestamp() - time.time())
+    record("  Retry-After = 다음 월요일 00:00Z 까지(±60초)", True, abs(ra - left) <= 60, "retry-after=%s left=%s" % (ra, left))
+    code, boxc, _ = M.inbox(C["id"], M.auth(C, C["id"]))
+    record("C 수신함에 주간 보고 있음 · unread_count 그대로 1(세지 않는다)", (True, 1),
+           (find(boxc, wk1["message_id"]) is not None, boxc.get("unread_count") if isinstance(boxc, dict) else None))
+
     # ── 10. 연속 규칙 ────────────────────────────────────────────────────────
     print("\n== 우편 10. 같은 수신자 연속 5통 → 쿨다운 · 답장이 오면 풀린다 ==")
     TD = new_id()

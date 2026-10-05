@@ -51,7 +51,8 @@ export function limitsFromEnv(env: Record<string, unknown>): RateLimits {
 
 export type PostKind = "post" | "reply";
 
-export interface Bucket { bucket: string; windowS: number; max: number; label: string }
+// `offsetS` = 고정창 칸 경계를 옮기는 초(없으면 0 = 1970-01-01 00:00Z 기준). 주 칸을 ISO 주(월요일 00:00Z)에 맞출 때만 쓴다.
+export interface Bucket { bucket: string; windowS: number; max: number; label: string; offsetS?: number }
 
 /** 이 글이 태울 버킷 목록(순수 함수 — 시험이 직접 부른다). */
 export function communityBuckets(kind: PostKind, from: string, isNew: boolean, l: RateLimits): Bucket[] {
@@ -91,6 +92,7 @@ export interface MailLimits {
   newcomerReplyDayMax: number;                     // 새 참가자 답장: 하루 30
   signalDayMax: number;                            // 자동 신호: 하루 1(다른 버킷과 따로)
   dailyDayMax: number;                             // 일일 보고: 하루 1(신호와도 따로 · 명세 §1-2 (2))
+  weeklyWeekMax: number;                           // 주간 성찰 보고: ISO 주 1(신호·일일과도 따로 · 명세 §1-3 (2))
   inDayMax: number;                                // 받는 이 하루 유입(사람 글 · 적대 6R #2 · 명세 §4-1)
   unreadMax: number;                               // 받는 이 미읽음 상한(사람 글 · 넘으면 429 inbox_full)
   consecMax: number; consecWindowS: number;        // 답장 없이 같은 사람에게 5통 → 24시간 쿨다운
@@ -106,6 +108,7 @@ export const DEFAULT_MAIL_LIMITS: MailLimits = {
   newcomerReplyDayMax: 30,
   signalDayMax: 1,
   dailyDayMax: 1,
+  weeklyWeekMax: 1,
   inDayMax: 200,
   unreadMax: 1000,
   consecMax: 5, consecWindowS: 86_400,
@@ -121,6 +124,7 @@ const MAIL_KNOBS: Array<[keyof MailLimits, string]> = [
   ["newcomerReplyDayMax", "AGORA_RATE_MAIL_NEWCOMER_REPLY_DAY_MAX"],
   ["signalDayMax", "AGORA_RATE_MAIL_SIGNAL_DAY_MAX"],
   ["dailyDayMax", "AGORA_RATE_MAIL_DAILY_DAY_MAX"],
+  ["weeklyWeekMax", "AGORA_RATE_MAIL_WEEKLY_WEEK_MAX"],
   ["inDayMax", "AGORA_RATE_MAIL_IN_DAY_MAX"], ["unreadMax", "AGORA_RATE_MAIL_UNREAD_MAX"],
   ["consecMax", "AGORA_RATE_MAIL_CONSEC_MAX"], ["consecWindowS", "AGORA_RATE_MAIL_CONSEC_WINDOW_S"],
 ];
@@ -140,15 +144,22 @@ export function mailLimitsFromEnv(env: Record<string, unknown>): MailLimits {
 //   (자기 우편에 이어 쓰기로 답장 칸을 쓰지 못하게 · 명세 §4 첫 줄).
 // ★신호(intent=signal)는 하루 1 버킷 **하나만** 태운다 — 새 대화·답장·연속 규칙과 따로(명세 §1-1 (3)).
 //   일일 보고(intent=daily)도 같은 꼴 · 버킷은 신호와 따로(명세 §1-2 (2)).
+//   주간 성찰 보고(intent=weekly)도 같은 꼴 · 칸 = ISO 주(월요일 00:00Z 경계 · 명세 §1-3 (2)).
 // ★버킷 이름은 새 참가자 여부와 무관하게 같다(창 길이·상한만 바뀐다) — 등록 24시간이 지나는 순간
 //   하루 칸의 계수가 0 으로 돌아가지 않게(엄격 쪽).
 
-export type MailKind = "signal" | "daily" | "reply" | "new";
+export const WEEK_S = 7 * 86_400;
+// 1970-01-01 은 목요일이다 — 7일 칸을 그대로 쓰면 칸 경계가 목요일 00:00Z 에 선다. 첫 월요일(1970-01-05)까지 4일 옮겨
+// 칸 경계를 **ISO 주 경계(월요일 00:00Z)** 에 맞춘다(명세 §1-3 (2) · `week` 칸 검증과 같은 주).
+export const ISO_WEEK_OFFSET_S = 4 * 86_400;
+
+export type MailKind = "signal" | "daily" | "weekly" | "reply" | "new";
 
 /** 이 우편이 어느 칸으로 세어지나(순수 함수). `ref` = 같은 대화에서 `reply_to` 가 가리킨 우편(없으면 null). */
 export function mailKindOf(intent: string, to: string, ref: { from_id: string } | null): MailKind {
   if (intent === "signal") return "signal";
   if (intent === "daily") return "daily";
+  if (intent === "weekly") return "weekly";
   return ref && ref.from_id === to ? "reply" : "new";
 }
 
@@ -159,6 +170,10 @@ export function mailBuckets(kind: MailKind, from: string, isNew: boolean, l: Mai
   }
   if (kind === "daily") {
     return [{ bucket: "gmail-daily-day:" + from, windowS: 86_400, max: l.dailyDayMax, label: "mail_daily_day" }];
+  }
+  if (kind === "weekly") {
+    return [{ bucket: "gmail-weekly-week:" + from, windowS: WEEK_S, max: l.weeklyWeekMax, label: "mail_weekly_week",
+              offsetS: ISO_WEEK_OFFSET_S }];
   }
   if (kind === "reply") {
     return [

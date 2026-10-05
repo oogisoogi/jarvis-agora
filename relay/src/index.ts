@@ -959,14 +959,14 @@ async function handleMailPost(req: Request, env: Env): Promise<Response> {
   //   ★연속 규칙을 버킷 **앞**에 둔다: 연속으로 거절될 우편이 간격·하루 칸을 먼저 태우지 않게.
   const limits = mailLimitsFromEnv(env as unknown as Record<string, unknown>);
   const kind = mailKindOf(d.payload.intent, d.to, ref);
-  if (kind !== "signal" && kind !== "daily") {
+  if (kind !== "signal" && kind !== "daily" && kind !== "weekly") {
     // 「연속」 = 상대가 나에게 마지막으로 보낸 (신호 아닌) 우편 이후, 창 안에 내가 그 사람에게 보낸 (신호 아닌) 우편 수.
-    //   ★상대의 **신호·일일 보고**는 답이 아니다 — 기계가 하루 한 번 보내는 통으로 쿨다운이 풀리지 않게(엄격 쪽 · §14-9).
+    //   ★상대의 **신호·일일·주간 보고**는 답이 아니다 — 기계가 하루 한 번 보내는 통으로 쿨다운이 풀리지 않게(엄격 쪽 · §14-9).
     const c = await qb.prepare(
       `SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM mail
-        WHERE from_id = ?1 AND to_id = ?2 AND intent NOT IN ('signal', 'daily') AND created_at > ?3
+        WHERE from_id = ?1 AND to_id = ?2 AND intent NOT IN ('signal', 'daily', 'weekly') AND created_at > ?3
           AND seq > COALESCE((SELECT MAX(seq) FROM mail
-                               WHERE from_id = ?2 AND to_id = ?1 AND intent NOT IN ('signal', 'daily')), 0)`
+                               WHERE from_id = ?2 AND to_id = ?1 AND intent NOT IN ('signal', 'daily', 'weekly')), 0)`
     ).bind(d.from, d.to, new Date(nowMs - limits.consecWindowS * 1000).toISOString())
      .first<{ n: number; oldest: string | null }>();
     const v = mailConsecutive(Number(c?.n ?? 0), c?.oldest ?? null, nowMs, limits);
@@ -979,7 +979,7 @@ async function handleMailPost(req: Request, env: Env): Promise<Response> {
   if (human) {
     const u = await qb.prepare(
       `SELECT COUNT(*) AS n FROM mail WHERE to_id = ?1 AND acked_at IS NULL AND purged_at IS NULL
-          AND keep_until > ?2 AND intent NOT IN ('signal', 'daily')`
+          AND keep_until > ?2 AND intent NOT IN ('signal', 'daily', 'weekly')`
     ).bind(d.to, nowIso(new Date(nowMs))).first<{ n: number }>();
     if (Number(u?.n ?? 0) >= limits.unreadMax) {
       // 결정론 안내: 받는 쪽이 읽어야 풀린다 — 보낸이는 시각이 아니라 영수(receipts)로 판단한다.
@@ -992,7 +992,7 @@ async function handleMailPost(req: Request, env: Env): Promise<Response> {
   const me = roster.rows.find(r => r.participant_id === d.from);
   const isNew = isNewParticipant(me?.created_at, nowMs, limitsFromEnv(env as unknown as Record<string, unknown>));
   for (const b of mailBuckets(kind, d.from, isNew, limits)) {
-    const r = await bumpRate(qb.asDb, b.bucket, b.windowS, b.max, nowMs);
+    const r = await bumpRate(qb.asDb, b.bucket, b.windowS, b.max, nowMs, b.offsetS ?? 0);
     if (!r.ok) mailRateFail(b.label, b.windowS, b.max, r.retryAfter);
   }
   if (human) {
@@ -1092,8 +1092,8 @@ async function handleMailInbox(req: Request, env: Env): Promise<Response> {
   }
 
   // 미읽음 — 전체 수(쪽과 무관) + 쪽에 든 대화별 수를 질의 1 로(UNION ALL · 대화 id 는 빈 문자열이 될 수 없다).
-  //   미읽음 = 나에게 온 · 읽음 표시 없음 · 본문이 아직 있음 · 신호·일일 보고 아님(사람에게 알릴 글이 아니다 · 명세 §1-1 (6) · §1-2 (4)).
-  const UNREAD = `to_id = ?1 AND acked_at IS NULL AND purged_at IS NULL AND keep_until > ?2 AND intent NOT IN ('signal', 'daily')`;
+  //   미읽음 = 나에게 온 · 읽음 표시 없음 · 본문이 아직 있음 · 신호·일일·주간 보고 아님(사람에게 알릴 글이 아니다 · 명세 §1-1 (6) · §1-2 (4) · §1-3 (6)).
+  const UNREAD = `to_id = ?1 AND acked_at IS NULL AND purged_at IS NULL AND keep_until > ?2 AND intent NOT IN ('signal', 'daily', 'weekly')`;
   const unreadRows = (await qb.prepare(
     `SELECT '' AS thread_id, COUNT(*) AS n, NULL AS oldest FROM mail WHERE ${UNREAD}
      UNION ALL
