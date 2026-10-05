@@ -45,6 +45,7 @@ DEFAULTS: dict[str, Any] = {
     "model": "opus",                 # 배치 모델(기본 Opus)
     "max_output_tokens": 16000,      # 배치 출력 토큰 상한(CLAUDE_CODE_MAX_OUTPUT_TOKENS)
     "max_budget_usd": 5,             # 배치 호출 하나의 비용 상한(--max-budget-usd · 분석 1 + 공개 답 ≤1)
+    "daily_cost_cap_usd": 10,        # 하루(06:00 KST 경계) 합산 천장 = 분석 5 + 공개 답 5 — 넘을 호출은 거절(code 3 · master f78aa7c6 R2)
     "agent": None,                   # 배치 에이전트 실행 파일(없으면 PATH 의 claude)
 }
 PERIODS = ("day", "week")
@@ -114,6 +115,9 @@ def settings(config: dict[str, Any] | None) -> dict[str, Any]:
     v = raw.get("max_output_tokens")
     if type(v) is int and 1000 <= v <= 64000:
         out["max_output_tokens"] = v
+    v = raw.get("daily_cost_cap_usd")
+    if type(v) in (int, float) and 0 < v <= 100:
+        out["daily_cost_cap_usd"] = v
     v = raw.get("max_budget_usd")
     if type(v) in (int, float) and 0 < v <= 50:
         out["max_budget_usd"] = v
@@ -1012,10 +1016,35 @@ def _boundary(payload: dict[str, Any]) -> str:
     return boundary
 
 
+def spent_today(calls_path: str, now: datetime.datetime, budget: float) -> float:
+    """오늘(day_of) 이미 쓴 배치 비용 — 끝 줄의 실제 비용 · 비용을 모르는 호출(도중 사망·숫자 아님)은 그 호출 상한으로 센다."""
+    today, spent, open_calls = day_of(now), 0.0, 0
+    for r in _rows(calls_path):
+        at = _parse(r.get("at"))
+        if at is None or at.tzinfo is None or day_of(at) != today:
+            continue
+        if r.get("phase") == "start":
+            open_calls += 1
+        elif r.get("phase") == "end" and open_calls:
+            open_calls -= 1
+            cost = r.get("total_cost_usd")
+            spent += cost if type(cost) in (int, float) and cost >= 0 else budget
+    return spent + open_calls * budget
+
+
 def _call_once(*, which: str, argv: list[str], prompt: str, period: str, now: datetime.datetime, model: str,
-               calls_path: str, out_dir: str, env: dict[str, str],
+               calls_path: str, out_dir: str, env: dict[str, str], budget: float, cap: float,
                caller: Callable[[list[str], str], dict[str, Any]] | None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """호출 하나 — ★호출 **전에** 원장에 적는다(도중에 죽어도 「이 기간 호출」은 쓴 것으로 센다 · 비용 천장)."""
+    """호출 하나 — ★호출 **전에** 원장에 적는다(도중에 죽어도 「이 기간 호출」은 쓴 것으로 센다 · 비용 천장).
+
+    ★하루 합산 천장(master f78aa7c6 R2): 오늘 쓴 비용 + 이 호출 상한이 `daily_cost_cap_usd` 를 넘으면 **부르지 않는다**
+      — 원장에 거절 1줄 · (None, 거절) 을 돌려주고 배치는 보고서를 쓴 뒤 code 3 으로 끝난다.
+    """
+    if spent_today(calls_path, now, budget) + budget > cap:
+        _append(calls_path, {"period": period, "called": False, "call": which, "at": _iso(now), "phase": "refused",
+                             "code": errors.GATE_REJECT, "why": "daily_cost_cap",
+                             "spent_usd": spent_today(calls_path, now, budget), "cap_usd": cap})
+        return None, {"called": False, "refused": True, "summary": f"{which} · 거절(하루 비용 천장 ${cap} · code 3)"}
     _append(calls_path, {"period": period, "called": True, "call": which, "at": _iso(now), "model": model,
                          "bytes_in": len(prompt.encode("utf-8")), "phase": "start"})
     res = (caller or (lambda a, p: run_call(a, p, env=env)))(argv, prompt)
@@ -1082,7 +1111,8 @@ def _batch_locked(ctx: Any, *, dry_run: bool, now: datetime.datetime | None,
         if caller is None and not agent:
             _fail("배치 에이전트(claude)를 찾지 못했다 — 설정 desk.agent", None, errors.PRECONDITION)
         common = {"period": period, "now": now, "model": s["model"], "calls_path": calls_path,
-                  "out_dir": out_dir, "env": env, "caller": caller}
+                  "out_dir": out_dir, "env": env, "caller": caller,
+                  "budget": s["max_budget_usd"], "cap": s["daily_cost_cap_usd"]}
         parsed, call = _call_once(which="analysis", argv=batch_argv(agent, s), prompt=prompt, **common)
         model_doc = _clean_model(parsed, data["addresses"], reply_layer="mail") if parsed is not None else None
         ok_analysis = model_doc is not None
@@ -1112,6 +1142,12 @@ def _batch_locked(ctx: Any, *, dry_run: bool, now: datetime.datetime | None,
             f" · 공개 글 {data['counts']['plaza_groups']} · 신호 {data['counts']['signals']} · 일일 {data['counts']['dailies']}"
             f" · 이월 {data['carried']} · 답 초안 {len(drafts['replies'])} · {call['summary']}")
     sent = notify(s, line, runner=notifier)
+    refused = [c for c in (call, call.get("public") or {}) if c.get("refused")]
+    if refused:
+        # 보고서·초안·원장은 이미 썼다 — 거절은 끝에서 code 3 으로 알린다(조용히 성공으로 끝내지 않는다).
+        _fail("하루 비용 천장으로 호출을 거절했다", {"period": period, "report": report_path,
+                                                 "refused": [c["summary"] for c in refused],
+                                                 "cap_usd": s["daily_cost_cap_usd"]}, errors.GATE_REJECT)
     return {"period": period, "dir": out_dir, "report": report_path, "call": call,
             "drafts": len(drafts["replies"]), "carried": data["carried"], "counts": data["counts"],
             "notify": sent}

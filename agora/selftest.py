@@ -4484,7 +4484,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M644-desk-trimmed-notes-done", "M645-desk-final-size-unchecked",
                "M646-desk-note-stops-at-first-overflow", "M647-desk-oversize-note-carried-forever",
                "M648-desk-mask-rescans-tokens", "M649-desk-mask-case-sensitive", "M650-desk-mask-overlap-twice",
-               "M651-desk-mask-no-whole-lower", "M652-desk-mask-one-pass", "M653-desk-mask-cap-not-total"),
+               "M651-desk-mask-no-whole-lower", "M652-desk-mask-one-pass", "M653-desk-mask-cap-not-total",
+               "M655-desk-daily-cost-cap-ignored"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17778,6 +17779,46 @@ def _case_desk_mask_once_case_free() -> None:
                              f"only={len(data['notes_report_only'])} bytes={data['bytes']}")
 
 
+def _case_desk_daily_cost_cap() -> None:
+    """master f78aa7c6 R2 — 하루 합산 비용 천장(daily_cost_cap_usd) · 넘을 호출은 부르지 않는다(원장 거절 1줄 · 끝에서 code 3)
+    · 보고서·우편 답 초안은 남는다 · 거절된 공개 글은 처리 완료로 안 적는다 · 기본 10 = 분석 5 + 공개 답 5 는 둘 다 돈다."""
+    from agora import counsel, mail
+    m = _mail_doc(subject="질문", body="업데이트가 안 돼요")
+    config = {"human_approval": False, "desk": {"enabled": True, "daily_cost_cap_usd": 6}}
+    ctx, _store = _desk_world([m], config=config)
+    room = sorted(mail.desk_pin()["rooms"])[0]
+    posts = _desk_plaza_events(room, [("1" * 32, "설치가 멈춰요")])
+    _desk_cycle(ctx, reduce=lambda _c, r: posts if r == room else {"events": []},
+                publish=lambda c, d: {"status": 201, "message_id": d["message_id"]},
+                notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    seen: list[str] = []
+
+    def caller(argv: list[str], prompt: str) -> dict[str, Any]:
+        seen.append(argv[argv.index("--system-prompt") + 1])
+        inner = {"summary": "s", "topics": [], "backlog": [], "human_needed": [],
+                 "replies": [{"key": "M1", "body": "우편 답"}, {"key": "P1", "body": "공개 답"}]}
+        return {"rc": 0, "stdout": json.dumps({"result": json.dumps(inner, ensure_ascii=False), "total_cost_usd": 2})}
+    try:
+        counsel.batch(ctx, caller=caller, notifier=lambda *a, **k: None)
+    except AgoraError as e:
+        if e.code != 3:
+            raise
+    else:
+        raise AssertionError("하루 비용 천장(2 + 5 > 6)을 넘는 둘째 호출을 거절하지 않았다")
+    rows = mail._rows(os.path.join(counsel.counsel_dir(ctx), counsel.CALLS_FILE))
+    refused = [r for r in rows if r.get("phase") == "refused"]
+    if seen != [counsel.SYSTEM_PROMPT] or len(refused) != 1 or refused[0]["call"] != "public" \
+            or refused[0]["spent_usd"] != 2:
+        raise AssertionError(f"천장 거절이 다르다: 호출 {len(seen)} 거절 {refused}")
+    period = rows[0]["period"]
+    drafts = json.load(open(os.path.join(counsel.counsel_dir(ctx), period, "drafts.json"), encoding="utf-8"))
+    batched = {r.get("key") for r in mail._rows(counsel._desk_path(ctx, counsel.BATCHED_FILE))}
+    if [r["key"] for r in drafts["replies"]] != ["M1"] or "1" * 32 in batched or not batched:
+        raise AssertionError(f"거절 뒤 초안·처리 표시가 다르다: {drafts['replies']} {sorted(batched)}")
+    if counsel.settings({"desk": {}})["daily_cost_cap_usd"] != 10:
+        raise AssertionError("하루 비용 천장 기본값이 10 이 아니다")
+
+
 def _case_scrub_our_two_hosts_only() -> None:
     """허용 도메인 = 우리 정확한 호스트 둘만(master 0a9ded7f · 하위·형제·상위·꼬리 붙인 호스트 차단)."""
     from agora import scrub
@@ -18390,6 +18431,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("상담소: 빠진 오너 한 줄은 이월",          _case_desk_owner_notes_carried, None),
     ("상담소: 공개 답은 공개 글만 본다",        _case_desk_public_call_isolated, None),
     ("상담소: 이름 가림은 한 번·대소문자 무관",  _case_desk_mask_once_case_free, None),
+    ("상담소: 하루 비용 천장",                  _case_desk_daily_cost_cap, None),
     ("스크럽: 우리 도메인은 정확한 두 호스트",  _case_scrub_our_two_hosts_only, None),
     ("상주: 데스크면 깨움 0",                   _case_resident_desk_branch_never_wakes, None),
 )
@@ -18531,6 +18573,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    pz = _plaza()\n    return _dt.datetime.combine(pz.day_of(cast_at) + _dt.timedelta(days=1)',
      '    pz = _plaza()\n    return _dt.datetime.combine(cast_at.astimezone(pz.KST).date() + _dt.timedelta(days=1)',
      "하루 한 바퀴: 시험 시계 = 표 던진 날 다음 06:10"),
+    ("M655-desk-daily-cost-cap-ignored", "agora/counsel.py",
+     '    if spent_today(calls_path, now, budget) + budget > cap:',
+     '    if False:',
+     "상담소: 하루 비용 천장"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',
      '\n.jarvis.godmeyou.kr\n.godmeyou.kr\n',
