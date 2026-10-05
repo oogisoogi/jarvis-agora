@@ -104,13 +104,13 @@ class Mail:
             h["X-Agora-Mail-Auth"] = header
         return http("GET", self.base + "/mail/inbox?" + q, headers=h)
 
-    def ack(self, signer, for_id, message_ids, thread_ids, ts=None):
+    def ack(self, signer, for_id, mail_ids, thread_ids, upto="", ts=None):
         ts = ts or iso()
-        doc = {"acked": message_ids, "acked_threads": thread_ids, "for": for_id,
-               "purpose": "agora-mail-ack-v1", "ts": ts}
+        doc = {"acked": mail_ids, "acked_threads": thread_ids, "for": for_id,
+               "purpose": "agora-mail-ack-v2", "ts": ts, "upto": upto}
         sig = sign_bytes(signer["key"], canonical_bytes(doc), self.workdir)
-        return http("POST", self.base + "/mail/ack", {"for": for_id, "message_ids": message_ids,
-                                                       "thread_ids": thread_ids, "ts": ts, "signature": sig})
+        return http("POST", self.base + "/mail/ack", {"for": for_id, "mail_ids": mail_ids, "thread_ids": thread_ids,
+                                                       "upto": upto, "ts": ts, "signature": sig})
 
 
 def letter(subject, body="본문입니다", intent="notice"):
@@ -250,6 +250,29 @@ def main():
     record("경합: 같은 대화에 b→v(조회를 앞서 통과) = 행 0", None, race_insert("b", "v", TR))
     record("경합: 같은 대화에 v→a(같은 쌍 · 역방향) = 행 1", True, bool(race_insert("v", "a", TR)))
 
+    # ── 3-c. 읽음 SQL — mail_id 대상 · upto 상한(적대 2R R2-1·R2-2 · 오프라인 · 실제 ack SQL) ──
+    print("\n== 우편 3-c. 읽음 SQL(mail_id 대상 · upto 상한) ==")
+    upd = _re.search(r"`(UPDATE mail SET acked_at = \?1.*?)`", src, _re.S)
+    db2 = _sqlite3.connect(":memory:")
+    db2.executescript(open(os.path.join(RELAY, "migrations", "0002_mail.sql"), encoding="utf-8").read())
+    same_mid, TA, TC = new_id(), new_id(), new_id()
+
+    def put(frm, tid, mid):
+        return db2.execute(ins.group(1), (mid, tid, frm, "v", "genesis", None, "notice", "0" * 64, 1, "{}", "sig",
+                                          iso(), iso())).fetchone()[0]
+    sa = put("a", TA, same_mid)
+    sc = put("c", TC, same_mid)
+
+    def ack_sql(seqs, threads, upto):
+        cur = db2.execute(upd.group(1), (iso(), "v", json.dumps(seqs), json.dumps(threads), upto)) if upd else None
+        return cur.rowcount if cur else "no-sql"
+    record("두 발신자 · 같은 message_id · a 의 mail_id 하나 ack = 1통만", 1, ack_sql([sa], [], 0))
+    record("  c 의 우편은 그대로 미읽음", None,
+           db2.execute("SELECT acked_at FROM mail WHERE seq = ?", (sc,)).fetchone()[0])
+    s2 = put("a", TA, new_id())
+    record("대화 ack upto=첫 우편 → 뒤에 적재된 우편 0통(재생해도)", (0, 0), (ack_sql([], [TA], sa), ack_sql([], [TA], sa)))
+    record("  upto=뒤 우편 → 1통", 1, ack_sql([], [TA], s2))
+
     # ── 4. 상한(새 대화) ──────────────────────────────────────────────────────
     print("\n== 우편 4. 새 대화 상한 ==")
     _, _, code, body, hdrs = M.send(A, B["id"], new_id(), letter("두 번째 새 대화"))
@@ -315,16 +338,16 @@ def main():
 
     # ── 8. 읽음 · 영수 ───────────────────────────────────────────────────────
     print("\n== 우편 8. 읽음 표시 · 영수 · 남의 ack ==")
-    code, body, _ = M.ack(C, C["id"], [m1["message_id"]], [])
+    code, body, _ = M.ack(C, C["id"], [mail_id1], [])
     record("C 가 A→B 우편에 ack = 200 · acked 0 · ignored 1", (200, 0, 1),
            (code, (body or {}).get("acked"), (body or {}).get("ignored")))
-    code, body, _ = M.ack(C, C["id"], [], [T1])
+    code, body, _ = M.ack(C, C["id"], [], [T1], upto="ml_9999999999999999")
     record("C 가 A-B 대화 id 로 ack = acked 0", (200, 0), (code, (body or {}).get("acked")))
     code, box, _ = M.inbox(B["id"], M.auth(B, B["id"]))
     record("남의 ack 뒤 B unread_count 그대로 1", 1, box.get("unread_count") if isinstance(box, dict) else None)
-    code, body, _ = M.ack(C, B["id"], [m1["message_id"]], [])
+    code, body, _ = M.ack(C, B["id"], [mail_id1], [])
     record("C 키로 for=B ack = 401", 401, code)
-    code, body, _ = M.ack(B, B["id"], [m1["message_id"], new_id()], [])
+    code, body, _ = M.ack(B, B["id"], [mail_id1, "ml_9999999999999998"], [])
     record("B ack = 200 · acked 1 · ignored 1", (200, 1, 1),
            (code, (body or {}).get("acked"), (body or {}).get("ignored")))
     code, box, _ = M.inbox(B["id"], M.auth(B, B["id"]))
@@ -338,7 +361,7 @@ def main():
     record("A 는 B 의 답장을 미읽음 1 로 본다(대화 T1 · peer B)", (1, 1, B["id"]),
            (boxa.get("unread_count") if isinstance(boxa, dict) else None,
             ta[0].get("unread") if ta else None, ta[0].get("peer") if ta else None))
-    code, body, _ = M.ack(B, B["id"], [m1["message_id"]], [])
+    code, body, _ = M.ack(B, B["id"], [mail_id1], [])
     record("다시 ack = acked 0(첫 시각 유지)", (200, 0), (code, (body or {}).get("acked")))
     code, boxa2, _ = M.inbox(A["id"], M.auth(A, A["id"], receipts_since=first_ack or ""),
                              receipts_since=first_ack or "")
@@ -348,25 +371,28 @@ def main():
     code, body, _ = M.ack(B, B["id"], [], [])
     record("빈 ack = 400/10", (400, 10), (code, code_of(body)))
 
-    # ── 8-b. 대화 단위 ack 상한(적대 1R R1-1) ────────────────────────────────
-    print("\n== 우편 8-b. 대화 단위 ack = 서명 시각까지 들어온 우편에만 ==")
-    signed_before = iso()
-    time.sleep(0.05)
+    # ── 8-b. 대화 단위 ack 상한(적대 1R R1-1 → 2R R2-1 · 서명된 upto) ──────────
+    print("\n== 우편 8-b. 대화 단위 ack = 서명된 upto(mail_id) 이하에만 ==")
     for _ in range(3):
         mx, _, code, body, _ = M.send(A, B["id"], T1, letter("ack 서명 뒤 도착"), reply_to=rb["message_id"])
         if code != 429:
             break
         time.sleep(2.2)
-    record("A→B 답장(ack 서명 뒤 도착) = 201", 201, code)
-    code, body, _ = M.ack(B, B["id"], [], [T1], ts=signed_before)
-    record("서명 시각 이전 ts 의 대화 ack = acked 0(뒤 도착 우편 미표시)", (200, 0),
+    record("A→B 답장(upto 뒤 도착) = 201", 201, code)
+    mx_id = body.get("mail_id") if isinstance(body, dict) else None
+    code, body, _ = M.ack(B, B["id"], [], [T1], upto=mail_id1)
+    record("upto=m1 의 대화 ack = acked 0(뒤 도착 우편 미표시)", (200, 0), (code, (body or {}).get("acked")))
+    code, body, _ = M.ack(B, B["id"], [], [T1], upto=mail_id1, ts=iso(time.time() + 240))
+    record("  같은 upto · 미래 ts(+4분) 재생도 acked 0(시각이 경계가 아니다)", (200, 0),
            (code, (body or {}).get("acked")))
+    code, body, _ = M.ack(B, B["id"], [], [T1])
+    record("  대화 ack 에 upto 없음 = 400/10", (400, 10), (code, code_of(body)))
     code, boxb, _ = M.inbox(B["id"], M.auth(B, B["id"]))
     hit = find(boxb, mx["message_id"])
     record("  뒤 도착 우편 본문 그대로 · 미읽음 1", (True, 1),
            (bool(hit and "mail" in hit), boxb.get("unread_count") if isinstance(boxb, dict) else None))
-    code, body, _ = M.ack(B, B["id"], [], [T1])
-    record("지금 ts 의 대화 ack = acked 1", (200, 1), (code, (body or {}).get("acked")))
+    code, body, _ = M.ack(B, B["id"], [], [T1], upto=mx_id or "")
+    record("upto=그 우편 의 대화 ack = acked 1", (200, 1), (code, (body or {}).get("acked")))
     time.sleep(2.2)          # A 의 답장 간격(로컬 2초)을 비워 둔다 — 아래 10 의 「답장 5통」이 이 1통에 걸리지 않게
 
     # ── 9. 신호 우편 ─────────────────────────────────────────────────────────

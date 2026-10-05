@@ -540,6 +540,21 @@ describe("우편 문서 — 닫힌 스키마(명세 §2·§1-1)", () => {
       const d = okDaily(); f(d);
       expect(await codeOfAsync(() => mailTs.validateMail(d, MAIL_NOW)), f.toString()).toBe(10);
     }
+    // 적대 2R R2-4 — 없는 날짜는 Date.parse 가 고쳐 읽어도 거부 · 윤년 2월 29일은 통과
+    for (const day of ["2026-02-30", "2025-02-29", "2026-04-31"]) {
+      const d = okDaily(); d.payload.daily.day = day;
+      expect(await codeOfAsync(() => mailTs.validateMail(d, MAIL_NOW)), day).toBe(10);
+    }
+    const leap = okDaily(); leap.payload.daily.day = "2028-02-29";
+    await expect(mailTs.validateMail(leap, MAIL_NOW)).resolves.toBeTruthy();
+    // 적대 2R R2-3 — 시각 창 기준 = 봉투 ts(서버 시각 아님): ts 3시간 전 · at = ts+4분 통과 · ts+6분 거부(서버 시각보다는 과거여도)
+    const early = okDaily(); early.ts = isoAt(MAIL_NOW - 3 * 3600_000);
+    early.payload.daily.updates[0].at = isoAt(MAIL_NOW - 3 * 3600_000 + 4 * 60_000);
+    early.payload.daily.uptime.last_boot = isoAt(MAIL_NOW - 3 * 3600_000 + 4 * 60_000);
+    await expect(mailTs.validateMail(early, MAIL_NOW)).resolves.toBeTruthy();
+    const late = okDaily(); late.ts = isoAt(MAIL_NOW - 3 * 3600_000);
+    late.payload.daily.updates[0].at = isoAt(MAIL_NOW - 3 * 3600_000 + 6 * 60_000);
+    expect(await codeOfAsync(() => mailTs.validateMail(late, MAIL_NOW))).toBe(10);
     const note200 = okDaily(); note200.payload.daily.owner_note = "😀".repeat(200);
     await expect(mailTs.validateMail(note200, MAIL_NOW)).resolves.toBeTruthy();
     const big = okDaily(); big.payload.daily.errors.signatures = Array(100).fill("d".repeat(32));
@@ -736,8 +751,12 @@ describe("수신함·읽음 인증 문서 — 서명 대상 바이트(명세 §3
       .toBe('{"for":"jarvis-b","purpose":"agora-mail-inbox-v1","receipts_since":"","since":"","ts":"2026-10-05T12:00:00.000Z"}');
   });
   it("ack 문서의 canonical 모양이 계약 그대로다", () => {
-    expect(canonicalText(mailTs.ackAuthDoc("jarvis-b", ["a".repeat(32)], [], ts)))
-      .toBe(`{"acked":["${"a".repeat(32)}"],"acked_threads":[],"for":"jarvis-b","purpose":"agora-mail-ack-v1","ts":"${ts}"}`);
+    expect(canonicalText(mailTs.ackAuthDoc("jarvis-b", ["ml_0000000000000007"], ["a".repeat(32)], "ml_0000000000000009", ts)))
+      .toBe(`{"acked":["ml_0000000000000007"],"acked_threads":["${"a".repeat(32)}"],"for":"jarvis-b","purpose":"agora-mail-ack-v2","ts":"${ts}","upto":"ml_0000000000000009"}`);
+  });
+  it("음성 대조 — upto 를 바꾸면 서명 대상이 달라진다(대화 읽음 범위를 서명이 고정한다 · 적대 2R R2-1)", () => {
+    expect(canonicalText(mailTs.ackAuthDoc("jarvis-b", [], ["a".repeat(32)], "ml_0000000000000009", ts)))
+      .not.toBe(canonicalText(mailTs.ackAuthDoc("jarvis-b", [], ["a".repeat(32)], "ml_0000000000000010", ts)));
   });
   it("음성 대조 — since 를 바꾸면 서명 대상이 달라진다(헤더 재사용 차단의 근거)", () => {
     expect(canonicalText(mailTs.inboxAuthDoc("jarvis-b", "ml_0000000000000001", "", ts)))

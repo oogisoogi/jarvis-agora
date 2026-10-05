@@ -1063,50 +1063,57 @@ async function handleMailInbox(req: Request, env: Env): Promise<Response> {
 }
 
 // ── POST /mail/ack ─────────────────────────────────────────────────────────
-function idList(body: Record<string, unknown>, key: string, max: number): string[] {
+function idList(body: Record<string, unknown>, key: string, max: number,
+                ok: (x: unknown) => boolean = isId): string[] {
   const v = body[key];
   if (!Array.isArray(v)) fail(ARGUMENT, "id 목록이어야 한다", { key });
   if (v.length > max) fail(ARGUMENT, "id 목록이 너무 길다", { key, count: v.length, max });
-  v.forEach((x, i) => { if (!isId(x)) fail(ARGUMENT, "id 형식이 아니다", { key, index: i }); });
+  v.forEach((x, i) => { if (!ok(x)) fail(ARGUMENT, "id 형식이 아니다", { key, index: i }); });
   return v as string[];
 }
+const isMailId = (x: unknown): boolean => typeof x === "string" && mail.parseMailId(x) !== null;
 
 async function handleMailAck(req: Request, env: Env): Promise<Response> {
   const body = await readJson(req);
-  closedBody(body, ["for", "message_ids", "thread_ids", "ts", "signature"]);
+  closedBody(body, ["for", "mail_ids", "thread_ids", "upto", "ts", "signature"]);
   const forId = needStr(body, "for");
-  const messageIds = idList(body, "message_ids", mail.ACK_IDS_MAX);
+  const mailIds = idList(body, "mail_ids", mail.ACK_IDS_MAX, isMailId);
   const threadIds = idList(body, "thread_ids", mail.ACK_THREADS_MAX);
-  if (!messageIds.length && !threadIds.length) fail(ARGUMENT, "message_ids·thread_ids 가 둘 다 비었다", null);
+  if (!mailIds.length && !threadIds.length) fail(ARGUMENT, "mail_ids·thread_ids 가 둘 다 비었다", null);
+  if (typeof body.upto !== "string" || (body.upto !== "" && !isMailId(body.upto))) {
+    fail(ARGUMENT, "upto 는 빈 문자열 또는 ml_ + 16자리", { key: "upto" });
+  }
+  const upto = body.upto as string;
+  if (threadIds.length && upto === "") fail(ARGUMENT, "대화 단위 읽음에는 upto 가 필요하다", { key: "upto" });
   const ts = needStr(body, "ts");
   const signature = needStr(body, "signature");
   const nowMs = Date.now();
   const qb = new QueryBudget(env.DB, MAIL_ACK_D1_QUERIES_MAX);
   // ★서명 대상 = 요청 그대로의 목록(순서·중복 포함) — 서버가 고쳐 쓴 값에 서명이 걸린 척하지 않는다.
-  await verifyMailAuth(qb, env, forId, mail.ackAuthDoc(forId, messageIds, threadIds, ts), ts, signature, nowMs);
+  await verifyMailAuth(qb, env, forId, mail.ackAuthDoc(forId, mailIds, threadIds, upto, ts), ts, signature, nowMs);
 
   // ★수신자가 **자기 앞 우편에만** 붙인다 — 남의 우편·남의 대화 id 는 조용히 무시하고 계수만 준다.
-  const uniq = [...new Set(messageIds)];
+  //   대상 = mail_id(= seq · 전역 유일). message_id 로 고르면 다른 발신자의 같은 id 우편까지 붙는다(적대 2R R2-2).
+  const seqs = [...new Set(mailIds.map(x => mail.parseMailId(x) as number))];
   let matched = 0;
-  if (uniq.length) {
+  if (seqs.length) {
     const m = await qb.prepare(
-      `SELECT COUNT(DISTINCT message_id) AS n FROM mail
-        WHERE to_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))`
-    ).bind(forId, JSON.stringify(uniq)).first<{ n: number }>();
+      `SELECT COUNT(*) AS n FROM mail WHERE to_id = ?1 AND seq IN (SELECT value FROM json_each(?2))`
+    ).bind(forId, JSON.stringify(seqs)).first<{ n: number }>();
     matched = Number(m?.n ?? 0);
   }
   // ★이미 붙은 표시는 안 바뀐다(첫 시각 유지 · acked_at IS NULL).
-  // ★대화 단위 ack 는 **서명 시각까지 들어온 우편에만** 붙는다(적대 1R R1-1) — 대화 id 만 서명에 걸리므로
-  //   상한이 없으면 같은 요청을 ±5분 안에 재생해 그 뒤 도착한 우편까지 읽음 처리하고, 읽음 = 본문 삭제(덤 삭제)로
-  //   받는 사람이 한 번도 못 본 우편이 사라진다. 상한 = min(서명 ts, 서버 시각) · message_id 지정 ack 는 그대로.
-  const ackUpto = nowIso(new Date(Math.min(Date.parse(ts), nowMs)));
+  // ★대화 단위 ack 는 **서명된 upto(mail_id) 이하**에만 붙는다(적대 1R R1-1 → 2R R2-1) — 받는 사람이 실제로 본
+  //   수신함 쪽의 마지막 mail_id 를 서명에 싣는다. seq 는 적재 순간에 매겨지므로 같은 요청을 재생해도, 서명 뒤에
+  //   적재된 우편(더 큰 seq)은 절대 안 걸린다. 시각(ts·created_at)은 경계로 쓰지 않는다(미래 ts·적재 지연 둘 다 새는 경계였다).
+  const uptoSeq = upto === "" ? 0 : (mail.parseMailId(upto) as number);
   const res = await qb.prepare(
     `UPDATE mail SET acked_at = ?1
       WHERE to_id = ?2 AND acked_at IS NULL
-        AND (message_id IN (SELECT value FROM json_each(?3))
-             OR (thread_id IN (SELECT value FROM json_each(?4)) AND created_at <= ?5))`
-  ).bind(nowIso(new Date(nowMs)), forId, JSON.stringify(uniq), JSON.stringify(threadIds), ackUpto).run();
-  return json({ acked: Number(res.meta?.changes ?? 0), ignored: uniq.length - matched }, 200, MAIL_HEADERS);
+        AND (seq IN (SELECT value FROM json_each(?3))
+             OR (thread_id IN (SELECT value FROM json_each(?4)) AND seq <= ?5))`
+  ).bind(nowIso(new Date(nowMs)), forId, JSON.stringify(seqs), JSON.stringify(threadIds), uptoSeq).run();
+  return json({ acked: Number(res.meta?.changes ?? 0), ignored: seqs.length - matched }, 200, MAIL_HEADERS);
 }
 
 // ── 라우터 ─────────────────────────────────────────────────────────────────

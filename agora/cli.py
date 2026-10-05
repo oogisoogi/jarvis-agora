@@ -252,7 +252,7 @@ CLI_ONLY_ARGS: dict[str, tuple[str, ...]] = {
     "resident":     ("interval_min", "dry_run", "print_agenda", "dir"),
     # ★동작마다 받는 인자는 `mail.CLI_ACTION_ARGS` 가 한 번 더 좁힌다(`inbox --to` 거절).
     "mail":         ("to", "subject", "body", "body_file", "intent", "reply_to", "refs",
-                     "thread_id", "message_id", "dir"),
+                     "thread_id", "mail_id", "dir"),
 }
 
 # CLI 전용 명령의 **필수** 인자. ★구판은 이것을 `_run_local` 안의 분기에서 따로 봤고,

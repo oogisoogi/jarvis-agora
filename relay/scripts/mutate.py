@@ -165,10 +165,15 @@ MUTATIONS = [
      "harness", "우편: 보존 기한 지난 본문 = 머리만(purged)"),
 
     # ── 적대 1R(codex · 2026-10-05) 반영 자리 ──
-    ("M30 대화 단위 ack 의 서명 시각 상한 제거", "src/index.ts",
-     "AND created_at <= ?5))`",
+    ("M30 대화 단위 ack 의 upto 상한 제거", "src/index.ts",
+     "AND seq <= ?5))`",
      "AND ?5 = ?5))`",
-     "harness", "우편 8-b: 서명 시각 이전 ts 의 대화 ack = acked 0"),
+     "harness", "우편 8-b·3-c: upto 뒤에 적재된 우편 = acked 0"),
+
+    ("M34 읽음 대상을 message_id 로 넓힘(다른 발신자 같은 id)", "src/index.ts",
+     "        AND (seq IN (SELECT value FROM json_each(?3))\n",
+     "        AND (seq IN (SELECT value FROM json_each(?3)) OR message_id IN (SELECT m2.message_id FROM mail m2 WHERE m2.seq IN (SELECT value FROM json_each(?3)))\n",
+     "harness", "우편 3-c: 같은 message_id 의 c 우편은 그대로"),
 
     ("M31 적재 문장의 대화 결박 제거(경합 창)", "src/index.ts",
      "        WHERE NOT EXISTS (SELECT 1 FROM mail WHERE thread_id = ?2",

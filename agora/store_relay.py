@@ -622,12 +622,13 @@ class RelayStore:
                                                           "receipts_since": receipts_since}),
                          headers={"X-Agora-Mail-Auth": auth})
 
-    def mail_ack(self, *, participant: str, message_ids: list[str], thread_ids: list[str],
-                 ts: str, signature: str) -> dict[str, Any]:
-        """`POST /mail/ack` — 읽음 표시. 쓰기지만 같은 표시를 두 번 해도 첫 시각이 남는다(멱등)."""
+    def mail_ack(self, *, participant: str, mail_ids: list[str], thread_ids: list[str],
+                 upto: str, ts: str, signature: str) -> dict[str, Any]:
+        """`POST /mail/ack` — 읽음 표시(v2 · 대상 = mail_id · 대화 읽음 = 서명된 upto 이하).
+        쓰기지만 같은 표시를 두 번 해도 첫 시각이 남는다(멱등)."""
         return self._run("POST", "/mail/ack", write=True, payload={
-            "for": participant, "message_ids": list(message_ids),
-            "thread_ids": list(thread_ids), "ts": ts, "signature": signature})
+            "for": participant, "mail_ids": list(mail_ids),
+            "thread_ids": list(thread_ids), "upto": upto, "ts": ts, "signature": signature})
 
     def register(self, *, participant_id: str, display_name: str,
                  public_key: str, fingerprint: str,

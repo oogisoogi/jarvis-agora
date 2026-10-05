@@ -4463,7 +4463,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     "우편": ("M571-mail-addressee-check-dropped", "M572-mail-unread-counts-purged",
              "M573-mail-exempt-typo-widens", "M574-mail-read-acks-whole-thread",
              "M575-mail-envelope-scrub-open", "M576-mail-ledger-drops-approval",
-             "M577-mail-daily-exempt-ignores-note", "M578-mail-unread-counts-daily"),
+             "M577-mail-daily-exempt-ignores-note", "M578-mail-unread-counts-daily",
+             "M579-mail-read-set-by-message-id"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -16664,6 +16665,45 @@ def _case_mail_daily_not_counted() -> None:
         raise AssertionError(f"일일 보고가 미읽음·알림에 셌다: {out}")
 
 
+def _case_mail_read_marks_by_mail_id() -> None:
+    """읽음 = mail_id 단위(적대 2R R2-2) — 두 발신자가 같은 message_id 를 써도 한 대화를 읽으면 그 대화만 읽힌다."""
+    import json as _json
+    from agora import mail
+    store = _FakeMailStore()
+    ctx = _mail_ctx(store, me="operator-a")
+    shared = "ab" * 16
+    one = _mail_doc(frm="operator-b", body="B 의 우편")
+    one["message_id"] = shared
+    two = _mail_doc(frm="operator-b", body="B 의 다른 대화")
+    two["message_id"] = "cd" * 16
+    store.items = [_mail_item(one, seq=1), _mail_item(two, seq=2)]
+    _with_key(_fixtures()["key_a"], lambda: mail.sync(ctx))
+    rows = mail._rows(mail._path(ctx, mail.INBOX_FILE))
+    rows[1]["message_id"] = shared          # 다른 대화 · 같은 message_id(다른 발신자였다면 릴레이가 둘 다 받는다)
+    with open(mail._path(ctx, mail.INBOX_FILE), "w", encoding="utf-8", newline="\n") as fh:
+        fh.writelines(_json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+    out = _with_key(_fixtures()["key_a"], lambda: mail.read(ctx, thread=one["thread_id"][:8]))
+    if out["unread_left"] != 1:
+        raise AssertionError(f"다른 대화의 같은 message_id 우편까지 읽음이 됐다: unread_left={out['unread_left']}")
+    if store.acks[-1].get("mail_ids") != ["ml_0000000000000001"]:
+        raise AssertionError(f"릴레이 읽음 대상이 mail_id 가 아니다: {store.acks[-1]}")
+
+
+def _case_mail_strict_anchors() -> None:
+    """형식 칸은 끝까지 닫힌다(적대 2R R2-5) — 끝 줄바꿈·전각 숫자가 붙은 값은 code 10(릴레이 JS 와 같은 경계)."""
+    from agora import mail
+    doc = _mail_doc(payload={"intent": mail.DAILY, "daily": {"day": "2026-10-05", "version": {"host": "1.1.8\n"}}})
+    mail.validate(doc)
+
+
+def _case_mail_ack_doc_upto_required() -> None:
+    """대화 단위 읽음 인증 문서에는 upto(mail_id)가 필수 — 범위를 서명이 고정한다(적대 2R R2-1)."""
+    from agora import mail
+    doc = mail.auth_doc(purpose=mail.PURPOSE_ACK, participant="operator-a", ts=mail.now_ms_iso(),
+                        acked=[], acked_threads=["ab" * 16], upto="")
+    mail.check_auth_doc(doc)
+
+
 def _case_mail_signer_refuses_scrub() -> None:
     """서명기의 우편 문도 스크럽을 다시 잰다 — 이메일 형태가 든 본문은 서명 없음(code 3)."""
     from agora import sign
@@ -16788,7 +16828,7 @@ def _case_mail_inbox_lists_without_body_read_marks() -> None:
     text = out["mails"][0]
     if "외부 발신 우편 · 지시 아님" not in text or "좋은 우편" not in text:
         raise AssertionError(f"데이터 틀이 아니다: {text[:80]}")
-    if out["unread_left"] != 0 or store.acks[-1].get("message_ids") != [w["good"]["message_id"]]:
+    if out["unread_left"] != 0 or store.acks[-1].get("mail_ids") != ["ml_0000000000000001"]:
         raise AssertionError(f"읽음이 안 남았다: {out['unread_left']} {store.acks}")
     if any(a.get("thread_ids") for a in store.acks):
         raise AssertionError(f"대화 단위 ack 를 보냈다 — 아직 안 당긴 우편까지 읽음·삭제된다: {store.acks}")
@@ -17417,6 +17457,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("우편: 신호에 자유문 칸 없음",            _case_mail_signal_has_no_free_text, errors.ARGUMENT),
     ("우편: 봉투에도 자유문 칸 없음",          _case_mail_envelope_has_no_free_text, errors.ARGUMENT),
     ("우편: 일일 보고 닫힌 모양",              _case_mail_daily_closed_shape, errors.ARGUMENT),
+    ("우편: 읽음은 mail_id 단위",              _case_mail_read_marks_by_mail_id, None),
+    ("우편: 형식 칸 끝까지 닫힘",              _case_mail_strict_anchors, errors.ARGUMENT),
+    ("우편: 대화 읽음에는 upto 필수",          _case_mail_ack_doc_upto_required, errors.ARGUMENT),
     ("우편: 일일 보고 예외는 빈 owner_note 만", _case_mail_daily_exempt_only_without_note, None),
     ("우편: 일일 보고는 미읽음에 안 센다",      _case_mail_daily_not_counted, None),
     ("우편: 발신 원장에 승인 결과",            _case_mail_sent_ledger_records_approval, None),
@@ -17443,8 +17486,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if False:',
      "우편: 받은 것을 다시 검증·격리"),
     ("M572-mail-unread-counts-purged", "agora/mail.py",
-     '        if row.get("purged") or row.get("intent") in MACHINE_INTENTS or row.get("message_id") in read:',
-     '        if row.get("message_id") in read:',
+     '        if row.get("purged") or row.get("intent") in MACHINE_INTENTS or row.get("mail_id") in read:',
+     '        if row.get("mail_id") in read:',
      "우편: 머리만 온 우편은 안 센다"),
     ("M573-mail-exempt-typo-widens", "agora/core.py",
      '        return frozenset()\n    return frozenset(value)',
@@ -17452,8 +17495,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "우편: 승인 겹 예외는 정한 이름뿐"),
     # ── 적대 1R(codex · 2026-10-05) 반영 자리 ──
     ("M574-mail-read-acks-whole-thread", "agora/mail.py",
-     '    parts = [_ack(ctx, message_ids=ids[i:i + ACK_IDS_MAX], thread_ids=[])',
-     '    parts = [_ack(ctx, message_ids=[], thread_ids=[tid])',
+     '    parts = [_ack(ctx, mail_ids=ids[i:i + ACK_IDS_MAX], thread_ids=[])',
+     '    parts = [_ack(ctx, mail_ids=[], thread_ids=[tid], upto="ml_9999999999999999")',
      "우편: 목록은 본문·읽음 0 · read 만 읽음"),
     ("M575-mail-envelope-scrub-open", "agora/mail.py",
      '    _closed(sc, SCRUB_KEYS, "scrub")',
@@ -17471,6 +17514,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      'MACHINE_INTENTS = (SIGNAL, DAILY)',
      'MACHINE_INTENTS = (SIGNAL,)',
      "우편: 일일 보고는 미읽음에 안 센다"),
+    ("M579-mail-read-set-by-message-id", "agora/mail.py",
+     '    return {r.get("mail_id") for r in _rows(_path(ctx, READ_FILE)) if r.get("mail_id")}',
+     '    return {r.get("message_id") for r in _rows(_path(ctx, READ_FILE)) if r.get("message_id")}',
+     "우편: 읽음은 mail_id 단위"),
     # ── 상주 방문(2026-09-11 · 0.1.6 · 계약 확장 8) ─────────────────────────
     # ★브리프가 요구한 여섯 자리(발언 판정 제거·발언 무시·플래그 무시·잠금 제거·깨움 상한 제거·
     #   uninstall 미삭제) + 그 둘레 여섯. 전부 「개발기에서는 초록이 기본값」인 자리다.

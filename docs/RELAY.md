@@ -736,14 +736,16 @@ canonical **32KB** 초과 = 413/3. 버킷 `gmail-daily-day:<from>` 하루 1(§14
 
 ### 14-4. `POST /mail/ack` — 읽음 표시
 
-- 요청(닫힘) `{"for","message_ids":[…≤50],"thread_ids":[…≤20],"ts","signature"}` — 두 목록 칸 **모두 있어야 한다**(빈 목록 가능 · 둘 다 비면 400/10) · id 는 소문자 hex 32자.
-- 서명 대상 canonical `{"acked":<message_ids 그대로>,"acked_threads":<thread_ids 그대로>,"for":<id>,"purpose":"agora-mail-ack-v1","ts":<ts>}`
+- ★**v2**(적대 2R R2-1·R2-2 · 미배포 상태에서 교체 — 옛 v1 서명이 남아 있을 곳 0): 읽음 대상 = **`mail_id`**(릴레이가 매긴 전역 유일 번호 · `message_id` 는 발신자별로만 유일해
+  다른 발신자의 같은 id 우편까지 읽음·삭제됐다) · 대화 단위 읽음 = 서명된 **`upto`(mail_id) 이하만**(시각 경계는 미래 ts·적재 지연 둘 다 새었다).
+- 요청(닫힘) `{"for","mail_ids":[ml_…≤50],"thread_ids":[hex32…≤20],"upto":""|ml_…,"ts","signature"}` — 두 목록 칸 **모두 있어야 한다**(빈 목록 가능 · 둘 다 비면 400/10) ·
+  `thread_ids` 가 있으면 `upto` 필수(비면 400/10).
+- 서명 대상 canonical `{"acked":<mail_ids 그대로>,"acked_threads":<thread_ids 그대로>,"for":<id>,"purpose":"agora-mail-ack-v2","ts":<ts>,"upto":<upto>}`
   (★요청 그대로의 목록 — 순서·중복 포함. 서버가 고쳐 쓴 값에 서명이 걸린 척하지 않는다). 인증 순서·`pid:` 계수 = §14-3 과 같다.
-- 동작: `UPDATE mail SET acked_at = 지금 WHERE to_id = for AND acked_at IS NULL AND (message_id IN … OR (thread_id IN … AND created_at <= min(ts, 지금)))`.
-  ★**대화 단위 ack 는 서명 시각까지 들어온 우편에만**(적대 1R R1-1) — 서명에는 대화 id 만 걸리므로 상한이 없으면 같은 요청을 ±5분 안에 재생해
-  그 뒤 도착한 우편까지 읽음 처리하고, 읽음 = 본문 삭제라 받는 사람이 못 본 우편이 사라진다. 클라이언트 `agora mail read` 는 **보여 준 우편 id 로만** ack 한다.
+- 동작: `UPDATE mail SET acked_at = 지금 WHERE to_id = for AND acked_at IS NULL AND (seq IN <mail_ids> OR (thread_id IN … AND seq <= <upto>))`.
+  ★seq 는 **적재 순간**에 매겨지므로 같은 요청을 재생해도 서명 뒤에 적재된 우편(더 큰 seq)은 안 걸린다. 클라이언트 `agora mail read` 는 **보여 준 우편의 mail_id 로만** ack 한다.
   ★**수신자가 자기 앞 우편에만** 붙인다 — 남의 우편·남의 대화 id 는 조용히 무시. 이미 붙은 표시는 안 바뀐다(첫 시각 유지).
-- 응답 200 `{"acked": <이번에 새로 붙은 수>, "ignored": <요청한 message_ids(중복 제거) 중 나에게 온 우편이 아닌 수>}`.
+- 응답 200 `{"acked": <이번에 새로 붙은 수>, "ignored": <요청한 mail_ids(중복 제거) 중 나에게 온 우편이 아닌 수>}`.
 - 읽음이 붙으면 발신자는 다음 `receipts` 로 「전달됨(읽힘)」을 알고, 그 우편 본문은 다음 덤 삭제 대상이 된다(§14-5).
 
 ### 14-5. D1 — `relay/migrations/0002_mail.sql`(★원격 적용 = master)
@@ -777,7 +779,7 @@ CREATE INDEX IF NOT EXISTS mail_thread ON mail (thread_id, seq);
 |---|---|---|
 | `POST /mail` | 10 | 명부 1 + 대화 결박 1 + 멱등 1 + 연속 계수 1(신호 0) + 상한 2(신호 1) + 적재 1 + 덤 삭제 1 = **8** (+ UNIQUE 경합 재조회 1) |
 | `GET /mail/inbox` | 6 | 명부 1 + `pid:` 1 + 후보 머리 1 + 본문 1(쪽에 본문 0 이면 생략) + 미읽음(전체+대화별 UNION ALL) 1 + 영수 1 = **6** |
-| `POST /mail/ack` | 4 | 명부 1 + `pid:` 1 + 무시 계수 1(message_ids 비면 생략) + 갱신 1 = **4** |
+| `POST /mail/ack` | 4 | 명부 1 + `pid:` 1 + 무시 계수 1(mail_ids 비면 생략) + 갱신 1 = **4** |
 
 ### 14-6. 상한 — 「새 대화 / 답장」(`relay/src/lib/limits.ts` · 노브 `AGORA_RATE_MAIL_*`)
 

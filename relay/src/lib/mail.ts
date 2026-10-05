@@ -32,7 +32,9 @@ export const MAIL_TS_PAST_MS = 86_400_000;      // 우편 ts = 서버 시각 −
 export const AUTH_SKEW_MS = 300_000;            // 수신함·읽음 인증 ts = 서버 시각 ±5분
 
 export const INBOX_PURPOSE = "agora-mail-inbox-v1";
-export const ACK_PURPOSE = "agora-mail-ack-v1";
+// ★v2(적대 2R R2-1·R2-2): 읽음 대상 = 릴레이가 매긴 `mail_id`(전역 유일 · message_id 는 발신자별로만 유일) ·
+//   대화 단위 읽음 = 서명된 `upto`(mail_id) 이하만 — 시각(ts·created_at)을 경계로 쓰지 않는다.
+export const ACK_PURPOSE = "agora-mail-ack-v2";
 export const INBOX_PAGE_MAX = 50;
 export const INBOX_SCAN_MAX = 500;
 export const RECEIPTS_MAX = 100;
@@ -195,7 +197,9 @@ function checkDaily(p: Obj, nowMs: number): void {
   const d = need<Obj>(p, "daily", "dict", "payload");
   closed(d, DAILY_KEYS, w);
   const day = need<string>(d, "day", "string", w);
-  if (!DAY_RE.test(day) || Number.isNaN(Date.parse(day + "T00:00:00.000Z"))) bad("day 는 YYYY-MM-DD", { where: `${w}.day` });
+  // ★Date.parse 는 2026-02-30 을 3월 2일로 고쳐 읽는다 — 되돌려 같은 글자인지 본다(적대 2R R2-4 · 파이썬 date.fromisoformat 과 같은 경계).
+  const dayMs = DAY_RE.test(day) ? Date.parse(day + "T00:00:00.000Z") : NaN;
+  if (Number.isNaN(dayMs) || new Date(dayMs).toISOString().slice(0, 10) !== day) bad("day 는 실제 날짜 YYYY-MM-DD", { where: `${w}.day` });
   if ("version" in d) {
     const v = need<Obj>(d, "version", "dict", w);
     closed(v, ["host", "pack"], `${w}.version`);
@@ -286,11 +290,11 @@ function checkLetter(p: Obj): void {
 
 /**
  * 우편 문서 닫힌 검증(명세 §2 · §1-1). 통과하면 같은 객체를 돌려준다.
- * ★`nowMs` 를 받는 이유: 신호의 first_seen·last_seen 창(지난 7일 ~ +5분)은 서버 시각 기준이다.
- *   우편 자체의 `ts` 창(−24시간)은 여기서 보지 않는다 — 그것은 모양이 아니라 정책(422/3)이고,
- *   명세의 검사 순서상 대화 결박 **뒤**다.
+ * ★신호·일일 보고의 시각 창(지난 7일 ~ +5분)은 **봉투 ts 기준**이다(적대 2R R2-3 · 받는 쪽과 같은 기준).
+ *   `_nowMs` 는 부르는 쪽 계약을 그대로 두려고 남긴다(쓰지 않는다). 우편 자체의 `ts` 창(서버 −24시간 ~ +5분)은
+ *   여기서 보지 않는다 — 그것은 모양이 아니라 정책(422/3)이고, 명세의 검사 순서상 대화 결박 **뒤**다.
  */
-export async function validateMail(doc: unknown, nowMs: number): Promise<Obj> {
+export async function validateMail(doc: unknown, _nowMs: number): Promise<Obj> {
   if (typeof doc !== "object" || doc === null || Array.isArray(doc)) {
     bad("우편 문서는 객체여야 한다", { got: Array.isArray(doc) ? "list" : doc === null ? "null" : typeof doc });
   }
@@ -327,9 +331,13 @@ export async function validateMail(doc: unknown, nowMs: number): Promise<Obj> {
   if (!isIsoMs(need<string>(d, "ts", "string", "mail"))) bad("ts 는 밀리초 고정폭 ISO", { ts: d["ts"] });
   const p = need<Obj>(d, "payload", "dict", "mail");
   const intent = need<string>(p, "intent", "string", "payload");
-  if (intent === SIGNAL_INTENT) await checkSignal(p, nowMs);
+  // ★신호·일일 보고의 시각 창 기준 = **우편 봉투 ts**(적대 2R R2-3) — 받는 쪽 클라이언트도 같은 기준으로 다시 잰다.
+  //   서버 시각을 기준으로 두면 릴레이가 받은 문서를 받는 쪽이 계약 위반으로 격리한다. 봉투 ts 자체의 서버 창
+  //   (−24시간 ~ +5분)은 handleMailPost (6) 이 따로 본다.
+  const basisMs = Date.parse(d["ts"] as string);
+  if (intent === SIGNAL_INTENT) await checkSignal(p, basisMs);
   else if (intent === DAILY_INTENT) {
-    checkDaily(p, nowMs);
+    checkDaily(p, basisMs);
     const bytes = canonicalBytes(d).length;
     if (bytes > DAILY_MAX_BYTES) {
       fail(GATE_REJECT, "일일 보고 크기 상한 초과", { where: "mail", bytes, limit: DAILY_MAX_BYTES }, { status: 413 });
@@ -348,8 +356,8 @@ export function inboxAuthDoc(forId: string, since: string, receiptsSince: string
   return { for: forId, purpose: INBOX_PURPOSE, receipts_since: receiptsSince, since, ts };
 }
 
-export function ackAuthDoc(forId: string, acked: string[], ackedThreads: string[], ts: string): Obj {
-  return { acked, acked_threads: ackedThreads, for: forId, purpose: ACK_PURPOSE, ts };
+export function ackAuthDoc(forId: string, acked: string[], ackedThreads: string[], upto: string, ts: string): Obj {
+  return { acked, acked_threads: ackedThreads, for: forId, purpose: ACK_PURPOSE, ts, upto };
 }
 
 /** `X-Agora-Mail-Auth: base64(JSON {"ts","signature"})` → 두 칸. 없거나 못 읽으면 401/4. */
