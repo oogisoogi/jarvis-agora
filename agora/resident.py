@@ -40,7 +40,7 @@ import sys
 import time
 from typing import Any, Callable
 
-from agora import errors
+from agora import _proc, errors
 from agora.errors import AgoraError
 
 # ── 설계값(전부 여기 한 곳) ──────────────────────────────────────────────────
@@ -468,12 +468,11 @@ def run_agent(argv: list[str], *, cwd: str, timeout: int, env: dict[str, str]) -
     kwargs: dict[str, Any] = {"cwd": cwd, "env": env, "stdin": subprocess.DEVNULL,
                               "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
     if os.name == "nt":
-        kwargs["creationflags"] = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                                   | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)  # 창 숨김 = _proc
     else:
         kwargs["start_new_session"] = True
     try:
-        proc = subprocess.Popen(argv, **kwargs)
+        proc = _proc.Popen(argv, **kwargs)
     except OSError as e:
         return {"rc": "spawn_failed", "seconds": 0.0, "error": type(e).__name__}
     try:
@@ -487,8 +486,7 @@ def run_agent(argv: list[str], *, cwd: str, timeout: int, env: dict[str, str]) -
 
 def _kill_tree(proc: subprocess.Popen) -> None:
     if os.name == "nt":
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        _proc.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
     else:
         try:
             os.killpg(proc.pid, signal.SIGTERM)
@@ -766,10 +764,7 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
 # ── 일정 등록 ────────────────────────────────────────────────────────────────
 def _run(argv: list[str]) -> dict[str, Any]:
     try:
-        kwargs: dict[str, Any] = {"capture_output": True, "text": True, "timeout": 30}
-        if os.name == "nt":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        proc = subprocess.run(argv, **kwargs)
+        proc = _proc.run(argv, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"rc": None, "error": type(e).__name__}
     return {"rc": proc.returncode, "stderr": (proc.stderr or "").strip()[:200]}

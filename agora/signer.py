@@ -20,12 +20,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import sys
 import tempfile
 from typing import Any
 
-from agora import errors, scrub
+from agora import _proc, errors, scrub
 from agora.contract_open import (
     CHECKPOINT_PURPOSE, CHECKPOINT_TIME_PATTERN, KINDS, MAX_EVENT_BYTES,
     REGISTER_PURPOSE, SIGN_NAMESPACE,
@@ -84,7 +83,7 @@ def sign_bytes(raw: bytes, key_path: str) -> str:
         msg = os.path.join(tmp, "event.bin")
         with open(msg, "wb") as fh:
             fh.write(raw)
-        proc = subprocess.run(
+        proc = _proc.run(
             ["ssh-keygen", "-Y", "sign", "-n", SIGN_NAMESPACE, "-f", key_path, msg],
             capture_output=True, text=True, timeout=30,
         )

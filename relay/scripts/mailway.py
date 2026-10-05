@@ -238,7 +238,7 @@ def main():
     src = open(os.path.join(RELAY, "src", "index.ts"), encoding="utf-8").read()
     ins = _re.search(r"`(INSERT INTO mail \(.*?RETURNING seq)`", src, _re.S)
     db = _sqlite3.connect(":memory:")
-    db.executescript(open(os.path.join(RELAY, "migrations", "0002_mail.sql"), encoding="utf-8").read())
+    db.executescript(open(os.path.join(RELAY, "migrations", "0003_mail.sql"), encoding="utf-8").read())
 
     def race_insert(frm, to, tid):
         args = (new_id(), tid, frm, to, "genesis", None, "notice", "0" * 64, 1, "{}", "sig", iso(), iso())
@@ -252,7 +252,7 @@ def main():
     print("\n== 우편 3-c. 읽음 SQL(mail_id 목록만 · 재생 안전) ==")
     upd = _re.search(r"`(UPDATE mail SET acked_at = \?1.*?)`", src, _re.S)
     db2 = _sqlite3.connect(":memory:")
-    db2.executescript(open(os.path.join(RELAY, "migrations", "0002_mail.sql"), encoding="utf-8").read())
+    db2.executescript(open(os.path.join(RELAY, "migrations", "0003_mail.sql"), encoding="utf-8").read())
     same_mid, TA, TC = new_id(), new_id(), new_id()
 
     def put(frm, tid, mid):

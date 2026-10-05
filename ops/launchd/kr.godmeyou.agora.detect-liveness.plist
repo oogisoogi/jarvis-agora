@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 탐지기 생존 점검 — 1시간마다 「마지막 성공이 3시간보다 오래됐나」를 본다(설계 §6-2 · master Q1=A).
+     알림 = 상태가 바뀔 때 1회(정상→경보 · 경보→해소). 탐지 스크립트 자체가 사라지면 파이썬 없이 셸이 1회 알린다. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>kr.godmeyou.agora.detect-liveness</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>S=/Users/oogisoogi/axdev/.wt/agora-admission/tools/detect_ours.py; M="$HOME/.local/state/agora-detect/script_missing"; if [ -f "$S" ]; then rm -f "$M"; exec /opt/homebrew/bin/python3 "$S" liveness --notify --max-age-h 3; fi; [ -f "$M" ] &amp;&amp; exit 1; printf '%s\n' "【경고】 탐지기 스크립트가 없다: $S — 탐지·생존 점검이 멈췄다(경로를 옮겨 plist 재설치)" | "$HOME/.claude/channels/inbox-append.sh" agora-detector@launchd &amp;&amp; mkdir -p "$(dirname "$M")" &amp;&amp; touch "$M"; exit 1</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/oogisoogi</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartInterval</key><integer>3600</integer>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/oogisoogi/.local/state/agora-detect/liveness.log</string>
+  <key>StandardErrorPath</key><string>/Users/oogisoogi/.local/state/agora-detect/liveness.log</string>
+</dict>
+</plist>

@@ -14,10 +14,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-import subprocess
 from typing import Any
 
-from agora import errors
+from agora import _proc, errors
 from agora.contract_open import (
     CHECKPOINT_PURPOSE, CHECKPOINT_TIME_PATTERN,
     ROSTER_ALLOWED_SIGNERS, ROSTER_OPERATORS, ROSTER_REVOKED_KEYS,
@@ -107,8 +106,8 @@ def _fingerprints_of(path: str) -> frozenset[str]:
         return frozenset()          # 있는데 비었다 = 명시적 0건
     if not _has_key_lines(path):
         return frozenset()          # 주석뿐 = 명시적 0건(위 docstring 의 실사고)
-    proc = subprocess.run(["ssh-keygen", "-l", "-f", path],
-                          capture_output=True, text=True, timeout=30)
+    proc = _proc.run(["ssh-keygen", "-l", "-f", path],
+                     capture_output=True, text=True, timeout=30)
     if proc.returncode != 0:
         raise AgoraError(errors.PRECONDITION, "폐기 목록을 읽을 수 없다",
                          {"stderr": proc.stderr.strip()[:200]})

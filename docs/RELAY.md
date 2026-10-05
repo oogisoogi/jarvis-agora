@@ -749,7 +749,7 @@ canonical **32KB** 초과 = 413/3. 버킷 `gmail-daily-day:<from>` 하루 1(§14
 - 응답 200 `{"acked": <이번에 새로 붙은 수>, "ignored": <요청한 mail_ids(중복 제거) 중 나에게 온 우편이 아닌 수>}`.
 - 읽음이 붙으면 발신자는 다음 `receipts` 로 「전달됨(읽힘)」을 알고, 그 우편 본문은 다음 덤 삭제 대상이 된다(§14-5).
 
-### 14-5. D1 — `relay/migrations/0002_mail.sql`(★원격 적용 = master)
+### 14-5. D1 — `relay/migrations/0003_mail.sql`(0002 = 받아들이기 차단 선착)(★원격 적용 = master)
 
 ```sql
 CREATE TABLE IF NOT EXISTS mail (

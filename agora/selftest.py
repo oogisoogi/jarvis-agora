@@ -19,7 +19,7 @@ import subprocess
 import sys
 from typing import Any, Callable
 
-from agora import contract_open, errors
+from agora import _proc, contract_open, errors
 from agora.cli import COMMANDS, MCP_EXEMPT, core_command_names, mcp_tool_name
 from agora.errors import AgoraError
 
@@ -556,8 +556,8 @@ def _lock_down_for_windows(path: str) -> None:
         return
     user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
     grant = f"{user}:(OI)(CI)F" if os.path.isdir(path) else f"{user}:F"
-    subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", grant],
-                   capture_output=True, text=True, timeout=60)
+    _proc.run(["icacls", path, "/inheritance:r", "/grant:r", grant],
+              capture_output=True, text=True, timeout=60)
 
 
 def _participant_dir(doc_override: dict[str, Any] | None = None,
@@ -3788,8 +3788,8 @@ def _crash_after(stage_script: str, directory: str) -> int:
         "%s;"
         "os.kill(os.getpid(), signal.SIGKILL)"
     ) % (_ROOT, directory, stage_script)
-    proc = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True,
-                          text=True, timeout=60)
+    proc = _proc.run([sys.executable, "-B", "-c", code], capture_output=True,
+                     text=True, timeout=60)
     return proc.returncode
 
 
@@ -4101,8 +4101,8 @@ def _case_watch_restart_no_loss_no_duplicate() -> None:
         "print(out['new'], flush=True);"
         "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"
     ) % (_ROOT, store_path, d, d, _w_roster()["allowed_signers_path"])
-    proc = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True,
-                          text=True, timeout=60)
+    proc = _proc.run([sys.executable, "-B", "-c", script], capture_output=True,
+                     text=True, timeout=60)
     if proc.returncode == 0:
         raise AssertionError("자식이 강제 종료로 죽지 않았다 — 픽스처가 무효다")
     if proc.stdout.strip() != "3":
@@ -4450,6 +4450,10 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                 "M557-pin-injection-ignores-the-version",
                 "M558-any-ahead-version-passes",
                 "M559-cli-budget-read-as-string"),
+    # ★D20(2026-10-05) — 윈도우 자식 창. 잃는 것은 조용하다: 맥에서는 아무것도 안 보이고 운영자 화면에서만 깜빡인다.
+    "자식창": ("M601-proc-forgets-no-window", "M602-proc-shows-the-window",
+               "M603-proc-hides-off-windows", "M604-resident-agent-bypasses-proc",
+               "M605-verify-bypasses-proc"),
     # ★상주 방문(0.1.6 · 계약 확장 8) — 참가자 컴퓨터가 **사람 없이** 에이전트를 깨우는 자리.
     #   이름이 곧 「무엇을 잃을 수 있나」다: 판정이 틀리면 안 깨우거나 끝없이 깨우고, 끄는 손이 안 먹으면 사람이 못 멈춘다.
     "상주판정": ("M441-resident-round-check-dropped", "M442-resident-ignores-that-i-spoke",
@@ -6318,7 +6322,7 @@ def _case_powershell_is_spawned_through_one_door() -> None:
             f"이 목록에 적어라: {offenders}")
     # 그 하나의 문이 실제로 **env 를 넘기는가**(넘기지 않으면 고정이 장식이 된다).
     door = _read_text(os.path.join(_ROOT, "agora", "participant.py"))
-    if "subprocess.run(argv + [cmd]" not in door or "env=env" not in door:
+    if "_proc.run(argv + [cmd]" not in door or "env=env" not in door:
         raise AssertionError("하나뿐인 문이 자식에게 env 를 안 넘긴다 — 고정이 장식이 된다")
 
 
@@ -6637,8 +6641,8 @@ def _case_second_selftest_is_refused_at_once() -> None:
         # ⑴ 토큰 없는 자식 = 남의 실행 → 즉시 거부.
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         env.pop(_LOCK_TOKEN_ENV, None)
-        r = subprocess.run([sys.executable, "-B", "-c", stub], env=env, cwd=_ROOT,
-                           capture_output=True, text=True, timeout=60)
+        r = _proc.run([sys.executable, "-B", "-c", stub], env=env, cwd=_ROOT,
+                      capture_output=True, text=True, timeout=60)
         out = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
         if out == "NO-REFUSAL" or not out:
             raise AssertionError(f"잠금이 있는데 두 번째 실행이 거부되지 않았다: {out!r} {r.stderr[-200:]}")
@@ -6646,15 +6650,15 @@ def _case_second_selftest_is_refused_at_once() -> None:
         if got != {"code": errors.PRECONDITION, "reason": "selftest_running"}:
             raise AssertionError(f"거부 사유가 계약과 다르다: {got}")
         # ⑵ 같은 토큰을 물려받은 자식 = 같은 실행 → 통과(드릴 child2 가 이 길을 쓴다).
-        r = subprocess.run([sys.executable, "-B", "-c", stub], env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
-                           cwd=_ROOT, capture_output=True, text=True, timeout=60)
+        r = _proc.run([sys.executable, "-B", "-c", stub], env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+                      cwd=_ROOT, capture_output=True, text=True, timeout=60)
         if r.stdout.strip().splitlines()[-1:] != ["NO-REFUSAL"]:
             raise AssertionError(f"같은 실행의 자식이 거부됐다: {r.stdout[-200:]} {r.stderr[-200:]}")
         # ⑶ 죽은 pid 의 잠금은 회수된다 — 임시 폴더에서(진짜 잠금은 건드리지 않는다).
         tmp = tempfile.mkdtemp(prefix="agora-lock-")
         try:
-            dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
-                                  capture_output=True, text=True, timeout=30)
+            dead = _proc.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                             capture_output=True, text=True, timeout=30)
             dead_pid = int(dead.stdout.strip())
             stale = os.path.join(tmp, "lock")
             os.mkdir(stale)
@@ -8211,7 +8215,7 @@ def _case_drill_reaps_child_on_setup_failure() -> None:
     import shutil
     ticks = itertools.count(0, 31)               # 호출마다 31초씩 — 첫 검사에서 이미 마감을 넘긴다
     spawned: list[subprocess.Popen] = []
-    real_popen = subprocess.Popen
+    real_popen = _proc.Popen
 
     def record(*args: Any, **kwargs: Any) -> subprocess.Popen:
         proc = real_popen(*args, **kwargs)
@@ -8282,7 +8286,7 @@ def _sigkill_drill(root: str, target: str, pristine: str, journal: str, env: dic
     import signal
     import time
     clock = clock or time.time
-    popen = popen or subprocess.Popen
+    popen = popen or _proc.Popen
     # ⑴ 진짜 하네스 경로로 변이를 쓰고 killer 자리에서 멈추는 자식.
     child1 = (
         "import sys, time; sys.path.insert(0, %r);"
@@ -8334,8 +8338,8 @@ def _sigkill_drill(root: str, target: str, pristine: str, journal: str, env: dic
         "st._run_cases = lambda: ([], set()); st._run_mutations = lambda: [];"
         "print(json.dumps(st.run()['복구'], ensure_ascii=False))"
     ) % root
-    done = subprocess.run([sys.executable, "-B", "-c", child2], cwd=root, env=env,
-                          capture_output=True, text=True, timeout=120)
+    done = _proc.run([sys.executable, "-B", "-c", child2], cwd=root, env=env,
+                     capture_output=True, text=True, timeout=120)
     if done.returncode != 0:
         raise AssertionError(f"복구 실행이 실패했다: {done.stderr[-300:]}")
     report = json.loads(done.stdout.strip().splitlines()[-1])
@@ -11625,11 +11629,11 @@ def _case_whitespace_gate_fails_without_base_branch() -> None:
         with open(os.path.join(tmp, "seed.txt"), "w", encoding="utf-8") as fh:
             fh.write("seed\n")
         quiet = {"cwd": tmp, "capture_output": True, "text": True}
-        subprocess.run(["git", "init", "-q", "-b", "other"], **quiet)
-        subprocess.run(["git", "add", "-A"], **quiet)
-        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
-                        "commit", "-qm", "seed"], **quiet)
-        out = subprocess.run(["bash", target], **quiet)
+        _proc.run(["git", "init", "-q", "-b", "other"], **quiet)
+        _proc.run(["git", "add", "-A"], **quiet)
+        _proc.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                   "commit", "-qm", "seed"], **quiet)
+        out = _proc.run(["bash", target], **quiet)
     if out.returncode == 0:
         raise AssertionError(f"main 이 없는데 통과했다(미측정을 통과로 셌다): {out.stdout!r}")
     if "미측정" not in out.stdout:
@@ -12741,6 +12745,136 @@ def _case_no_module_imports_fcntl_directly() -> None:
     if offenders:
         raise AssertionError(f"잠금 수단을 직접 아는 모듈이 있다: {offenders} — 창구는 _lock.py 하나다")
 
+
+def _case_proc_door_hides_child_windows() -> None:
+    """자식을 띄우는 문(`_proc`)은 윈도우에서 **창 없이** 띄우고, 그 밖에서는 아무것도 더하지 않는다(D20).
+
+    ★2026-10-05 운영자 노트북 실측: pythonw 로 도는 상주가 `ssh-keygen`·`powershell` 자식을 숨김 없이 띄워
+      10분마다 창이 16~17개 깜빡였다. 다섯을 잰다: ⑴윈도우(흉내)에서 세 입구(run·Popen·check_output) 모두
+      CREATE_NO_WINDOW + STARTUPINFO(SW_HIDE) 를 넘긴다 ⑵부르는 쪽의 creationflags 는 OR 로 남는다
+      ⑶부르는 쪽의 startupinfo 는 바꾸지 않는다 ⑷부르는 쪽의 dict 를 고치지 않는다
+      ⑸윈도우가 아니면 인자가 **그대로** 넘어간다(맥·리눅스 행동 무변경).
+    """
+    import subprocess
+    from unittest import mock
+    from agora import _proc
+
+    class _SI:
+        def __init__(self) -> None:
+            self.dwFlags, self.wShowWindow = 0, None
+
+    seen: dict[str, dict[str, Any]] = {}
+
+    def _rec(name: str) -> Callable[..., Any]:
+        def _f(*a: Any, **k: Any) -> str:
+            seen[name] = dict(k)
+            return name
+        return _f
+
+    doors = (("run", _proc.run), ("Popen", _proc.Popen), ("check_output", _proc.check_output))
+    patches = [mock.patch.object(subprocess, n, _rec(n)) for n, _ in doors]
+    with mock.patch.object(_proc.os, "name", "nt"), \
+         mock.patch.object(subprocess, "STARTUPINFO", _SI, create=True), \
+         mock.patch.object(subprocess, "STARTF_USESHOWWINDOW", 0x1, create=True), \
+         mock.patch.object(subprocess, "SW_HIDE", 0, create=True), \
+         patches[0], patches[1], patches[2]:
+        for name, door in doors:
+            if door(["x"], capture_output=True) != name:
+                raise AssertionError(f"{name}: 문이 진짜 subprocess.{name} 에 닿지 않는다(측정이 대상에 안 닿음)")
+            k = seen[name]
+            if k.get("creationflags", 0) & 0x08000000 != 0x08000000:
+                raise AssertionError(f"{name}: CREATE_NO_WINDOW 가 없다: {k.get('creationflags')!r}")
+            si = k.get("startupinfo")
+            if si is None or not (si.dwFlags & 0x1) or si.wShowWindow != 0:
+                raise AssertionError(f"{name}: STARTUPINFO 가 창을 숨기지 않는다(SW_HIDE)")
+            if k.get("capture_output") is not True:
+                raise AssertionError(f"{name}: 부르는 쪽 인자를 잃었다: {k}")
+        given = {"creationflags": 0x200}
+        _proc.Popen(["x"], **given)
+        if seen["Popen"]["creationflags"] != 0x200 | 0x08000000:
+            raise AssertionError(f"부르는 쪽 creationflags 를 OR 로 합치지 않았다: {seen['Popen']['creationflags']:#x}")
+        if given != {"creationflags": 0x200}:
+            raise AssertionError(f"부르는 쪽 dict 를 고쳤다: {given}")
+        mine = _SI()
+        _proc.run(["x"], startupinfo=mine)
+        if seen["run"]["startupinfo"] is not mine or mine.wShowWindow is not None:
+            raise AssertionError("부르는 쪽이 준 startupinfo 를 바꿨다")
+    patches = [mock.patch.object(subprocess, n, _rec(n)) for n, _ in doors]
+    with mock.patch.object(_proc.os, "name", "posix"), patches[0], patches[1], patches[2]:
+        for name, door in doors:
+            door(["x"], capture_output=True, text=True)
+            if seen[name] != {"capture_output": True, "text": True}:
+                raise AssertionError(f"{name}: 윈도우가 아닌데 인자를 바꿨다: {seen[name]}")
+
+
+_SPAWN_NAMES = frozenset({"run", "Popen", "call", "check_call", "check_output",
+                          "getoutput", "getstatusoutput"})
+
+
+def _direct_spawns(src: str) -> list[int]:
+    """`_proc` 을 거치지 않고 자식을 띄우는 자리(줄 번호) — **문자열이 아니라 구문 나무**로 센다.
+
+    ★잡는 것: `subprocess.<띄우기>` 의 모든 사용(부르기·별칭 저장 `p = subprocess.Popen`)·
+      `from subprocess import <띄우기>`·`os.system`·`os.popen`.
+    ★빼는 것: 형 표기(`proc: subprocess.Popen`)는 자식을 띄우지 않는다 · 문자열 안의 인용(뮤턴트 표·
+      `mock.patch("subprocess.run")`)은 나무에 이름으로 나타나지 않는다.
+    """
+    import ast
+    tree = ast.parse(src)
+    skip: set[int] = set()
+    for node in ast.walk(tree):
+        notes = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            notes = [a.annotation for a in (*node.args.posonlyargs, *node.args.args,
+                                            *node.args.kwonlyargs, node.args.vararg,
+                                            node.args.kwarg) if a is not None] + [node.returns]
+        elif isinstance(node, ast.AnnAssign):
+            notes = [node.annotation]
+        for note in notes:
+            if note is not None:
+                skip |= {id(n) for n in ast.walk(note)}
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if id(node) in skip:
+            continue
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == "subprocess" and node.attr in _SPAWN_NAMES:
+                lines.append(node.lineno)
+            elif node.value.id == "os" and node.attr in ("system", "popen"):
+                lines.append(node.lineno)
+        elif isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            if any(a.name in _SPAWN_NAMES or a.name == "*" for a in node.names):
+                lines.append(node.lineno)
+    return sorted(lines)
+
+
+def _case_children_spawn_only_through_proc() -> None:
+    """자식을 띄우는 자리는 **`agora/_proc.py` 하나뿐**이다(D20 재발 방지 · 정적 검사).
+
+    ★숨김을 자리마다 붙이던 때(resident 3곳·participant 1곳)는 붙인 자리만 조용했고, 붙이지 않은
+      자리(서명 확인 `ssh-keygen` 14번)가 운영자 화면에서 깜빡였다 — 개발기(맥)에서는 영원히 초록이다.
+      ⇒ 「숨겼다」가 아니라 「숨기지 않고 띄울 길이 없다」를 잰다.
+    ⑴판정기가 눈을 뜨고 있는가(알려진 위반 표본 셋을 잡고 형 표기·문자열은 안 잡는다) ⑵agora/·bin/ 전수 0건.
+    """
+    probe = ("import subprocess\nfrom subprocess import run\n"
+             "def f(p: subprocess.Popen) -> subprocess.Popen:\n"
+             "    q = subprocess.Popen\n    s = 'subprocess.run(x)'\n"
+             "    return subprocess.run(['x'])\n")
+    if _direct_spawns(probe) != [2, 4, 6]:
+        raise AssertionError(f"판정기가 표본을 잘못 읽는다: {_direct_spawns(probe)} ≠ [2, 4, 6]")
+    targets = [os.path.join("bin", n) for n in ("agora", "agora-signer")]
+    for dirpath, dirnames, filenames in os.walk(os.path.join(_ROOT, "agora")):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        targets += [os.path.relpath(os.path.join(dirpath, fn), _ROOT)
+                    for fn in sorted(filenames) if fn.endswith(".py")]
+    offenders = []
+    for rel in targets:
+        if rel == os.path.join("agora", "_proc.py"):
+            continue
+        hits = _direct_spawns(_read_text(os.path.join(_ROOT, rel)))
+        offenders += [f"{rel}:{n}" for n in hits]
+    if offenders:
+        raise AssertionError(f"`_proc` 을 거치지 않고 자식을 띄우는 자리가 있다(윈도우에서 창이 뜬다): {offenders}")
 
 # ── 잔재 칸 이관(0.1.3 · 2026-09-11) ─────────────────────────────────────────
 
@@ -17420,6 +17554,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("윈도우: PowerShell 자식 환경 고정", _case_windows_powershell_child_gets_a_pinned_module_path, None),
     ("윈도우: Get-Acl 자식 창 숨김", _case_windows_acl_child_hides_its_window, None),
     ("윈도우: PowerShell 문은 하나다", _case_powershell_is_spawned_through_one_door, None),
+    # ── D20(2026-10-05 · 운영자 노트북) 상주 창 깜빡임 — 자식은 _proc 한 문으로만 ──
+    ("윈도우: 자식 문은 창을 숨긴다", _case_proc_door_hides_child_windows, None),
+    ("윈도우: 자식은 _proc 으로만 뜬다", _case_children_spawn_only_through_proc, None),
     ("초대장: 윈도우 덩어리가 한글 경로를 버틴다", _case_invite_windows_block_survives_a_korean_path, None),
     ("점검: 아무것도 쓰지 않는다",     _case_selfcheck_writes_nothing, None),
     ("점검: 표 밖 파일도 센다",       _case_selfcheck_counts_files_missing_from_the_table, None),
@@ -19929,6 +20066,27 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      'JSON_ARGS = frozenset({"envelope", "deadlines", "budget", "counter", "refs", "parent",',
      'JSON_ARGS = frozenset({"envelope", "deadlines", "counter", "refs", "parent",',
      "CLI: enter --budget 은 JSON 칸"),
+    # ── D20(2026-10-05) 윈도우 자식 창 ────────────────────────────────────────
+    ("M601-proc-forgets-no-window", "agora/_proc.py",
+     'kw["creationflags"] = (kw.get("creationflags") or 0) | getattr(',
+     'kw["creationflags"] = (kw.get("creationflags") or 0) & getattr(',
+     "윈도우: 자식 문은 창을 숨긴다"),
+    ("M602-proc-shows-the-window", "agora/_proc.py",
+     'si.wShowWindow = getattr(subprocess, "SW_HIDE", SW_HIDE)',
+     'si.wShowWindow = 1',
+     "윈도우: 자식 문은 창을 숨긴다"),
+    ("M603-proc-hides-off-windows", "agora/_proc.py",
+     'if os.name != "nt":\n        return kwargs',
+     'if os.name == "java":\n        return kwargs',
+     "윈도우: 자식 문은 창을 숨긴다"),
+    ("M604-resident-agent-bypasses-proc", "agora/resident.py",
+     "proc = _proc.Popen(argv, **kwargs)",
+     "proc = subprocess.Popen(argv, **kwargs)",
+     "윈도우: 자식은 _proc 으로만 뜬다"),
+    ("M605-verify-bypasses-proc", "agora/sign.py",
+     "    proc = _proc.run(cmd, input=data, capture_output=True, timeout=timeout)\n    return proc.returncode",
+     "    proc = subprocess.run(cmd, input=data, capture_output=True, timeout=timeout)\n    return proc.returncode",
+     "윈도우: 자식은 _proc 으로만 뜬다"),
 )
 
 
@@ -19974,8 +20132,8 @@ def _case_passes_in_subprocess(case_name: str) -> bool:
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     # 픽스처를 물려준다 — 자식이 키를 다시 만들지 않게(실행 시간의 대부분이 그것이었다).
     env[FIXTURE_ENV] = _fixtures()["dir"]
-    proc = subprocess.run([sys.executable, "-B", "-c", code], env=env,
-                          capture_output=True, text=True, cwd=_ROOT, timeout=120)
+    proc = _proc.run([sys.executable, "-B", "-c", code], env=env,
+                     capture_output=True, text=True, cwd=_ROOT, timeout=120)
     return proc.returncode == 0
 
 
