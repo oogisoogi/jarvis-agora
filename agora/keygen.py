@@ -10,10 +10,9 @@ from __future__ import annotations
 import json
 import os
 import stat
-import subprocess
 from typing import Any
 
-from agora import errors
+from agora import _proc, errors
 from agora.contract_open import SIGN_NAMESPACE
 from agora.errors import AgoraError
 from agora.participant import FILENAME, config_dir
@@ -22,8 +21,8 @@ KEY_NAME = "id_ed25519"
 
 
 def _fingerprint(pub_path: str) -> str:
-    proc = subprocess.run(["ssh-keygen", "-l", "-f", pub_path],
-                          capture_output=True, text=True, timeout=30)
+    proc = _proc.run(["ssh-keygen", "-l", "-f", pub_path],
+                     capture_output=True, text=True, timeout=30)
     if proc.returncode != 0:
         raise AgoraError(errors.PRECONDITION, "지문을 읽을 수 없다",
                          {"stderr": proc.stderr.strip()[:200]})
@@ -65,7 +64,7 @@ def run(rest: list[str]) -> dict[str, Any]:
         raise AgoraError(errors.ARGUMENT, "이미 키가 있다 — 덮어쓰지 않는다",
                          {"file": KEY_NAME})
 
-    proc = subprocess.run(
+    proc = _proc.run(
         ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", f"agora:{participant_id}",
          "-f", key_path, "-q"],
         capture_output=True, text=True, timeout=60,

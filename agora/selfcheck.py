@@ -311,14 +311,14 @@ def _verify_probe(raw: bytes, signature: str) -> tuple[str, str | None]:
     ★그러나 **지문**은 돌려준다. 「서명이 유효하다」와 「내 열쇠가 서명했다」는 다른 주장이고,
       부르는 쪽이 뒤엣것을 물을 수 있어야 한다(이종 검증 2026-09-09).
     """
-    import subprocess
     import tempfile
+    from agora import _proc
     from agora.sign import _signing_fingerprint
     with tempfile.TemporaryDirectory() as tmp:
         sig = os.path.join(tmp, "probe.sig")
         with open(sig, "w", encoding="utf-8") as fh:
             fh.write(signature)
-        proc = subprocess.run(
+        proc = _proc.run(
             ["ssh-keygen", "-Y", "check-novalidate", "-n", SIGN_NAMESPACE, "-s", sig],
             input=raw, capture_output=True, timeout=30)
         text = ((proc.stdout or b"") + b"\n" + (proc.stderr or b"")).decode("utf-8", "replace")

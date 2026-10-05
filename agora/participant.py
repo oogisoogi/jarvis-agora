@@ -146,7 +146,7 @@ def _windows_acl_sids(path: str) -> list[str]:
     ⚠실패는 **어느 PowerShell·어느 모듈 경로**를 칸으로 들고 나간다 — 그 두 값이 없으면 K-1 같은
       환경 사고가 「Get-Acl 이 실패했다」로만 보이고, 받는 사람은 고칠 데를 못 찾는다.
     """
-    import subprocess
+    from agora import _proc
     cmd = (
         "(Get-Acl -LiteralPath '" + path.replace("'", "''") + "').Access | "
         "Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { "
@@ -154,8 +154,8 @@ def _windows_acl_sids(path: str) -> list[str]:
         "catch { $_.IdentityReference.Value } }"
     )
     argv, env, shell_name, module_path = _powershell_invocation()
-    r = subprocess.run(argv + [cmd], capture_output=True, text=True, timeout=20, env=env,
-                       **_hidden_window_kwargs())
+    r = _proc.run(argv + [cmd], capture_output=True, text=True, timeout=20, env=env,
+                  **_hidden_window_kwargs())
     if r.returncode != 0:
         raise _PowerShellFailure((r.stderr or r.stdout).strip()[:200],
                                  shell=shell_name, module_path=module_path)

@@ -18,12 +18,11 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from agora import _lock, errors
+from agora import _lock, _proc, errors
 from agora.errors import AgoraError
 
 # ★한도에 걸린 것은 **벽이 아니라 신호**다(§10). 429·403(secondary rate limit)은 「하지 마라」가
@@ -203,7 +202,7 @@ def gh_transport(query: str, variables: dict[str, Any], *,
             continue
         flag = "-F" if type(value) is int else "-f"
         cmd += [flag, f"{key}={value}"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    proc = _proc.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
         err = proc.stderr.strip()[:300]
         # ★저장층 오류는 **재시도 가능**(7)이다 — 계약 위반(10)과 섞지 않는다.

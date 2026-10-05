@@ -14,12 +14,11 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from typing import Any
 
-from agora import errors
+from agora import _proc, errors
 from agora.contract_open import SIGN_NAMESPACE
 from agora.errors import AgoraError
 
@@ -74,7 +73,7 @@ def _call_signer(request: dict[str, Any], *, timeout: int,
     #   해석기를 명시해 부른다 — 세 OS 모두 같은 길이라 갈래가 없다.
     # ★인코딩도 고정한다 — 한국어 윈도우의 기본 문자셋(cp949)은 대시·이모지를 못 담아
     #   ensure_ascii=False 본문이 서명 전에 UnicodeEncodeError 로 죽는다(codex 1R ④).
-    proc = subprocess.run(
+    proc = _proc.run(
         [sys.executable, SIGNER_BIN],
         input=json.dumps(request, ensure_ascii=False),
         capture_output=True, text=True, encoding="utf-8", errors="strict",
@@ -98,12 +97,12 @@ def _call_signer(request: dict[str, Any], *, timeout: int,
 
 def _run(cmd: list[str], data: bytes, timeout: int = 30) -> int:
     """rc 만 본다. ★파이프를 거치지 않는다 — 파이프 뒤에서 rc 를 읽으면 남의 rc 를 읽는다."""
-    proc = subprocess.run(cmd, input=data, capture_output=True, timeout=timeout)
+    proc = _proc.run(cmd, input=data, capture_output=True, timeout=timeout)
     return proc.returncode
 
 
 def _run_capture(cmd: list[str], data: bytes, timeout: int = 30) -> tuple[int, str]:
-    proc = subprocess.run(cmd, input=data, capture_output=True, timeout=timeout)
+    proc = _proc.run(cmd, input=data, capture_output=True, timeout=timeout)
     out = (proc.stdout or b"").decode("utf-8", "replace")
     err = (proc.stderr or b"").decode("utf-8", "replace")
     return proc.returncode, out + err
