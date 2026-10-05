@@ -4470,7 +4470,10 @@ S8_AXES: dict[str, tuple[str, ...]] = {
              "M577-mail-daily-exempt-ignores-note", "M578-mail-unread-counts-daily",
              "M579-mail-read-set-by-message-id", "M580-mail-ts-skips-real-date",
              "M581-mail-ack-doc-accepts-any-id", "M582-mail-hold-never-refreshes",
-             "M583-mail-reply-lookup-ignores-peer", "M584-roster-additive-accepts-removal"),
+             "M583-mail-reply-lookup-ignores-peer", "M584-roster-additive-accepts-removal",
+             "M656-mail-weekly-exempt-ignores-note", "M657-mail-unread-counts-weekly",
+             "M658-mail-weekly-blank-evidence-ok", "M659-mail-weekly-empty-ok", "M660-mail-pin-period-unclamped",
+             "M666-mail-weekly-week-window-dropped"),
     # ★상담소 데스크(2026-10-05) — 회신이 한 번인가 · 긴급이 도배가 되는가 · 호출이 한 번인가 · 남의 글이 새는가.
     "상담소": ("M621-desk-acks-every-mail", "M622-desk-urgent-no-thread-cap", "M623-desk-batch-twice-a-period",
                "M624-desk-batch-unmasked", "M625-desk-model-picks-address", "M626-desk-publish-no-leak-check",
@@ -4485,7 +4488,10 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M646-desk-note-stops-at-first-overflow", "M647-desk-oversize-note-carried-forever",
                "M648-desk-mask-rescans-tokens", "M649-desk-mask-case-sensitive", "M650-desk-mask-overlap-twice",
                "M651-desk-mask-no-whole-lower", "M652-desk-mask-one-pass", "M653-desk-mask-cap-not-total",
-               "M655-desk-daily-cost-cap-ignored"),
+               "M655-desk-daily-cost-cap-ignored",
+               # 주간 성찰 보고(2026-10-06)
+               "M661-desk-weekly-every-day", "M662-desk-mismatch-silent", "M663-desk-ratio-seat-cap-dropped",
+               "M664-desk-proposals-take-any-key", "M665-desk-acks-weekly", "M667-desk-weekly-status-fixed-window"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17611,8 +17617,8 @@ def _case_desk_prompt_cap_is_final_bytes() -> None:
         raise AssertionError(f"묶음 포장이 상한 밖이다: 계산 {d2['bytes']} 실제 {real2} 이월 {d2['carried']}")
     orig = counsel.collect
 
-    def bloated(c: Any, *, max_bytes: int) -> dict[str, Any]:
-        d = orig(c, max_bytes=max_bytes)
+    def bloated(c: Any, *, max_bytes: int, **kw: Any) -> dict[str, Any]:
+        d = orig(c, max_bytes=max_bytes, **kw)
         d["items"] = d["items"] + [{"key": "P99", "layer": "공개 방 글", "posts": [{"body": "가" * counsel.MIN_BATCH_BYTES}]}]
         return d
     counsel.collect = bloated
@@ -17845,6 +17851,262 @@ def _case_resident_desk_branch_never_wakes() -> None:
         directory=ctx.config_dir, ctx_factory=lambda _d: ctx, runner=runner))
     if out["깨움"] != 0 or out["판정"]["종료코드"] != 0 or out["데스크"].get("acks") != 1:
         raise AssertionError(f"데스크 분기가 다르다: {out.get('판정')} {out.get('데스크')}")
+
+
+# ── 주간 성찰 보고(명세 §1-3 · 10-06 개정 · TICKET=agora-spec-weekly) ─────────────────────
+
+def _weekly_payload(**over: Any) -> dict[str, Any]:
+    from agora import mail
+    import datetime as _dt
+    wk = {"week": mail.iso_week_of(_dt.datetime.now(_dt.timezone.utc)), "version": "1.1.8", "os": "macos-15.6",
+          "blocked": [{"text": "업데이트 뒤 같은 경고가 사흘 이어졌다", "evidence": "doctor warn 1 · dept-awakening-seed"}],
+          "top_features": [{"op": "host.update", "count": 3}], "owner_note": ""}
+    wk.update(over)
+    return {"intent": "weekly", "weekly": wk}
+
+
+def _case_mail_weekly_closed_shape() -> None:
+    """주간 보고(명세 §1-3) — 닫힌 칸 · 섹션 ≤3 · text ≤200 · evidence 1~120(근거 인용 의무) · 빈 보고 거부 · week ±1주 ·
+    일일 weekly_skipped = true 만 · 빈 값 글자 목록 = 릴레이와 같다."""
+    from agora import mail
+    import datetime as _dt
+    mail.validate(_mail_doc(payload=_weekly_payload()))
+    item = {"text": "t", "evidence": "e"}
+
+    def code_of(payload: dict[str, Any]) -> tuple[Any, Any]:
+        try:
+            mail.validate(_mail_doc(payload=payload))
+        except AgoraError as e:
+            return e.code, (e.detail or {}).get("why")
+        return None, None
+    now = _dt.datetime.now(_dt.timezone.utc)
+    far = mail.iso_week_of(now - _dt.timedelta(days=15))
+    bad = [(_weekly_payload(extra=1), None), (_weekly_payload(blocked=[item] * 4), None),
+           (_weekly_payload(blocked=[{"text": "가" * 201, "evidence": "e"}]), None),
+           (_weekly_payload(blocked=[{"text": " ", "evidence": "e"}]), None),
+           (_weekly_payload(blocked=[{"text": "t", "evidence": ""}]), "evidence_required"),
+           (_weekly_payload(blocked=[{"text": "t", "evidence": "﻿　"}]), "evidence_required"),
+           (_weekly_payload(blocked=[{"text": "t", "evidence": "가" * 121}]), None),
+           (_weekly_payload(blocked=[{"text": "t", "evidence": "e", "signatures": ["c" * 32] * 2}]), "duplicate_signature"),
+           (_weekly_payload(top_features=[{"op": "x", "count": 1}, {"op": "x", "count": 2}]), "duplicate_op"),
+           (_weekly_payload(top_features=[{"op": "x", "count": 0}]), None),
+           (_weekly_payload(week="2027-W53"), None), (_weekly_payload(week=far), "week_far_from_ts"),
+           ({"intent": "weekly", "weekly": {"week": mail.iso_week_of(now), "owner_note": "  "}}, "weekly_empty"),
+           ({"intent": "weekly", "weekly": {"week": mail.iso_week_of(now)}}, "weekly_empty")]
+    for payload, why in bad:
+        got = code_of(payload)
+        if got[0] != errors.ARGUMENT or (why and got[1] != why):
+            raise AssertionError(f"주간 보고 위반을 못 잡았다: {got} ← {json.dumps(payload, ensure_ascii=False)[:160]}")
+    ok_edge = _weekly_payload(blocked=[{"text": "😀" * 200, "evidence": "😀" * 120,
+                                        "signatures": [c * 32 for c in "abcde"]}] * 3)
+    if code_of(ok_edge)[0] is not None:
+        raise AssertionError("코드포인트 상한 끝값을 거부했다")
+    day = mail.now_ms_iso()[:10]
+    if code_of({"intent": "daily", "daily": {"day": day, "weekly_skipped": True}})[0] is not None \
+            or code_of({"intent": "daily", "daily": {"day": day, "weekly_skipped": False}})[0] != errors.ARGUMENT:
+        raise AssertionError("weekly_skipped 는 true 만 받아야 한다")
+    if [mail.is_blank(t) for t in ("", " \t\n", "﻿　", "\x1c\x85", "​⁠")] != [True] * 5 \
+            or [mail.is_blank(t) for t in ("a", " a ", "­", ".")] != [False] * 4:
+        raise AssertionError("빈 값 글자 목록이 릴레이 시험 벡터와 다르다")
+
+
+def _case_mail_weekly_exempt_only_without_note() -> None:
+    """주간 보고 승인 겹 예외 `mail_weekly` 는 owner_note 가 빈 통만(§1-3 (5) · D8-1 ⓑ 와 같은 규칙)."""
+    from agora import mail
+    store = _FakeMailStore()
+    ctx = _mail_ctx(store)
+    ctx.isatty, ctx.prompt = (lambda: False), (lambda: False)
+    key = _fixtures()["key_a"]
+    out = _with_key(key, lambda: mail._publish(ctx, mail.build(ctx, to="operator-b", payload=_weekly_payload())))
+    if out["approval"].get("why") != "approval_exempt:mail_weekly":
+        raise AssertionError(f"빈 owner_note 주간 보고가 예외로 지나지 않았다: {out['approval']}")
+    noted = mail.build(ctx, to="operator-b", payload=_weekly_payload(owner_note="오너 말"))
+    try:
+        _with_key(key, lambda: mail._publish(ctx, noted))
+    except AgoraError as e:
+        if e.code != errors.GATE_REJECT:
+            raise AssertionError(f"code {e.code}") from None
+    else:
+        raise AssertionError("owner_note 가 든 주간 보고가 사람 없이 겹을 지났다")
+    ctx.config = dict(ctx.config, approval_exempt=["mail_signal", "desk_room", "mail_daily"])
+    try:
+        _with_key(key, lambda: mail._publish(ctx, mail.build(ctx, to="operator-b", payload=_weekly_payload())))
+    except AgoraError as e:
+        if e.code != errors.GATE_REJECT:
+            raise AssertionError(f"code {e.code}") from None
+    else:
+        raise AssertionError("목록에서 뺀 mail_weekly 가 여전히 예외였다")
+
+
+def _case_mail_weekly_not_counted() -> None:
+    """받은 주간 보고는 적재하되 미읽음·알림에 안 센다(§1-3 (6))."""
+    from agora import mail
+    store = _FakeMailStore()
+    ctx = _mail_ctx(store)
+    store.items = [_mail_item(_mail_doc(payload=_weekly_payload()), seq=1)]
+    out = _with_key(_fixtures()["key_a"], lambda: mail.sync(ctx))
+    if out["added"] != 1 or out["unread"] != 0 or os.path.exists(mail._path(ctx, mail.NOTICES_FILE)):
+        raise AssertionError(f"주간 보고가 미읽음·알림에 셌다: {out}")
+
+
+def _case_mail_pin_weekly_period() -> None:
+    """데스크 핀 `weekly_period_days` = 7~28 정수만 · 없거나 못 읽으면 7(넓히지 않는다 · 7 미만 = 릴레이 주 1 에 걸림)."""
+    from agora import mail
+    import tempfile
+    d = tempfile.mkdtemp(prefix="pin-")
+    want = {"": 7, "weekly_period_days 14\n": 14, "weekly_period_days 28\n": 28, "weekly_period_days 6\n": 7,
+            "weekly_period_days 29\n": 7, "weekly_period_days 1e1\n": 7, "weekly_period_days ١٤\n": 7,
+            "weekly_period_days 14 # 격주\n": 14}
+    for body, n in want.items():
+        path = os.path.join(d, "pin.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("desk jarvis-counsel SHA256:x\n" + body)
+        got = mail.desk_pin(path)["weekly_period_days"]
+        if got != n:
+            raise AssertionError(f"핀 주기 {body!r} → {got}(기대 {n})")
+    if mail.desk_pin()["weekly_period_days"] != 7:
+        raise AssertionError("꾸러미 핀 기본 주기가 7 이 아니다")
+
+
+def _case_desk_weekly_no_reply() -> None:
+    """주간 보고 = 회신 없이 접수만(§10-2 · 10-06 개정 — 기계 우편에 사람용 접수 회신 0)."""
+    from agora import counsel, mail
+    ctx, store = _desk_world([_mail_doc(payload=_weekly_payload())])
+    out = _desk_cycle(ctx, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    rows = [r for r in mail._rows(counsel._desk_path(ctx, counsel.INTAKE_FILE)) if r.get("type") == "item"]
+    if store.sent or out["acks"] or [r["intent"] for r in rows] != ["weekly"]:
+        raise AssertionError(f"주간 보고에 회신했거나 접수가 다르다: {out}")
+
+
+def _desk_row(frm: str, ts: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {"from": frm, "ts": ts, "intent": payload["intent"], "mail": json.dumps({"ts": ts, "payload": payload})}
+
+
+def _case_desk_daily_signature_mismatch() -> None:
+    """§1-2 대조 규칙 — 같은 날 같은 발신자의 daily.errors.signatures ⊄ 신호 서명 = ⚠불일치(보고서 2절 열 · 수집기 결함 신호)."""
+    from agora import counsel
+    a, b, c = "a" * 32, "b" * 32, "c" * 32
+    sig_item = lambda s: {"signature": s, "error_code": "x.y", "source": "pack", "op": "o", "version": "1.1.8",
+                          "os": "macos", "count": 1, "first_seen": "2026-10-05T00:00:00.000Z",
+                          "last_seen": "2026-10-05T00:00:00.000Z"}
+    signals = [_desk_row("p1", "2026-10-05T01:00:00.000Z", {"intent": "signal", "items": [sig_item(a)]}),
+               _desk_row("p2", "2026-10-04T01:00:00.000Z", {"intent": "signal", "items": [sig_item(c)]})]
+    daily = lambda frm, sigs: _desk_row(frm, "2026-10-05T01:00:00.000Z", {"intent": "daily", "daily": {
+        "day": "2026-10-05", "errors": {"tick_errors": 0, "hook_rc_nonzero": 0, "signatures": sigs}}})
+    got = counsel.signature_mismatch([daily("p1", [a]), daily("p1x", []), daily("p2", [c]), daily("p3", [a, b])], signals)
+    want = [{"from": "p2", "day": "2026-10-05", "missing": [c]}, {"from": "p3", "day": "2026-10-05", "missing": [a, b]}]
+    if got != want:
+        raise AssertionError(f"대조 결과가 다르다(날이 다른 신호는 그날 것이 아니다): {got}")
+    md = counsel._signal_md(counsel._signal_table(signals), got)
+    if "일일 대조" not in md or md.count("⚠불일치 · 참가자 1") != 3 or "| bbbbbbbb | ?(그날 신호 통에 없음)" not in md \
+            or "일일 대조 불일치 2건" not in md:
+        raise AssertionError(f"2절 표에 불일치 열·줄이 없다:\n{md}")
+
+
+def _case_desk_ratio_table() -> None:
+    """§10 비율표 — 발생 좌석·일 / 활성 좌석·일 / 관찰일 · (참가자, 날) 몫 ≤ 그날 좌석 · 원시 횟수 0 · 직전 판 대비 회귀 후보."""
+    from agora import counsel
+    import datetime as _dt
+    end = _dt.date(2026, 10, 12)
+    ts = lambda d: f"2026-10-{d:02d}T01:00:00.000Z"          # 10:00 KST → 그날
+    daily = lambda frm, d, v, seats: _desk_row(frm, ts(d), {"intent": "daily", "daily": {
+        "day": f"2026-10-{d:02d}", "version": {"host": v, "pack": v},
+        "seats": {"count": seats, "roles": ["master"]}}})
+    item = lambda v, src, sig="d" * 32: {"signature": sig, "error_code": "hook.rc1", "source": src, "op": "hook.x",
+                                         "version": v, "os": "macos", "count": 500,
+                                         "first_seen": ts(9), "last_seen": ts(9)}
+    rows = [daily("p1", 10, "1.1.7", 3), daily("p1", 11, "1.1.7", 3),          # 1.1.7 = 6 좌석·일 · 신호 0
+            daily("p2", 11, "1.1.8", 2), daily("p2", 12, "1.1.8", 2),          # 1.1.8 = 4 좌석·일
+            _desk_row("p2", ts(11), {"intent": "signal", "items": [item("1.1.8", "master"), item("1.1.8", "worker", "e" * 32)]}),
+            _desk_row("p2", ts(12), {"intent": "signal", "items": [item("1.1.8", "master")]}),
+            daily("p9", 3, "1.1.8", 64)]                                       # 창 밖(10-03) = 안 센다
+    cso = item("1.1.8", "cso")
+    rows[5] = _desk_row("p2", ts(12), {"intent": "signal", "items": [item("1.1.8", "master"),
+                                                                     dict(cso, signature="f" * 32)]})
+    rows.append(_desk_row("p2", ts(12), {"intent": "signal", "items": [dict(item("1.1.8", "worker"))]}))
+    rows.append(_desk_row("p2", ts(12), {"intent": "signal", "items": [dict(item("1.1.8", "cso"))]}))
+    table = counsel.ratio_table(rows, end_day=end, threshold=0.10)
+    d = next(x for x in table if x["signature"] == "d" * 32 and x["version"] == "1.1.8")
+    # (p2,11) master 1 · (p2,12) master·worker·cso 3 → 그날 좌석 2 로 잘림 → 1 + 2 = 3 / 4
+    if (d["occurred"], d["active"], d["days"], d["prev"], d["prev_ratio"]) != (3, 4, 2, "1.1.7", 0.0) \
+            or not d["verdict"].startswith("⚠회귀 후보"):
+        raise AssertionError(f"비율표 계산이 다르다: {d}")
+    md = counsel._ratio_md(table, 0.10)
+    if "75.0%" not in md or "500" in md or "| 1.1.8 | dddddddd |" not in md:
+        raise AssertionError(f"비율표 표시가 다르다(원시 횟수 금지):\n{md}")
+
+
+def _case_desk_weekly_status_period() -> None:
+    """9-1 주간 보고 상태 — 창 = 핀 주기(격주 14 면 열흘 전 보고도 「보냄」) · 생략 표지 · 일일만 온 집 = 안 옴."""
+    from agora import counsel
+    import datetime as _dt
+    end = _dt.date(2026, 10, 19)
+    ts = lambda d: f"2026-10-{d:02d}T01:00:00.000Z"
+    daily = lambda frm, d, extra=None: _desk_row(frm, ts(d), {"intent": "daily", "daily": {"day": f"2026-10-{d:02d}", **(extra or {})}})
+    rows = [daily("p1", 18), _desk_row("p1", ts(9), _weekly_payload(week="2026-W41")),     # 열흘 전 주간 보고
+            daily("p2", 18), daily("p2", 12, {"weekly_skipped": True}),                    # 7일 전 생략 표지
+            daily("p3", 17),                                                               # 일일만
+            _desk_row("p9", ts(18), _weekly_payload(week="2026-W43"))]                     # 일일 없는 집 = 표 밖
+    got = {x["from"]: x["state"] for x in counsel.weekly_status(rows, end_day=end, period_days=14)}
+    if got != {"p1": "보냄", "p2": "생략(빈 보고)", "p3": "안 옴(일일은 옴 — 주간 수집 결함 의심)"}:
+        raise AssertionError(f"주간 상태(격주 창)가 다르다: {got}")
+    week = {x["from"]: x["state"] for x in counsel.weekly_status(rows, end_day=end, period_days=7)}
+    if week["p1"].startswith("보냄"):
+        raise AssertionError(f"주 1 창에서 열흘 전 보고를 이번 주 것으로 셌다: {week}")
+
+
+def _weekly_caller(seen: list[Any], proposals: list[dict[str, Any]]) -> Any:
+    def caller(argv: list[str], prompt: str) -> dict[str, Any]:
+        seen.append((argv, prompt))
+        inner = {"summary": "s", "topics": [], "backlog": [], "human_needed": [], "replies": [], "proposals": proposals}
+        return {"rc": 0, "stdout": json.dumps({"result": json.dumps(inner, ensure_ascii=False),
+                                              "usage": {"input_tokens": 10, "output_tokens": 5}, "total_cost_usd": 0.01})}
+    return caller
+
+
+def _case_desk_weekly_mode() -> None:
+    """주간 모드 = `weekly_dow` 요일에만 주간 보고를 같은 분석 호출에 합산 · 그 밖의 날은 대기(묶음 0 · 처리 완료 0) ·
+    §9 제안 묶음(집 수 · 근거 인용 · 신호 대조 승격) · 모르는 key 는 버림 · §10 비율표 · 가린 사본."""
+    from agora import counsel, mail
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    today = counsel.day_of(now).weekday()
+    sig = _mail_signal_item()
+    weekly = _mail_doc(payload=_weekly_payload(
+        blocked=[{"text": "갱신이 막혔다 someone@example.com", "evidence": "update.sig_mismatch 사흘", "signatures": [sig["signature"]]}],
+        wishes=[{"text": "알림을 줄여 달라", "evidence": "알림 하루 40줄"}]))
+    signal = _mail_doc(payload={"intent": "signal", "items": [sig]})
+    # ⑴ 주간 모드가 아닌 날 — 호출은 신호 때문에 1번 · 주간 보고는 대기
+    off = dict(_DESK_CONFIG, desk={"enabled": True, "weekly_dow": (today + 1) % 7})
+    ctx, _s = _desk_world([weekly, signal], config=off)
+    _desk_cycle(ctx, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    seen: list[Any] = []
+    out = counsel.batch(ctx, now=now, caller=_weekly_caller(seen, []), notifier=lambda *a, **k: None)
+    report = open(out["report"], encoding="utf-8").read()
+    done = {r.get("key") for r in mail._rows(counsel._desk_path(ctx, counsel.BATCHED_FILE))}
+    if "W1" in seen[0][1] or "## 9." in report or "주간 보고 대기 1통" not in report or "ml_%016d" % 1 in done:
+        raise AssertionError("주간 모드가 아닌 날에 주간 보고를 읽었거나 처리 완료로 적었다")
+    # ⑵ 주간 모드 날
+    on = dict(_DESK_CONFIG, desk={"enabled": True, "weekly_dow": today})
+    ctx, _s = _desk_world([weekly, signal], config=on)
+    _desk_cycle(ctx, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    seen = []
+    out = counsel.batch(ctx, now=now, caller=_weekly_caller(seen, [
+        {"title": "갱신 막힘", "keys": ["W1-b1", "W9-b1"], "why": "서명 대조"},
+        {"title": "가짜", "keys": ["M1"], "why": "x"}]), notifier=lambda *a, **k: None)
+    argv, prompt = seen[0]
+    if len(seen) != 1 or "W1-b1" not in prompt or "someone@example.com" in prompt \
+            or "proposals" not in argv[argv.index("--system-prompt") + 1]:
+        raise AssertionError("주간 모드 입력이 한 호출·가린 사본·주간 지시문이 아니다")
+    report = open(out["report"], encoding="utf-8").read()
+    if "## 9. 제안 묶음" not in report or "| G1 | 갱신 막힘 | 1 |" not in report or "승격(신호 일치 1항목)" not in report \
+            or "W9-b1" in report or "가짜" in report or "## 10." not in report:
+        raise AssertionError(f"9·10절이 다르다:\n{report[-1500:]}")
+    if "묶음에 안 든 항목" not in report or "W1-w1" not in report or "가설" not in report:
+        raise AssertionError("묶음에 안 든 항목이 결정론 목록으로 남지 않았다")
+    done = {r.get("key") for r in mail._rows(counsel._desk_path(ctx, counsel.BATCHED_FILE))}
+    if "ml_%016d" % 1 not in done:
+        raise AssertionError("주간 모드 날에 읽은 주간 보고를 처리 완료로 안 적었다")
 
 
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
@@ -18434,6 +18696,16 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("상담소: 하루 비용 천장",                  _case_desk_daily_cost_cap, None),
     ("스크럽: 우리 도메인은 정확한 두 호스트",  _case_scrub_our_two_hosts_only, None),
     ("상주: 데스크면 깨움 0",                   _case_resident_desk_branch_never_wakes, None),
+    # 주간 성찰 보고(2026-10-06 · TICKET=agora-spec-weekly)
+    ("우편: 주간 보고 닫힌 모양·근거 의무·빈 보고", _case_mail_weekly_closed_shape, None),
+    ("우편: 주간 보고 예외는 빈 owner_note 만", _case_mail_weekly_exempt_only_without_note, None),
+    ("우편: 주간 보고는 미읽음에 안 센다",      _case_mail_weekly_not_counted, None),
+    ("우편: 핀 주간 주기 7~28",                 _case_mail_pin_weekly_period, None),
+    ("상담소: 주간 보고는 회신 없이 접수",      _case_desk_weekly_no_reply, None),
+    ("상담소: 일일 대조 불일치 플래그",         _case_desk_daily_signature_mismatch, None),
+    ("상담소: 판본별 좌석 비율표",              _case_desk_ratio_table, None),
+    ("상담소: 주간 모드·제안 묶음",             _case_desk_weekly_mode, None),
+    ("상담소: 주간 상태 = 핀 주기 창",          _case_desk_weekly_status_period, None),
 )
 
 
@@ -18466,7 +18738,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        elif False and leaks(body, [bodies[m] for m in batch_mail_ids if m in bodies] + [n for ns',
      "상담소: 게시 검사·멱등"),
     ("M627-desk-empty-batch-calls", "agora/counsel.py",
-     '    need_analysis = bool(human or data["signals"] or data["daily_notes"])',
+     '    need_analysis = bool(human or data["signals"] or data["daily_notes"] or data["weekly_items"])',
      '    need_analysis = True',
      "상담소: 배치 입력 0 = 호출 0"),
     ("M628-desk-ack-no-downgrade", "agora/counsel.py",
@@ -18573,6 +18845,55 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    pz = _plaza()\n    return _dt.datetime.combine(pz.day_of(cast_at) + _dt.timedelta(days=1)',
      '    pz = _plaza()\n    return _dt.datetime.combine(cast_at.astimezone(pz.KST).date() + _dt.timedelta(days=1)',
      "하루 한 바퀴: 시험 시계 = 표 던진 날 다음 06:10"),
+    # ★주간 성찰 보고(2026-10-06 · TICKET=agora-spec-weekly)
+    ("M656-mail-weekly-exempt-ignores-note", "agora/mail.py",
+     '              else "mail_weekly" if intent == WEEKLY and not note else None)',
+     '              else "mail_weekly" if intent == WEEKLY else None)',
+     "우편: 주간 보고 예외는 빈 owner_note 만"),
+    ("M657-mail-unread-counts-weekly", "agora/mail.py",
+     'MACHINE_INTENTS = (SIGNAL, DAILY, WEEKLY)',
+     'MACHINE_INTENTS = (SIGNAL, DAILY)',
+     "우편: 주간 보고는 미읽음에 안 센다"),
+    ("M658-mail-weekly-blank-evidence-ok", "agora/mail.py",
+     '            if is_blank(ev):\n',
+     '            if False:\n',
+     "우편: 주간 보고 닫힌 모양·근거 의무·빈 보고"),
+    ("M659-mail-weekly-empty-ok", "agora/mail.py",
+     '    if not filled:\n        _fail("빈 주간 보고는',
+     '    if False:\n        _fail("빈 주간 보고는',
+     "우편: 주간 보고 닫힌 모양·근거 의무·빈 보고"),
+    ("M660-mail-pin-period-unclamped", "agora/mail.py",
+     'WEEKLY_PERIOD_MIN <= int(v) <= WEEKLY_PERIOD_MAX:',
+     'v.isdigit():',
+     "우편: 핀 주간 주기 7~28"),
+    ("M661-desk-weekly-every-day", "agora/counsel.py",
+     '    weekly_mode = s["batch_period"] == "week" or day_of(now).weekday() == s["weekly_dow"]',
+     '    weekly_mode = True',
+     "상담소: 주간 모드·제안 묶음"),
+    ("M662-desk-mismatch-silent", "agora/counsel.py",
+     '        if missing:\n            out.append({"from": row.get("from"), "day": str(_row_day(row)), "missing": missing})',
+     '        if False:\n            out.append({"from": row.get("from"), "day": str(_row_day(row)), "missing": missing})',
+     "상담소: 일일 대조 불일치 플래그"),
+    ("M663-desk-ratio-seat-cap-dropped", "agora/counsel.py",
+     '        numer[key] = sum(min(c, seats_of.get(pd, c)) for pd, c in per.items())',
+     '        numer[key] = sum(c for pd, c in per.items())',
+     "상담소: 판본별 좌석 비율표"),
+    ("M664-desk-proposals-take-any-key", "agora/counsel.py",
+     ' if type(k) is str and k in weekly_keys))[:20]',
+     ' if type(k) is str))[:20]',
+     "상담소: 주간 모드·제안 묶음"),
+    ("M665-desk-acks-weekly", "agora/counsel.py",
+     'HUMAN_INTENTS = ("notice", "request", "report")',
+     'HUMAN_INTENTS = ("notice", "request", "report", "weekly")',
+     "상담소: 주간 보고는 회신 없이 접수"),
+    ("M666-mail-weekly-week-window-dropped", "agora/mail.py",
+     '    if abs((monday - ts_monday).days) > 7:',
+     '    if False:',
+     "우편: 주간 보고 닫힌 모양·근거 의무·빈 보고"),
+    ("M667-desk-weekly-status-fixed-window", "agora/counsel.py",
+     '    recent, period = window_days(end_day), window_days(end_day, max(period_days, WEEKLY_WINDOW_DAYS))',
+     '    recent, period = window_days(end_day), window_days(end_day)',
+     "상담소: 주간 상태 = 핀 주기 창"),
     ("M655-desk-daily-cost-cap-ignored", "agora/counsel.py",
      '    if spent_today(calls_path, now, budget) + budget > cap:',
      '    if False:',
@@ -18608,12 +18929,12 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '"signature": signed["signature"]}',
      "우편: 발신 원장에 승인 결과"),
     ("M577-mail-daily-exempt-ignores-note", "agora/mail.py",
-     '              else "mail_daily" if intent == DAILY and not note else None)',
-     '              else "mail_daily" if intent == DAILY else None)',
+     '              else "mail_daily" if intent == DAILY and not note\n',
+     '              else "mail_daily" if intent == DAILY\n',
      "우편: 일일 보고 예외는 빈 owner_note 만"),
     ("M578-mail-unread-counts-daily", "agora/mail.py",
-     'MACHINE_INTENTS = (SIGNAL, DAILY)',
-     'MACHINE_INTENTS = (SIGNAL,)',
+     'MACHINE_INTENTS = (SIGNAL, DAILY, WEEKLY)',
+     'MACHINE_INTENTS = (SIGNAL, WEEKLY)',
      "우편: 일일 보고는 미읽음에 안 센다"),
     ("M579-mail-read-set-by-message-id", "agora/mail.py",
      '    return {r.get("mail_id") for r in _rows(_path(ctx, READ_FILE)) if r.get("mail_id")}',

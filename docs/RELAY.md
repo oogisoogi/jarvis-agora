@@ -673,6 +673,15 @@ canonical JSON(§3-2 · `agora/event.py canonical_bytes` 와 **같은 직렬화*
 `owner_note`(문자열 0~200 코드포인트 · ★유일한 자유문 · 스크럽 백스톱 그대로). 하위 칸은 전부 필수 · null 금지 · 모르는 칸 = 400/10.
 ★시각 칸(신호 `first_seen`·`last_seen` · `updates[].at` · `uptime.last_boot`)의 창 = **봉투 `ts` 기준과 서버 시각 기준 둘 다**(지난 7일 ~ +5분 · 적대 2R R2-3·3R R3-1 — 받는 쪽은 봉투 `ts` 만 보므로 릴레이가 받은 것은 받는 쪽도 받는다) · 시각·날짜는 실제 있는 값만(0001~9999년 · 2월 30일 거부).
 canonical **32KB** 초과 = 413/3. 버킷 `gmail-daily-day:<from>` 하루 1(§14-6) · 연속 규칙·`unread_count` 에 안 센다(신호와 같다).
+(10-06 개정) 선택 칸 `weekly_skipped` = `true` 뿐(그 주 주간 성찰 보고를 빈 보고라 생략한 날 · `false`·글자 = 400/10).
+
+**payload ⓓ 주간 성찰 보고**(`intent="weekly"` · 명세 §1-3 · 10-06 개정 · TICKET=agora-spec-weekly): 칸 = `intent`·`weekly` **둘뿐**.
+`weekly` = 닫힌 칸 `week`(필수 · ISO 주 `YYYY-Www` · 실제 있는 주 · 봉투 `ts` 의 ISO 주 ±1주 — 밖이면 400/10 `why="week_far_from_ts"`) + 선택 `version`·`os`(신호 규칙) ·
+`blocked`·`workarounds`·`wishes`(각 ≤3 · 항목 = 닫힌 `{text 1~200 코드포인트, evidence 1~120 코드포인트, signatures? ≤5 hex32 · 겹침 금지}`) ·
+`top_features`(≤5 · 닫힌 `{op = 신호 op 형식 · 겹침 금지, count 1~100000}`) · `owner_note`(0~200 코드포인트).
+★`evidence` 가 없거나 빈 값 = 400/10 `why="evidence_required"`(근거 인용 의무) · ★다섯 칸이 전부 비면 400/10 `why="weekly_empty"` ·
+「빈 값」 = 명시 글자 목록(탭·줄바꿈·공백·`\x1c-\x1f`·U+0085·U+00A0·U+1680·U+2000~U+200D·U+2028·U+2029·U+202F·U+205F·U+2060·U+3000·U+FEFF 만 — JS `trim()` 과 파이썬 `strip()` 이 달라 양쪽 같은 목록).
+canonical **32KB** 초과 = 413/3. 버킷 `gmail-weekly-week:<from>` ISO 주 1(§14-6 · 칸 경계 월요일 00:00Z) · 연속 규칙·받는 이 축·`unread_count` 에 안 센다. 스크럽 백스톱 = 자유문 칸 전부(422/3).
 
 ### 14-2. `POST /mail` — 보내기
 
@@ -731,7 +740,7 @@ canonical **32KB** 초과 = 413/3. 버킷 `gmail-daily-day:<from>` 하루 1(§14
      ★**at-least-once** — 이미 받은 우편이 다음 쪽에 다시 올 수 있고, 받는 쪽이 `(from, message_id)` 로 거른다(명세 §5-2).
   6. ★**진행 보장**: 대화가 50개를 넘으면 seq 가 가장 작은 후보의 대화가 첫 바퀴에서 잘려 `next` 가 `since` 와 같아지고 **같은 쪽이 영원히 반복**될 수 있다.
      그래서 그 대화를 첫 바퀴의 마지막 자리(49번)까지 당겨 넣는다 — 그 대화의 첫 항목이 곧 가장 작은 seq 이므로 `next` 가 반드시 전진한다(단위 시험 「진행 보장」).
-- `unread_count` = `to_id = for AND acked_at IS NULL AND purged_at IS NULL AND keep_until > 지금 AND intent NOT IN ('signal','daily')` 의 수(쪽과 무관 · 신호·일일 보고는 사람에게 알릴 글이 아니라 안 센다 · 명세 §1-1 (6)).
+- `unread_count` = `to_id = for AND acked_at IS NULL AND purged_at IS NULL AND keep_until > 지금 AND intent NOT IN ('signal','daily','weekly')` 의 수(쪽과 무관 · 신호·일일·주간 보고는 사람에게 알릴 글이 아니라 안 센다 · 명세 §1-1 (6) · §1-3 (6)).
   대화별 `unread`·`oldest_unread_at` = 같은 조건을 그 대화로 좁힌 값(쪽에 든 대화만 · 질의 1 에 UNION ALL 로 합쳤다).
 - `receipts` = **내가 보낸** 우편 중 `acked_at >= receipts_since`(비우면 전부 · ★`>=` = 같은 밀리초 영수가 쪽 경계에 걸려도 빠지지 않게 · 적대 6R #6 · 겹친 줄은 클라이언트가 (message_id, to, acked_at) 로 거른다) · `acked_at`·seq 오름차순 최대 100.
 
@@ -797,16 +806,17 @@ CREATE INDEX IF NOT EXISTS mail_thread ON mail (thread_id, seq);
 | 같은 수신자 연속 | (계수 질의 · 버킷 아님) | 5통 → 가장 오래된 것이 24시간 지날 때까지 | 같음 | `AGORA_RATE_MAIL_CONSEC_MAX`·`_CONSEC_WINDOW_S` |
 | 자동 신호 하루 | `gmail-signal-day:<from>` | 1 | 같음 | `AGORA_RATE_MAIL_SIGNAL_DAY_MAX` |
 | 일일 보고 하루(명세 §1-2 · 신호와 따로 · 연속 규칙·미읽음에 안 셈) | `gmail-daily-day:<from>` | 1 | 같음 | `AGORA_RATE_MAIL_DAILY_DAY_MAX` |
+| 주간 성찰 ISO 주(명세 §1-3 · 10-06 개정 · 칸 = 7일 고정창을 4일 옮겨 월요일 00:00Z 경계 · 연속 규칙·받는 이 축·미읽음에 안 셈) | `gmail-weekly-week:<from>` | 1 | 같음 | `AGORA_RATE_MAIL_WEEKLY_WEEK_MAX` |
 | ★받는 이 하루 유입(사람 글만 · 명세 §4-1 · 적대 6R #2) | `gmail-in-day:<to>` | 200 | 같음 | `AGORA_RATE_MAIL_IN_DAY_MAX` |
 | ★받는 이 미읽음 상한(사람 글 · 버킷 아님 = 계수 질의 1 · 보낸이 칸보다 **먼저**) | — | 1,000 | 같음 | `AGORA_RATE_MAIL_UNREAD_MAX` → 429/7 `limit=mail_inbox_full` · `why=recipient_inbox_full` · Retry-After 3600 |
 
-- **칸 고르기**: `intent="signal"` → 신호 하루 버킷 **하나만**(새 대화·답장·연속 규칙 전부 건너뜀) · `intent="daily"` → 일일 보고 하루 버킷 하나만(같은 규칙). 그 밖에서 `reply_to` 가 가리킨 우편(같은 대화 안)의 `from_id` 가 **이 우편의 `to`** 이면 「답장」, 아니면 「새 대화」
+- **칸 고르기**: `intent="signal"` → 신호 하루 버킷 **하나만**(새 대화·답장·연속 규칙 전부 건너뜀) · `intent="daily"` → 일일 보고 하루 버킷 하나만(같은 규칙) · `intent="weekly"` → 주간 성찰 주 버킷 하나만(같은 규칙). 그 밖에서 `reply_to` 가 가리킨 우편(같은 대화 안)의 `from_id` 가 **이 우편의 `to`** 이면 「답장」, 아니면 「새 대화」
   — ★같은 대화라도 `reply_to` 가 없거나 **내 우편**을 가리키면 새 대화로 센다(자기 우편에 이어 쓰기로 답장 칸을 쓰지 못하게).
 - **연속 규칙**(신호 제외): `to→from` 의 마지막 (신호 아닌) 우편 seq 뒤로, 24시간 안의 `from→to` (신호 아닌) 우편 수가 5 이상이면 429/7 `limit="mail_consecutive"` ·
   `Retry-After` = 그중 가장 오래된 것이 24시간 지나기까지 남은 초(왕복 실측 86389초). 상대가 답하면 풀린다(왕복 실측).
   ★연속 계수는 버킷 **앞**에 센다 — 연속으로 거절될 우편이 간격·하루 칸을 먼저 태우지 않게.
 - 버킷 이름은 새 참가자 여부와 무관하게 같다(창 길이·상한만 바뀐다) — 등록 24시간이 지나는 순간 하루 칸 계수가 0 으로 돌아가지 않게(엄격 쪽).
-- 429 는 전부 code 7 + `Retry-After` + `detail {limit, window_s, max}`. `limit` 이름 = `mail_new`·`mail_new_day`·`new_participant_mail_new`·`new_participant_mail_new_day`·`mail_reply`·`mail_reply_day`·`new_participant_mail_reply_day`·`mail_signal_day`·`mail_daily_day`·`mail_in_day`·`mail_inbox_full`·`mail_consecutive`·`participant`(수신함·읽음의 `pid:`).
+- 429 는 전부 code 7 + `Retry-After` + `detail {limit, window_s, max}`. `limit` 이름 = `mail_new`·`mail_new_day`·`new_participant_mail_new`·`new_participant_mail_new_day`·`mail_reply`·`mail_reply_day`·`new_participant_mail_reply_day`·`mail_signal_day`·`mail_daily_day`·`mail_weekly_week`·`mail_in_day`·`mail_inbox_full`·`mail_consecutive`·`participant`(수신함·읽음의 `pid:`).
 - 고정창 한계(경계 양쪽 2배)는 §7 과 같은 것으로 받아들인다. 거절이지 격리가 아니다(우편은 상태가 없다).
 
 ### 14-7. 시험(이 티켓의 실측)

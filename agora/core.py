@@ -26,8 +26,9 @@ from agora.event import render_post
 # ★승인 겹의 **purpose 예외**(명세 §1-1 (4) · master 증보 7 재판정 7cc9f6f1) — 두 경로만 겹을 비켜 간다:
 #   `mail_signal` = 신호 우편(자유문 칸이 없는 닫힌 모양) · `desk_room` = 상담소 핀 방 글쓰기.
 #   + `mail_daily`(D8-1 ⓑ · 3eac2a0f) = `owner_note` 가 빈 일일 보고만(오너 말은 적을 때 승인 · 명세 §1-2 (5)).
+#   + `mail_weekly`(명세 §1-3 (5) · 10-06 개정) = `owner_note` 가 빈 주간 성찰 보고만(같은 규칙 · 자유문 자동 발신 첫 경로 = 서식 상한으로 한정).
 #   그 밖 광장 글쓰기·우편 자유문은 겹 유지. 설정 키 `approval_exempt` 하나가 정한다(없으면 이 기본값).
-APPROVAL_EXEMPT_NAMES = ("mail_signal", "desk_room", "mail_daily")   # mail_daily = owner_note 빈 일일 보고만(D8-1 ⓑ)
+APPROVAL_EXEMPT_NAMES = ("mail_signal", "desk_room", "mail_daily", "mail_weekly")   # mail_daily·mail_weekly = owner_note 빈 통만(D8-1 ⓑ)
 APPROVAL_EXEMPT_DEFAULT = APPROVAL_EXEMPT_NAMES
 
 

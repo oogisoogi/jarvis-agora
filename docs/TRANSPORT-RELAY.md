@@ -345,7 +345,7 @@ GitHub 어댑터를 쓰는 설정에서는 그대로 남는다 — 「의존이 
 | 항목 | 값 |
 |---|---|
 | 대조 시각 | 2026-10-05 (TICKET=agora-mail-1to1 — RELAY §14 「우편(1:1)」 신설분 · 직전 = 2026-09-06 r4) |
-| `docs/RELAY.md` sha256 | `0580646e79c00998558b76b8022258866467e88debacc67bf3850bfa5745aba3`(직전 `13ff3d4d…` · 차이 = §14 적대 6R(받는 이 하루 유입·미읽음 상한 · 영수 >=) · 그 앞 `2dcd679a…` · 차이 = §14-5 마이그레이션 이름 0003_mail.sql(main 병합 · 0002 = 받아들이기 차단 선착) · 그 앞 `5d3215ed…` · 차이 = §14-4 읽음 v3(mail_id 목록만 · 대화 단위 읽음 API 제거 · 적대 4R R4-1) · 그 앞 `16acf30a…` · 차이 = §14 적대 3R(upto 실재 · 시각 창 두 기준 · 0001~9999년) · 그 앞 `d62f957d…` · 차이 = §14-4 읽음 v2(mail_id 대상 · 서명된 upto · 적대 2R R2-1·R2-2) · 그 앞 `a0acfffe…` · 차이 = §14 우편 절 — 일일 보고 payload ⓒ·버킷·미읽음 제외(D8-2 3eac2a0f) · 그 앞 `faeae200…`→`a0acfffe…` = 적대 1R 반영(봉투 닫힘 · 대화 ack 상한 · 적재 결박) · §3 기존 API 무변경 — 아래 §15-M M10~M13) |
+| `docs/RELAY.md` sha256 | `302ea5a62518a7232982b52c3495e9dc60bc03f480892fb2f450e0141871b1a8`(직전 `0580646e…` · 차이 = §14 주간 성찰 보고(payload ⓓ · `gmail-weekly-week` 버킷 줄 · 일일 `weekly_skipped` · 미읽음 제외 · `limit` 이름 · 10-06 TICKET=agora-spec-weekly) · 그 앞 `13ff3d4d…` · 차이 = §14 적대 6R(받는 이 하루 유입·미읽음 상한 · 영수 >=) · 그 앞 `2dcd679a…` · 차이 = §14-5 마이그레이션 이름 0003_mail.sql(main 병합 · 0002 = 받아들이기 차단 선착) · 그 앞 `5d3215ed…` · 차이 = §14-4 읽음 v3(mail_id 목록만 · 대화 단위 읽음 API 제거 · 적대 4R R4-1) · 그 앞 `16acf30a…` · 차이 = §14 적대 3R(upto 실재 · 시각 창 두 기준 · 0001~9999년) · 그 앞 `d62f957d…` · 차이 = §14-4 읽음 v2(mail_id 대상 · 서명된 upto · 적대 2R R2-1·R2-2) · 그 앞 `a0acfffe…` · 차이 = §14 우편 절 — 일일 보고 payload ⓒ·버킷·미읽음 제외(D8-2 3eac2a0f) · 그 앞 `faeae200…`→`a0acfffe…` = 적대 1R 반영(봉투 닫힘 · 대화 ack 상한 · 적재 결박) · §3 기존 API 무변경 — 아래 §15-M M10~M13) |
 | 대조 축 | 칸 이름 · 응답 코드(§3-7 표) · 서명 대상 바이트(§3-1 등록 · §3-6b 체크포인트) · 목록 상한 · namespace |
 | 결과 | **일치**(아래 r2 표 17항 + r4 체크포인트 4항 + main C23 UA 1항) · 어긋남 0 |
 
@@ -378,6 +378,7 @@ GitHub 어댑터를 쓰는 설정에서는 그대로 남는다 — 「의존이 
 | M12 | 대화 결박을 적재 문장 안에서 한 번 더 — 경합으로 걸리면 422/3 `thread_not_yours`(적대 1R R1-3) | 클라이언트는 이미 이 사유를 code 3 으로 받는다(새 사유 0) | 일치 |
 | M13 | 일일 보고 `intent="daily"` = 닫힌 `daily` 칸(`day` 필수 · 하위 칸 전부 필수 · 자유문 = `owner_note` ≤200) · 32KB 초과 413/3 · 버킷 `gmail-daily-day` 하루 1 · 연속 규칙·`unread_count` 제외 | `mail.validate` 같은 규칙(`_check_daily` · 32KB = code 3) · `MACHINE_INTENTS` 로 미읽음·알림·목록 제외 · 예외 `mail_daily` = `owner_note` 빈 통만(D8-1 ⓑ) | 일치(왕복 실측 = clientway ⑥ · mailway 9-b) |
 | M14 | 받는 이 축: `gmail-in-day:<to>` 200/일 · 미읽음 1,000 = 429/7 `mail_inbox_full`(사람 글만 · 명세 §4-1) · 영수 `acked_at >= receipts_since`(적대 6R #2·#6) | 클라이언트는 429 를 code 7 로 받는다(새 사유 0) · 영수는 (message_id, to, acked_at) 로 겹침 제거 | 일치 |
+| M15 | (10-06 개정) 주간 성찰 보고 `intent="weekly"` = 닫힌 `weekly` 칸(`week` 필수 · 봉투 ts 주 ±1 · 섹션 3 각 ≤3 · 항목 text ≤200·evidence 1~120(근거 의무 `evidence_required`)·signatures ≤5 · top_features ≤5 · owner_note ≤200 · 빈 보고 `weekly_empty`) · 32KB 413/3 · 버킷 `gmail-weekly-week` ISO 주 1(월요일 00:00Z) · 연속·받는 이 축·`unread_count` 제외 · 일일 `weekly_skipped` = true 만 | `mail.validate` 같은 규칙(`_check_weekly` · 「빈 값」 = 같은 명시 글자 목록 `is_blank` · 32KB = code 3) · `MACHINE_INTENTS` 로 미읽음·알림·목록 제외 · 예외 `mail_weekly` = `owner_note` 빈 통만 · 핀 `weekly_period_days` 7~28 | 일치 |
 
 ## 15-1. 계약 확정본 전수 대조 (RL-2 · `docs/RELAY.md@b2ca815` · 2026-09-05 r2)
 

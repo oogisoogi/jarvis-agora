@@ -33,7 +33,8 @@ MAIL_KIND = "mail"
 INTENTS = ("notice", "request", "report")
 SIGNAL = "signal"
 DAILY = "daily"                   # 일일 보고(명세 §1-2 · 증보 8) — 신호와 다른 통
-MACHINE_INTENTS = (SIGNAL, DAILY)  # 사람에게 알릴 글이 아닌 통 — 미읽음·알림·목록에 안 센다
+WEEKLY = "weekly"                 # 주간 성찰 보고(명세 §1-3 · 10-06 개정) — 신호·일일과 다른 통
+MACHINE_INTENTS = (SIGNAL, DAILY, WEEKLY)  # 사람에게 알릴 글이 아닌 통 — 미읽음·알림·목록에 안 센다
 SIGNAL_SOURCES = ("master", "worker", "cso", "pack", "update")
 PURPOSE_INBOX = "agora-mail-inbox-v1"
 PURPOSE_ACK = "agora-mail-ack-v3"   # v3 = mail_id 목록만 · 대화 단위 읽음 없음(적대 2R R2-2 → 4R R4-1)
@@ -69,7 +70,22 @@ DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z", re.ASCII)
 ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}\Z", re.ASCII)
 CHECK_ID_RE = re.compile(r"^[a-z0-9-]{1,40}\Z", re.ASCII)
 DAILY_KEYS = ("day", "version", "os", "seats", "doctor", "errors", "updates", "depts", "uptime",
-              "owner_note")
+              "owner_note", "weekly_skipped")
+WEEKLY_MAX_BYTES = 32 * 1024
+WEEKLY_SECTIONS = ("blocked", "workarounds", "wishes")   # 막힌 곳 · 우회 · 바라는 것 — 각 ≤3
+WEEKLY_SECTION_MAX = 3
+WEEKLY_TEXT_MAX_CHARS = 200
+WEEKLY_EVIDENCE_MAX_CHARS = 120     # 근거 인용 의무 — 빈 값 거부
+WEEKLY_ITEM_SIGS_MAX = 5
+WEEKLY_FEATURES_MAX = 5
+WEEKLY_KEYS = ("week", "version", "os") + WEEKLY_SECTIONS + ("top_features", "owner_note")
+WEEKLY_ITEM_KEYS = ("text", "evidence", "signatures")
+WEEK_RE = re.compile(r"^(\d{4})-W(\d{2})\Z", re.ASCII)
+# ★「빈 값」 = 아래 글자만으로 된 문자열(릴레이 mail.ts BLANK_RE 와 **같은 목록**) — 파이썬 strip() 과 JS trim() 은
+#   공백 집합이 다르다(\x1c-\x1f·U+0085 ↔ U+FEFF) · 한쪽만 「빈 값」이라 하면 릴레이가 받은 것을 받는 쪽이 격리한다.
+BLANK_RE = re.compile(r"^[\t\n\v\f\r \x1c-\x1f\x85\xa0\u1680\u2000-\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff]*\Z")
+WEEKLY_PERIOD_DEFAULT = 7           # 데스크 핀 `weekly_period_days`(§1-3 (2)) — 없거나 못 읽으면 7
+WEEKLY_PERIOD_MIN, WEEKLY_PERIOD_MAX = 7, 28   # 7 미만 = 릴레이 주 1 버킷에 걸린다 · 28 = 4주
 
 # ── 로컬 우편함(명세 §5 · §11 · §13-4) ─────────────────────────────────────
 MAILBOX_DIR = "mailbox"
@@ -283,6 +299,101 @@ def _check_daily(payload: dict[str, Any], *, now: datetime.datetime | None,
         _int_in(o, "uptime_s", ww, 0, 31_536_000)
     if "owner_note" in d and len(_need(d, "owner_note", str, w)) > DAILY_NOTE_MAX_CHARS:
         _fail("owner_note 는 200자까지", {"where": w + ".owner_note"})
+    # ★주간 보고를 빈 보고라 생략한 날의 표지(§1-3 (3)) — 값은 true 뿐(생략 안 한 날 = 칸을 뺀다).
+    if "weekly_skipped" in d and d["weekly_skipped"] is not True:
+        _fail("weekly_skipped 는 true 만(아니면 칸을 뺀다)", {"where": w + ".weekly_skipped"})
+
+
+def iso_week_monday(week: str) -> datetime.date | None:
+    """ISO 주 `YYYY-Www` → 그 주 월요일. 없는 주(W00 · 53주가 없는 해의 W53 · 0000년)는 None."""
+    m = WEEK_RE.match(week) if type(week) is str else None
+    if not m or m.group(1) == "0000":
+        return None
+    try:
+        return datetime.date.fromisocalendar(int(m.group(1)), int(m.group(2)), 1)
+    except ValueError:
+        return None
+
+
+def iso_week_of(moment: datetime.datetime) -> str:
+    """시각 → 그 시각이 든 ISO 주(UTC) `YYYY-Www`."""
+    year, week, _ = moment.astimezone(datetime.timezone.utc).date().isocalendar()
+    return f"{year:04d}-W{week:02d}"
+
+
+def is_blank(text: str) -> bool:
+    return bool(BLANK_RE.match(text))
+
+
+def _check_weekly(payload: dict[str, Any], *, ts: datetime.datetime) -> None:
+    """주간 성찰 보고(명세 §1-3) — 릴레이 `checkWeekly` 와 같은 규칙.
+
+    ★자유문 = 항목 `text`(≤200)·`evidence`(≤120 · 근거 인용 의무)·`owner_note`(≤200) · 다섯 칸이 전부 비면 거부.
+    """
+    _closed(payload, ("intent", "weekly"), "payload")
+    w = "payload.weekly"
+    d = _need(payload, "weekly", dict, "payload")
+    _closed(d, WEEKLY_KEYS, w)
+    monday = iso_week_monday(_need(d, "week", str, w))
+    if monday is None:
+        _fail("week 는 실제 ISO 주 YYYY-Www", {"where": w + ".week"})
+    ts_monday = iso_week_monday(iso_week_of(ts))
+    if abs((monday - ts_monday).days) > 7:          # 봉투 ts 의 주 ±1주(릴레이와 같은 경계)
+        _fail("week 는 봉투 ts 의 주 ±1주", {"where": w + ".week", "why": "week_far_from_ts"})
+    if "version" in d and not VERSION_RE.match(_need(d, "version", str, w)):
+        _fail("version 형식이 아니다", {"where": w + ".version"})
+    if "os" in d and not OS_RE.match(_need(d, "os", str, w)):
+        _fail("os 형식이 아니다", {"where": w + ".os"})
+    filled = 0
+    for sec in WEEKLY_SECTIONS:
+        if sec not in d:
+            continue
+        items = _need(d, sec, list, w)
+        if len(items) > WEEKLY_SECTION_MAX:
+            _fail("섹션 항목은 최대 3개", {"where": f"{w}.{sec}", "got": len(items)})
+        filled += len(items)
+        for i, it in enumerate(items):
+            ww = f"{w}.{sec}[{i}]"
+            if type(it) is not dict:
+                _fail("섹션 항목은 객체여야 한다", {"where": ww})
+            _closed(it, WEEKLY_ITEM_KEYS, ww)
+            text = _need(it, "text", str, ww)
+            ev = _need(it, "evidence", str, ww)
+            if is_blank(text) or len(text) > WEEKLY_TEXT_MAX_CHARS:
+                _fail("text 는 1~200자(공백만 = 빈 값)", {"where": ww + ".text"})
+            if is_blank(ev):
+                _fail("evidence 가 비었다 — 근거 인용 의무", {"where": ww + ".evidence", "why": "evidence_required"})
+            if len(ev) > WEEKLY_EVIDENCE_MAX_CHARS:
+                _fail("evidence 는 120자까지", {"where": ww + ".evidence"})
+            if "signatures" in it:
+                sigs = _str_list(it, "signatures", ww, WEEKLY_ITEM_SIGS_MAX, SIG32_RE)
+                if len(set(sigs)) != len(sigs):
+                    _fail("같은 signature 가 두 번 있다", {"where": ww + ".signatures", "why": "duplicate_signature"})
+    if "top_features" in d:
+        feats = _need(d, "top_features", list, w)
+        if len(feats) > WEEKLY_FEATURES_MAX:
+            _fail("top_features 는 최대 5개", {"where": w + ".top_features", "got": len(feats)})
+        filled += len(feats)
+        ops: set[str] = set()
+        for i, it in enumerate(feats):
+            ww = f"{w}.top_features[{i}]"
+            if type(it) is not dict:
+                _fail("top_features 항목은 객체여야 한다", {"where": ww})
+            _closed(it, ("op", "count"), ww)
+            op = _need(it, "op", str, ww)
+            if not OP_RE.match(op):
+                _fail("op 형식이 아니다", {"where": ww + ".op"})
+            if op in ops:
+                _fail("같은 op 가 두 번 있다", {"where": ww + ".op", "why": "duplicate_op"})
+            ops.add(op)
+            _int_in(it, "count", ww, 1, SIGNAL_COUNT_MAX)
+    if "owner_note" in d:
+        note = _need(d, "owner_note", str, w)
+        if len(note) > DAILY_NOTE_MAX_CHARS:
+            _fail("owner_note 는 200자까지", {"where": w + ".owner_note"})
+        filled += 0 if is_blank(note) else 1
+    if not filled:
+        _fail("빈 주간 보고는 보내지 않는다(다섯 칸이 전부 비었다)", {"where": w, "why": "weekly_empty"})
 
 
 def validate(doc: Any, *, now: datetime.datetime | None = None) -> dict[str, Any]:
@@ -339,8 +450,13 @@ def validate(doc: Any, *, now: datetime.datetime | None = None) -> dict[str, Any
         if len(canonical_bytes(doc)) > DAILY_MAX_BYTES:     # 릴레이 413/3 과 같은 경계
             _fail("일일 보고 32KB 상한 초과", {"limit": DAILY_MAX_BYTES}, errors.GATE_REJECT)
         return doc
+    if intent == WEEKLY:
+        _check_weekly(payload, ts=_parse_ts(doc["ts"]))
+        if len(canonical_bytes(doc)) > WEEKLY_MAX_BYTES:    # 릴레이 413/3 과 같은 경계
+            _fail("주간 보고 32KB 상한 초과", {"limit": WEEKLY_MAX_BYTES}, errors.GATE_REJECT)
+        return doc
     if intent not in INTENTS:
-        _fail("intent 가 계약 밖", {"intent": intent, "allowed": list(INTENTS) + [SIGNAL, DAILY]})
+        _fail("intent 가 계약 밖", {"intent": intent, "allowed": list(INTENTS) + list(MACHINE_INTENTS)})
     _closed(payload, ("subject", "body", "intent", "refs"), "payload")
     subject = _need(payload, "subject", str, "payload")
     if not 1 <= len(subject) <= SUBJECT_MAX_CHARS:
@@ -467,7 +583,8 @@ def desk_pin(path: str | None = None) -> dict[str, Any]:
     줄 서식: `desk <id> <SHA256:…>` · `chair <SHA256:…>` · `room <thread_id>` · `#` 주석.
     ★모르는 줄은 버린다(넓히지 않는다). 파일이 없으면 빈 핀 = 상담소 판별 0.
     """
-    pin: dict[str, Any] = {"desk": {}, "chair": set(), "rooms": set()}
+    pin: dict[str, Any] = {"desk": {}, "chair": set(), "rooms": set(),
+                           "weekly_period_days": WEEKLY_PERIOD_DEFAULT}
     try:
         with open(path or DESK_PIN_PATH, encoding="utf-8") as fh:
             lines = fh.read().splitlines()
@@ -481,6 +598,13 @@ def desk_pin(path: str | None = None) -> dict[str, Any]:
             pin["chair"].add(parts[1])
         elif len(parts) == 2 and parts[0] == "room" and is_id(parts[1]):
             pin["rooms"].add(parts[1])
+        elif len(parts) == 2 and parts[0] == "weekly_period_days":
+            # 주간 보고 주기(§1-3 (2) · 판올림 없이 정책만 바꾸는 손잡이) — 7~28 정수만 · 못 읽으면 7(넓히지 않는다).
+            v = parts[1]
+            if re.fullmatch(r"[0-9]{1,2}", v, re.ASCII) and WEEKLY_PERIOD_MIN <= int(v) <= WEEKLY_PERIOD_MAX:
+                pin["weekly_period_days"] = int(v)
+            else:
+                pin["weekly_period_days"] = WEEKLY_PERIOD_DEFAULT
     return pin
 
 
@@ -538,9 +662,12 @@ def _publish(ctx: Any, doc: dict[str, Any], *, prompt: Any = None,
     """
     # ★일일 보고는 `owner_note` 가 빈 통만 예외 `mail_daily`(D8-1 ⓑ · 3eac2a0f) — 오너 말은 **적을 때** 승인한다.
     intent = doc["payload"].get("intent")
-    note = (doc["payload"].get("daily") or {}).get("owner_note") if intent == DAILY else None
+    # ★주간 보고도 같은 규칙 — `owner_note` 가 빈 통만 예외 `mail_weekly`(§1-3 (5) · 항목 자유문은 서식 상한·스크럽 2중으로 한정).
+    note = ((doc["payload"].get("daily") or {}).get("owner_note") if intent == DAILY
+            else (doc["payload"].get("weekly") or {}).get("owner_note") if intent == WEEKLY else None)
     exempt = ("mail_signal" if intent == SIGNAL
-              else "mail_daily" if intent == DAILY and not note else None)
+              else "mail_daily" if intent == DAILY and not note
+              else "mail_weekly" if intent == WEEKLY and not note else None)
     from agora import core, scrub, sign
     validate(doc, now=datetime.datetime.now(datetime.timezone.utc))
     report = scrub.enforce(doc, names_path=scrub.names_path(ctx.config_dir))
