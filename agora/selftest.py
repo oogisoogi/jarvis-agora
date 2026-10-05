@@ -4483,7 +4483,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M641-desk-analysis-writes-public", "M642-desk-cap-skips-wrapping", "M643-desk-fleet-outside-cap",
                "M644-desk-trimmed-notes-done", "M645-desk-final-size-unchecked",
                "M646-desk-note-stops-at-first-overflow", "M647-desk-oversize-note-carried-forever",
-               "M648-desk-mask-rescans-tokens", "M649-desk-mask-case-sensitive"),
+               "M648-desk-mask-rescans-tokens", "M649-desk-mask-case-sensitive", "M650-desk-mask-overlap-twice",
+               "M651-desk-mask-no-whole-lower"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17719,6 +17720,15 @@ def _case_desk_mask_once_case_free() -> None:
         fh.write("림\nemail\n")
     if counsel._masker(ctx2)("someone@example.com") != "[가림:email]":
         raise AssertionError(f"이름 단계가 규칙 표지 안을 다시 가렸다: {counsel._masker(ctx2)('someone@example.com')}")
+    # 적대 7R codex — 끝 시그마(문자열 전체 lower() 와 글자별 접기가 다르다) · 접힌 두 글자가 한 원문 글자로 겹침
+    ctx3, _s3 = _desk_world([])
+    with open(os.path.join(ctx3.config_dir, scrub.NAMES_FILENAME), "w", encoding="utf-8") as fh:
+        fh.write("Νίκος\ni\n\u0307\n\u0307x\n")
+    m3 = counsel._masker(ctx3)
+    sig, dot, part = m3("ΝΊΚΟΣ 님"), m3("İ" * 200), m3("İx 님")
+    if sig != "[가림:이름] 님" or dot != "[가림:이름]" * 200 or part != "[가림:이름] 님" \
+            or counsel._PUA_RE.search(sig + dot + part):
+        raise AssertionError(f"접기·겹침 가림이 다르다: {sig!r} · {dot[:40]!r}… {len(dot.encode())}B")
     _desk_cycle(ctx, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
     data = counsel.collect(ctx, max_bytes=counsel.MIN_BATCH_BYTES)
     if len(data["daily_notes"]) != 1 or data["notes_report_only"] or data["bytes"] > counsel.MIN_BATCH_BYTES:
@@ -18457,6 +18467,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("M649-desk-mask-case-sensitive", "agora/counsel.py",
      '            folded, owner = _fold_map(out)',
      '            folded, owner = out, list(range(len(out)))',
+     "상담소: 이름 가림은 한 번·대소문자 무관"),
+    ("M650-desk-mask-overlap-twice", "agora/counsel.py",
+     '                if merged and a < merged[-1][1]:',
+     '                if False:',
+     "상담소: 이름 가림은 한 번·대소문자 무관"),
+    ("M651-desk-mask-no-whole-lower", "agora/counsel.py",
+     '            hay = [folded] + ([whole] if whole != folded and len(whole) == len(owner) else [])',
+     '            hay = [folded]',
      "상담소: 이름 가림은 한 번·대소문자 무관"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',

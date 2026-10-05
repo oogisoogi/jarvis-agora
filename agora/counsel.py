@@ -516,8 +516,20 @@ def _masker(ctx: Any) -> Callable[[str], str]:
             out = pattern.sub(marks[k], out)
         if name_re is not None:
             folded, owner = _fold_map(out)
-            spans = [(owner[m.start()], owner[m.end() - 1] + 1) for m in name_re.finditer(folded) if m.end() > m.start()]
-            for a, b in reversed(spans):
+            # ★문자열 전체 lower() 도 찾는다(적대 7R codex — 끝 시그마처럼 문맥으로 접히는 글자는 글자별 접기와 다르다).
+            #   길이가 같을 때만 같은 위치표를 쓴다(다르면 글자별 접기만 — 넓게 가리는 쪽).
+            whole = out.lower()
+            hay = [folded] + ([whole] if whole != folded and len(whole) == len(owner) else [])
+            spans = sorted({(owner[m.start()], owner[m.end() - 1] + 1) for h in hay for m in name_re.finditer(h)
+                            if m.end() > m.start()})
+            # ★겹치는 자리는 합친 뒤 한 번만 바꾼다(적대 7R codex — 접힌 두 글자가 한 원문 글자로 돌아가 두 번 바뀌며 표시가 남았다).
+            merged: list[list[int]] = []
+            for a, b in spans:
+                if merged and a < merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], b)
+                else:
+                    merged.append([a, b])
+            for a, b in reversed(merged):
                 out = out[:a] + marks[-1] + out[b:]
         for mark, token in zip(marks, tokens):
             out = out.replace(mark, token)
