@@ -4668,7 +4668,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                  "M500-daily-marker-not-posted",
                  "M501-daily-empty-room-not-retired",
                  "M502-daily-not-idempotent",
-                 "M503-daily-shelves-nothing"),
+                 "M503-daily-shelves-nothing",
+                 "M654-daily-test-clock-calendar-date"),
     # ★09-11 신설 — **예산출처**. 예산이 참가자 설정에서 **방 genesis** 로 옮긴 자리(계약 확장 9).
     #   여기서 잃는 것은 조용하다: 광장이 다시 2글짜리 방이 되거나, 두 구현이 다른 예산을 보거나,
     #   예산이 상태 해시로 새어 기존 방의 계보가 끊긴다 — 셋 다 사람에게는 「가끔 글이 사라진다」로 보인다.
@@ -13897,6 +13898,28 @@ def _plaza_budget() -> dict[str, int]:
             "max_chars_per_round": PLAZA_BUDGET_MAX_CHARS}
 
 
+def _daily_loop_now(cast_at: Any) -> Any:
+    """하루 한 바퀴 시험의 「지금」 = **표 던진 날(day_of) 다음 날 06:10 KST**.
+
+    ★달력 날짜가 아니라 day_of 로 센다(2026-10-06 정정 · 원인 = 시험 고정물) — 06:00 KST 이전에 던진 표는 그 전날 몫이라,
+      달력 날짜 + 1 로 두면 00:00~06:00 에 돌린 시험이 「방금 닫힌 하루」에 표가 없어 방을 못 열었다(어느 가지에서든 거짓 FAIL).
+    """
+    import datetime as _dt
+    pz = _plaza()
+    return _dt.datetime.combine(pz.day_of(cast_at) + _dt.timedelta(days=1), _dt.time(6, 10), pz.KST)
+
+
+def _case_daily_loop_clock_fixture() -> None:
+    """시험 시계 고정물 — 표를 01:00·05:59·06:00·23:59 KST 에 던져도 「지금」이 접는 하루(어제) = 표 던진 날."""
+    import datetime as _dt
+    pz = _plaza()
+    for hh, mm in ((1, 0), (5, 59), (6, 0), (23, 59)):
+        cast = _dt.datetime(2026, 10, 6, hh, mm, tzinfo=pz.KST)
+        now = _daily_loop_now(cast)
+        if pz.day_of(now) - _dt.timedelta(days=1) != pz.day_of(cast) or (now.hour, now.minute) != (6, 10):
+            raise AssertionError(f"{hh:02d}:{mm:02d} KST 에 던진 표가 접는 하루 밖이다: now={now.isoformat()}")
+
+
 def _case_daily_loop_opens_marks_and_retires() -> None:
     """실물(가짜 릴레이) 한 바퀴 — **방 개설 → [졸업] 마커 → 멱등 → [유찰] → [보관].**
 
@@ -13916,8 +13939,7 @@ def _case_daily_loop_opens_marks_and_retires() -> None:
         # ★점수는 **방금 닫힌 하루**까지 접는다 ⇒ 오늘 던진 표는 **다음 판**에서 센다.
         #   그래서 시각을 내일 06:10 로 주고 돈다(날짜 노브와 같은 자리).
         cast_at = _dt.datetime.now(_dt.timezone.utc)
-        now = _dt.datetime.combine((cast_at.astimezone(_plaza().KST) + _dt.timedelta(days=1)).date(),
-                                   _dt.time(6, 10), _plaza().KST)
+        now = _daily_loop_now(cast_at)
         # 제안 하나 + 서로 다른 두 사람의 표(=조건 충족). 표는 **어제** 던진 것으로 친다.
         said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=plaza_id, body="시험 제안 하나"))
         pid = said["message_id"]
@@ -14184,9 +14206,7 @@ def _case_daily_loop_does_not_open_twice_when_the_marker_fails() -> None:
     with _relay_env() as (ctx, _relay, _url):          # noqa: F841
         # ★예산 1 짜리 광장 — 제안 한 건이 그 자리를 다 쓰므로 **마커가 못 올라간다.**
         plaza_id = _relay_room(ctx, budget={"posts_per_round": 1, "max_chars_per_round": 6000})
-        now = _dt.datetime.combine(
-            (_dt.datetime.now(_dt.timezone.utc).astimezone(pz.KST) + _dt.timedelta(days=1)).date(),
-            _dt.time(6, 10), pz.KST)
+        now = _daily_loop_now(_dt.datetime.now(_dt.timezone.utc))
         said = _with_key(f["key_a"], lambda: tools.say(ctx, thread_id=plaza_id, body="시험 제안"))
         pid = said["message_id"]
         as_who = _three_party(ctx, _relay, f, _url)
@@ -17856,6 +17876,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("광장v2: skill 핀이 다르면 등록 안 함", _case_skill_pin_blocks_registration, None),
     ("광장v2: skill 핀 = 문서 · 낡으면 빌드 거부", _case_skill_pin_matches_the_doc, None),
     ("하루 한 바퀴: 얻어야 연다",    _case_daily_plan_opens_only_when_earned, None),
+    ("하루 한 바퀴: 시험 시계 = 표 던진 날 다음 06:10", _case_daily_loop_clock_fixture, None),
     ("하루 한 바퀴: 열고 적고 접는다", _case_daily_loop_opens_marks_and_retires, None),
     ("하루 한 바퀴: 마커가 실패해도 한 번",
      _case_daily_loop_does_not_open_twice_when_the_marker_fails, None),
@@ -18506,6 +18527,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            else:\n                out = marks[-1]\n',
      '            else:\n                pass\n',
      "상담소: 이름 가림은 한 번·대소문자 무관"),
+    ("M654-daily-test-clock-calendar-date", "agora/selftest.py",
+     '    pz = _plaza()\n    return _dt.datetime.combine(pz.day_of(cast_at) + _dt.timedelta(days=1)',
+     '    pz = _plaza()\n    return _dt.datetime.combine(cast_at.astimezone(pz.KST).date() + _dt.timedelta(days=1)',
+     "하루 한 바퀴: 시험 시계 = 표 던진 날 다음 06:10"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',
      '\n.jarvis.godmeyou.kr\n.godmeyou.kr\n',
