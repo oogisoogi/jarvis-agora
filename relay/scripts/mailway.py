@@ -370,8 +370,14 @@ def main():
     code, body, _ = M.ack(B, B["id"], [])
     record("빈 ack = 400/10", (400, 10), (code, code_of(body)))
 
-    # ── 8-b. 읽음 재생 안전(적대 1R R1-1 → 4R R4-1 · mail_id 목록만) ──────────
-    print("\n== 우편 8-b. 같은 읽음 요청을 재생해도 뒤 도착 우편은 안 걸린다 ==")
+    # ── 8-b. 읽음 재생 안전(적대 1R R1-1 → 4R R4-1 · 5R R5-2: **같은 요청 바이트 그대로** 재전송) ──────────
+    print("\n== 우편 8-b. 같은 읽음 요청(같은 ts·서명)을 재생해도 뒤 도착 우편은 안 걸린다 ==")
+    ts_r = iso()
+    doc_r = {"acked": [mail_id1], "for": B["id"], "purpose": "agora-mail-ack-v3", "ts": ts_r}
+    req_r = {"for": B["id"], "mail_ids": [mail_id1], "ts": ts_r,
+             "signature": sign_bytes(B["key"], canonical_bytes(doc_r), args.workdir)}
+    code, body, _ = http("POST", args.base + "/mail/ack", req_r)
+    record("원 읽음 요청(m1) = 200", 200, code)
     for _ in range(3):
         mx, _, code, body, _ = M.send(A, B["id"], T1, letter("읽음 서명 뒤 도착"), reply_to=rb["message_id"])
         if code != 429:
@@ -379,8 +385,8 @@ def main():
         time.sleep(2.2)
     record("A→B 답장(읽음 서명 뒤 도착) = 201", 201, code)
     mx_id = body.get("mail_id") if isinstance(body, dict) else None
-    code, body, _ = M.ack(B, B["id"], [mail_id1], ts=iso(time.time() + 240))
-    record("m1 읽음 · 미래 ts(+4분) 재생 = acked 0(새 우편은 목록에 없다)", (200, 0), (code, (body or {}).get("acked")))
+    code, body, _ = http("POST", args.base + "/mail/ack", req_r)
+    record("같은 요청 바이트 재전송 = 200 · acked 0(새 우편은 목록에 없다)", (200, 0), (code, (body or {}).get("acked")))
     code, boxb, _ = M.inbox(B["id"], M.auth(B, B["id"]))
     hit = find(boxb, mx["message_id"])
     record("  뒤 도착 우편 본문 그대로 · 미읽음 1", (True, 1),
