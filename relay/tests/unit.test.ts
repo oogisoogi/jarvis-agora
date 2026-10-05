@@ -430,7 +430,7 @@ describe("전역 상한 — 버킷과 노브", () => {
   });
 });
 
-// ── 자비스 우편(1:1) — docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md ──────────
+// ── 에이전트 우편(1:1) — docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md ──────────
 import { createHash } from "node:crypto";
 import * as mailTs from "../src/lib/mail.ts";
 import { DEFAULT_MAIL_LIMITS, mailBuckets, mailConsecutive, mailKindOf, mailLimitsFromEnv } from "../src/lib/limits.ts";
@@ -463,7 +463,7 @@ function okLetter(): any {
 }
 
 function okSignalItem(over: Record<string, unknown> = {}): any {
-  const it: any = { count: 3, source: "update", op: "cys.update", version: "1.1.8", os: "macos-15.6",
+  const it: any = { count: 3, source: "update", op: "host.update", version: "1.1.8", os: "macos-15.6",
                     error_code: "update.sig_mismatch",
                     first_seen: isoAt(MAIL_NOW - 3600_000), last_seen: isoAt(MAIL_NOW - 60_000), ...over };
   if (!("signature" in over)) it.signature = signalKeyByNode(it.error_code, it.op, it.source, it.version);
@@ -505,6 +505,51 @@ describe("우편 문서 — 닫힌 스키마(명세 §2·§1-1)", () => {
       const d = okLetter(); f(d);
       expect(await codeOfAsync(() => mailTs.validateMail(d, MAIL_NOW)), f.toString()).toBe(10);
     }
+  });
+
+  it("일일 보고(intent=daily · 명세 §1-2) — 정상 통과 · 닫힌 칸·범위·자유문 1칸 · 32KB = 413/3", async () => {
+    const okDaily = (): any => {
+      const d = okLetter();
+      d.payload = { intent: "daily", daily: {
+        day: "2026-10-05", version: { host: "1.1.7", pack: "1.1.7" }, os: "windows-11",
+        seats: { count: 3, roles: ["cso", "master", "worker"] },
+        doctor: { ok: 12, warn: 1, fail: 1, skip: 1, warn_ids: ["dept-awakening-seed"], fail_ids: ["runtime-seal"] },
+        errors: { tick_errors: 0, hook_rc_nonzero: 2, signatures: ["c".repeat(32)] },
+        updates: [{ from: "1.1.6", to: "1.1.7", result: "ok", at: isoAt(MAIL_NOW - 86_400_000) }],
+        depts: { active: 0, tombstones: 1 }, uptime: { last_boot: isoAt(MAIL_NOW - 8106_000), uptime_s: 8106 },
+        owner_note: "" } };
+      return d;
+    };
+    await expect(mailTs.validateMail(okDaily(), MAIL_NOW)).resolves.toBeTruthy();
+    const minimal = okLetter(); minimal.payload = { intent: "daily", daily: { day: "2026-10-05" } };
+    await expect(mailTs.validateMail(minimal, MAIL_NOW)).resolves.toBeTruthy();
+    const cases: Array<(d: any) => void> = [
+      d => { delete d.payload.daily.day; }, d => { d.payload.daily.day = "2026-13-40"; },
+      d => { d.payload.subject = "자유문"; }, d => { d.payload.daily.note = "자유문"; },
+      d => { d.payload.daily.version = {}; }, d => { d.payload.daily.version.cli = "1.1.7"; },
+      d => { d.payload.daily.seats.roles = ["worker", "master"]; }, d => { d.payload.daily.seats.roles = ["C:\\Users"]; },
+      d => { delete d.payload.daily.seats.count; }, d => { d.payload.daily.doctor.fail_ids = ["runtime seal 파손"]; },
+      d => { d.payload.daily.doctor.ok = 1000; }, d => { d.payload.daily.errors.signatures = ["자유문"]; },
+      d => { d.payload.daily.updates = Array(11).fill(d.payload.daily.updates[0]); },
+      d => { d.payload.daily.updates[0].result = "실패했습니다"; },
+      d => { d.payload.daily.updates[0].at = isoAt(MAIL_NOW - 8 * 86_400_000); },
+      d => { d.payload.daily.depts.extra = 1; }, d => { d.payload.daily.uptime.last_boot = isoAt(MAIL_NOW + 3600_000); },
+      d => { d.payload.daily.owner_note = "가".repeat(201); }, d => { d.payload.daily.owner_note = null; },
+    ];
+    for (const f of cases) {
+      const d = okDaily(); f(d);
+      expect(await codeOfAsync(() => mailTs.validateMail(d, MAIL_NOW)), f.toString()).toBe(10);
+    }
+    const note200 = okDaily(); note200.payload.daily.owner_note = "😀".repeat(200);
+    await expect(mailTs.validateMail(note200, MAIL_NOW)).resolves.toBeTruthy();
+    const big = okDaily(); big.payload.daily.errors.signatures = Array(100).fill("d".repeat(32));
+    big.payload.daily.doctor.warn_ids = Array(64).fill("a".repeat(40));
+    big.payload.daily.doctor.fail_ids = Array(64).fill("b".repeat(40));
+    big.payload.daily.seats.roles = Array(64).fill("r".repeat(32));
+    big.payload.daily.owner_note = "가".repeat(200);
+    expect(canonicalText(big).length).toBeLessThan(32 * 1024);     // 칸 상한 안에서는 32KB 를 못 넘는다(= 아래는 따로 만든 초과)
+    const r = await detailOf(() => mailTs.validateMail(okDaily(), MAIL_NOW));
+    expect(r).toBeNull();
   });
 
   it("봉투(scrub·roster)에 자유문 = 10 — 신호 우편도(적대 1R R1-2 · 승인 겹 예외의 전제)", async () => {
@@ -550,7 +595,7 @@ describe("우편 문서 — 닫힌 스키마(명세 §2·§1-1)", () => {
 
 describe("신호 우편 — 묶기 키 재계산·시각 창(명세 §1-1)", () => {
   it("서버의 묶기 키 = 독립 계산(node:crypto)과 같다 · version 은 소문자로 접는다", async () => {
-    const it0 = { error_code: "doctor.c27.fail", op: "cys.doctor", source: "pack", version: "1.1.8-RC1" };
+    const it0 = { error_code: "doctor.c27.fail", op: "host.doctor", source: "pack", version: "1.1.8-RC1" };
     expect(await mailTs.signalSignature(it0)).toBe(signalKeyByNode(it0.error_code, it0.op, it0.source, "1.1.8-rc1"));
     expect(await mailTs.signalSignature({ ...it0, version: "1.1.8-rc1" }))
       .toBe(await mailTs.signalSignature(it0));
@@ -561,7 +606,7 @@ describe("신호 우편 — 묶기 키 재계산·시각 창(명세 §1-1)", () 
     expect([r.code, r.detail.why]).toEqual([10, "signature_mismatch"]);
     // 음성 대조: 칸 하나(op)만 바꾸고 키를 그대로 두면 역시 불일치다.
     const good = okSignalItem();
-    const r2 = await detailOf(() => mailTs.validateMail(okSignal([{ ...good, op: "cys.other" }]), MAIL_NOW));
+    const r2 = await detailOf(() => mailTs.validateMail(okSignal([{ ...good, op: "host.other" }]), MAIL_NOW));
     expect(r2.detail.why).toBe("signature_mismatch");
   });
 
@@ -583,7 +628,7 @@ describe("신호 우편 — 묶기 키 재계산·시각 창(명세 §1-1)", () 
     const dup = okSignalItem();
     expect((await detailOf(() => mailTs.validateMail(okSignal([dup, { ...dup }]), MAIL_NOW))).detail.why)
       .toBe("duplicate_signature");
-    for (const over of [{ source: "user" }, { op: "cys update" }, { os: "android" }, { error_code: "Update.Fail" },
+    for (const over of [{ source: "user" }, { op: "host update" }, { os: "android" }, { error_code: "Update.Fail" },
                         { count: 0 }, { count: 100_001 }]) {
       expect(await codeOfAsync(() => mailTs.validateMail(okSignal([okSignalItem(over)]), MAIL_NOW)), JSON.stringify(over)).toBe(10);
     }
@@ -611,6 +656,13 @@ describe("우편 상한 — 칸 고르기(명세 §4 · 순수 함수)", () => {
   it("신호는 하루 1 버킷 하나만(다른 칸과 따로)", () => {
     expect(rows("signal", false)).toEqual([["gmail-signal-day:a", 86400, 1]]);
     expect(rows("signal", true)).toEqual([["gmail-signal-day:a", 86400, 1]]);
+  });
+
+  it("일일 보고도 하루 1 버킷 하나만 · 신호와 다른 버킷(명세 §1-2 (2))", () => {
+    expect(mailKindOf("daily", "b", { from_id: "b" })).toBe("daily");
+    expect(rows("daily", false)).toEqual([["gmail-daily-day:a", 86400, 1]]);
+    expect(rows("daily", true)).toEqual([["gmail-daily-day:a", 86400, 1]]);
+    expect(mailLimitsFromEnv({ AGORA_RATE_MAIL_DAILY_DAY_MAX: "3" }).dailyDayMax).toBe(3);
   });
 
   it("연속 규칙 — 4통까지 통과 · 5통이면 가장 오래된 것이 24시간 지날 때까지", () => {

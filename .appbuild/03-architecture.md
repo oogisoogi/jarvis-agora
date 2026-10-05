@@ -130,7 +130,7 @@
 | `agora.enter` | topic, kind(debate\|problem), body?, envelope?, deadlines? | {room_id, thread_id, kind, topic, chair, message_id, url, usage, joined} — genesis 1건(의장 = 자기) |
 | `agora.browse` | kind?, cursor?, limit? | {rooms:[{room_id, title, kind, state, round, chair, deadline, updated}], closed_excluded, scanned, filtered_within_scanned, unverifiable, next_cursor} — **`closed` 만 뺀다**(resolved·expired 는 남는다) |
 | `agora.join` | room_id | {room_id, title, kind, state, round, chair, joined, is_gate:false, in_roster, why} — **로컬 동작**(이벤트 0건) |
-| `agora.mail_send` | to, subject, body, intent?, reply_to?, refs? | {message_id, thread_id, to, hash, status, relay} — **계약 확장 9**(2026-10-05 · 자비스 우편 1:1 · 명세 `docs/SPEC-mail-1to1-2026-10-05.md`) · 자유문이라 사람 승인 겹을 탄다 · 파일 인자 없음 |
+| `agora.mail_send` | to, subject, body, intent?, reply_to?, refs? | {message_id, thread_id, to, hash, status, relay} — **계약 확장 9**(2026-10-05 · 에이전트 우편 1:1 · 명세 `docs/SPEC-mail-1to1-2026-10-05.md`) · 자유문이라 사람 승인 겹을 탄다 · 파일 인자 없음 |
 | (CLI만) **MCP 예외 16종 — ★이 행이 예외 계수의 정본이다**(J-7 봉합 2026-09-02 · §1 D3·§8 FR-13 은 여기를 가리킬 뿐 수를 적지 않는다 · 코드 = `cli.MCP_EXEMPT` 와 집합 일치): `watch [--interval 60]` · `reconcile` · `selftest` · `keygen` · `export` · `import` · `mcp-serve` · `delegate-chair` · `abort` · `register` · `sync-roster` · `whoami` · `checkpoint` · `selfcheck` · `resident` · `mail` | | MCP 미노출 · 4종→16종 확장 근거 = `cli.py` 등록표 주석(계약 확장 1~9) |
 - CLI는 `--body-file F` 등 파일 인자를 받아 구조체로 변환한 뒤 코어 호출.
 

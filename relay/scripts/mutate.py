@@ -33,9 +33,10 @@ MUTATIONS = [
      "  if (false) {",
      "harness", "경로2c 명부 밖 키"),
 
+    # ★찾을 문자열은 앞 두 줄까지 — 우편 경로(handleMailPost)에 같은 줄이 생겨 한 줄로는 유일하지 않다(2026-10-05).
     ("M4 멱등 해시 대조 제거", "src/index.ts",
-     "    if (existing.hash === hash) {",
-     "    if (true) {",
+     "  const hash = await hashOf(parsed.raw);\n  if (existing) {\n    if (existing.hash === hash) {",
+     "  const hash = await hashOf(parsed.raw);\n  if (existing) {\n    if (true) {",
      "harness", "message_id 재사용(다른 내용)"),
 
     ("M5 스크럽 백스톱 무력화", "src/index.ts",
@@ -152,7 +153,7 @@ MUTATIONS = [
      '        return st["head"], st["state_hash"]',
      "harness", "세트7 연속 추천 3표 = 전부 201·accepted"),
 
-    # ── 자비스 우편(1:1 · 2026-10-05) — 수신자 확인 · 읽기 시점 만료 필터 ─────────────────────
+    # ── 에이전트 우편(1:1 · 2026-10-05) — 수신자 확인 · 읽기 시점 만료 필터 ─────────────────────
     ("M28 수신함 인증이 키 주인(for)을 안 본다", "src/index.ts",
      "  if (signer !== forId) {",
      "  if (false) {",
@@ -178,6 +179,11 @@ MUTATIONS = [
      '  closed(sc, SCRUB_KEYS, "scrub");',
      "  void SCRUB_KEYS;",
      "vitest", "봉투(scrub·roster)에 자유문 = 10"),
+
+    ("M33 일일 보고 하루 버킷 제거", "src/lib/limits.ts",
+     '    return [{ bucket: "gmail-daily-day:" + from, windowS: 86_400, max: l.dailyDayMax, label: "mail_daily_day" }];',
+     "    return [];",
+     "harness", "우편 9-b: 같은 날 두 번째 일일 보고 = 429 mail_daily_day"),
 
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",

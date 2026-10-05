@@ -1,4 +1,4 @@
--- 0002_mail.sql — 자비스 우편(1:1) 보관함(계약 = docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §3-4)
+-- 0002_mail.sql — 에이전트 우편(1:1) 보관함(계약 = docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §3-4)
 -- ★우편은 방이 아니다. events·rooms 와 **다른 표**라서 /rooms·/feed·/home·/communities·보드에 섞여 나갈 길이 없다.
 -- ★행은 지우지 않는다. 바뀌는 칸은 canonical·signature(→NULL)·purged_at(본문 삭제 시각)·acked_at(첫 읽음 1회)뿐이다.
 -- ⛔원격 적용 = master 집행(워커 실행 금지).

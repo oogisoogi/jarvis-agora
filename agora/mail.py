@@ -1,4 +1,4 @@
-"""mail — 자비스 우편(1:1 · 비공개층) 클라이언트 쪽. 명세 = `docs/SPEC-mail-1to1-2026-10-05.md`.
+"""mail — 에이전트 우편(1:1 · 비공개층) 클라이언트 쪽. 명세 = `docs/SPEC-mail-1to1-2026-10-05.md`.
 
 무엇을 하나
 -----------
@@ -32,6 +32,8 @@ from agora.event import canonical_bytes, is_id, new_id, parse_event
 MAIL_KIND = "mail"
 INTENTS = ("notice", "request", "report")
 SIGNAL = "signal"
+DAILY = "daily"                   # 일일 보고(명세 §1-2 · 증보 8) — 신호와 다른 통
+MACHINE_INTENTS = (SIGNAL, DAILY)  # 사람에게 알릴 글이 아닌 통 — 미읽음·알림·목록에 안 센다
 SIGNAL_SOURCES = ("master", "worker", "cso", "pack", "update")
 PURPOSE_INBOX = "agora-mail-inbox-v1"
 PURPOSE_ACK = "agora-mail-ack-v1"
@@ -46,6 +48,8 @@ REFS_MAX = 5
 SIGNAL_ITEMS_MAX = 100
 SIGNAL_COUNT_MAX = 100_000
 SIGNAL_WINDOW_DAYS = 7
+DAILY_MAX_BYTES = 32 * 1024
+DAILY_NOTE_MAX_CHARS = 200
 ACK_IDS_MAX = 50
 ACK_THREADS_MAX = 20
 SCRUB_KEYS = ("rules", "blocked", "redacted")   # core.declare_scrub 이 만드는 모양 그대로
@@ -61,6 +65,11 @@ OS_RE = re.compile(r"^(macos|windows|linux)(-[0-9.]{1,16})?$")
 ERROR_CODE_RE = re.compile(r"^[a-z0-9._-]{1,48}$")
 PEER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$")
 MAIL_ID_RE = re.compile(r"^ml_\d{16}$")
+DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+CHECK_ID_RE = re.compile(r"^[a-z0-9-]{1,40}$")
+DAILY_KEYS = ("day", "version", "os", "seats", "doctor", "errors", "updates", "depts", "uptime",
+              "owner_note")
 
 # ── 로컬 우편함(명세 §5 · §11 · §13-4) ─────────────────────────────────────
 MAILBOX_DIR = "mailbox"
@@ -169,6 +178,97 @@ def _check_signal(payload: dict[str, Any], *, now: datetime.datetime | None) -> 
                   {"where": where, "why": "signature_mismatch"})
 
 
+def _int_in(obj: dict[str, Any], key: str, where: str, lo: int, hi: int) -> int:
+    v = _need(obj, key, int, where)
+    if not lo <= v <= hi:
+        _fail("정수 범위 밖", {"where": f"{where}.{key}", "min": lo, "max": hi})
+    return v
+
+
+def _str_list(obj: dict[str, Any], key: str, where: str, most: int, rx: Any) -> list[str]:
+    v = _need(obj, key, list, where)
+    if len(v) > most or any(type(x) is not str or not rx.match(x) for x in v):
+        _fail("목록 길이·항목 형식 밖", {"where": f"{where}.{key}", "max": most})
+    return v
+
+
+def _check_daily(payload: dict[str, Any], *, now: datetime.datetime | None) -> None:
+    """일일 보고(명세 §1-2) — 릴레이 `checkDaily` 와 같은 규칙. ★자유문 = `owner_note` 1칸(≤200자)뿐."""
+    _closed(payload, ("intent", "daily"), "payload")
+    w = "payload.daily"
+    d = _need(payload, "daily", dict, "payload")
+    _closed(d, DAILY_KEYS, w)
+    day = _need(d, "day", str, w)
+    try:
+        ok_day = bool(DAY_RE.match(day)) and bool(datetime.date.fromisoformat(day))
+    except ValueError:
+        ok_day = False
+    if not ok_day:
+        _fail("day 는 YYYY-MM-DD", {"where": w + ".day"})
+    if "version" in d:
+        v = _need(d, "version", dict, w)
+        _closed(v, ("host", "pack"), w + ".version")
+        if not v or any(type(x) is not str or not VERSION_RE.match(x) for x in v.values()):
+            _fail("version 은 host·pack 중 하나 이상 · 판본 형식", {"where": w + ".version"})
+    if "os" in d and not OS_RE.match(_need(d, "os", str, w)):
+        _fail("os 형식이 아니다", {"where": w + ".os"})
+    if "seats" in d:
+        o, ww = _need(d, "seats", dict, w), w + ".seats"
+        _closed(o, ("count", "roles"), ww)
+        _int_in(o, "count", ww, 0, 64)
+        roles = _str_list(o, "roles", ww, 64, ROLE_RE)
+        if roles != sorted(roles):
+            _fail("roles 는 정렬된 목록", {"where": ww + ".roles"})
+    if "doctor" in d:
+        o, ww = _need(d, "doctor", dict, w), w + ".doctor"
+        _closed(o, ("ok", "warn", "fail", "skip", "warn_ids", "fail_ids"), ww)
+        for k in ("ok", "warn", "fail", "skip"):
+            _int_in(o, k, ww, 0, 999)
+        for k in ("warn_ids", "fail_ids"):
+            _str_list(o, k, ww, 64, CHECK_ID_RE)
+    if "errors" in d:
+        o, ww = _need(d, "errors", dict, w), w + ".errors"
+        _closed(o, ("tick_errors", "hook_rc_nonzero", "signatures"), ww)
+        for k in ("tick_errors", "hook_rc_nonzero"):
+            _int_in(o, k, ww, 0, SIGNAL_COUNT_MAX)
+        _str_list(o, "signatures", ww, SIGNAL_ITEMS_MAX, SIG32_RE)
+    if "updates" in d:
+        ups = _need(d, "updates", list, w)
+        if len(ups) > 10:
+            _fail("updates 는 최대 10개", {"where": w + ".updates", "got": len(ups)})
+        for i, u in enumerate(ups):
+            ww = f"{w}.updates[{i}]"
+            if type(u) is not dict:
+                _fail("updates 항목은 객체여야 한다", {"where": ww})
+            _closed(u, ("from", "to", "result", "at"), ww)
+            for k in ("from", "to"):
+                if not VERSION_RE.match(_need(u, k, str, ww)):
+                    _fail("판본 형식이 아니다", {"where": f"{ww}.{k}"})
+            if not ERROR_CODE_RE.match(_need(u, "result", str, ww)):
+                _fail("result 형식이 아니다", {"where": ww + ".result"})
+            at = _need(u, "at", str, ww)
+            if not TS_RE.match(at):
+                _fail("at 은 밀리초 고정폭 ISO", {"where": ww + ".at"})
+            if now is not None:
+                lo = now - datetime.timedelta(days=SIGNAL_WINDOW_DAYS)
+                if not lo <= _parse_ts(at) <= now + datetime.timedelta(minutes=5):
+                    _fail("updates.at 이 7일 창 밖", {"where": ww + ".at"})
+    if "depts" in d:
+        o, ww = _need(d, "depts", dict, w), w + ".depts"
+        _closed(o, ("active", "tombstones"), ww)
+        for k in ("active", "tombstones"):
+            _int_in(o, k, ww, 0, 999)
+    if "uptime" in d:
+        o, ww = _need(d, "uptime", dict, w), w + ".uptime"
+        _closed(o, ("last_boot", "uptime_s"), ww)
+        lb = _need(o, "last_boot", str, ww)
+        if not TS_RE.match(lb) or (now is not None and _parse_ts(lb) > now + datetime.timedelta(minutes=5)):
+            _fail("last_boot 은 지나간 밀리초 ISO", {"where": ww + ".last_boot"})
+        _int_in(o, "uptime_s", ww, 0, 31_536_000)
+    if "owner_note" in d and len(_need(d, "owner_note", str, w)) > DAILY_NOTE_MAX_CHARS:
+        _fail("owner_note 는 200자까지", {"where": w + ".owner_note"})
+
+
 def validate(doc: Any, *, now: datetime.datetime | None = None) -> dict[str, Any]:
     """우편 문서 닫힌 검사(명세 §2 · §1-1). `now` 를 주면 신호 시각 창까지 본다.
 
@@ -215,8 +315,13 @@ def validate(doc: Any, *, now: datetime.datetime | None = None) -> dict[str, Any
     if intent == SIGNAL:
         _check_signal(payload, now=now)
         return doc
+    if intent == DAILY:
+        _check_daily(payload, now=now)
+        if len(canonical_bytes(doc)) > DAILY_MAX_BYTES:     # 릴레이 413/3 과 같은 경계
+            _fail("일일 보고 32KB 상한 초과", {"limit": DAILY_MAX_BYTES}, errors.GATE_REJECT)
+        return doc
     if intent not in INTENTS:
-        _fail("intent 가 계약 밖", {"intent": intent, "allowed": list(INTENTS) + [SIGNAL]})
+        _fail("intent 가 계약 밖", {"intent": intent, "allowed": list(INTENTS) + [SIGNAL, DAILY]})
     _closed(payload, ("subject", "body", "intent", "refs"), "payload")
     subject = _need(payload, "subject", str, "payload")
     if not 1 <= len(subject) <= SUBJECT_MAX_CHARS:
@@ -412,7 +517,11 @@ def _publish(ctx: Any, doc: dict[str, Any], *, prompt: Any = None,
     ★승인 겹 예외는 **문서의 사실**로만 고른다 — `intent == "signal"`(자유문 칸이 없는 닫힌 모양)이면 `mail_signal`.
       신호 발신(수집기)은 T3 의 일이라 이 티켓에는 부르는 곳이 없다(명세 §1-1 (6)).
     """
-    exempt = "mail_signal" if doc["payload"].get("intent") == SIGNAL else None
+    # ★일일 보고는 `owner_note` 가 빈 통만 예외 `mail_daily`(D8-1 ⓑ · 3eac2a0f) — 오너 말은 **적을 때** 승인한다.
+    intent = doc["payload"].get("intent")
+    note = (doc["payload"].get("daily") or {}).get("owner_note") if intent == DAILY else None
+    exempt = ("mail_signal" if intent == SIGNAL
+              else "mail_daily" if intent == DAILY and not note else None)
     from agora import core, scrub, sign
     validate(doc, now=datetime.datetime.now(datetime.timezone.utc))
     report = scrub.enforce(doc, names_path=scrub.names_path(ctx.config_dir))
@@ -479,8 +588,8 @@ def _verify_item(ctx: Any, item: dict[str, Any], *, inbox_rows: list[dict[str, A
     try:
         doc = parse_event(item.get("mail") or "")
         validate(doc, now=None)
-        if doc["payload"]["intent"] == SIGNAL:
-            validate(doc, now=_parse_ts(doc["ts"]))     # 신호 시각 창은 우편 시각 기준
+        if doc["payload"]["intent"] in MACHINE_INTENTS:
+            validate(doc, now=_parse_ts(doc["ts"]))     # 신호·일일 보고 시각 창은 우편 시각 기준
     except AgoraError as e:
         return {**base, "quarantine": "contract", "code": e.code}
     raw = canonical_bytes(doc)
@@ -555,8 +664,8 @@ def sync(ctx: Any) -> dict[str, Any]:
             inbox_rows.append(row)
             have.add((row.get("from"), row.get("message_id")))
             added += 1
-            if row.get("intent") == SIGNAL or row.get("purged"):
-                continue                         # 신호는 사람에게 알릴 글이 아니다
+            if row.get("intent") in MACHINE_INTENTS or row.get("purged"):
+                continue                         # 신호·일일 보고는 사람에게 알릴 글이 아니다
             notice = {"at": now_ms_iso(), "from": row["from"],
                       "fingerprint": _fingerprint_short(row.get("fingerprint")),
                       "subject": row.get("subject"), "intent": row.get("intent"),
@@ -596,7 +705,7 @@ def write_unread(ctx: Any, *, desk: dict[str, Any] | None = None) -> dict[str, A
     read = _read_ids(ctx)
     threads: dict[str, dict[str, Any]] = {}
     for row in _rows(_path(ctx, INBOX_FILE)):
-        if row.get("purged") or row.get("intent") == SIGNAL or row.get("message_id") in read:
+        if row.get("purged") or row.get("intent") in MACHINE_INTENTS or row.get("message_id") in read:
             continue
         tid = row.get("thread_id")
         if not tid:
@@ -623,7 +732,7 @@ def inbox(ctx: Any) -> dict[str, Any]:
     threads: dict[str, dict[str, Any]] = {}
     for row in _rows(_path(ctx, INBOX_FILE)):
         tid = row.get("thread_id")
-        if not tid or row.get("intent") == SIGNAL:
+        if not tid or row.get("intent") in MACHINE_INTENTS:
             continue
         t = threads.setdefault(tid, {"thread_id": tid, "peer": row.get("from"), "mails": 0,
                                      "unread": 0, "last_subject": None, "last_at": "",
@@ -657,7 +766,7 @@ def read(ctx: Any, *, thread: str) -> dict[str, Any]:
     if not thread or not re.fullmatch(r"[0-9a-f]{4,32}", thread):
         _fail("대화 id(앞 4자 이상 hex)가 필요하다", {"usage": "agora mail read --thread <id>"})
     rows = [r for r in _rows(_path(ctx, INBOX_FILE))
-            if str(r.get("thread_id") or "").startswith(thread) and r.get("intent") != SIGNAL]
+            if str(r.get("thread_id") or "").startswith(thread) and r.get("intent") not in MACHINE_INTENTS]
     tids = {r["thread_id"] for r in rows}
     if not rows:
         _fail("그런 대화가 우편함에 없다", {"thread": thread}, errors.PRECONDITION)

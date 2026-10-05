@@ -1570,7 +1570,7 @@ def check_args(name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
 #   따로 놀면 「CLI 엔 있는데 MCP 엔 없는」 도구가 조용히 생긴다 — 시험이 셋을 대조한다.
 def mail_send(ctx: Context, *, to: str, subject: str, body: str, intent: str = "notice",
               reply_to: str | None = None, refs: list[str] | None = None) -> dict[str, Any]:
-    """자비스 우편 한 통(1:1 · 비공개층 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §6).
+    """에이전트 우편 한 통(1:1 · 비공개층 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §6).
 
     ★도구에는 `body_file` 이 없다 — 대리인 손에 「이 컴퓨터의 파일을 우편으로 보내라」를 쥐여 주지 않는다
       (파일 본문은 CLI `agora mail send --body-file` 만 · 사람이 친다). 자유문이라 사람 승인 겹을 탄다.
@@ -1589,6 +1589,6 @@ CORE_TOOLS: dict[str, Any] = {
     #   판정됐고 06 에 정오표가 남았다. 조용히 늘리지 않고 여기 근거를 적는다.
     "enter": enter, "browse": browse, "join": join,
     # ★계약 확장 9(master 발주 2026-10-05 · TICKET=agora-mail-1to1 브리프 §1-4 「CLI + MCP 도구 1」) —
-    #   자비스 우편 보내기. 14종 → **15종**. 받기·읽기·읽음은 도구가 아니다(CLI `agora mail` · 상주).
+    #   에이전트 우편 보내기. 14종 → **15종**. 받기·읽기·읽음은 도구가 아니다(CLI `agora mail` · 상주).
     "mail-send": mail_send,
 }

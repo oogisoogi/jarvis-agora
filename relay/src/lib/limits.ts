@@ -75,7 +75,7 @@ export function isNewParticipant(createdAt: string | null | undefined, nowMs: nu
   return nowMs - t < l.newAccountS * 1000;
 }
 
-// ── 자비스 우편 상한(명세 docs/SPEC-mail-1to1-2026-10-05.md §4 · docs/RELAY.md §14-6) ──────────
+// ── 에이전트 우편 상한(명세 docs/SPEC-mail-1to1-2026-10-05.md §4 · docs/RELAY.md §14-6) ──────────
 // ★광장의 「글 / 댓글」 나눔과 같은 꼴로 「새 대화 / 답장」을 나눈다. 먼저 말을 거는 쪽(새 대화)은 조이고,
 //   받은 말에 답하는 쪽은 넉넉히 둔다 — 상담소가 새 대화마다 접수 회신을 보내야 하기 때문이다(명세 §4 첫 문단).
 // ★광장 상한(RateLimits)과 **다른 객체**로 둔다 — 광장 기본값·노브는 한 글자도 안 바뀐다(우편이 광장 상한을 흔들지 않게).
@@ -90,6 +90,7 @@ export interface MailLimits {
   newcomerNewDayMax: number;                       // 새 참가자 새 대화: 하루 5
   newcomerReplyDayMax: number;                     // 새 참가자 답장: 하루 30
   signalDayMax: number;                            // 자동 신호: 하루 1(다른 버킷과 따로)
+  dailyDayMax: number;                             // 일일 보고: 하루 1(신호와도 따로 · 명세 §1-2 (2))
   consecMax: number; consecWindowS: number;        // 답장 없이 같은 사람에게 5통 → 24시간 쿨다운
 }
 
@@ -102,6 +103,7 @@ export const DEFAULT_MAIL_LIMITS: MailLimits = {
   newcomerNewDayMax: 5,
   newcomerReplyDayMax: 30,
   signalDayMax: 1,
+  dailyDayMax: 1,
   consecMax: 5, consecWindowS: 86_400,
 };
 
@@ -114,6 +116,7 @@ const MAIL_KNOBS: Array<[keyof MailLimits, string]> = [
   ["newcomerNewDayMax", "AGORA_RATE_MAIL_NEWCOMER_NEW_DAY_MAX"],
   ["newcomerReplyDayMax", "AGORA_RATE_MAIL_NEWCOMER_REPLY_DAY_MAX"],
   ["signalDayMax", "AGORA_RATE_MAIL_SIGNAL_DAY_MAX"],
+  ["dailyDayMax", "AGORA_RATE_MAIL_DAILY_DAY_MAX"],
   ["consecMax", "AGORA_RATE_MAIL_CONSEC_MAX"], ["consecWindowS", "AGORA_RATE_MAIL_CONSEC_WINDOW_S"],
 ];
 
@@ -131,14 +134,16 @@ export function mailLimitsFromEnv(env: Record<string, unknown>): MailLimits {
 // ★답장 = `reply_to` 가 **상대가 나에게 보낸 우편**을 가리키는 것. 내 우편에 이어 쓰기는 새 대화로 센다
 //   (자기 우편에 이어 쓰기로 답장 칸을 쓰지 못하게 · 명세 §4 첫 줄).
 // ★신호(intent=signal)는 하루 1 버킷 **하나만** 태운다 — 새 대화·답장·연속 규칙과 따로(명세 §1-1 (3)).
+//   일일 보고(intent=daily)도 같은 꼴 · 버킷은 신호와 따로(명세 §1-2 (2)).
 // ★버킷 이름은 새 참가자 여부와 무관하게 같다(창 길이·상한만 바뀐다) — 등록 24시간이 지나는 순간
 //   하루 칸의 계수가 0 으로 돌아가지 않게(엄격 쪽).
 
-export type MailKind = "signal" | "reply" | "new";
+export type MailKind = "signal" | "daily" | "reply" | "new";
 
 /** 이 우편이 어느 칸으로 세어지나(순수 함수). `ref` = 같은 대화에서 `reply_to` 가 가리킨 우편(없으면 null). */
 export function mailKindOf(intent: string, to: string, ref: { from_id: string } | null): MailKind {
   if (intent === "signal") return "signal";
+  if (intent === "daily") return "daily";
   return ref && ref.from_id === to ? "reply" : "new";
 }
 
@@ -146,6 +151,9 @@ export function mailKindOf(intent: string, to: string, ref: { from_id: string } 
 export function mailBuckets(kind: MailKind, from: string, isNew: boolean, l: MailLimits): Bucket[] {
   if (kind === "signal") {
     return [{ bucket: "gmail-signal-day:" + from, windowS: 86_400, max: l.signalDayMax, label: "mail_signal_day" }];
+  }
+  if (kind === "daily") {
+    return [{ bucket: "gmail-daily-day:" + from, windowS: 86_400, max: l.dailyDayMax, label: "mail_daily_day" }];
   }
   if (kind === "reply") {
     return [

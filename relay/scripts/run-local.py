@@ -113,7 +113,7 @@ def main():
         print("서버 준비 완료: %s (pgid %d)\n" % (BASE, pgid))
         cmd = [sys.executable, os.path.join(HERE, "threeway.py"), "--base", BASE] + sys.argv[1:]
         rc = subprocess.run(cmd, cwd=RELAY, env=env).returncode
-        # 자비스 우편(1:1) 왕복 — 같은 서버·같은 D1 위에서 threeway 뒤에 돈다(docs/RELAY.md §14).
+        # 에이전트 우편(1:1) 왕복 — 같은 서버·같은 D1 위에서 threeway 뒤에 돈다(docs/RELAY.md §14).
         # ★둘 중 하나라도 적색이면 적색이다 — 앞의 PASS 줄이 뒤의 FAIL 을 가리지 않게 종료 코드로 합친다.
         cmd = [sys.executable, os.path.join(HERE, "mailway.py"), "--base", BASE]
         rc_mail = subprocess.run(cmd, cwd=RELAY, env=env).returncode

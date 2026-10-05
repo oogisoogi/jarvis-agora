@@ -767,7 +767,7 @@ async function postCheckpoint(req: Request, env: Env): Promise<Response> {
   return json({ checkpoint, signer, signed_at: signedAt }, 201);
 }
 
-// ── 자비스 우편(1:1) — docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §3 ──────────
+// ── 에이전트 우편(1:1) — docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §3 ──────────
 // ★우편은 방이 아니다: 표가 따로(`mail`)라서 /rooms·/feed·/home·/communities·보드로 섞여 나갈 길이 없다.
 // ★세 경로 모두 **CORS 를 열지 않는다**(라우터의 OPTIONS 도 405) · 응답은 `Cache-Control: private, no-store`.
 // ★질의 상한은 주석이 아니라 동작이다(QueryBudget) — 명세 §3-4 질의 예산을 넘으면 503.
@@ -905,14 +905,14 @@ async function handleMailPost(req: Request, env: Env): Promise<Response> {
   //   ★연속 규칙을 버킷 **앞**에 둔다: 연속으로 거절될 우편이 간격·하루 칸을 먼저 태우지 않게.
   const limits = mailLimitsFromEnv(env as unknown as Record<string, unknown>);
   const kind = mailKindOf(d.payload.intent, d.to, ref);
-  if (kind !== "signal") {
+  if (kind !== "signal" && kind !== "daily") {
     // 「연속」 = 상대가 나에게 마지막으로 보낸 (신호 아닌) 우편 이후, 창 안에 내가 그 사람에게 보낸 (신호 아닌) 우편 수.
-    //   ★상대의 **신호**는 답이 아니다 — 기계가 하루 한 번 보내는 신호로 쿨다운이 풀리지 않게(엄격 쪽 · §14-9).
+    //   ★상대의 **신호·일일 보고**는 답이 아니다 — 기계가 하루 한 번 보내는 통으로 쿨다운이 풀리지 않게(엄격 쪽 · §14-9).
     const c = await qb.prepare(
       `SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM mail
-        WHERE from_id = ?1 AND to_id = ?2 AND intent != 'signal' AND created_at > ?3
+        WHERE from_id = ?1 AND to_id = ?2 AND intent NOT IN ('signal', 'daily') AND created_at > ?3
           AND seq > COALESCE((SELECT MAX(seq) FROM mail
-                               WHERE from_id = ?2 AND to_id = ?1 AND intent != 'signal'), 0)`
+                               WHERE from_id = ?2 AND to_id = ?1 AND intent NOT IN ('signal', 'daily')), 0)`
     ).bind(d.from, d.to, new Date(nowMs - limits.consecWindowS * 1000).toISOString())
      .first<{ n: number; oldest: string | null }>();
     const v = mailConsecutive(Number(c?.n ?? 0), c?.oldest ?? null, nowMs, limits);
@@ -1016,8 +1016,8 @@ async function handleMailInbox(req: Request, env: Env): Promise<Response> {
   }
 
   // 미읽음 — 전체 수(쪽과 무관) + 쪽에 든 대화별 수를 질의 1 로(UNION ALL · 대화 id 는 빈 문자열이 될 수 없다).
-  //   미읽음 = 나에게 온 · 읽음 표시 없음 · 본문이 아직 있음 · 신호 아님(신호는 사람에게 알릴 글이 아니다 · 명세 §1-1 (6)).
-  const UNREAD = `to_id = ?1 AND acked_at IS NULL AND purged_at IS NULL AND keep_until > ?2 AND intent != 'signal'`;
+  //   미읽음 = 나에게 온 · 읽음 표시 없음 · 본문이 아직 있음 · 신호·일일 보고 아님(사람에게 알릴 글이 아니다 · 명세 §1-1 (6) · §1-2 (4)).
+  const UNREAD = `to_id = ?1 AND acked_at IS NULL AND purged_at IS NULL AND keep_until > ?2 AND intent NOT IN ('signal', 'daily')`;
   const unreadRows = (await qb.prepare(
     `SELECT '' AS thread_id, COUNT(*) AS n, NULL AS oldest FROM mail WHERE ${UNREAD}
      UNION ALL

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""자비스 우편 — **실제 클라이언트**(`agora/mail.py` · 서명기 · `store_relay`) ↔ 실제 로컬 릴레이 왕복.
+"""에이전트 우편 — **실제 클라이언트**(`agora/mail.py` · 서명기 · `store_relay`) ↔ 실제 로컬 릴레이 왕복.
 
 ★mailway.py 는 시험용 서명 도우미로 릴레이를 잰다. 이 파일은 그 반대편을 잰다 — 참가자 PC 가 쓰는
   **그 코드 그대로**(keygen → register → sync-roster → mail send/sync/read/ack)가 릴레이 계약과 맞물리는가.
@@ -93,9 +93,9 @@ def main() -> int:
     os.environ.update(env_b)
     ctx_b.isatty, ctx_b.prompt = (lambda: False), (lambda: False)   # 사람 없음 — 예외 경로만 지나야 한다
     now = mail.now_ms_iso()
-    item = {"source": "update", "op": "cys.update", "version": "1.1.8", "os": "macos-15.6",
+    item = {"source": "update", "op": "host.update", "version": "1.1.8", "os": "macos-15.6",
             "error_code": "update.sig_mismatch", "count": 2, "first_seen": now, "last_seen": now}
-    item["signature"] = mail.signal_signature(source="update", op="cys.update",
+    item["signature"] = mail.signal_signature(source="update", op="host.update",
                                               error_code="update.sig_mismatch", version="1.1.8")
     doc = mail.build(ctx_b, to=alice_id, payload={"intent": mail.SIGNAL, "items": [item]})
     out = mail._publish(ctx_b, doc)
@@ -112,6 +112,27 @@ def main() -> int:
     check(sig_side["added"] == 1 and sig_side["unread"] == back["unread"] == 1
           and sig_side["relay_unread_count"] == 1,
           f"신호는 적재하되 미읽음에 안 센다 (전 {back['unread']} → 후 {sig_side['unread']} · 릴레이 {sig_side['relay_unread_count']})")
+
+    # ⑥ 일일 보고(명세 §1-2) — owner_note 빈 통만 승인 겹 예외 mail_daily(D8-1 ⓑ) · 미읽음에 안 센다
+    os.environ.update(env_b)
+    day = mail.now_ms_iso()[:10]
+    noted = mail.build(ctx_b, to=alice_id, payload={"intent": mail.DAILY,
+                                                    "daily": {"day": day, "owner_note": "오너 말"}})
+    try:
+        mail._publish(ctx_b, noted)
+        check(False, "사람 없는 owner_note 일일 보고가 겹을 지났다")
+    except AgoraError as e:
+        check(e.code == errors.GATE_REJECT, f"owner_note 든 일일 보고 · 사람 없음 = code 3 (got {e.code})")
+    plain = mail.build(ctx_b, to=alice_id, payload={"intent": mail.DAILY, "daily": {
+        "day": day, "version": {"host": "1.1.8"}, "doctor": {"ok": 12, "warn": 1, "fail": 0, "skip": 1,
+                                                              "warn_ids": ["dept-awakening-seed"], "fail_ids": []}}})
+    out = mail._publish(ctx_b, plain)
+    check(out["status"] == 201 and out["approval"].get("why") == "approval_exempt:mail_daily",
+          f"owner_note 빈 일일 보고 201 · 예외 mail_daily ({out['status']} {out['approval']})")
+    os.environ.update(env_a)
+    daily_side = mail.sync(ctx_a)
+    check(daily_side["added"] == 1 and daily_side["unread"] == 1 and daily_side["relay_unread_count"] == 1,
+          f"일일 보고는 적재하되 미읽음에 안 센다 ({daily_side['added']} · {daily_side['unread']} · {daily_side['relay_unread_count']})")
 
     passed = sum(1 for ok, _ in RESULTS if ok)
     print(f"== 클라이언트 왕복 결과: {'PASS' if passed == len(RESULTS) else 'FAIL'} ({passed}/{len(RESULTS)}) ==")

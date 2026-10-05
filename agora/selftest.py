@@ -4459,10 +4459,11 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     "상주멈춤": ("M443-resident-ignores-off-flag", "M448-resident-wakes-without-agent"),
     "상주원복": ("M446-resident-uninstall-keeps-plist", "M450-resident-refused-install-leaves-plist"),
     "상주가시": ("M451-whoami-drops-resident-line",),
-    # ★자비스 우편(2026-10-05) — 받은 것을 다시 보는가 · 머리만 온 우편을 세는가 · 예외가 오타로 넓어지는가.
+    # ★에이전트 우편(2026-10-05) — 받은 것을 다시 보는가 · 머리만 온 우편을 세는가 · 예외가 오타로 넓어지는가.
     "우편": ("M571-mail-addressee-check-dropped", "M572-mail-unread-counts-purged",
              "M573-mail-exempt-typo-widens", "M574-mail-read-acks-whole-thread",
-             "M575-mail-envelope-scrub-open", "M576-mail-ledger-drops-approval"),
+             "M575-mail-envelope-scrub-open", "M576-mail-ledger-drops-approval",
+             "M577-mail-daily-exempt-ignores-note", "M578-mail-unread-counts-daily"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -16431,7 +16432,7 @@ def _case_resident_cli_entry_stands() -> None:
         raise AssertionError("시험이 이 기계의 실제 상주 자리를 건드렸다")
 
 
-# ── 자비스 우편(계약 확장 9 · TICKET=agora-mail-1to1 · 명세 docs/SPEC-mail-1to1-2026-10-05.md) ──
+# ── 에이전트 우편(계약 확장 9 · TICKET=agora-mail-1to1 · 명세 docs/SPEC-mail-1to1-2026-10-05.md) ──
 # ★서버 왕복은 `relay/scripts/run-local.py`(실제 workerd + D1)가 잰다. 여기는 **클라이언트가 받은 것을
 #   다시 보는가 · 본문을 지시로 쓰지 않는가 · 파일 계약(unread.json)** 을 잰다.
 
@@ -16534,7 +16535,7 @@ def _mail_item(doc: dict[str, Any], *, key: str = "key_b", seq: int = 1,
 def _mail_signal_item(**over: Any) -> dict[str, Any]:
     from agora import mail
     now = mail.now_ms_iso()
-    item = {"source": "update", "op": "cys.update", "version": "1.1.8", "os": "macos-15.6",
+    item = {"source": "update", "op": "host.update", "version": "1.1.8", "os": "macos-15.6",
             "error_code": "update.sig_mismatch", "count": 3, "first_seen": now, "last_seen": now}
     item.update(over)
     item["signature"] = over.get("signature") or mail.signal_signature(
@@ -16618,6 +16619,51 @@ def _case_mail_sent_ledger_records_approval() -> None:
         raise AssertionError(f"발신 원장에 승인 결과가 없다: {got}")
 
 
+def _case_mail_daily_closed_shape() -> None:
+    """일일 보고(명세 §1-2) — `day` 만으로도 통과 · 모르는 칸(자유문 끼우기)은 code 10."""
+    from agora import mail
+    mail.validate(_mail_doc(payload={"intent": mail.DAILY, "daily": {"day": "2026-10-05"}}))
+    mail.validate(_mail_doc(payload={"intent": mail.DAILY, "daily": {
+        "day": "2026-10-05", "seats": {"count": 3, "roles": ["cso", "master", "worker"]},
+        "doctor": {"ok": 12, "warn": 1, "fail": 1, "skip": 1, "warn_ids": ["dept-awakening-seed"],
+                   "fail_ids": ["runtime-seal"]}, "owner_note": ""}}))
+    mail.validate(_mail_doc(payload={"intent": mail.DAILY, "daily": {"day": "2026-10-05", "note": "자유문"}}))
+
+
+def _case_mail_daily_exempt_only_without_note() -> None:
+    """일일 보고 승인 겹 예외 `mail_daily` 는 **owner_note 가 빈 통만**(D8-1 ⓑ) — 사람 없음 + 오너 말 = code 3."""
+    from agora import mail
+    store = _FakeMailStore()
+    ctx = _mail_ctx(store)
+    ctx.isatty, ctx.prompt = (lambda: False), (lambda: False)
+    key = _fixtures()["key_a"]
+    plain = mail.build(ctx, to="operator-b", payload={"intent": mail.DAILY, "daily": {"day": "2026-10-05"}})
+    out = _with_key(key, lambda: mail._publish(ctx, plain))
+    if out["approval"].get("why") != "approval_exempt:mail_daily":
+        raise AssertionError(f"빈 owner_note 일일 보고가 예외로 지나지 않았다: {out['approval']}")
+    noted = mail.build(ctx, to="operator-b", payload={"intent": mail.DAILY,
+                                                      "daily": {"day": "2026-10-05", "owner_note": "오너 말"}})
+    try:
+        _with_key(key, lambda: mail._publish(ctx, noted))
+    except AgoraError as e:
+        if e.code != errors.GATE_REJECT:
+            raise AssertionError(f"code {e.code}") from None
+    else:
+        raise AssertionError("owner_note 가 든 일일 보고가 사람 없이 겹을 지났다")
+
+
+def _case_mail_daily_not_counted() -> None:
+    """받은 일일 보고는 적재하되 미읽음·알림에 안 센다(명세 §1-2 (4))."""
+    from agora import mail
+    store = _FakeMailStore()
+    ctx = _mail_ctx(store)
+    doc = _mail_doc(payload={"intent": mail.DAILY, "daily": {"day": mail.now_ms_iso()[:10]}})
+    store.items = [_mail_item(doc, seq=1)]
+    out = _with_key(_fixtures()["key_a"], lambda: mail.sync(ctx))
+    if out["added"] != 1 or out["unread"] != 0 or os.path.exists(mail._path(ctx, mail.NOTICES_FILE)):
+        raise AssertionError(f"일일 보고가 미읽음·알림에 셌다: {out}")
+
+
 def _case_mail_signer_refuses_scrub() -> None:
     """서명기의 우편 문도 스크럽을 다시 잰다 — 이메일 형태가 든 본문은 서명 없음(code 3)."""
     from agora import sign
@@ -16634,12 +16680,13 @@ def _case_mail_signer_auth_is_closed() -> None:
 
 
 def _case_mail_approval_exempt_only_two_paths() -> None:
-    """승인 겹 예외는 두 이름뿐 — 기본값·빈 목록·오타·예외 없음을 각각 잰다(TTY 없음 = 겹이면 code 3)."""
+    """승인 겹 예외는 정한 세 이름뿐(mail_signal·desk_room·mail_daily) — 기본값·빈 목록·오타·예외 없음을 각각 잰다(TTY 없음 = 겹이면 code 3)."""
     from agora import core
     no_tty = lambda: False      # noqa: E731
-    out = core.approval_gate(config={}, isatty=no_tty, exempt="mail_signal")
-    if out.get("why") != "approval_exempt:mail_signal":
-        raise AssertionError(f"기본값에서 신호 우편이 예외가 아니다: {out}")
+    for name in ("mail_signal", "mail_daily"):
+        out = core.approval_gate(config={}, isatty=no_tty, exempt=name)
+        if out.get("why") != "approval_exempt:" + name:
+            raise AssertionError(f"기본값에서 {name} 가 예외가 아니다: {out}")
     for cfg, exempt, what in (({}, None, "예외 없음"),
                               ({"approval_exempt": []}, "mail_signal", "빈 목록"),
                               ({"approval_exempt": ["mail_signal", "오타"]}, "mail_signal", "오타 섞임"),
@@ -17362,17 +17409,20 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("더블: 두 머리는 뜻이 다르다", _case_double_separates_transport_head_from_state_head, None),
     # ── F-1 봉합 6차(codex 6R · master 한정 승인 2026-09-09) ────────────────
     ("게이트: 기준 브랜치 부재는 실패", _case_whitespace_gate_fails_without_base_branch, None),
-    # ── 자비스 우편(계약 확장 9 · 2026-10-05 · TICKET=agora-mail-1to1) ─────────
+    # ── 에이전트 우편(계약 확장 9 · 2026-10-05 · TICKET=agora-mail-1to1) ─────────
     ("우편: 닫힌 모양(모르는 칸 → 10)",       _case_mail_validate_closed, errors.ARGUMENT),
     ("우편: 광장 문과 서로 재사용 불가",       _case_mail_doc_is_not_an_event, None),
     ("우편: 신호 signature 재계산 대조",       _case_mail_signal_signature_recomputed, errors.ARGUMENT),
     ("우편: 신호 7일 창",                      _case_mail_signal_time_window, errors.ARGUMENT),
     ("우편: 신호에 자유문 칸 없음",            _case_mail_signal_has_no_free_text, errors.ARGUMENT),
     ("우편: 봉투에도 자유문 칸 없음",          _case_mail_envelope_has_no_free_text, errors.ARGUMENT),
+    ("우편: 일일 보고 닫힌 모양",              _case_mail_daily_closed_shape, errors.ARGUMENT),
+    ("우편: 일일 보고 예외는 빈 owner_note 만", _case_mail_daily_exempt_only_without_note, None),
+    ("우편: 일일 보고는 미읽음에 안 센다",      _case_mail_daily_not_counted, None),
     ("우편: 발신 원장에 승인 결과",            _case_mail_sent_ledger_records_approval, None),
     ("우편: 서명기 우편 문도 스크럽",          _case_mail_signer_refuses_scrub, errors.GATE_REJECT),
     ("우편: 서명기 인증 문은 닫혀 있다",       _case_mail_signer_auth_is_closed, errors.ARGUMENT),
-    ("우편: 승인 겹 예외는 두 경로뿐",         _case_mail_approval_exempt_only_two_paths, None),
+    ("우편: 승인 겹 예외는 정한 이름뿐",         _case_mail_approval_exempt_only_two_paths, None),
     ("우편: 상담소 방 예외는 핀으로만",        _case_mail_desk_room_exempt_by_pin, None),
     ("우편: 받은 것을 다시 검증·격리",         _case_mail_sync_verifies_and_quarantines, None),
     ("우편: unread.json 계약",                 _case_mail_unread_json_contract, None),
@@ -17387,19 +17437,19 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
 # ── 뮤테이션 ────────────────────────────────────────────────────────────────
 # (id, 파일, 찾을 문자열, 바꿀 문자열, 이 변이를 잡아야 하는 케이스 이름)
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
-    # ── 자비스 우편(2026-10-05 · TICKET=agora-mail-1to1) — 초록이 대상을 만났는가 ──────────
+    # ── 에이전트 우편(2026-10-05 · TICKET=agora-mail-1to1) — 초록이 대상을 만났는가 ──────────
     ("M571-mail-addressee-check-dropped", "agora/mail.py",
      '    if doc["to"] != ctx.participant_id:',
      '    if False:',
      "우편: 받은 것을 다시 검증·격리"),
     ("M572-mail-unread-counts-purged", "agora/mail.py",
-     '        if row.get("purged") or row.get("intent") == SIGNAL or row.get("message_id") in read:',
+     '        if row.get("purged") or row.get("intent") in MACHINE_INTENTS or row.get("message_id") in read:',
      '        if row.get("message_id") in read:',
      "우편: 머리만 온 우편은 안 센다"),
     ("M573-mail-exempt-typo-widens", "agora/core.py",
      '        return frozenset()\n    return frozenset(value)',
      '        return frozenset(APPROVAL_EXEMPT_NAMES)\n    return frozenset(value)',
-     "우편: 승인 겹 예외는 두 경로뿐"),
+     "우편: 승인 겹 예외는 정한 이름뿐"),
     # ── 적대 1R(codex · 2026-10-05) 반영 자리 ──
     ("M574-mail-read-acks-whole-thread", "agora/mail.py",
      '    parts = [_ack(ctx, message_ids=ids[i:i + ACK_IDS_MAX], thread_ids=[])',
@@ -17413,6 +17463,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '"signature": signed["signature"],\n           "approval": approval}',
      '"signature": signed["signature"]}',
      "우편: 발신 원장에 승인 결과"),
+    ("M577-mail-daily-exempt-ignores-note", "agora/mail.py",
+     '              else "mail_daily" if intent == DAILY and not note else None)',
+     '              else "mail_daily" if intent == DAILY else None)',
+     "우편: 일일 보고 예외는 빈 owner_note 만"),
+    ("M578-mail-unread-counts-daily", "agora/mail.py",
+     'MACHINE_INTENTS = (SIGNAL, DAILY)',
+     'MACHINE_INTENTS = (SIGNAL,)',
+     "우편: 일일 보고는 미읽음에 안 센다"),
     # ── 상주 방문(2026-09-11 · 0.1.6 · 계약 확장 8) ─────────────────────────
     # ★브리프가 요구한 여섯 자리(발언 판정 제거·발언 무시·플래그 무시·잠금 제거·깨움 상한 제거·
     #   uninstall 미삭제) + 그 둘레 여섯. 전부 「개발기에서는 초록이 기본값」인 자리다.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""자비스 우편(1:1) 서버 왕복 — docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §8.
+"""에이전트 우편(1:1) 서버 왕복 — docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §8.
 
 무엇을 재는가: 실제 workerd + 실제 D1(로컬) 위에서 `POST /mail` · `GET /mail/inbox` · `POST /mail/ack` 가
 명세의 검사 순서·응답 모양·상한·보존 기한을 지키는가. 서명은 실제 `ssh-keygen -Y sign` 으로 만든다.
@@ -117,7 +117,7 @@ def letter(subject, body="본문입니다", intent="notice"):
     return {"subject": subject, "body": body, "intent": intent}
 
 
-def signal_item(error_code="update.sig_mismatch", op="cys.update", source="update", version="1.1.8", **over):
+def signal_item(error_code="update.sig_mismatch", op="host.update", source="update", version="1.1.8", **over):
     key = hashlib.sha256(canonical_bytes({"error_code": error_code, "op": op, "source": source,
                                           "version": version.lower()})).hexdigest()[:32]
     now = time.time()
@@ -401,6 +401,26 @@ def main():
     code, body, _ = M.post(m1, s1)
     record("본문 삭제 뒤 같은 서명 재게시 = 200(새 배달 0)", (200, mail_id1),
            (code, body.get("mail_id") if isinstance(body, dict) else None))
+
+    # ── 9-b. 일일 보고(intent=daily · 명세 §1-2 · 증보 8) ────────────────────
+    print("\n== 우편 9-b. 일일 보고(intent=daily) ==")
+    TDy = new_id()
+    today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    daily = {"day": today, "version": {"host": "1.1.7", "pack": "1.1.7"}, "os": "windows-11",
+             "seats": {"count": 3, "roles": ["cso", "master", "worker"]},
+             "doctor": {"ok": 12, "warn": 1, "fail": 1, "skip": 1,
+                        "warn_ids": ["dept-awakening-seed"], "fail_ids": ["runtime-seal"]},
+             "depts": {"active": 0, "tombstones": 1}, "owner_note": ""}
+    _, _, code, body, _ = M.send(A, C["id"], TDy, {"intent": "daily", "daily": dict(daily, note="자유문")})
+    record("일일 보고 모르는 칸 = 400/10", (400, 10), (code, code_of(body)))
+    dy1, _, code, body, _ = M.send(A, C["id"], TDy, {"intent": "daily", "daily": daily})
+    record("일일 보고 첫 통 = 201(신호 버킷과 따로)", 201, code)
+    _, _, code, body, _ = M.send(A, C["id"], TDy, {"intent": "daily", "daily": dict(daily, owner_note="둘째")})
+    record("같은 날 두 번째 일일 보고 = 429 mail_daily_day", (429, 7, "mail_daily_day"),
+           (code, code_of(body), (body.get("detail") or {}).get("limit") if isinstance(body, dict) else None))
+    code, boxc, _ = M.inbox(C["id"], M.auth(C, C["id"]))
+    record("C 수신함에 일일 보고 있음 · unread_count 그대로 1(세지 않는다)", (True, 1),
+           (find(boxc, dy1["message_id"]) is not None, boxc.get("unread_count") if isinstance(boxc, dict) else None))
 
     # ── 10. 연속 규칙 ────────────────────────────────────────────────────────
     print("\n== 우편 10. 같은 수신자 연속 5통 → 쿨다운 · 답장이 오면 풀린다 ==")

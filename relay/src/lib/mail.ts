@@ -1,5 +1,5 @@
 /**
- * 자비스 우편(1:1) — 순수 모듈. 계약 = docs/RELAY.md §14 · 명세 = docs/SPEC-mail-1to1-2026-10-05.md §1-1·§2·§3.
+ * 에이전트 우편(1:1) — 순수 모듈. 계약 = docs/RELAY.md §14 · 명세 = docs/SPEC-mail-1to1-2026-10-05.md §1-1·§2·§3.
  *
  * ★우편은 방이 아니다. 광장 `KINDS` 9종·리듀서·상태기계에 들어가지 않는다(PROTOCOL 무변경).
  *   그래서 스키마도 schema.ts 의 `validate` 가 아니라 여기의 **닫힌 정의**를 쓴다 — 우편 문서를
@@ -17,6 +17,9 @@ export const MAIL_KIND = "mail";
 export const MAIL_INTENTS = ["notice", "request", "report"] as const;
 export const SIGNAL_INTENT = "signal";
 export const SIGNAL_SOURCES = ["master", "worker", "cso", "pack", "update"] as const;
+export const DAILY_INTENT = "daily";              // 일일 보고(명세 §1-2 · 증보 8) — 신호와 다른 통
+export const DAILY_MAX_BYTES = 32 * 1024;        // 일일 보고 canonical 상한(일반 우편 64KB 보다 작다 · 넘으면 413/3)
+export const DAILY_NOTE_MAX_CHARS = 200;         // owner_note = 유일한 자유문 · 코드포인트
 
 export const MAX_SUBJECT_CHARS = 200;          // 코드포인트 수(UTF-16 길이 아님)
 export const MAX_BODY_BYTES = 16 * 1024;       // UTF-8
@@ -53,6 +56,10 @@ const VERSION_RE = /^[0-9A-Za-z.+-]{1,32}$/;
 const OS_RE = /^(macos|windows|linux)(-[0-9.]{1,16})?$/;
 const ERROR_CODE_RE = /^[a-z0-9._-]{1,48}$/;
 const MAIL_ID_RE = /^ml_(\d{16})$/;
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ROLE_RE = /^[a-z][a-z0-9-]{0,31}$/;
+const CHECK_ID_RE = /^[a-z0-9-]{1,40}$/;
+const DAILY_KEYS = ["day", "version", "os", "seats", "doctor", "errors", "updates", "depts", "uptime", "owner_note"];
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -164,11 +171,96 @@ async function checkSignal(p: Obj, nowMs: number): Promise<void> {
   }
 }
 
+function intIn(o: Obj, key: string, where: string, min: number, max: number): number {
+  const v = need<number>(o, key, "int", where);
+  if (v < min || v > max) bad("정수 범위 밖", { where: `${where}.${key}`, min, max });
+  return v;
+}
+
+function strList(o: Obj, key: string, where: string, max: number, re: RegExp): string[] {
+  const v = need<unknown[]>(o, key, "list", where);
+  if (v.length > max) bad("목록이 너무 길다", { where: `${where}.${key}`, count: v.length, max });
+  v.forEach((x, i) => { if (typeof x !== "string" || !re.test(x)) bad("목록 항목 형식이 아니다", { where: `${where}.${key}[${i}]` }); });
+  return v as string[];
+}
+
+/**
+ * 일일 보고(명세 §1-2) — 닫힌 모양 · `day` 만 필수 · 나머지 칸은 선택(모르면 뺀다) · 칸 안의 하위 칸은 전부 필수
+ * (단 `version` 은 host·pack 중 하나 이상). ★자유문은 `owner_note` 1칸(≤200 코드포인트)뿐 — 나머지는 계수·판본·기계 id.
+ * 크기 상한 32KB 는 validateMail 이 canonical 전체로 잰다(413/3).
+ */
+function checkDaily(p: Obj, nowMs: number): void {
+  closed(p, ["intent", "daily"], "payload");
+  const w = "payload.daily";
+  const d = need<Obj>(p, "daily", "dict", "payload");
+  closed(d, DAILY_KEYS, w);
+  const day = need<string>(d, "day", "string", w);
+  if (!DAY_RE.test(day) || Number.isNaN(Date.parse(day + "T00:00:00.000Z"))) bad("day 는 YYYY-MM-DD", { where: `${w}.day` });
+  if ("version" in d) {
+    const v = need<Obj>(d, "version", "dict", w);
+    closed(v, ["host", "pack"], `${w}.version`);
+    const keys = Object.keys(v);
+    if (!keys.length) bad("version 은 host·pack 중 하나 이상", { where: `${w}.version` });
+    for (const k of keys) if (!VERSION_RE.test(need<string>(v, k, "string", `${w}.version`))) bad("version 형식이 아니다", { where: `${w}.version.${k}` });
+  }
+  if ("os" in d && !OS_RE.test(need<string>(d, "os", "string", w))) bad("os 형식이 아니다", { where: `${w}.os` });
+  if ("seats" in d) {
+    const o = need<Obj>(d, "seats", "dict", w); const ww = `${w}.seats`;
+    closed(o, ["count", "roles"], ww);
+    intIn(o, "count", ww, 0, 64);
+    const roles = strList(o, "roles", ww, 64, ROLE_RE);
+    if (roles.some((r, i) => i > 0 && roles[i - 1] > r)) bad("roles 는 정렬된 목록", { where: `${ww}.roles` });
+  }
+  if ("doctor" in d) {
+    const o = need<Obj>(d, "doctor", "dict", w); const ww = `${w}.doctor`;
+    closed(o, ["ok", "warn", "fail", "skip", "warn_ids", "fail_ids"], ww);
+    for (const k of ["ok", "warn", "fail", "skip"]) intIn(o, k, ww, 0, 999);
+    for (const k of ["warn_ids", "fail_ids"]) strList(o, k, ww, 64, CHECK_ID_RE);
+  }
+  if ("errors" in d) {
+    const o = need<Obj>(d, "errors", "dict", w); const ww = `${w}.errors`;
+    closed(o, ["tick_errors", "hook_rc_nonzero", "signatures"], ww);
+    for (const k of ["tick_errors", "hook_rc_nonzero"]) intIn(o, k, ww, 0, SIGNAL_COUNT_MAX);
+    strList(o, "signatures", ww, SIGNAL_ITEMS_MAX, SIG_KEY);
+  }
+  if ("updates" in d) {
+    const ups = need<unknown[]>(d, "updates", "list", w);
+    if (ups.length > 10) bad("updates 는 최대 10개", { where: `${w}.updates`, count: ups.length, max: 10 });
+    ups.forEach((u, i) => {
+      const ww = `${w}.updates[${i}]`;
+      if (typeof u !== "object" || u === null || Array.isArray(u)) bad("updates 항목은 객체여야 한다", { where: ww });
+      const o = u as Obj;
+      closed(o, ["from", "to", "result", "at"], ww);
+      for (const k of ["from", "to"]) if (!VERSION_RE.test(need<string>(o, k, "string", ww))) bad("version 형식이 아니다", { where: `${ww}.${k}` });
+      if (!ERROR_CODE_RE.test(need<string>(o, "result", "string", ww))) bad("result 형식이 아니다", { where: `${ww}.result` });
+      const at = need<string>(o, "at", "string", ww);
+      if (!isIsoMs(at)) bad("at 은 밀리초 고정폭 ISO", { where: `${ww}.at` });
+      checkTimeWindow(at, `${ww}.at`, nowMs);
+    });
+  }
+  if ("depts" in d) {
+    const o = need<Obj>(d, "depts", "dict", w); const ww = `${w}.depts`;
+    closed(o, ["active", "tombstones"], ww);
+    for (const k of ["active", "tombstones"]) intIn(o, k, ww, 0, 999);
+  }
+  if ("uptime" in d) {
+    const o = need<Obj>(d, "uptime", "dict", w); const ww = `${w}.uptime`;
+    closed(o, ["last_boot", "uptime_s"], ww);
+    const lb = need<string>(o, "last_boot", "string", ww);
+    if (!isIsoMs(lb) || Date.parse(lb) > nowMs + FUTURE_SKEW_MS) bad("last_boot 은 지나간 밀리초 ISO", { where: `${ww}.last_boot` });
+    intIn(o, "uptime_s", ww, 0, 31_536_000);
+  }
+  if ("owner_note" in d) {
+    const n = [...need<string>(d, "owner_note", "string", w)].length;
+    if (n > DAILY_NOTE_MAX_CHARS) bad("owner_note 는 200자까지", { where: `${w}.owner_note`, chars: n, max: DAILY_NOTE_MAX_CHARS });
+  }
+}
+
 function checkLetter(p: Obj): void {
   closed(p, ["subject", "body", "intent", "refs"], "payload");
   const intent = need<string>(p, "intent", "string", "payload");
   if (!(MAIL_INTENTS as readonly string[]).includes(intent)) {
-    bad("intent 가 계약 밖", { where: "payload.intent", intent, allowed: [...MAIL_INTENTS, SIGNAL_INTENT] });
+    bad("intent 가 계약 밖", { where: "payload.intent", intent, allowed: [...MAIL_INTENTS, SIGNAL_INTENT, DAILY_INTENT] });
   }
   const subject = need<string>(p, "subject", "string", "payload");
   const n = [...subject].length;
@@ -236,7 +328,13 @@ export async function validateMail(doc: unknown, nowMs: number): Promise<Obj> {
   const p = need<Obj>(d, "payload", "dict", "mail");
   const intent = need<string>(p, "intent", "string", "payload");
   if (intent === SIGNAL_INTENT) await checkSignal(p, nowMs);
-  else checkLetter(p);
+  else if (intent === DAILY_INTENT) {
+    checkDaily(p, nowMs);
+    const bytes = canonicalBytes(d).length;
+    if (bytes > DAILY_MAX_BYTES) {
+      fail(GATE_REJECT, "일일 보고 크기 상한 초과", { where: "mail", bytes, limit: DAILY_MAX_BYTES }, { status: 413 });
+    }
+  } else checkLetter(p);
   return d;
 }
 

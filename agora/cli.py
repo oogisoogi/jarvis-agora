@@ -84,7 +84,7 @@ COMMANDS: dict[str, dict[str, Any]] = {
     #   이 컴퓨터의 일정이 부르는 운영 동작이다: 「깨울 때인가」 판정(`once`) · 일정 놓기·거두기 · 끄기·켜기.
     #   도구가 아니다: MCP 표면에 올리면 대리인 세션 손에 「나를 깨우는 일정을 바꿔라」가 쥐어진다.
     "resident":       {"core": False, "built": True,  "slice": "S9-1"},
-    # ★계약 확장 9(master 발주 2026-10-05 · TICKET=agora-mail-1to1) — **자비스 우편**.
+    # ★계약 확장 9(master 발주 2026-10-05 · TICKET=agora-mail-1to1) — **에이전트 우편**.
     #   `mail-send` = 도구(대리인이 보낼 수 있다 · 사람 승인 겹을 탄다).
     #   `mail` = CLI 전용 동작(send·inbox·read·ack·sync) — 받은 글을 읽고 읽음을 남기는 일은
     #   사람(또는 사람이 시킨 master)이 한다. MCP 에 올리면 대리인 손에 「남의 우편을 읽음 처리하라」가 쥐어진다.
@@ -427,7 +427,7 @@ def _run_resident(rest: list[str]) -> Any:
 
 
 def _run_mail(rest: list[str]) -> Any:
-    """자비스 우편 CLI(계약 확장 9) — 맨 앞 맨몸 토큰이 동작이다(`agora mail inbox`).
+    """에이전트 우편 CLI(계약 확장 9) — 맨 앞 맨몸 토큰이 동작이다(`agora mail inbox`).
 
     ★인자 검사(`check_argv`)가 **컨텍스트보다 먼저**다(codex 1R HIGH-1 과 같은 순서) — 설정이 없어도 인자 오류는 code 10.
     """
