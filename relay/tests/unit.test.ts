@@ -860,6 +860,8 @@ describe("상담소 방 자동 방문 제외(AGORA_DESK_ROOMS · master ca16d9a2
     expect(split.auto.map(r => r.thread_id)).toEqual([plain]);
     expect(homeSql.splitMine(rowsMine, new Set(), 2).auto.map(r => r.thread_id)).toEqual([d2, d1]);
     const mine = JSON.stringify(split.auto.map(r => r.thread_id));
+    // 커서가 덮는 방 = all ∪ auto — auto 에만 있는 일반 방의 답글도 next_since 에 든다(적대 5R codex · 같은 답글 반복 차단)
+    expect(homeSql.roomsToRead(split).sort()).toEqual([d1, d2, plain].sort());
     const got = run(homeSql.HOME_REPLIES_SQL, mine, "me", 0, 2, deskJson).map((r: any) => r.message_id);
     expect(got).toEqual(["x".repeat(32)]);
     // 답글 SQL 자체의 제외(2차 겹이 아니라 1차) — 내 방 목록에 상담소가 섞여 들어와도 일반 답글만

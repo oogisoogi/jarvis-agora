@@ -50,7 +50,7 @@ DEFAULTS: dict[str, Any] = {
 PERIODS = ("day", "week")
 MODES = ("collect", "worker")
 MAX_BATCH_BYTES = 1024 * 1024        # 설정으로도 못 넘는 천장
-MIN_BATCH_BYTES = 4 * 1024           # 설정 하한 — 오너 한 줄(계약 ≤200자 · 이스케이프 최악 6B/자 ≈1.2KB)이 빈 프롬프트에 늘 혼자 든다(적대 4R codex)
+MIN_BATCH_BYTES = 4 * 1024           # 설정 하한 — 오너 한 줄(계약 ≤200자)이 이스케이프 최악(6B/자)·이름 가림 최악(15B/자 = 3,000B)에도 빈 프롬프트에 혼자 든다(적대 4R·5R codex · 시험) · 규칙 가림은 보장 밖 → 보고서 전용
 ACK_TRIES_MAX = 3                    # 접수 회신 재시도(상한 · 실패한 판 수)
 LEAK_RUN = 40                        # 교차 유출 검사 — 연속 일치 문자 수(명세 §10-4 · 실측 없음 · 첫 배치로 조정)
 LEAK_RUN_PUBLIC = 20                 # 공개 답은 더 엄격하게(적대 1R codex — 40자 미만 비공개 사실이 통째로 지나갔다 · 오탐 = 보류 = 안전 쪽)
@@ -483,15 +483,19 @@ def _masker(ctx: Any) -> Callable[[str], str]:
     """스크럽 규칙(차단 17종 + 이름 목록)으로 **가린 사본**을 만든다 — 모델에 보내는 입력용(발신 검사 아님)."""
     from agora import scrub
     rules = scrub.load_rules()
-    names = sorted(scrub.load_names(scrub.names_path(ctx.config_dir)), key=len, reverse=True)
+    names = sorted({n for n in scrub.load_names(scrub.names_path(ctx.config_dir)) if n}, key=len, reverse=True)
+    # ★이름은 **한 번에**(긴 이름 먼저) · 이미 넣은 가림 표지 안은 건너뛴다 · 대소문자 무관(목록은 소문자 · scrub.check_names 와 같다).
+    #   적대 5R codex — 이름마다 차례로 바꾸면 앞서 넣은 「[가림:이름]」 안의 글자(「이」)를 다시 가려 사본이 수십 배로 불었고,
+    #   대소문자를 가리면 「Kim」이 목록의 「kim」을 비껴갔다. 한 번에 바꾸면 늘어남은 글자당 표지 하나(≤15B)다.
+    name_re = (re.compile(r"\[가림:[^\[\]]{1,40}\]|" + "|".join(re.escape(n) for n in names), re.IGNORECASE)
+               if names else None)
 
     def mask(text: str) -> str:
         out = text or ""
         for rid, _kind, pattern in rules.compiled:
             out = pattern.sub(f"[가림:{rid}]", out)
-        for n in names:
-            if n:
-                out = out.replace(n, "[가림:이름]")
+        if name_re is not None:
+            out = name_re.sub(lambda m: m.group(0) if m.group(0).startswith("[가림:") else "[가림:이름]", out)
         return out
     return mask
 
@@ -683,7 +687,8 @@ def collect(ctx: Any, *, max_bytes: int) -> dict[str, Any]:
     #   보고서에는 전부 결정론으로 싣는다(§3 오너 한 줄) · 모델이 못 읽은 것만 다음 기간에 다시 읽힌다.
     #   ★넘친 한 줄 뒤에서 멈추지 않는다 — 뒤의 짧은 한 줄은 남은 자리에 담는다(적대 3R codex — 큰 한 줄 하나가 뒤를 다 막았다).
     #   ★혼자서도 빈 프롬프트에 안 드는 한 줄은 **보고서 전용**(§3 에 「모델 입력 불가」 표시 · 이월하지 않는다 — 이월해도 영영 못 든다).
-    #     설정 하한(MIN_BATCH_BYTES)과 계약(≤200자)으로는 생기지 않는 자리다 — 방어 분기(적대 4R codex — 잘라 담고 완료로 치면 뒤쪽이 사라졌다).
+    #     설정 하한(MIN_BATCH_BYTES)·계약(≤200자)·이름 가림 한 번으로는 생기지 않는다 — 규칙 가림이 크게 불린 경우의 방어 분기
+    #     (적대 4R codex — 잘라 담고 완료로 치면 뒤쪽이 사라졌다).
     notes_out: list[str] = []
     notes_report_only: list[str] = []
     alone = prompt_len(_empty_payload())

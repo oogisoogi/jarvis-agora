@@ -16,6 +16,12 @@ export function splitMine<T extends { thread_id: string }>(rows: T[], desk: Set<
   return { all: rows.slice(0, max), auto: rows.filter(r => !desk.has(r.thread_id)).slice(0, max) };
 }
 
+/** 방 상태를 읽을 방 = all ∪ auto(질의 하나) — ★next_since 는 답글을 돌려준 방(auto)까지 덮어야 한다
+ *  (적대 5R codex — all 만 보면 auto 에만 있는 일반 방의 답글이 커서에 안 들어 같은 답글이 거듭 왔다). 응답의 rooms 는 all 만. */
+export function roomsToRead(split: { all: { thread_id: string }[]; auto: { thread_id: string }[] }): string[] {
+  return [...new Set([...split.all, ...split.auto].map(r => r.thread_id))];
+}
+
 // (6) 말할 차례인 방 — ?1 참가자 · ?2 상한 · ?3 상담소 방 JSON
 export const HOME_SPEAK_DUE_SQL =
   `SELECT r.thread_id, r.round, r.state FROM rooms r

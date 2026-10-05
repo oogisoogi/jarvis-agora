@@ -225,6 +225,11 @@ MUTATIONS = [
      "return { all: rows.filter(r => !desk.has(r.thread_id)).slice(0, max),",
      "vitest", "제외는 LIMIT 전(SQL WHERE)"),
 
+    ("M44 커서가 답글 후보 방(auto)을 안 덮는다", "src/lib/home_sql.ts",
+     "  return [...new Set([...split.all, ...split.auto].map(r => r.thread_id))];",
+     "  return [...new Set([...split.all].map(r => r.thread_id))];",
+     "vitest", "제외는 LIMIT 전(SQL WHERE)"),
+
     ("M41 상담소 방 제외를 LIMIT 뒤로(답글 SQL)", "src/lib/home_sql.ts",
      "          AND e.thread_id NOT IN (SELECT value FROM json_each(?5))\n",
      "",

@@ -4482,7 +4482,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M639-desk-public-threshold-loose", "M640-desk-public-sees-private",
                "M641-desk-analysis-writes-public", "M642-desk-cap-skips-wrapping", "M643-desk-fleet-outside-cap",
                "M644-desk-trimmed-notes-done", "M645-desk-final-size-unchecked",
-               "M646-desk-note-stops-at-first-overflow", "M647-desk-oversize-note-carried-forever"),
+               "M646-desk-note-stops-at-first-overflow", "M647-desk-oversize-note-carried-forever",
+               "M648-desk-mask-rescans-tokens", "M649-desk-mask-case-sensitive"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17696,6 +17697,28 @@ def _case_desk_public_call_isolated() -> None:
         raise AssertionError(f"호출 원장이 다르다: {calls}")
 
 
+def _case_desk_mask_once_case_free() -> None:
+    """적대 5R codex — 이름 가림은 **한 번에**(넣은 표지 안을 다시 안 가린다) · 대소문자 무관 ·
+    한 글자 이름 200자 오너 한 줄도 하한 4KB 빈 프롬프트에 혼자 든다(보고서 전용으로 안 빠진다)."""
+    from agora import counsel, mail, scrub
+    note = "김" * 200
+    daily = _mail_doc(payload={"intent": "daily", "daily": {"day": mail.now_ms_iso()[:10], "os": "macos-15.6",
+                                                             "owner_note": note}})
+    ctx, _store = _desk_world([daily])
+    with open(os.path.join(ctx.config_dir, scrub.NAMES_FILENAME), "w", encoding="utf-8") as fh:
+        fh.write("김\n이\nkim\n")
+    mask = counsel._masker(ctx)
+    if mask("Kim 과 KIM 그리고 이몽룡") != "[가림:이름] 과 [가림:이름] 그리고 [가림:이름]몽룡":
+        raise AssertionError(f"대소문자·한 번 가림이 다르다: {mask('Kim 과 KIM 그리고 이몽룡')}")
+    if mask("[가림:이름]") != "[가림:이름]" or mask(note) != "[가림:이름]" * 200:
+        raise AssertionError("넣은 가림 표지 안을 다시 가렸다")
+    _desk_cycle(ctx, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    data = counsel.collect(ctx, max_bytes=counsel.MIN_BATCH_BYTES)
+    if len(data["daily_notes"]) != 1 or data["notes_report_only"] or data["bytes"] > counsel.MIN_BATCH_BYTES:
+        raise AssertionError(f"하한 4KB 에 오너 한 줄이 혼자 안 들었다: in={len(data['daily_notes'])} "
+                             f"only={len(data['notes_report_only'])} bytes={data['bytes']}")
+
+
 def _case_scrub_our_two_hosts_only() -> None:
     """허용 도메인 = 우리 정확한 호스트 둘만(master 0a9ded7f · 하위·형제·상위·꼬리 붙인 호스트 차단)."""
     from agora import scrub
@@ -18306,6 +18329,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("상담소: 상한 = 최종 프롬프트 바이트",      _case_desk_prompt_cap_is_final_bytes, None),
     ("상담소: 빠진 오너 한 줄은 이월",          _case_desk_owner_notes_carried, None),
     ("상담소: 공개 답은 공개 글만 본다",        _case_desk_public_call_isolated, None),
+    ("상담소: 이름 가림은 한 번·대소문자 무관",  _case_desk_mask_once_case_free, None),
     ("스크럽: 우리 도메인은 정확한 두 호스트",  _case_scrub_our_two_hosts_only, None),
     ("상주: 데스크면 깨움 0",                   _case_resident_desk_branch_never_wakes, None),
 )
@@ -18419,6 +18443,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if alone + _jlen(view) > max_bytes:\n            notes_report_only.append(n["key"])',
      '        if False:\n            notes_report_only.append(n["key"])',
      "상담소: 빠진 오너 한 줄은 이월"),
+    ("M648-desk-mask-rescans-tokens", "agora/counsel.py",
+     'r"\\[가림:[^\\[\\]]{1,40}\\]|" + ',
+     '',
+     "상담소: 이름 가림은 한 번·대소문자 무관"),
+    ("M649-desk-mask-case-sensitive", "agora/counsel.py",
+     '"|".join(re.escape(n) for n in names), re.IGNORECASE)',
+     '"|".join(re.escape(n) for n in names))',
+     "상담소: 이름 가림은 한 번·대소문자 무관"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',
      '\n.jarvis.godmeyou.kr\n.godmeyou.kr\n',

@@ -18,7 +18,7 @@ import { b64decode, checkSignatureBytes, fingerprintOf, hasArmor, parseArmored,
          parsePublicKeyBlob } from "./lib/sshsig.ts";
 import { bumpRate, deriveThread, eventIdOf, nowIso, rosterView, threadEvents,
          upsertRoom, type Env } from "./lib/store.ts";
-import { HOME_MINE_SQL, HOME_REPLIES_SQL, HOME_SPEAK_DUE_SQL, splitMine } from "./lib/home_sql.ts";
+import { HOME_MINE_SQL, HOME_REPLIES_SQL, HOME_SPEAK_DUE_SQL, roomsToRead, splitMine } from "./lib/home_sql.ts";
 import { FEED_SORTS, deskRooms, feed, isCommunity, replyParent, withoutDeskRooms, type FeedEvent,
          type FeedSort } from "./lib/feed.ts";
 import { communityBuckets, isNewParticipant, limitsFromEnv, mailBuckets, mailConsecutive,
@@ -675,9 +675,12 @@ async function getHome(req: Request, env: Env): Promise<Response> {
   const mineRows = (await qb.prepare(
     HOME_MINE_SQL
   ).bind(pid, HOME_ROOMS_MAX + desk.size).all<{ thread_id: string; last: number }>()).results ?? [];
-  const { all: mine, auto: mineAuto } = splitMine(mineRows, desk, HOME_ROOMS_MAX);
+  const split = splitMine(mineRows, desk, HOME_ROOMS_MAX);
+  const { all: mine, auto: mineAuto } = split;
   const ids = JSON.stringify(mine.map(r => r.thread_id));
   const autoIds = JSON.stringify(mineAuto.map(r => r.thread_id));
+  const readIds = JSON.stringify(roomsToRead(split));
+  const shown = new Set(mine.map(r => r.thread_id));
 
   // (6) 말할 차례인 방 — 열린 토론 회차(r0~r3)인데 **이 회차에 내 post 가 없는** 방(상주 목적 speak 의 후보).
   //   ★「내 방」만이 아니라 열린 방 전체에서 고른다 — 상주는 아직 한 번도 안 쓴 방에서도 깨워야 한다.
@@ -691,7 +694,7 @@ async function getHome(req: Request, env: Env): Promise<Response> {
     rooms = (await qb.prepare(
       `SELECT thread_id, title, type, state, round, closed, updated_at, last_seq FROM rooms
         WHERE thread_id IN (SELECT value FROM json_each(?1)) ORDER BY updated_at DESC`
-    ).bind(ids).all<any>()).results ?? [];
+    ).bind(readIds).all<any>()).results ?? [];
     // (4) 내 글에 달린 새 답글 — 부모가 **같은 방·먼저 적재된 내 post** 일 때만(plaza.feed 와 같은 조건)
     replies = (await qb.prepare(
       HOME_REPLIES_SQL
@@ -717,7 +720,9 @@ async function getHome(req: Request, env: Env): Promise<Response> {
   // 2차 겹 — SQL 이 1차로 걸렀다. 질의가 바뀌어도 상담소 방이 새지 않게 응답 직전에 한 번 더.
   const speakDueOut = withoutDeskRooms(speakDue, desk, r => r.thread_id);
   replies = withoutDeskRooms(replies, desk, (r: any) => r.thread_id);
+  // ★커서 = 읽은 방 전부(all ∪ auto)의 최신 seq · 응답의 rooms = all 만(상담소 포함 · 자동 방문 후보와 별개)
   const nextSince = Math.max(since, ...rooms.map(r => Number(r.last_seq) || 0));
+  rooms = rooms.filter(r => shown.has(r.thread_id));
   return json({
     participant: pid, fingerprint: me.fingerprint, since, next_since: nextSince,
     rooms: rooms.map(r => ({ room_id: r.thread_id, title: r.title, type: r.type, state: r.state,
