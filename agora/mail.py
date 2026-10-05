@@ -204,7 +204,8 @@ def _str_list(obj: dict[str, Any], key: str, where: str, most: int, rx: Any) -> 
     return v
 
 
-def _check_daily(payload: dict[str, Any], *, now: datetime.datetime | None) -> None:
+def _check_daily(payload: dict[str, Any], *, now: datetime.datetime | None,
+                 ts: datetime.datetime | None = None) -> None:
     """일일 보고(명세 §1-2) — 릴레이 `checkDaily` 와 같은 규칙. ★자유문 = `owner_note` 1칸(≤200자)뿐."""
     _closed(payload, ("intent", "daily"), "payload")
     w = "payload.daily"
@@ -217,6 +218,9 @@ def _check_daily(payload: dict[str, Any], *, now: datetime.datetime | None) -> N
         ok_day = False
     if not ok_day:
         _fail("day 는 YYYY-MM-DD", {"where": w + ".day"})
+    if ts is not None and abs((datetime.date.fromisoformat(day) - ts.date()).days) > 1:
+        # ★봉투 ts 날짜 ±1일(적대 6R #4 · 릴레이 checkDaily 와 같은 경계)
+        _fail("day 는 봉투 ts 날짜 ±1일", {"where": w + ".day", "why": "day_far_from_ts"})
     if "version" in d:
         v = _need(d, "version", dict, w)
         _closed(v, ("host", "pack"), w + ".version")
@@ -331,7 +335,7 @@ def validate(doc: Any, *, now: datetime.datetime | None = None) -> dict[str, Any
         _check_signal(payload, now=basis)
         return doc
     if intent == DAILY:
-        _check_daily(payload, now=basis)
+        _check_daily(payload, now=basis, ts=_parse_ts(doc["ts"]))
         if len(canonical_bytes(doc)) > DAILY_MAX_BYTES:     # 릴레이 413/3 과 같은 경계
             _fail("일일 보고 32KB 상한 초과", {"limit": DAILY_MAX_BYTES}, errors.GATE_REJECT)
         return doc
@@ -482,11 +486,15 @@ def desk_pin(path: str | None = None) -> dict[str, Any]:
 
 # ── 보내기 ─────────────────────────────────────────────────────────────────
 
-def _known_mail(ctx: Any, message_id: str) -> dict[str, Any] | None:
-    """내가 받았거나 보낸 우편 한 통(답장의 대화·상대를 정한다)."""
-    for name in (INBOX_FILE, SENT_FILE):
+def _known_mail(ctx: Any, message_id: str, peer: str) -> dict[str, Any] | None:
+    """그 상대(peer)와 주고받은 우편 한 통(답장의 대화를 정한다).
+
+    ★message_id 는 발신자별로만 유일하다 — 상대 없이 찾으면 남이 같은 id 로 보낸 우편이 먼저 잡혀 내 답장이
+      거부된다(적대 6R #5). 받은 우편이면 보낸이, 보낸 우편이면 받는이가 peer 인 줄만 본다.
+    """
+    for name, side in ((INBOX_FILE, "from"), (SENT_FILE, "to")):
         for row in _rows(_path(ctx, name)):
-            if row.get("message_id") == message_id:
+            if row.get("message_id") == message_id and row.get(side) == peer:
                 return row
     return None
 
@@ -506,12 +514,9 @@ def build(ctx: Any, *, to: str, payload: dict[str, Any],
     from agora import core, tools
     thread_id = new_id()
     if reply_to:
-        known = _known_mail(ctx, reply_to)
+        known = _known_mail(ctx, reply_to, to)
         if known is None:
-            _fail("답할 우편을 이 우편함에서 찾지 못했다", {"reply_to": reply_to})
-        peer = known.get("to") if known.get("from") == ctx.participant_id else known.get("from")
-        if peer != to:
-            _fail("답장의 받는 사람이 그 대화의 상대가 아니다", {"to": to, "peer": peer})
+            _fail("답할 우편을 이 우편함에서 찾지 못했다(그 상대와 주고받은 우편 중)", {"reply_to": reply_to, "to": to})
         thread_id = known["thread_id"]
     doc: dict[str, Any] = {
         "v": 1, "kind": MAIL_KIND, "message_id": new_id(), "thread_id": thread_id,
@@ -637,8 +642,20 @@ def _verify_item(ctx: Any, item: dict[str, Any], *, inbox_rows: list[dict[str, A
             "received_at": now_ms_iso()}
 
 
-def sync(ctx: Any) -> dict[str, Any]:
-    """수신함 한 번(명세 §5 · §13-4). ★읽음 표시는 보내지 않는다 — 사람이 `read` 로 봤을 때만."""
+def _refresh_roster(ctx: Any) -> dict[str, Any]:
+    """명부 자동 재수신(적대 6R #1) — **추가만 있는 차이만** 받는다(`onboard.sync_roster(additive_only=True)`)."""
+    from agora import onboard
+    return onboard.sync_roster(directory=ctx.config_dir, additive_only=True)
+
+
+def sync(ctx: Any, *, refresh_roster: Any = None, _refreshed: bool = False) -> dict[str, Any]:
+    """수신함 한 번(명세 §5 · §13-4). ★읽음 표시는 보내지 않는다 — 사람이 `read` 로 봤을 때만.
+
+    ★명부에 없는 보낸이(보류)가 나오면 **같은 회차에 명부를 한 번 다시 받는다**(적대 6R #1 · master 정책 b90adcd6) —
+      새 참가자의 첫 우편(상담소의 주 흐름)이 사람의 sync-roster 를 기다리며 커서를 세우지 않게. 추가만 있는 차이면
+      받아 두고 그 쪽을 다시 당긴다 · 지우기·키 교체·운영자 추가면 보류 유지(사람) — 그때도 보류 수가 커서·unread.json·
+      하트비트에 실려 **멈춤이 보인다**.
+    """
     cursor_path = _path(ctx, CURSOR_FILE)
     cursor = _load_json(cursor_path)
     since = cursor.get("since") if MAIL_ID_RE.match(str(cursor.get("since") or "")) else ""
@@ -652,7 +669,7 @@ def sync(ctx: Any) -> dict[str, Any]:
     have = {(r.get("from"), r.get("message_id")) for r in inbox_rows}
     pin = desk_pin()
     trusted = set((ctx.config or {}).get("trusted_senders") or [])
-    added = quarantined = 0
+    added = quarantined = held = 0
     hold: int | None = None          # 명부가 낡아 못 본 첫 우편 — 커서를 그 앞에 멈춘다
     max_seq = int(since[3:]) if since else 0
     for thread in page.get("threads") or []:
@@ -670,7 +687,8 @@ def sync(ctx: Any) -> dict[str, Any]:
             if "quarantine" in row:
                 if row["quarantine"] in ("not_in_roster", "no_roster"):
                     hold = seq if hold is None else min(hold, seq)
-                    continue                     # 명부를 받으면 다음 판에 다시 본다
+                    held += 1
+                    continue                     # 명부를 받으면 다시 본다(같은 회차 재수신 1회 · 아래)
                 _append(_path(ctx, QUARANTINE_FILE), {**row, "at": now_ms_iso()})
                 quarantined += 1
                 continue
@@ -689,8 +707,13 @@ def sync(ctx: Any) -> dict[str, Any]:
                 body = json.loads(row["mail"])["payload"]["body"]
                 notice["summary"] = body[:SUMMARY_CHARS]
             _append(_path(ctx, NOTICES_FILE), notice)
+    # ★영수 커서는 `>=` 로 받는다(적대 6R #6 — 같은 밀리초 영수가 쪽 경계에 걸려도 빠지지 않게) · 겹친 줄은 여기서 거른다.
+    seen_receipts = {(r.get("message_id"), r.get("to"), r.get("acked_at")) for r in _rows(_path(ctx, RECEIPTS_FILE))}
     for receipt in page.get("receipts") or []:
-        _append(_path(ctx, RECEIPTS_FILE), {**receipt, "seen_at": now_ms_iso()})
+        key = (receipt.get("message_id"), receipt.get("to"), receipt.get("acked_at"))
+        if key not in seen_receipts:
+            seen_receipts.add(key)
+            _append(_path(ctx, RECEIPTS_FILE), {**receipt, "seen_at": now_ms_iso()})
         if str(receipt.get("acked_at") or "") > receipts_since:
             receipts_since = str(receipt["acked_at"])
     if hold is not None:
@@ -700,11 +723,24 @@ def sync(ctx: Any) -> dict[str, Any]:
     else:
         new_since = f"ml_{max_seq:016d}" if max_seq else since
     _write_atomic(cursor_path, {"since": new_since, "receipts_since": receipts_since,
-                                "at": now_ms_iso()})
+                                "held": held, "at": now_ms_iso()})
     unread = write_unread(ctx, desk=pin)
-    return {"added": added, "quarantined": quarantined, "held_for_roster": hold is not None,
-            "unread": unread["count"], "relay_unread_count": page.get("unread_count"),
-            "receipts": len(page.get("receipts") or [])}
+    out = {"added": added, "quarantined": quarantined, "held_for_roster": hold is not None, "held": held,
+           "unread": unread["count"], "relay_unread_count": page.get("unread_count"),
+           "receipts": len(page.get("receipts") or [])}
+    if hold is not None and not _refreshed:
+        try:
+            refreshed = (refresh_roster or _refresh_roster)(ctx)
+        except AgoraError as e:
+            refreshed = {"applied": False, "reason": "error", "code": e.code}
+        out["roster_refresh"] = {k: refreshed.get(k) for k in ("applied", "reason", "blocked", "code")
+                                 if refreshed.get(k) is not None}
+        if refreshed.get("applied"):
+            again = sync(ctx, refresh_roster=refresh_roster, _refreshed=True)
+            out.update({k: again[k] for k in ("held_for_roster", "held", "unread", "relay_unread_count")})
+            out["added"] += again["added"]
+            out["quarantined"] += again["quarantined"]
+    return out
 
 
 # ── 읽음 · 계수 ────────────────────────────────────────────────────────────
@@ -736,6 +772,8 @@ def write_unread(ctx: Any, *, desk: dict[str, Any] | None = None) -> dict[str, A
     doc = {"v": UNREAD_VERSION, "updated_at": now_ms_iso(), "count": mail_unread,
            "desk_count": sum(t["unread"] for t in listed if t["from_desk"]),
            "mail_unread": mail_unread, "desk_post_replies": 0,
+           # ★명부에 없는 보낸이라 보류 중인 우편 수(적대 6R #1) — 0 이 아니면 수신이 멈춰 있다는 뜻(앱이 보이게).
+           "held_for_roster": int(_load_json(_path(ctx, CURSOR_FILE)).get("held") or 0),
            "threads": listed[:UNREAD_THREADS_MAX]}
     _write_atomic(_path(ctx, UNREAD_FILE), doc)
     return doc

@@ -195,6 +195,16 @@ MUTATIONS = [
      "  const bases = [Date.parse(d[\"ts\"] as string)];",
      "vitest", "일일 보고: 봉투 24시간 전 + 8일 전 시각 = 10"),
 
+    ("M37 받는 이 미읽음 상한 제거", "src/index.ts",
+     "    if (Number(u?.n ?? 0) >= limits.unreadMax) {",
+     "    if (false) {",
+     "harness", "우편 12: 미읽음 상한 = 429 mail_inbox_full"),
+
+    ("M38 받는 이 하루 유입 버킷 제거", "src/index.ts",
+     "  if (human) {\n    const b = mailRecipientBucket(d.to, limits);",
+     "  if (false) {\n    const b = mailRecipientBucket(d.to, limits);",
+     "harness", "우편 12: 하루 유입 201통째 = 429 mail_in_day"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",

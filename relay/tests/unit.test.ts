@@ -433,7 +433,8 @@ describe("전역 상한 — 버킷과 노브", () => {
 // ── 에이전트 우편(1:1) — docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md ──────────
 import { createHash } from "node:crypto";
 import * as mailTs from "../src/lib/mail.ts";
-import { DEFAULT_MAIL_LIMITS, mailBuckets, mailConsecutive, mailKindOf, mailLimitsFromEnv } from "../src/lib/limits.ts";
+import { DEFAULT_MAIL_LIMITS, mailBuckets, mailConsecutive, mailKindOf, mailLimitsFromEnv,
+         mailRecipientBucket } from "../src/lib/limits.ts";
 
 async function codeOfAsync(fn: () => Promise<unknown>): Promise<number | string> {
   try { await fn(); return "던지지 않았다"; }
@@ -545,8 +546,15 @@ describe("우편 문서 — 닫힌 스키마(명세 §2·§1-1)", () => {
       const d = okDaily(); d.payload.daily.day = day;
       expect(await codeOfAsync(() => mailTs.validateMail(d, MAIL_NOW)), day).toBe(10);
     }
-    const leap = okDaily(); leap.payload.daily.day = "2028-02-29";
-    await expect(mailTs.validateMail(leap, MAIL_NOW)).resolves.toBeTruthy();
+    const leap = okLetter(); leap.ts = "2028-02-29T12:00:00.000Z";
+    leap.payload = { intent: "daily", daily: { day: "2028-02-29" } };
+    await expect(mailTs.validateMail(leap, Date.parse(leap.ts))).resolves.toBeTruthy();
+    // 적대 6R #4 — day 는 봉투 ts 날짜 ±1일(하루 경계 어긋남만 허용)
+    for (const [day, ok] of [["2026-10-04", true], ["2026-10-06", true], ["2026-10-03", false], ["2020-01-01", false]] as const) {
+      const d = okDaily(); d.payload.daily.day = day;
+      if (ok) await expect(mailTs.validateMail(d, MAIL_NOW), day).resolves.toBeTruthy();
+      else expect(await codeOfAsync(() => mailTs.validateMail(d, MAIL_NOW)), day).toBe(10);
+    }
     // 적대 2R R2-3 — 시각 창 기준 = 봉투 ts(서버 시각 아님): ts 3시간 전 · at = ts+4분 통과 · ts+6분 거부(서버 시각보다는 과거여도)
     const early = okDaily(); early.ts = isoAt(MAIL_NOW - 3 * 3600_000);
     early.payload.daily.updates[0].at = isoAt(MAIL_NOW - 3 * 3600_000 + 4 * 60_000);
@@ -682,6 +690,13 @@ describe("우편 상한 — 칸 고르기(명세 §4 · 순수 함수)", () => {
   it("신호는 하루 1 버킷 하나만(다른 칸과 따로)", () => {
     expect(rows("signal", false)).toEqual([["gmail-signal-day:a", 86400, 1]]);
     expect(rows("signal", true)).toEqual([["gmail-signal-day:a", 86400, 1]]);
+  });
+
+  it("받는 이 하루 유입 버킷 · 미읽음 상한 기본값(적대 6R #2 · 명세 §4-1)", () => {
+    expect(mailRecipientBucket("desk", l)).toEqual({ bucket: "gmail-in-day:desk", windowS: 86400, max: 200, label: "mail_in_day" });
+    expect(l.unreadMax).toBe(1000);
+    const m = mailLimitsFromEnv({ AGORA_RATE_MAIL_IN_DAY_MAX: "5", AGORA_RATE_MAIL_UNREAD_MAX: "x" });
+    expect([m.inDayMax, m.unreadMax]).toEqual([5, 1000]);
   });
 
   it("일일 보고도 하루 1 버킷 하나만 · 신호와 다른 버킷(명세 §1-2 (2))", () => {

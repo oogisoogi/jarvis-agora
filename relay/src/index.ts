@@ -20,7 +20,7 @@ import { bumpRate, deriveThread, eventIdOf, nowIso, rosterView, threadEvents,
          upsertRoom, type Env } from "./lib/store.ts";
 import { FEED_SORTS, feed, isCommunity, replyParent, type FeedEvent, type FeedSort } from "./lib/feed.ts";
 import { communityBuckets, isNewParticipant, limitsFromEnv, mailBuckets, mailConsecutive,
-         mailKindOf, mailLimitsFromEnv } from "./lib/limits.ts";
+         mailKindOf, mailLimitsFromEnv, mailRecipientBucket } from "./lib/limits.ts";
 import * as mail from "./lib/mail.ts";
 import { admissionBlock, isAdmissionBlockedError } from "./lib/admission.ts";
 
@@ -825,7 +825,7 @@ async function postCheckpoint(req: Request, env: Env): Promise<Response> {
 // ★우편은 방이 아니다: 표가 따로(`mail`)라서 /rooms·/feed·/home·/communities·보드로 섞여 나갈 길이 없다.
 // ★세 경로 모두 **CORS 를 열지 않는다**(라우터의 OPTIONS 도 405) · 응답은 `Cache-Control: private, no-store`.
 // ★질의 상한은 주석이 아니라 동작이다(QueryBudget) — 명세 §3-4 질의 예산을 넘으면 503.
-const MAIL_POST_D1_QUERIES_MAX = 10;   // 명부 1 + 대화 결박 1 + 멱등 1 + 연속 1 + 상한 2 + 적재 1 + 덤 삭제 1 (+경합 재조회 1)
+const MAIL_POST_D1_QUERIES_MAX = 12;   // 명부 1 + 대화 결박 1 + 멱등 1 + 연속 1 + 받는 이 미읽음 1 + 상한 2 + 받는 이 하루 1 + 적재 1 + 덤 삭제 1 (+경합 재조회 1)
 const MAIL_INBOX_D1_QUERIES_MAX = 6;   // 명부 1 + pid 상한 1 + 후보 머리 1 + 본문 1 + 미읽음 1 + 영수 1
 const MAIL_ACK_D1_QUERIES_MAX = 4;     // 명부 1 + pid 상한 1 + 무시 계수 1 + 갱신 1
 const MAIL_HEADERS: Record<string, string> = { "Cache-Control": "private, no-store" };
@@ -972,9 +972,31 @@ async function handleMailPost(req: Request, env: Env): Promise<Response> {
     const v = mailConsecutive(Number(c?.n ?? 0), c?.oldest ?? null, nowMs, limits);
     if (!v.ok) mailRateFail("mail_consecutive", limits.consecWindowS, limits.consecMax, v.retryAfter);
   }
+  // ★받는 이 축(적대 6R #2 · 명세 §4-1) — 사람 글만. ① 미읽음 상한(읽기 1 · 보낸이 칸을 태우기 **전**에 본다:
+  //   꽉 찬 수신함 때문에 보낸이 하루 칸이 깎이지 않게) ② 보낸이 버킷 ③ 받는 이 하루 버킷(보낸이 칸을 넘긴 시도가
+  //   받는 이 칸을 태우지 않게 — 남의 초과 시도로 상담소 하루 칸이 마르지 않는다).
+  const human = kind === "new" || kind === "reply";
+  if (human) {
+    const u = await qb.prepare(
+      `SELECT COUNT(*) AS n FROM mail WHERE to_id = ?1 AND acked_at IS NULL AND purged_at IS NULL
+          AND keep_until > ?2 AND intent NOT IN ('signal', 'daily')`
+    ).bind(d.to, nowIso(new Date(nowMs))).first<{ n: number }>();
+    if (Number(u?.n ?? 0) >= limits.unreadMax) {
+      // 결정론 안내: 받는 쪽이 읽어야 풀린다 — 보낸이는 시각이 아니라 영수(receipts)로 판단한다.
+      fail(STORE, "받는 사람의 수신함이 가득 찼다(읽지 않은 우편 상한)",
+        { limit: "mail_inbox_full", why: "recipient_inbox_full", max: limits.unreadMax, to: d.to,
+          how: "받는 사람이 읽으면 풀린다 · 영수(receipts)를 보고 다시 보낸다" },
+        { status: 429, headers: { "Retry-After": "3600" } });
+    }
+  }
   const me = roster.rows.find(r => r.participant_id === d.from);
   const isNew = isNewParticipant(me?.created_at, nowMs, limitsFromEnv(env as unknown as Record<string, unknown>));
   for (const b of mailBuckets(kind, d.from, isNew, limits)) {
+    const r = await bumpRate(qb.asDb, b.bucket, b.windowS, b.max, nowMs);
+    if (!r.ok) mailRateFail(b.label, b.windowS, b.max, r.retryAfter);
+  }
+  if (human) {
+    const b = mailRecipientBucket(d.to, limits);
     const r = await bumpRate(qb.asDb, b.bucket, b.windowS, b.max, nowMs);
     if (!r.ok) mailRateFail(b.label, b.windowS, b.max, r.retryAfter);
   }
@@ -1089,7 +1111,7 @@ async function handleMailInbox(req: Request, env: Env): Promise<Response> {
   // 영수 — 내가 보낸 우편 중 receipts_since 이후 읽음 표시가 붙은 것(발신자가 같은 호출로 전달 여부를 안다).
   const receipts = (await qb.prepare(
     `SELECT message_id, to_id, acked_at FROM mail
-      WHERE from_id = ?1 AND acked_at IS NOT NULL AND acked_at > ?2 ORDER BY acked_at, seq LIMIT ?3`
+      WHERE from_id = ?1 AND acked_at IS NOT NULL AND acked_at >= ?2 ORDER BY acked_at, seq LIMIT ?3`
   ).bind(forId, receiptsSince, mail.RECEIPTS_MAX)
    .all<{ message_id: string; to_id: string; acked_at: string }>()).results ?? [];
 

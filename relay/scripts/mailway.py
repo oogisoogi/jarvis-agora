@@ -364,7 +364,7 @@ def main():
     record("다시 ack = acked 0(첫 시각 유지)", (200, 0), (code, (body or {}).get("acked")))
     code, boxa2, _ = M.inbox(A["id"], M.auth(A, A["id"], receipts_since=first_ack or ""),
                              receipts_since=first_ack or "")
-    record("receipts_since=첫 시각 → m1 영수 없음", 0,
+    record("receipts_since=첫 시각 → m1 영수 다시 1(>= 경계 · 적대 6R #6 · 겹침은 클라이언트가 거른다)", 1,
            len([r for r in (boxa2.get("receipts") or []) if r.get("message_id") == m1["message_id"]])
            if isinstance(boxa2, dict) else "?")
     code, body, _ = M.ack(B, B["id"], [])
@@ -487,6 +487,31 @@ def main():
            ["created_at", "from", "mail_id", "message_id", "purged"], sorted((it or {}).keys()))
     record("기한 지난 우편은 unread_count 에서 빠진다 = 0", 0,
            boxc.get("unread_count") if isinstance(boxc, dict) else None)
+
+    # ── 12. 받는 이 축 상한(적대 6R #2 · 명세 §4-1) — ★TTL(11) 뒤: 여기 POST 의 덤 삭제가 11 의 측정을 흔들지 않게 ──
+    print("\n== 우편 12. 받는 이 축 — 미읽음 상한 · 하루 유입 버킷 ==")
+    E = keygen(args.workdir, "mail-e")
+    code, _ = register(args.base, E, args.workdir)
+    record("등록 %s = 201" % E["id"], 201, code)
+    rc, out = d1("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000) "
+                 "INSERT INTO mail (message_id, thread_id, from_id, to_id, prev, reply_to, intent, hash, bytes, "
+                 "canonical, signature, keep_until, created_at) SELECT printf('%%032x', i), printf('%%032x', i), "
+                 "'zz-fill', '%s', 'genesis', NULL, 'notice', 'h', 1, '{}', 's', '2099-01-01T00:00:00.000Z', "
+                 "'2026-01-01T00:00:00.000Z' FROM n;" % E["id"])
+    record("E 앞으로 미읽음 1000통 채우기(로컬 D1)", 0, rc, out[-80:] if rc else "")
+    _, _, code, body, hdrs = M.send(C, E["id"], new_id(), letter("가득 찬 수신함"))
+    record("미읽음 상한 = 429 mail_inbox_full · why recipient_inbox_full", (429, "mail_inbox_full", "recipient_inbox_full"),
+           (code, (body.get("detail") or {}).get("limit") if isinstance(body, dict) else None, why_of(body)))
+    _, _, code, body, _ = M.send(C, E["id"], new_id(), {"intent": "daily", "daily": {"day": iso()[:10]}})
+    record("  일일 보고는 미읽음 상한을 안 탄다 = 201", 201, code)
+    rc, _ = d1("DELETE FROM mail WHERE to_id = '%s' AND from_id = 'zz-fill';" % E["id"])
+    win = int(time.time() // 86400) * 86400
+    rc2, _ = d1("INSERT INTO rate_windows (bucket, window_start, count) VALUES ('gmail-in-day:%s', %d, 200) "
+                "ON CONFLICT(bucket, window_start) DO UPDATE SET count = 200;" % (E["id"], win))
+    record("E 하루 유입 칸 200 채우기(로컬 D1)", (0, 0), (rc, rc2))
+    _, _, code, body, _ = M.send(C, E["id"], new_id(), letter("하루 유입 초과"))
+    record("하루 유입 201통째 = 429 mail_in_day", (429, 7, "mail_in_day"),
+           (code, code_of(body), (body.get("detail") or {}).get("limit") if isinstance(body, dict) else None))
 
     ok = all(checks)
     print("\n== 우편 결과: %s (%d/%d) ==" % ("PASS" if ok else "FAIL", sum(checks), len(checks)))

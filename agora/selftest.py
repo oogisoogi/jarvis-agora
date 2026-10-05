@@ -4469,7 +4469,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
              "M575-mail-envelope-scrub-open", "M576-mail-ledger-drops-approval",
              "M577-mail-daily-exempt-ignores-note", "M578-mail-unread-counts-daily",
              "M579-mail-read-set-by-message-id", "M580-mail-ts-skips-real-date",
-             "M581-mail-ack-doc-accepts-any-id"),
+             "M581-mail-ack-doc-accepts-any-id", "M582-mail-hold-never-refreshes",
+             "M583-mail-reply-lookup-ignores-peer", "M584-roster-additive-accepts-removal"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -12295,6 +12296,35 @@ def _case_sync_roster_is_tofu_then_confirmed() -> None:
             raise AssertionError(f"무엇으로 확인했는지 안 적는다: {confirmed}")
 
 
+def _case_sync_roster_additive_only_policy() -> None:
+    """우편 보류 해소용 자동 갱신(additive_only · 적대 6R #1) — 참가자 **추가만** 자동 수용 · 지우기·키 교체·운영자 추가·첫 sync 는 안 쓴다."""
+    from agora import onboard
+    d = _onboard_dir()
+    with _fake_relay().serving() as (url, relay):
+        relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
+        relay.roster_text["operators"] = "operator-a\n"
+        first = onboard.sync_roster(directory=d, relay_url=url, additive_only=True)
+        if first.get("applied") or first.get("reason") != "first_sync" or os.path.exists(os.path.join(d, "allowed_signers")):
+            raise AssertionError(f"첫 sync 를 자동으로 받았다: {first}")
+        onboard.sync_roster(directory=d, relay_url=url)                         # 사람의 첫 sync(TOFU)
+        relay.roster_text["allowed_signers"] += "새-참가자 ssh-ed25519 BBBB\n"
+        added = onboard.sync_roster(directory=d, relay_url=url, additive_only=True)
+        text = open(os.path.join(d, "allowed_signers"), encoding="utf-8").read()
+        if not added.get("applied") or "새-참가자" not in text or added["confirmed_by"] != "additive_auto":
+            raise AssertionError(f"추가만 있는 차이를 받지 않았다: {added}")
+        for what, change in (("키 교체", lambda r: r.roster_text.__setitem__(
+                                 "allowed_signers", "operator-a ssh-ed25519 CCCC\n새-참가자 ssh-ed25519 BBBB\n")),
+                             ("운영자 추가", lambda r: r.roster_text.__setitem__("operators", "operator-a\n새-참가자\n"))):
+            before = {n: open(os.path.join(d, n), encoding="utf-8").read() for n in ("allowed_signers", "operators")}
+            change(relay)
+            out = onboard.sync_roster(directory=d, relay_url=url, additive_only=True)
+            after = {n: open(os.path.join(d, n), encoding="utf-8").read() for n in ("allowed_signers", "operators")}
+            if out.get("applied") or out.get("reason") != "not_additive" or after != before:
+                raise AssertionError(f"{what}를 사람 없이 받았다: {out}")
+            relay.roster_text["allowed_signers"] = before["allowed_signers"]
+            relay.roster_text["operators"] = before["operators"]
+
+
 def _case_sync_roster_stops_when_revocations_are_missing() -> None:
     """폐기 목록에 **404** 로 답하는 서버에서는 **멈춘다**(fail-closed).
 
@@ -16856,6 +16886,60 @@ def _case_mail_impossible_ts_is_contract_error() -> None:
     mail.validate(doc, now=datetime.datetime.now(datetime.timezone.utc))
 
 
+def _mail_held_world(refresh: Any) -> tuple[Any, Any, dict[str, Any]]:
+    """명부 밖 보낸이(operator-c) 1통 + 그 뒤 명부 안 보낸이 60통 — 보류가 진행을 막는가."""
+    from agora import mail
+    store = _FakeMailStore()
+    ctx = _mail_ctx(store)
+    items = [_mail_item(_mail_doc(frm="operator-c", body="새 참가자의 첫 우편"), key="key_c", seq=1)]
+    items += [_mail_item(_mail_doc(body=f"뒤 우편 {i}"), seq=i + 2) for i in range(60)]
+    store.items = items
+    out = _with_key(_fixtures()["key_a"], lambda: mail.sync(ctx, refresh_roster=refresh))
+    return ctx, store, out
+
+
+def _case_mail_roster_hold_refreshes_additive() -> None:
+    """명부 보류 → 같은 회차 명부 재수신(추가만 있는 차이 = 자동 수용) → 그 우편과 뒤 60통이 적재된다(적대 6R #1 진행 보장)."""
+    from agora import mail
+    def refresh(ctx: Any) -> dict[str, Any]:
+        with open(_fixtures()["key_c"] + ".pub", encoding="utf-8") as fh:
+            pub_c = fh.read().strip()
+        with open(ctx.allowed_signers_path, "a", encoding="utf-8") as fh:   # 추가만(operator-c 한 줄)
+            fh.write(f"operator-c {pub_c}\n")
+        return {"applied": True}
+    ctx, _store, out = _mail_held_world(refresh)
+    if (out["added"], out["held"], out["held_for_roster"]) != (61, 0, False):
+        raise AssertionError(f"보류 뒤 진행이 없다: {out}")
+    if mail._load_json(mail._path(ctx, mail.UNREAD_FILE)).get("held_for_roster") != 0:
+        raise AssertionError("unread.json 의 보류 수가 0 이 아니다")
+
+
+def _case_mail_roster_hold_visible_when_not_additive() -> None:
+    """지우기·키 교체 등 추가가 아닌 차이면 보류 유지 — 그때 보류 수가 sync 결과·unread.json 에 보인다(적대 6R #1)."""
+    from agora import mail
+    _ctx, _store, out = _mail_held_world(lambda ctx: {"applied": False, "reason": "not_additive"})
+    ctx = _ctx
+    if not out["held_for_roster"] or out["held"] != 1 or out.get("roster_refresh", {}).get("reason") != "not_additive":
+        raise AssertionError(f"보류가 안 보인다: {out}")
+    if mail._load_json(mail._path(ctx, mail.UNREAD_FILE)).get("held_for_roster") != 1:
+        raise AssertionError("unread.json 에 보류 수가 없다")
+
+
+def _case_mail_reply_lookup_keyed_by_peer() -> None:
+    """답장 대상 조회 = (상대, message_id) — 남이 같은 message_id 로 보낸 우편이 내 답장을 막지 못한다(적대 6R #5)."""
+    from agora import mail
+    store = _FakeMailStore()
+    ctx = _mail_ctx(store, config={"human_approval": False})
+    shared = "ab" * 16
+    for frm, tid in (("operator-c", "11" * 16), ("operator-b", "22" * 16)):
+        mail._append(mail._path(ctx, mail.INBOX_FILE), {"from": frm, "to": "operator-a", "thread_id": tid,
+                                                        "message_id": shared})
+    out = _with_key(_fixtures()["key_a"], lambda: mail.send(ctx, to="operator-b", subject="답", body="답장",
+                                                            reply_to=shared))
+    if out["thread_id"] != "22" * 16:
+        raise AssertionError(f"엉뚱한 대화로 답했다: {out['thread_id']}")
+
+
 def _case_mail_signer_refuses_scrub() -> None:
     """서명기의 우편 문도 스크럽을 다시 잰다 — 이메일 형태가 든 본문은 서명 없음(code 3)."""
     from agora import sign
@@ -16958,7 +17042,8 @@ def _case_mail_unread_json_contract() -> None:
     doc = json.loads(raw.decode("utf-8"))
     if b"\r" in raw or raw.startswith(b"\xef\xbb\xbf"):
         raise AssertionError("줄끝·BOM 계약 위반")
-    if set(doc) != {"v", "updated_at", "count", "desk_count", "mail_unread", "desk_post_replies", "threads"}:
+    if set(doc) != {"v", "updated_at", "count", "desk_count", "mail_unread", "desk_post_replies",
+                    "held_for_roster", "threads"}:
         raise AssertionError(f"칸이 계약과 다르다: {sorted(doc)}")
     if doc["count"] != 1 or doc["threads"][0]["layer"] != "mail" or doc["desk_post_replies"] != 0:
         raise AssertionError(f"계수가 다르다: {doc}")
@@ -17525,6 +17610,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("등록: 소유 증명 동봉",          _case_register_carries_proof_of_possession, None),
     ("등록: 문이 서명 신탁이 아니다", _case_register_door_is_not_a_signing_oracle, None),
     ("명부: TOFU 뒤 변경은 확인",     _case_sync_roster_is_tofu_then_confirmed, None),
+    ("명부: 자동 갱신은 추가만",      _case_sync_roster_additive_only_policy, None),
     ("명부: 폐기 목록 없으면 멈춤",   _case_sync_roster_stops_when_revocations_are_missing, None),
     ("whoami: 첫 칸이 승인 게이트",   _case_whoami_puts_the_approval_gate_first, None),
     ("whoami: 잠금 수단을 적는다",  _case_whoami_reports_the_lock_backend, None),
@@ -17615,6 +17701,9 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("우편: 읽음은 mail_id 단위",              _case_mail_read_marks_by_mail_id, None),
     ("우편: 형식 칸 끝까지 닫힘",              _case_mail_strict_anchors, errors.ARGUMENT),
     ("우편: 읽음 문서는 mail_id 목록뿐",       _case_mail_ack_doc_mail_ids_only, None),
+    ("우편: 명부 보류 → 추가만이면 자동 수용·진행", _case_mail_roster_hold_refreshes_additive, None),
+    ("우편: 명부 보류가 보인다(추가 아님)",    _case_mail_roster_hold_visible_when_not_additive, None),
+    ("우편: 답장 조회 = 상대+message_id",      _case_mail_reply_lookup_keyed_by_peer, None),
     ("우편: 없는 날짜 ts = 계약 오류",         _case_mail_impossible_ts_is_contract_error, errors.ARGUMENT),
     ("우편: 일일 보고 예외는 빈 owner_note 만", _case_mail_daily_exempt_only_without_note, None),
     ("우편: 일일 보고는 미읽음에 안 센다",      _case_mail_daily_not_counted, None),
@@ -17682,6 +17771,18 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if not all(type(x) is str and MAIL_ID_RE.match(x) for x in acked):',
      '        if False:',
      "우편: 읽음 문서는 mail_id 목록뿐"),
+    ("M584-roster-additive-accepts-removal", "agora/onboard.py",
+     '        blocked = sorted(n for n, c in changes.items() if c["removed"] or (n == "operators" and c["added"]))',
+     '        blocked = []',
+     "명부: 자동 갱신은 추가만"),
+    ("M582-mail-hold-never-refreshes", "agora/mail.py",
+     '    if hold is not None and not _refreshed:',
+     '    if False:',
+     "우편: 명부 보류 → 추가만이면 자동 수용·진행"),
+    ("M583-mail-reply-lookup-ignores-peer", "agora/mail.py",
+     '            if row.get("message_id") == message_id and row.get(side) == peer:',
+     '            if row.get("message_id") == message_id:',
+     "우편: 답장 조회 = 상대+message_id"),
     # ── 상주 방문(2026-09-11 · 0.1.6 · 계약 확장 8) ─────────────────────────
     # ★브리프가 요구한 여섯 자리(발언 판정 제거·발언 무시·플래그 무시·잠금 제거·깨움 상한 제거·
     #   uninstall 미삭제) + 그 둘레 여섯. 전부 「개발기에서는 초록이 기본값」인 자리다.
@@ -18538,8 +18639,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        for name in ROSTER_FILES:\n            try:\n                out[name] = self._run("GET", f"/participants/{name}", accept="text")\n            except AgoraError:\n                out[name] = ""',
      "명부: 폐기 목록 없으면 멈춤"),
     ("M310-sync-roster-skips-confirmation", "agora/onboard.py",
-     '    if changes and not first_sync and not yes:',
-     '    if changes and not first_sync and not yes and False:',
+     '    elif changes and not first_sync and not yes:',
+     '    elif changes and not first_sync and not yes and False:',
      "명부: TOFU 뒤 변경은 확인"),
     # ★2026-09-05 재조준 — agy 봉합으로 이 블록이 try 안으로 들어가며 들여쓰기가 바뀌었다.
     #   조준을 안 옮기면 「.prev 보존」 축이 NOT-APPLIED 로 조용히 꺼진다(오늘 세 번째 같은 형태).

@@ -202,7 +202,7 @@ def issue_checkpoint(*, directory: str | None = None, relay_url: str | None = No
 # ── sync-roster ─────────────────────────────────────────────────────────────
 
 def sync_roster(*, directory: str | None = None, relay_url: str | None = None,
-                yes: bool = False) -> dict[str, Any]:
+                yes: bool = False, additive_only: bool = False) -> dict[str, Any]:
     """명부 3종 사본을 릴레이에서 받는다 — **첫 번째는 그대로, 그 뒤 변경은 확인받고.**
 
     ★TOFU + 변경 승인(master 결정 2026-09-05 · RC-1). 명부의 정본이 운반층으로 옮겨 갔으므로,
@@ -243,7 +243,16 @@ def sync_roster(*, directory: str | None = None, relay_url: str | None = None,
             # ★공개키 전문을 결과에 싣지 않는다 — 화면·로그에 남는다. **줄 수와 principal 만.**
             changes[name] = {"added": [ln.split()[0] for ln in added],
                              "removed": [ln.split()[0] for ln in removed]}
-    if changes and not first_sync and not yes:
+    if additive_only:
+        # ★우편 수신 보류 해소용 자동 갱신(적대 6R #1 · master 정책 b90adcd6): **새 참가자 줄이 더해지기만** 한
+        #   차이는 사람 없이 받는다. 지우기·키 교체(같은 principal 의 줄 바뀜 = 지우기+더하기)·운영자 명부의 추가
+        #   (권한 확대)·첫 sync 는 종전대로 사람(`sync-roster --yes`) — 아무것도 쓰지 않고 이유만 돌려준다.
+        blocked = sorted(n for n, c in changes.items() if c["removed"] or (n == "operators" and c["added"]))
+        if first_sync or blocked or not changes:
+            return {"applied": False, "changes": changes, "wrote": [],
+                    "reason": "first_sync" if first_sync else ("not_additive" if blocked else "no_change"),
+                    "blocked": blocked}
+    elif changes and not first_sync and not yes:
         raise AgoraError(errors.GATE_REJECT,
                          "명부가 바뀌었다 — 확인하고 --yes 로 받아라",
                          {"changes": changes, "wrote": [], "reason": "roster_change_unconfirmed"})
@@ -278,8 +287,9 @@ def sync_roster(*, directory: str | None = None, relay_url: str | None = None,
         wrote.append(os.path.basename(path))
 
     checkpoint = _fetch_checkpoint(store, directory)
-    return {"relay": url, "first_sync": first_sync, "changes": changes,
-            "wrote": wrote, "confirmed_by": "--yes" if yes else ("tofu" if first_sync else "no_change"),
+    return {"relay": url, "first_sync": first_sync, "changes": changes, "applied": bool(wrote),
+            "wrote": wrote, "confirmed_by": "--yes" if yes else ("tofu" if first_sync else
+                                                         ("additive_auto" if additive_only else "no_change")),
             "counts": {name: len(_lines(fetched[name])) for name in ROSTER_FILES},
             "digest": {name: _sha256_file(os.path.join(directory, name))
                        for name in ROSTER_FILES},

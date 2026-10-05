@@ -16,3 +16,6 @@ CREATE TABLE IF NOT EXISTS mail (
 CREATE INDEX IF NOT EXISTS mail_to   ON mail (to_id, seq);
 CREATE INDEX IF NOT EXISTS mail_pair ON mail (from_id, to_id, seq);
 CREATE INDEX IF NOT EXISTS mail_thread ON mail (thread_id, seq);
+-- 덤 삭제(매 POST)·미읽음 계수가 전표를 훑지 않게(적대 6R #3) — `purged_at IS NULL AND (keep_until < ? OR acked_at IS NOT NULL)`.
+CREATE INDEX IF NOT EXISTS mail_purge_keep ON mail (purged_at, keep_until);
+CREATE INDEX IF NOT EXISTS mail_purge_ack ON mail (purged_at, acked_at);

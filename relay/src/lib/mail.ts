@@ -201,6 +201,9 @@ function checkDaily(p: Obj, bases: number[]): void {
   // ★Date.parse 는 2026-02-30 을 3월 2일로 고쳐 읽는다 — 되돌려 같은 글자인지 본다(적대 2R R2-4 · 파이썬 date.fromisoformat 과 같은 경계).
   const dayMs = DAY_RE.test(day) && !day.startsWith("0000") ? Date.parse(day + "T00:00:00.000Z") : NaN;   // 0000년 = 파이썬 date 밖(R3-3)
   if (Number.isNaN(dayMs) || new Date(dayMs).toISOString().slice(0, 10) !== day) bad("day 는 실제 날짜 YYYY-MM-DD", { where: `${w}.day` });
+  // ★day 는 봉투 ts 의 날짜 ±1일 안(적대 6R #4 — 06:00 KST 하루 경계라 UTC 날짜와 하루 어긋날 수 있다 · 그 이상은 엉뚱한 날 합산).
+  const tsDayMs = Date.parse(new Date(bases[0]).toISOString().slice(0, 10) + "T00:00:00.000Z");
+  if (Math.abs(dayMs - tsDayMs) > 86_400_000) bad("day 는 봉투 ts 날짜 ±1일", { where: `${w}.day`, why: "day_far_from_ts" });
   if ("version" in d) {
     const v = need<Obj>(d, "version", "dict", w);
     closed(v, ["host", "pack"], `${w}.version`);

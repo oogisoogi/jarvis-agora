@@ -91,6 +91,8 @@ export interface MailLimits {
   newcomerReplyDayMax: number;                     // 새 참가자 답장: 하루 30
   signalDayMax: number;                            // 자동 신호: 하루 1(다른 버킷과 따로)
   dailyDayMax: number;                             // 일일 보고: 하루 1(신호와도 따로 · 명세 §1-2 (2))
+  inDayMax: number;                                // 받는 이 하루 유입(사람 글 · 적대 6R #2 · 명세 §4-1)
+  unreadMax: number;                               // 받는 이 미읽음 상한(사람 글 · 넘으면 429 inbox_full)
   consecMax: number; consecWindowS: number;        // 답장 없이 같은 사람에게 5통 → 24시간 쿨다운
 }
 
@@ -104,6 +106,8 @@ export const DEFAULT_MAIL_LIMITS: MailLimits = {
   newcomerReplyDayMax: 30,
   signalDayMax: 1,
   dailyDayMax: 1,
+  inDayMax: 200,
+  unreadMax: 1000,
   consecMax: 5, consecWindowS: 86_400,
 };
 
@@ -117,6 +121,7 @@ const MAIL_KNOBS: Array<[keyof MailLimits, string]> = [
   ["newcomerReplyDayMax", "AGORA_RATE_MAIL_NEWCOMER_REPLY_DAY_MAX"],
   ["signalDayMax", "AGORA_RATE_MAIL_SIGNAL_DAY_MAX"],
   ["dailyDayMax", "AGORA_RATE_MAIL_DAILY_DAY_MAX"],
+  ["inDayMax", "AGORA_RATE_MAIL_IN_DAY_MAX"], ["unreadMax", "AGORA_RATE_MAIL_UNREAD_MAX"],
   ["consecMax", "AGORA_RATE_MAIL_CONSEC_MAX"], ["consecWindowS", "AGORA_RATE_MAIL_CONSEC_WINDOW_S"],
 ];
 
@@ -168,6 +173,15 @@ export function mailBuckets(kind: MailKind, from: string, isNew: boolean, l: Mai
        { bucket: "gmail-new-day:" + from, windowS: 86_400, max: l.newcomerNewDayMax, label: "new_participant_mail_new_day" }]
     : [{ bucket: "gmail-new:" + from, windowS: l.newWindowS, max: l.newMax, label: "mail_new" },
        { bucket: "gmail-new-day:" + from, windowS: 86_400, max: l.newDayMax, label: "mail_new_day" }];
+}
+
+/**
+ * 받는 이 축 하루 유입 버킷(적대 6R #2) — 보낸이 상한만으로는 참가자 수에 비례해 한 곳(상담소)으로 몰린다.
+ * ★사람 글(새 대화·답장)만 센다. 신호·일일 보고는 보낸이당 하루 1 이라 이미 닫혀 있고, 그 묶음의 입력 상한은
+ *   배치 분석기(T2 · 명세 §10) 몫이다. 버킷 이름 = 받는 이 id(창 = 하루 고정).
+ */
+export function mailRecipientBucket(to: string, l: MailLimits): Bucket {
+  return { bucket: "gmail-in-day:" + to, windowS: 86_400, max: l.inDayMax, label: "mail_in_day" };
 }
 
 /**

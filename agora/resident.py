@@ -676,6 +676,8 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
         if not dry_run and not print_agenda:
             base["우편"] = _mail_sync(ctx)
             row["mail"] = base["우편"].get("added", base["우편"].get("code"))
+            if base["우편"].get("held"):
+                row["mail_held"] = base["우편"]["held"]      # 명부 보류 = 수신 정지 — 하트비트에 보이게(적대 6R #1)
         row.update({"scanned": found["scanned"], "due": len(due),
                     "rooms": [d["room_id"][:8] for d in due]})
         rules = visit_rules_path()
