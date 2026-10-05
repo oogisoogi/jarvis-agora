@@ -4484,7 +4484,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M644-desk-trimmed-notes-done", "M645-desk-final-size-unchecked",
                "M646-desk-note-stops-at-first-overflow", "M647-desk-oversize-note-carried-forever",
                "M648-desk-mask-rescans-tokens", "M649-desk-mask-case-sensitive", "M650-desk-mask-overlap-twice",
-               "M651-desk-mask-no-whole-lower", "M652-desk-mask-one-pass"),
+               "M651-desk-mask-no-whole-lower", "M652-desk-mask-one-pass", "M653-desk-mask-cap-not-total"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17735,6 +17735,19 @@ def _case_desk_mask_once_case_free() -> None:
         scrub.names_path(ctx4.config_dir)))]
     if left or m4("ΝΊΚΟΣA") != "[가림:이름][가림:이름]":
         raise AssertionError(f"가린 뒤 드러난 이름이 남았다: {m4('ΝΊΚΟΣA')!r} 검출 {len(left)}")
+    # 적대 9R codex — 표지와 원문에 걸친 이름 · 되풀이 상한(시그마 연쇄)을 넘으면 통째로 가림
+    for names_text, inputs in (("a\n름]x\nx[가\n", ("ax", "xa")), ("ς\na\n", ("B" + "Σ" * 40 + "A",))):
+        ctx5, _s5 = _desk_world([])
+        with open(os.path.join(ctx5.config_dir, scrub.NAMES_FILENAME), "w", encoding="utf-8") as fh:
+            fh.write(names_text)
+        m5, names5 = counsel._masker(ctx5), scrub.load_names(scrub.names_path(ctx5.config_dir))
+        for t in inputs:
+            out5 = m5(t)
+            if list(scrub.check_names({"t": out5.replace("[가림:이름]", "")}, names5)) or counsel._PUA_RE.search(out5) \
+                    or len(out5.encode()) > 15 * len(t):
+                raise AssertionError(f"걸친 이름·되풀이 상한 처리가 다르다: {t[:12]!r} → {out5[:40]!r}")
+    if counsel._masker(ctx5)("B" + "Σ" * 40 + "A") != "[가림:이름]":
+        raise AssertionError("되풀이 상한을 넘었는데 통째로 가리지 않았다")
     if sig != "[가림:이름] 님" or dot != "[가림:이름]" * 200 or part != "[가림:이름] 님" \
             or counsel._PUA_RE.search(sig + dot + part):
         raise AssertionError(f"접기·겹침 가림이 다르다: {sig!r} · {dot[:40]!r}… {len(dot.encode())}B")
@@ -18474,20 +18487,24 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            out = pattern.sub(tokens[k], out)',
      "상담소: 이름 가림은 한 번·대소문자 무관"),
     ("M649-desk-mask-case-sensitive", "agora/counsel.py",
-     '            folded, owner = _fold_map(out)',
-     '            folded, owner = out, list(range(len(out)))',
+     '                folded, owner = _fold_map(shown)',
+     '                folded, owner = shown, list(range(len(shown)))',
      "상담소: 이름 가림은 한 번·대소문자 무관"),
     ("M650-desk-mask-overlap-twice", "agora/counsel.py",
-     '                if merged and a < merged[-1][1]:',
-     '                if False:',
+     '                    if merged and a < merged[-1][1]:',
+     '                    if False:',
      "상담소: 이름 가림은 한 번·대소문자 무관"),
     ("M651-desk-mask-no-whole-lower", "agora/counsel.py",
      '            hay = [folded] + ([whole] if whole != folded and len(whole) == len(owner) else [])',
      '            hay = [folded]',
      "상담소: 이름 가림은 한 번·대소문자 무관"),
     ("M652-desk-mask-one-pass", "agora/counsel.py",
-     '                out = out[:a] + marks[-1] + out[b:]\n',
-     '                out = out[:a] + marks[-1] + out[b:]\n            break\n',
+     '                    out = out[:a] + marks[-1] + out[b:]\n',
+     '                    out = out[:a] + marks[-1] + out[b:]\n                break\n',
+     "상담소: 이름 가림은 한 번·대소문자 무관"),
+    ("M653-desk-mask-cap-not-total", "agora/counsel.py",
+     '            else:\n                out = marks[-1]\n',
+     '            else:\n                pass\n',
      "상담소: 이름 가림은 한 번·대소문자 무관"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',

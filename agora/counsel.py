@@ -494,6 +494,28 @@ def _fold_map(text: str) -> tuple[str, list[int]]:
     return "".join(folded), owner
 
 
+MASK_PASSES_MAX = 32                 # 이름 가림 되풀이 상한 — 넘으면 그 글을 통째로 가린다(적대 9R codex)
+
+
+def _expand(out: str, marks: list[str], tokens: list[str]) -> tuple[str, list[int]]:
+    """표시를 표지로 편 글 + 글자마다 `out` 의 원문 위치(표지 글자 = -1)."""
+    index = {m: t for m, t in zip(marks, tokens)}
+    shown: list[str] = []
+    src: list[int] = []
+    i = 0
+    while i < len(out):
+        token = index.get(out[i:i + 3]) if out[i] == "\ue000" else None
+        if token is not None:
+            shown.append(token)
+            src.extend([-1] * len(token))
+            i += 3
+        else:
+            shown.append(out[i])
+            src.append(i)
+            i += 1
+    return "".join(shown), src
+
+
 def _masker(ctx: Any) -> Callable[[str], str]:
     """스크럽 규칙(차단 17종 + 이름 목록)으로 **가린 사본**을 만든다 — 모델에 보내는 입력용(발신 검사 아님).
 
@@ -514,27 +536,46 @@ def _masker(ctx: Any) -> Callable[[str], str]:
         out = _PUA_RE.sub("", text or "")
         for k, (_rid, _kind, pattern) in enumerate(rules.compiled):
             out = pattern.sub(marks[k], out)
-        # ★더 찾을 것이 없을 때까지 되풀이한다(적대 8R codex — 가린 자리가 이웃 시그마의 문맥을 바꿔 남은 이름이 새로 드러났다).
-        #   한 바퀴마다 원문 글자가 하나 이상 표시로 바뀌므로 원문 길이 안에 끝난다 · 표시는 이름에 없는 글자라 다시 안 걸린다.
-        while name_re is not None:
-            folded, owner = _fold_map(out)
-            # ★문자열 전체 lower() 도 찾는다(적대 7R codex — 끝 시그마처럼 문맥으로 접히는 글자는 글자별 접기와 다르다).
-            #   길이가 같을 때만 같은 위치표를 쓴다(다르면 글자별 접기만 — 넓게 가리는 쪽).
-            whole = out.lower()
-            hay = [folded] + ([whole] if whole != folded and len(whole) == len(owner) else [])
-            spans = sorted({(owner[m.start()], owner[m.end() - 1] + 1) for h in hay for m in name_re.finditer(h)
-                            if m.end() > m.start()})
-            if not spans:
-                break
-            # ★겹치는 자리는 합친 뒤 한 번만 바꾼다(적대 7R codex — 접힌 두 글자가 한 원문 글자로 돌아가 두 번 바뀌며 표시가 남았다).
-            merged: list[list[int]] = []
-            for a, b in spans:
-                if merged and a < merged[-1][1]:
-                    merged[-1][1] = max(merged[-1][1], b)
-                else:
-                    merged.append([a, b])
-            for a, b in reversed(merged):
-                out = out[:a] + marks[-1] + out[b:]
+        # ★이름은 **표지를 편 모양**에서 찾는다(적대 9R codex — 표지와 원문에 걸친 이름 · 끝 시그마 문맥도 최종 출력과 같아진다).
+        #   원문 글자가 하나라도 든 일치만 가린다(표지 안에만 있는 일치는 건너뜀) · 가린 자리가 새 이름을 드러내면 되풀이한다
+        #   (적대 8R codex) · 한 바퀴마다 원문 글자가 하나 이상 표시로 바뀐다 · ★MASK_PASSES_MAX 를 넘으면 통째로 가린다
+        #   (적대 9R codex — 시그마 연쇄 같은 입력은 바퀴 수가 입력 길이만큼 늘어 시간이 제곱으로 컸다 · 넓게 가리는 쪽).
+        if name_re is not None:
+            for _pass in range(MASK_PASSES_MAX):
+                shown, src = _expand(out, marks, tokens)
+                folded, owner = _fold_map(shown)
+                # ★문자열 전체 lower() 도 찾는다(적대 7R codex — 끝 시그마처럼 문맥으로 접히는 글자는 글자별 접기와 다르다).
+                #   길이가 같을 때만 같은 위치표를 쓴다(다르면 글자별 접기만 — 넓게 가리는 쪽).
+                whole = shown.lower()
+                hay = [folded] + ([whole] if whole != folded and len(whole) == len(owner) else [])
+                spans: set[tuple[int, int]] = set()
+                for h in hay:
+                    for m in name_re.finditer(h):
+                        if m.end() <= m.start():
+                            continue
+                        ks = [src[k] for k in range(owner[m.start()], owner[m.end() - 1] + 1) if src[k] >= 0]
+                        # 한 일치 안의 이어진 원문 자리 = 한 묶음(표지가 끼면 갈린다)
+                        run_start = None
+                        for n, k in enumerate(ks):
+                            if run_start is None:
+                                run_start = k
+                            if n + 1 == len(ks) or ks[n + 1] != k + 1:
+                                spans.add((run_start, k + 1))
+                                run_start = None
+                if not spans:
+                    break
+                # ★겹치는 자리는 합친 뒤 한 번만 바꾼다(적대 7R codex — 접힌 두 글자가 한 원문 글자로 돌아가 두 번 바뀌며
+                #   표시가 남았다) · 맞닿기만 한 두 이름은 따로 둔다(이름마다 표지 하나).
+                merged: list[list[int]] = []
+                for a, b in sorted(spans):
+                    if merged and a < merged[-1][1]:
+                        merged[-1][1] = max(merged[-1][1], b)
+                    else:
+                        merged.append([a, b])
+                for a, b in reversed(merged):
+                    out = out[:a] + marks[-1] + out[b:]
+            else:
+                out = marks[-1]
         for mark, token in zip(marks, tokens):
             out = out.replace(mark, token)
         return out
