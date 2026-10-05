@@ -269,6 +269,16 @@ describe("scrub — 백스톱이 실제로 잡는가", () => {
     expect(scrubCheck({ body: "https://github.com/x" }, b).blocked).toBe(0);
   });
 
+  it("우리 도메인은 정확한 호스트 둘만 통과(하위·형제·상위·꼬리 붙인 호스트는 차단 · 상담소 링크 T2)", async () => {
+    const b = await loadBundle(rules, allow, domains);
+    expect(scrubCheck({ body: "https://jarvis.godmeyou.kr/help/J-LOGIN-01" }, b).blocked).toBe(0);
+    expect(scrubCheck({ body: "https://agora.godmeyou.kr/rooms/x" }, b).blocked).toBe(0);
+    for (const u of ["https://evil.godmeyou.kr/x", "https://godmeyou.kr/x",
+                     "https://x.jarvis.godmeyou.kr/", "https://jarvis.godmeyou.kr.evil.com/"]) {
+      expect(scrubCheck({ body: u }, b).blocked).toBeGreaterThan(0);
+    }
+  });
+
   it("규칙이 깨지면 전량 차단(fail-closed)", async () => {
     await expect(loadBundle("{", allow, domains)).rejects.toBeInstanceOf(AgoraError);
     await expect(loadBundle(JSON.stringify({ version: "v", rules: [] }), allow, domains))

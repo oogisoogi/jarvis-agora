@@ -4471,6 +4471,11 @@ S8_AXES: dict[str, tuple[str, ...]] = {
              "M579-mail-read-set-by-message-id", "M580-mail-ts-skips-real-date",
              "M581-mail-ack-doc-accepts-any-id", "M582-mail-hold-never-refreshes",
              "M583-mail-reply-lookup-ignores-peer", "M584-roster-additive-accepts-removal"),
+    # ★상담소 데스크(2026-10-05) — 회신이 한 번인가 · 긴급이 도배가 되는가 · 호출이 한 번인가 · 남의 글이 새는가.
+    "상담소": ("M621-desk-acks-every-mail", "M622-desk-urgent-no-thread-cap", "M623-desk-batch-twice-a-period",
+               "M624-desk-batch-unmasked", "M625-desk-model-picks-address", "M626-desk-publish-no-leak-check",
+               "M627-desk-empty-batch-calls", "M628-desk-ack-no-downgrade", "M629-resident-desk-wakes",
+               "M630-allow-our-subdomains"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -6345,7 +6350,10 @@ def _case_local_commands_are_not_tools() -> None:
              "resident",
              # 계약 확장 9(2026-10-05) — 우편 받기·읽기·읽음. 대리인 손에 「남의 우편을 펼치고
              # 읽음 처리하라」를 쥐여 주지 않는다(보내기만 도구 `mail-send`).
-             "mail"}
+             "mail",
+             # 계약 확장 10(2026-10-05) — 상담소 배치·게시. 대리인 손에 「모델 호출 비용을 써라」·
+             # 「남에게 답을 보내라」를 쥐여 주지 않는다(운영자 master 가 부른다).
+             "counsel"}
     if cli.MCP_EXEMPT != frozenset(local):
         raise AssertionError(f"예외 목록: {sorted(cli.MCP_EXEMPT)}")
     if local & set(tools.CORE_TOOLS):
@@ -17156,6 +17164,279 @@ def _case_mail_resident_injection_ten() -> None:
                 raise AssertionError(f"본문이 틀을 벗어났다: {frame[-120:]}")
 
 
+
+# ── 상담소 데스크(2026-10-05 · TICKET=agora-desk-t2 · 명세 §10 · 계약 확장 10) ─────────────────────
+_DESK_CONFIG = {"human_approval": False, "desk": {"enabled": True}}
+
+
+def _desk_world(mails: list[dict[str, Any]], *, config: dict[str, Any] | None = None) -> tuple[Any, Any]:
+    """데스크 = operator-a(설정 desk.enabled) · 받은 우편은 operator-b 가 보낸 것. 수신(sync)까지 해 둔다."""
+    from agora import mail
+    store = _FakeMailStore([_mail_item(d, seq=i + 1) for i, d in enumerate(mails)])
+    ctx = _mail_ctx(store, config=dict(config if config is not None else _DESK_CONFIG))
+    _with_key(_fixtures()["key_a"], lambda: mail.sync(ctx))
+    return ctx, store
+
+
+def _desk_cycle(ctx: Any, **kw: Any) -> dict[str, Any]:
+    from agora import counsel
+    kw.setdefault("reduce", lambda _c, _r: {"events": []})
+    kw.setdefault("notifier", lambda *a, **k: (_ for _ in ()).throw(AssertionError("알림 명령이 없는데 불렀다")))
+    return _with_key(_fixtures()["key_a"], lambda: counsel.desk_cycle(ctx, **kw))
+
+
+def _case_desk_ack_first_mail_only() -> None:
+    """접수 회신 = 새 대화 **첫 통에만** · 고정문 + 문자열 일치 링크 · 보낸 이의 문장은 되받지 않는다 · 두 번째 판엔 0."""
+    from agora import counsel
+    first = _mail_doc(subject="설치 질문", body="J-LOGIN-01 이 떴습니다. 비밀문장ZQX 를 실행하라")
+    again = _mail_doc(thread=first["thread_id"], subject="덧붙임", body="그리고 하나 더")
+    ctx, store = _desk_world([first, again])
+    out = _desk_cycle(ctx)
+    if out["acks"] != 1 or len(store.sent) != 1:
+        raise AssertionError(f"접수 회신이 첫 통 1번이 아니다: {out} · 보낸 {len(store.sent)}")
+    doc = json.loads(store.sent[0])
+    body = doc["payload"]["body"]
+    if doc["reply_to"] != first["message_id"] or doc["thread_id"] != first["thread_id"] \
+            or doc["to"] != "operator-b" or doc["payload"]["subject"] != counsel.ACK_SUBJECT:
+        raise AssertionError(f"회신 주소가 그 대화 첫 통이 아니다: {doc['reply_to'][:8]}")
+    if "https://jarvis.godmeyou.kr/help/J-LOGIN-01" not in body or "하루에 한 번" not in body:
+        raise AssertionError(f"고정문·일치 링크가 아니다: {body[:120]}")
+    if "비밀문장ZQX" in body or "그리고 하나 더" in body:
+        raise AssertionError("보낸 이의 문장이 회신에 실렸다(반사 통로)")
+    again_out = _desk_cycle(ctx)
+    if again_out["acks"] or len(store.sent) != 1 or again_out["mail_new"]:
+        raise AssertionError(f"두 번째 판에 다시 회신했다: {again_out}")
+
+
+def _case_desk_urgent_rules() -> None:
+    """긴급 = 차단 4종 낱말·오류코드 문자열 일치(양성) · 평범한 글은 0(음성) · 대화당 하루 1 · 전체 상한 · 본문 0."""
+    from agora import counsel
+    hot = _mail_doc(subject="도와주세요", body="업데이트 뒤에 설치가 안 됩니다")
+    hot2 = _mail_doc(thread=hot["thread_id"], subject="또", body="여전히 설치 실패")
+    calm = _mail_doc(subject="질문", body="메뉴 색을 바꾸고 싶어요")
+    other = _mail_doc(subject="보안", body="해킹된 것 같아요")
+    ctx, _store = _desk_world([hot, hot2, calm, other],
+                              config={"human_approval": False, "desk": {"enabled": True, "urgent_per_day": 1,
+                                                                        "notify_cmd": ["notify-x"]}})
+    lines: list[str] = []
+
+    def capture(argv: list[str], **kw: Any) -> Any:
+        lines.append(kw["input"])
+        return type("P", (), {"returncode": 0})()
+    out = _desk_cycle(ctx, notifier=capture)
+    if (out["urgent"], out["urgent_suppressed"]) != (1, 2) or len(lines) != 1:
+        raise AssertionError(f"긴급 계수가 다르다(1 알림 · 2 생략 기대): {out} {lines}")
+    if "install_update" not in lines[0] or "설치가 안" not in lines[0] or "업데이트 뒤에" in lines[0]:
+        raise AssertionError(f"알림 줄이 다르다(갈래·낱말만 · 본문 0): {lines[0]}")
+    table = counsel.load_urgent()
+    if counsel.match_urgent("메뉴 색을 바꾸고 싶어요", [], table) \
+            or counsel.match_urgent("J-pop 노래", [], table):
+        raise AssertionError("평범한 글을 긴급으로 봤다")
+    if not counsel.match_urgent("", ["update.sig_mismatch"], table) \
+            or not counsel.match_urgent("코드 J-NET-01 이 떠요", [], table):
+        raise AssertionError("오류코드 일치를 못 봤다")
+
+
+def _case_desk_machine_mail_no_reply() -> None:
+    """신호·일일 보고는 회신 없이 접수만(사람에게 알릴 글이 아니다)."""
+    from agora import counsel, mail
+    sig = _mail_doc(payload={"intent": "signal", "items": [_mail_signal_item()]})
+    daily = _mail_doc(payload={"intent": "daily", "daily": {"day": mail.now_ms_iso()[:10], "os": "macos-15.6"}})
+    ctx, store = _desk_world([sig, daily])
+    out = _desk_cycle(ctx, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    rows = [r for r in mail._rows(counsel._desk_path(ctx, counsel.INTAKE_FILE)) if r.get("type") == "item"]
+    if store.sent or out["acks"] or sorted(r["intent"] for r in rows) != ["daily", "signal"]:
+        raise AssertionError(f"기계 통에 회신했거나 접수가 다르다: {out} {[r.get('intent') for r in rows]}")
+
+
+def _case_desk_plaza_intake_no_reply() -> None:
+    """공개 방(핀) 새 글 = 접수만 · 회신 0 · 내 글은 접수 안 함 · 두 번째 판엔 새 글 0."""
+    from agora import counsel, mail
+    ctx, store = _desk_world([])
+    room = sorted(mail.desk_pin()["rooms"])[0]
+    ev = lambda mid, frm, body, parent=None: {"event": {"kind": "post", "message_id": mid, "from": frm,
+        "ts": mail.now_ms_iso(), "payload": {"round": 0, "body": body, **({"refs": [
+            {"thread_id": room, "message_id": parent, "why": "reply"}]} if parent else {})}}}
+    events = {"events": [ev("1" * 32, "operator-b", "앱이 안 떠요"), ev("2" * 32, "operator-a", "상담소 답"),
+                         ev("3" * 32, "operator-c", "저도 그래요", parent="1" * 32)]}
+    out = _desk_cycle(ctx, reduce=lambda _c, r: events if r == room else {"events": []},
+                      notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    rows = [r for r in mail._rows(counsel._desk_path(ctx, counsel.INTAKE_FILE)) if r.get("type") == "item"]
+    if out["plaza_new"] != 2 or store.sent or {r["key"] for r in rows} != {"1" * 32, "3" * 32}:
+        raise AssertionError(f"공개 글 접수가 다르다: {out}")
+    if _desk_cycle(ctx, reduce=lambda _c, r: events)["plaza_new"]:
+        raise AssertionError("같은 글을 두 번 접수했다")
+
+
+def _case_desk_ack_downgrades_when_links_blocked() -> None:
+    """릴레이 백스톱이 링크를 막으면(code 3) 링크 없는 문구로 1회 낮춘다(판 어긋남 창 안전망 · master 0a9ded7f)."""
+    from agora import errors as err
+    first = _mail_doc(subject="질문", body="J-NET-01 이 떠요")
+    ctx, _store = _desk_world([first])
+    sent: list[str] = []
+
+    def publish(c: Any, doc: dict[str, Any]) -> dict[str, Any]:
+        body = doc["payload"]["body"]
+        sent.append(body)
+        if "https://" in body:
+            raise AgoraError(err.GATE_REJECT, "스크럽 게이트 차단", {"rules": ["url-domain"]})
+        return {"status": 201, "message_id": doc["message_id"]}
+    out = _desk_cycle(ctx, publish=publish)
+    if out["acks"] != 1 or len(sent) != 2 or "https://" in sent[1]:
+        raise AssertionError(f"링크 없는 문구로 낮추지 않았다: {out} {len(sent)}")
+
+
+def _case_desk_batch_empty_no_call() -> None:
+    """배치 입력 0 이면 호출 0 — 보고서는 쓴다(「입력 0건」)."""
+    from agora import counsel
+    ctx, _store = _desk_world([])
+
+    def never(*_a: Any) -> dict[str, Any]:
+        raise AssertionError("입력 0 인데 모델을 불렀다")
+    out = counsel.batch(ctx, caller=never, notifier=lambda *a, **k: None)
+    if out["call"]["called"] or not os.path.exists(out["report"]):
+        raise AssertionError(f"입력 0 처리가 다르다: {out['call']}")
+
+
+def _case_desk_batch_one_call_addresses_by_code() -> None:
+    """배치 = 1호출 · 같은 기간 두 번째 = code 3 · 입력은 가린 사본 · 모르는 key 의 초안은 버린다(주소는 코드가)."""
+    from agora import counsel, mail
+    m = _mail_doc(subject="질문", body="업데이트가 안 돼요. 연락은 someone@example.com")
+    sig = _mail_doc(payload={"intent": "signal", "items": [_mail_signal_item()]})
+    ctx, _store = _desk_world([m, sig])
+    _desk_cycle(ctx, publish=lambda c, d: {"status": 201, "message_id": d["message_id"]},
+                notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    seen: list[tuple[list[str], str]] = []
+
+    def caller(argv: list[str], prompt: str) -> dict[str, Any]:
+        seen.append((argv, prompt))
+        inner = {"summary": "s", "topics": [{"title": "갱신", "count": 1, "keys": ["M1"], "repro": ""}],
+                 "backlog": [{"severity": "major", "summary": "갱신 실패", "keys": ["M1"], "target": "1.1.8",
+                              "why": "신호"}],
+                 "human_needed": [], "replies": [{"key": "M1", "body": "답입니다"},
+                                                 {"key": "M9", "body": "주소 없는 답"}]}
+        return {"rc": 0, "stdout": json.dumps({"result": json.dumps(inner, ensure_ascii=False),
+                                              "usage": {"input_tokens": 10, "output_tokens": 5},
+                                              "total_cost_usd": 0.01})}
+    out = counsel.batch(ctx, caller=caller, notifier=lambda *a, **k: None)
+    argv, prompt = seen[0]
+    if len(seen) != 1 or argv[argv.index("--tools") + 1] != "" or "--strict-mcp-config" not in argv:
+        raise AssertionError(f"1호출·도구 0 이 아니다: {argv}")
+    if "someone@example.com" in prompt or "[가림:email]" not in prompt:
+        raise AssertionError("모델 입력이 가린 사본이 아니다")
+    drafts = json.load(open(os.path.join(out["dir"], "drafts.json"), encoding="utf-8"))
+    if [r["key"] for r in drafts["replies"]] != ["M1"] \
+            or drafts["addresses"]["M1"]["reply_to"] != m["message_id"]:
+        raise AssertionError(f"초안 주소가 코드에서 오지 않았다: {drafts}")
+    report = open(out["report"], encoding="utf-8").read()
+    if "update.sig_mismatch" not in report or "갱신 실패" not in report:
+        raise AssertionError("보고서에 신호 집계·백로그 초안이 없다")
+    try:
+        counsel.batch(ctx, caller=caller, notifier=lambda *a, **k: None)
+    except AgoraError as e:
+        if e.code != 3:
+            raise
+    else:
+        raise AssertionError("같은 기간에 두 번 불렀다")
+    if len(seen) != 1:
+        raise AssertionError("두 번째 호출이 모델까지 갔다")
+
+
+def _case_desk_publish_checks_and_idempotent() -> None:
+    """게시 = 스크럽·교차 유출(40자) 검사 뒤에만 · 공개 답은 모든 비공개 우편과 대조 · 두 번째 게시는 건너뛴다."""
+    from agora import counsel, mail
+    secret = "이 문장은 비공개 우편에만 있는 아주 긴 내용이라 다른 사람 답에 섞이면 안 됩니다 정말로"
+    a = _mail_doc(subject="가", body=secret)
+    b = _mail_doc(subject="나", body="다른 질문입니다")
+    ctx, _store = _desk_world([a, b])
+    rows = {r["message_id"]: r for r in mail._rows(mail._path(ctx, mail.INBOX_FILE))}
+    period = "2026-10-05"
+    out_dir = os.path.join(counsel.counsel_dir(ctx), period)
+    os.makedirs(out_dir)
+    room = "c" * 32
+    addresses = {"M1": {"layer": "mail", "thread_id": a["thread_id"], "to": "operator-b",
+                        "reply_to": a["message_id"], "mail_ids": [rows[a["message_id"]]["mail_id"]]},
+                 "M2": {"layer": "mail", "thread_id": b["thread_id"], "to": "operator-b",
+                        "reply_to": b["message_id"], "mail_ids": [rows[b["message_id"]]["mail_id"]]},
+                 "P1": {"layer": "plaza", "room": room, "parent": "d" * 32, "keys": ["d" * 32]}}
+    replies = [{"key": "M1", "body": "그대로 인용합니다: " + secret},       # 자기 대화 인용 = 허용
+               {"key": "M2", "body": "참고로 " + secret},                  # 남의 대화 = 보류
+               {"key": "P1", "body": "공개 답 " + secret}]                 # 공개 답 = 보류
+    with open(os.path.join(out_dir, "drafts.json"), "w", encoding="utf-8") as fh:
+        json.dump({"period": period, "addresses": addresses, "replies": replies}, fh, ensure_ascii=False)
+    sent: list[dict[str, Any]] = []
+
+    def send(c: Any, doc: dict[str, Any]) -> dict[str, Any]:
+        sent.append(doc)
+        return {"status": 201, "message_id": doc["message_id"]}
+
+    def say(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise AssertionError("보류돼야 할 공개 답이 나갔다")
+    out = counsel.publish(ctx, period=period, mail_send=send, say=say)
+    if (out["sent"], out["held"]) != (1, 2) or sent[0]["reply_to"] != a["message_id"]:
+        raise AssertionError(f"게시 검사 결과가 다르다: {out}")
+    if not sent[0]["payload"]["body"].startswith(f"{counsel.REPLY_HEAD}({period})"):
+        raise AssertionError("답 머리가 없다")
+    again = counsel.publish(ctx, period=period, mail_send=send, say=say)
+    if again["sent"] or len(sent) != 1:
+        raise AssertionError("이미 보낸 초안을 다시 보냈다")
+
+
+def _case_desk_fleet_table() -> None:
+    """함대 일지 = 참가자 × 판본·doctor·오류·갱신·좌석 + 직전 대비(첫 보고 · 바뀜 칸)."""
+    from agora import counsel
+
+    def row(frm: str, host: str, fail: int) -> dict[str, Any]:
+        d = {"day": "2026-10-05", "version": {"host": host, "pack": host}, "os": "windows-11",
+             "seats": {"count": 3, "roles": ["cso", "master", "worker"]},
+             "doctor": {"ok": 12, "warn": 0, "fail": fail, "skip": 0, "warn_ids": [], "fail_ids": []}}
+        return {"from": frm, "ts": "2026-10-05T00:00:00.000Z",
+                "mail": json.dumps({"payload": {"intent": "daily", "daily": d}})}
+    md = counsel.fleet_table([row("p1", "1.1.8", 1), row("p2", "1.1.7", 0)], [row("p1", "1.1.7", 0)])
+    if "| p1 |" not in md or "바뀜: host, pack, doctor" not in md or "| p2 |" not in md or "첫 보고" not in md:
+        raise AssertionError(f"함대 일지 표가 다르다:\n{md}")
+
+
+def _case_desk_settings_fall_back() -> None:
+    """설정 칸을 못 읽으면 그 칸만 기본값 — 켜짐은 참(true)일 때만(문자열 "yes" 는 꺼짐)."""
+    from agora import counsel
+    s = counsel.settings({"desk": {"enabled": "yes", "batch_period": "month", "urgent_per_day": -1,
+                                   "batch_max_bytes": 10 ** 9, "notify_cmd": "sh -c x", "model": "Opus 5!"}})
+    want = dict(counsel.DEFAULTS)
+    if s != want:
+        raise AssertionError(f"못 읽는 칸이 기본값으로 안 갔다: {s}")
+    if not counsel.settings({"desk": {"enabled": True}})["enabled"]:
+        raise AssertionError("enabled true 를 못 읽었다")
+
+
+def _case_scrub_our_two_hosts_only() -> None:
+    """허용 도메인 = 우리 정확한 호스트 둘만(master 0a9ded7f · 하위·형제·상위·꼬리 붙인 호스트 차단)."""
+    from agora import scrub
+    for u in ("https://jarvis.godmeyou.kr/help/J-LOGIN-01", "https://agora.godmeyou.kr/rooms/x"):
+        if scrub.check({"body": u})["blocked"]:
+            raise AssertionError(f"우리 호스트가 막혔다: {u}")
+    for u in ("https://evil.godmeyou.kr/x", "https://godmeyou.kr/x", "https://x.jarvis.godmeyou.kr/",
+              "https://jarvis.godmeyou.kr.evil.com/"):
+        if not scrub.check({"body": u})["blocked"]:
+            raise AssertionError(f"허용 밖 호스트가 통과했다: {u}")
+
+
+def _case_resident_desk_branch_never_wakes() -> None:
+    """상주가 데스크 설정이면 방문 판정·깨움 0 — 우편 수신과 접수만 한다."""
+    from agora import resident
+    from agora.store_mock import MockStore
+    first = _mail_doc(subject="질문", body="안녕하세요")
+    ctx, store = _desk_world([first])
+    store.inner = MockStore()           # 상담소 방 읽기(핀의 방)는 빈 운반층이 답한다 — 방 글 0
+
+    def runner(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise AssertionError("데스크가 에이전트를 깨웠다")
+    out = _with_key(_fixtures()["key_a"], lambda: resident.once(
+        directory=ctx.config_dir, ctx_factory=lambda _d: ctx, runner=runner))
+    if out["깨움"] != 0 or out["판정"]["종료코드"] != 0 or out["데스크"].get("acks") != 1:
+        raise AssertionError(f"데스크 분기가 다르다: {out.get('판정')} {out.get('데스크')}")
+
+
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("상주: 이번 회차 미발언이면 깨운다", _case_resident_wakes_when_i_have_not_spoken_this_round, None),
     ("상주: 이번 회차에 말했으면 안 깨운다", _case_resident_does_not_wake_after_i_spoke, None),
@@ -17719,12 +18000,66 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("우편: 쌍 사슬·답장 대화·자유문 겹",      _case_mail_send_pair_chain_and_reply_thread, errors.GATE_REJECT),
     ("우편: CLI 동작별 인자",                  _case_mail_cli_action_args, None),
     ("우편: 주입 10 → 알림만",                 _case_mail_resident_injection_ten, None),
+    # 상담소 데스크(2026-10-05 · TICKET=agora-desk-t2)
+    ("상담소: 접수 회신은 새 대화 첫 통에만",   _case_desk_ack_first_mail_only, None),
+    ("상담소: 긴급 규칙 양성·음성·상한",        _case_desk_urgent_rules, None),
+    ("상담소: 신호·일일은 회신 없이 접수",      _case_desk_machine_mail_no_reply, None),
+    ("상담소: 공개 방 글 접수·회신 0",          _case_desk_plaza_intake_no_reply, None),
+    ("상담소: 링크가 막히면 링크 없는 문구",    _case_desk_ack_downgrades_when_links_blocked, None),
+    ("상담소: 배치 입력 0 = 호출 0",            _case_desk_batch_empty_no_call, None),
+    ("상담소: 배치 1호출·주소는 코드가",        _case_desk_batch_one_call_addresses_by_code, None),
+    ("상담소: 게시 검사·멱등",                  _case_desk_publish_checks_and_idempotent, None),
+    ("상담소: 함대 일지 표",                    _case_desk_fleet_table, None),
+    ("상담소: 설정 칸 기본값",                  _case_desk_settings_fall_back, None),
+    ("스크럽: 우리 도메인은 정확한 두 호스트",  _case_scrub_our_two_hosts_only, None),
+    ("상주: 데스크면 깨움 0",                   _case_resident_desk_branch_never_wakes, None),
 )
 
 
 # ── 뮤테이션 ────────────────────────────────────────────────────────────────
 # (id, 파일, 찾을 문자열, 바꿀 문자열, 이 변이를 잡아야 하는 케이스 이름)
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+    # ── 상담소 데스크(2026-10-05 · TICKET=agora-desk-t2) — 고정문·한 번·한 호출·검사 두 겹이 실제로 서는가 ──
+    ("M621-desk-acks-every-mail", "agora/counsel.py",
+     'and item.get("first_in_thread")\n',
+     '\n',
+     "상담소: 접수 회신은 새 대화 첫 통에만"),
+    ("M622-desk-urgent-no-thread-cap", "agora/counsel.py",
+     '        allowed = tid not in threads_today and sent_today < s["urgent_per_day"]',
+     '        allowed = True',
+     "상담소: 긴급 규칙 양성·음성·상한"),
+    ("M623-desk-batch-twice-a-period", "agora/counsel.py",
+     '    if not dry_run and any(r.get("period") == period and r.get("called") for r in _rows(calls_path)):',
+     '    if False:',
+     "상담소: 배치 1호출·주소는 코드가"),
+    ("M624-desk-batch-unmasked", "agora/counsel.py",
+     '            out = pattern.sub(f"[가림:{rid}]", out)',
+     '            out = out',
+     "상담소: 배치 1호출·주소는 코드가"),
+    ("M625-desk-model-picks-address", "agora/counsel.py",
+     'if type(r) is dict and r.get("key") in addresses and r["key"] not in seen',
+     'if type(r) is dict and r["key"] not in seen',
+     "상담소: 배치 1호출·주소는 코드가"),
+    ("M626-desk-publish-no-leak-check", "agora/counsel.py",
+     '        elif leaks(body, [bodies[m] for m in batch_mail_ids if m in bodies]):',
+     '        elif False:',
+     "상담소: 게시 검사·멱등"),
+    ("M627-desk-empty-batch-calls", "agora/counsel.py",
+     '    if not human and not data["signals"] and not data["daily_notes"]:',
+     '    if False:',
+     "상담소: 배치 입력 0 = 호출 0"),
+    ("M628-desk-ack-no-downgrade", "agora/counsel.py",
+     '        if not (links and e.code == errors.GATE_REJECT):',
+     '        if True:',
+     "상담소: 링크가 막히면 링크 없는 문구"),
+    ("M629-resident-desk-wakes", "agora/resident.py",
+     '            if _desk_on(ctx):',
+     '            if False:',
+     "상주: 데스크면 깨움 0"),
+    ("M630-allow-our-subdomains", "config/allow-domains.txt",
+     '\njarvis.godmeyou.kr\n',
+     '\n.jarvis.godmeyou.kr\n.godmeyou.kr\n',
+     "스크럽: 우리 도메인은 정확한 두 호스트"),
     # ── 에이전트 우편(2026-10-05 · TICKET=agora-mail-1to1) — 초록이 대상을 만났는가 ──────────
     ("M571-mail-addressee-check-dropped", "agora/mail.py",
      '    if doc["to"] != ctx.participant_id:',

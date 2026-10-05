@@ -90,6 +90,10 @@ COMMANDS: dict[str, dict[str, Any]] = {
     #   사람(또는 사람이 시킨 master)이 한다. MCP 에 올리면 대리인 손에 「남의 우편을 읽음 처리하라」가 쥐어진다.
     "mail-send":      {"core": True,  "built": True,  "slice": "S10-1"},
     "mail":           {"core": False, "built": True,  "slice": "S10-1"},
+    # ★계약 확장 10(master 발주 2026-10-05 · TICKET=agora-desk-t2) — **상담소 데스크의 배치·게시**.
+    #   `batch` = 하루(설정 주) 1호출 분석 → 보고서·답 초안(게시 0) · `publish` = master 가 읽은 뒤 초안 게시.
+    #   도구가 아니다: MCP 에 올리면 대리인 손에 「모델 호출 비용을 써라」·「남에게 답을 보내라」가 쥐어진다.
+    "counsel":        {"core": False, "built": True,  "slice": "S11-1"},
 }
 
 # MCP 에 노출하지 않는 것 — 정본 = 설계 §4 「(CLI만)」 행(예외 계수는 그 한 곳에만 · J-7 2026-09-02).
@@ -105,7 +109,9 @@ MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
                         # 계약 확장 8(2026-09-11) — 상주 방문. 대리인을 깨우는 일정은 대리인 손에 두지 않는다.
                         "resident",
                         # 계약 확장 9(2026-10-05) — 우편 받기·읽기·읽음. 보내기만 도구(`mail-send`)다.
-                        "mail"})
+                        "mail",
+                        # 계약 확장 10(2026-10-05) — 상담소 데스크 배치·게시. 운영자(master)가 부른다.
+                        "counsel"})
 
 # ── 역할별 노출표(설계 §5 「수신 격리」 H-3 · NFR-2) ─────────────────────────
 # ★**여기가 「도구 목록」의 단일 출처다.** 대리인 브리프(S6-3 `brief-reader.md`)는 이 표를
@@ -253,6 +259,8 @@ CLI_ONLY_ARGS: dict[str, tuple[str, ...]] = {
     # ★동작마다 받는 인자는 `mail.CLI_ACTION_ARGS` 가 한 번 더 좁힌다(`inbox --to` 거절).
     "mail":         ("to", "subject", "body", "body_file", "intent", "reply_to", "refs",
                      "thread_id", "mail_id", "dir"),
+    # ★동작마다 받는 인자는 `counsel.CLI_ACTION_ARGS` 가 한 번 더 좁힌다(`publish --dry-run` 거절).
+    "counsel":      ("dry_run", "date", "dir"),
 }
 
 # CLI 전용 명령의 **필수** 인자. ★구판은 이것을 `_run_local` 안의 분기에서 따로 봤고,
@@ -275,7 +283,8 @@ SELF_PARSED = ("selfcheck", "selftest", "keygen", "mcp-serve")
 # **맨몸 동작 토큰**을 받는 명령(`agora checkpoint issue`). ★표를 한 곳에 둔다 —
 # 진입점(`_run_onboard`)과 문서 시험이 같은 표를 봐야 「문서대로 치면 돈다」가 참이 된다.
 ACTION_ARG: dict[str, tuple[str, ...]] = {"checkpoint": ("issue",),
-                                          "mail": ("send", "inbox", "read", "ack", "sync")}
+                                          "mail": ("send", "inbox", "read", "ack", "sync"),
+                                          "counsel": ("batch", "publish")}
 
 
 def action_names(command: str) -> tuple[str, ...]:
@@ -359,6 +368,9 @@ def check_argv(command: str, rest: list[str]) -> dict[str, Any]:
     if command == "mail":
         from agora import mail
         mail.check_action_args(action, kw)
+    if command == "counsel":
+        from agora import counsel
+        counsel.check_action_args(action, kw)
     return kw
 
 
@@ -436,6 +448,18 @@ def _run_mail(rest: list[str]) -> Any:
     kw = check_argv("mail", rest)
     ctx = tools.context_from_config(kw.pop("dir", None))
     return mail.dispatch(ctx, action, kw)
+
+
+def _run_counsel(rest: list[str]) -> Any:
+    """상담소 데스크 CLI(계약 확장 10) — 맨 앞 맨몸 토큰이 동작이다(`agora counsel batch`).
+
+    ★인자 검사가 컨텍스트보다 먼저다(`_run_mail` 과 같은 순서).
+    """
+    from agora import counsel, tools
+    action, _rest = split_action("counsel", rest)
+    kw = check_argv("counsel", rest)
+    ctx = tools.context_from_config(kw.pop("dir", None))
+    return counsel.dispatch(ctx, action, kw)
 
 
 def _config_dir(explicit: str | None) -> str:
@@ -582,6 +606,8 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
         return _run_resident(list(args.rest) if hasattr(args, "rest") else [])
     if name == "mail":
         return _run_mail(list(args.rest) if hasattr(args, "rest") else [])
+    if name == "counsel":
+        return _run_counsel(list(args.rest) if hasattr(args, "rest") else [])
     if name in ("watch", "reconcile", "export", "import"):
         return _run_local(name, list(args.rest) if hasattr(args, "rest") else [])
     if meta["core"]:

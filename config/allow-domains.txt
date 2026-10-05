@@ -6,3 +6,6 @@ github.com
 .github.com
 docs.python.org
 www.openssh.com
+# 우리 도메인 — 정확한 호스트 둘만(하위 도메인 비허용 · 와일드카드 금지). 상담소 접수 회신·답의 도움말 링크(명세 §10-2).
+jarvis.godmeyou.kr
+agora.godmeyou.kr

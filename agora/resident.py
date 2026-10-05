@@ -628,6 +628,39 @@ def _mail_sync(ctx: Any) -> dict[str, Any]:
         return {"code": e.code, "message": e.message}
 
 
+def _desk_on(ctx: Any) -> bool:
+    from agora import counsel
+    return counsel.desk_enabled(getattr(ctx, "config", None))
+
+
+def _desk_once(p: dict[str, str], ctx: Any, *, row: dict[str, Any], started: str,
+               dry_run: bool) -> dict[str, Any]:
+    """상담소 데스크의 한 판(명세 §10-2 · 설정 `desk.enabled`) — **방문 판정·에이전트 깨움 0 · 모델 호출 0.**
+
+    ★데스크는 방에 말하러 가는 참가자가 아니다 — 받은 우편과 상담소 방의 새 글을 접수 원장에 적고,
+      결정론 접수 회신·긴급 알림만 한다(`counsel.desk_cycle`). 분석은 하루 한 번 `agora counsel batch`(사람·일정).
+    """
+    from agora import counsel
+    if dry_run:
+        _log(p, {**row, "rc": RC_OK, "why": "desk dry-run"})
+        return {"판정": _verdict(RC_OK, "데스크 드라이런 — 아무것도 안 바꿨다"), "깨움": 0, "데스크": "드라이런"}
+    mail_out = _mail_sync(ctx)
+    try:
+        desk = counsel.desk_cycle(ctx)
+        rc, meaning = RC_OK, "데스크 접수를 했다(모델 호출 0 · 깨움 0)"
+    except AgoraError as e:
+        desk = {"code": e.code, "message": e.message}
+        rc, meaning = RC_WAKE_FAILED, f"데스크 접수가 실패했다 — code {e.code}"
+    row.update({"rc": rc, "woke": 0, "desk": True, "mail": mail_out.get("added", mail_out.get("code")),
+                "desk_new": (desk.get("mail_new", 0) + desk.get("plaza_new", 0)) if "code" not in desk else None,
+                "acks": desk.get("acks"), "urgent": desk.get("urgent")})
+    if mail_out.get("held"):
+        row["mail_held"] = mail_out["held"]
+    _log(p, row)
+    _write_last(p, started=started, rc=rc, woke=0, due=0, why=None if rc == RC_OK else meaning)
+    return {"판정": _verdict(rc, meaning), "깨움": 0, "우편": mail_out, "데스크": desk}
+
+
 def _verdict(rc: int, meaning: str) -> dict[str, Any]:
     return {"종료코드": rc, "뜻": meaning}
 
@@ -661,7 +694,9 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
     try:
         try:
             ctx = (ctx_factory or tools.context_from_config)(p["config_dir"])
-            attempts = {k: v for k, v in _load_json(p["attempts"]).items() if type(v) is int}
+            if _desk_on(ctx):
+                return _desk_once(p, ctx, row=row, started=at, dry_run=dry_run or print_agenda)
+            attempts ={k: v for k, v in _load_json(p["attempts"]).items() if type(v) is int}
             found = plan(ctx, attempts=attempts)
         except AgoraError as e:
             _log(p, {**row, "rc": RC_WAKE_FAILED, "why": f"code {e.code}"})

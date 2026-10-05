@@ -1,0 +1,196 @@
+{
+ "v": 1,
+ "source": "사이트 진단 코드 안내 17쪽(도움말) + 설치·매뉴얼·공지 3쪽 — 2026-10-05 라이브 200 전수 실측",
+ "default": {
+  "url": "https://jarvis.godmeyou.kr/help/",
+  "title": "막혔을 때 — 진단 코드 안내"
+ },
+ "max_links": 3,
+ "entries": [
+  {
+   "id": "J-AV-01",
+   "match": [
+    "J-AV-01"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-AV-01",
+   "title": "클로드 설치가 정해진 시간 안에 끝나지 않았다(백신 창 대기)",
+   "public": true
+  },
+  {
+   "id": "J-AV-02",
+   "match": [
+    "J-AV-02"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-AV-02",
+   "title": "받은 설치 파일이 사라졌다(백신 격리 모양)",
+   "public": true
+  },
+  {
+   "id": "J-AV-03",
+   "match": [
+    "J-AV-03"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-AV-03",
+   "title": "지난 실행이 끝을 알리지 않고 멈췄다(창이 갑자기 닫힘)",
+   "public": true
+  },
+  {
+   "id": "J-DISK-01",
+   "match": [
+    "J-DISK-01"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-DISK-01",
+   "title": "저장 공간이 부족하다",
+   "public": true
+  },
+  {
+   "id": "J-DL-03",
+   "match": [
+    "J-DL-03"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-DL-03",
+   "title": "받은 설치 파일의 지문을 잴 수 없다(확인 없이 설치하지 않음)",
+   "public": true
+  },
+  {
+   "id": "J-DL-04",
+   "match": [
+    "J-DL-04"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-DL-04",
+   "title": "받은 설치 파일의 지문이 릴리스와 다르다(그 파일은 쓰지 않음)",
+   "public": true
+  },
+  {
+   "id": "J-DL-05",
+   "match": [
+    "J-DL-05"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-DL-05",
+   "title": "받을 자리에 그 판본이 없다(기다려도 생기지 않음)",
+   "public": true
+  },
+  {
+   "id": "J-LOGIN-01",
+   "match": [
+    "J-LOGIN-01"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-LOGIN-01",
+   "title": "로그인 승인이 시간 안에 끝나지 않았다",
+   "public": true
+  },
+  {
+   "id": "J-LOGIN-02",
+   "match": [
+    "J-LOGIN-02"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-LOGIN-02",
+   "title": "로그인 코드 입력이 받아들여지지 않았다",
+   "public": true
+  },
+  {
+   "id": "J-NET-01",
+   "match": [
+    "J-NET-01"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-NET-01",
+   "title": "인터넷 연결이 없다",
+   "public": true
+  },
+  {
+   "id": "J-NET-02",
+   "match": [
+    "J-NET-02"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-NET-02",
+   "title": "우리 서버가 응답하지 않는다",
+   "public": true
+  },
+  {
+   "id": "J-NET-03",
+   "match": [
+    "J-NET-03"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-NET-03",
+   "title": "바깥 서버(설치 파일 받는 곳)가 응답하지 않는다",
+   "public": true
+  },
+  {
+   "id": "J-PATH-01",
+   "match": [
+    "J-PATH-01"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-PATH-01",
+   "title": "깔렸는데 이 창에서 명령을 찾지 못한다",
+   "public": true
+  },
+  {
+   "id": "J-PERM-01",
+   "match": [
+    "J-PERM-01"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-PERM-01",
+   "title": "파일이나 폴더를 쓸 권한이 없다",
+   "public": true
+  },
+  {
+   "id": "J-RM-01",
+   "match": [
+    "J-RM-01"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-RM-01",
+   "title": "지난 설치의 자국이 남아 설치가 막힌다",
+   "public": true
+  },
+  {
+   "id": "J-UNK-00",
+   "match": [
+    "J-UNK-00"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-UNK-00",
+   "title": "무슨 일인지 분류하지 못했다",
+   "public": true
+  },
+  {
+   "id": "J-VER-01",
+   "match": [
+    "J-VER-01"
+   ],
+   "url": "https://jarvis.godmeyou.kr/help/J-VER-01",
+   "title": "낡은 판본이 먼저 잡힌다",
+   "public": true
+  },
+  {
+   "id": "install",
+   "match": [
+    "설치",
+    "install"
+   ],
+   "url": "https://jarvis.godmeyou.kr/get/",
+   "title": "설치하기 안내",
+   "public": true
+  },
+  {
+   "id": "manual",
+   "match": [
+    "사용법",
+    "매뉴얼",
+    "manual"
+   ],
+   "url": "https://jarvis.godmeyou.kr/howto/manual",
+   "title": "매뉴얼",
+   "public": true
+  },
+  {
+   "id": "notice",
+   "match": [
+    "업데이트",
+    "갱신",
+    "update"
+   ],
+   "url": "https://jarvis.godmeyou.kr/notice/",
+   "title": "공지(업데이트 소식)",
+   "public": true
+  }
+ ]
+}
