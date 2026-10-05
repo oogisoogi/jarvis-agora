@@ -142,7 +142,7 @@ MUTATIONS = [
      "  return cand.filter(r => true).slice(0, limit)",
      "harness", "/communities 에 열린 일반 토론방(세트6b) 없음"),
 
-    ("M26 /home 답함 판정이 댓글 규칙을 안 본다", "src/index.ts",
+    ("M26 /home 답함 판정이 댓글 규칙을 안 본다", "src/lib/home_sql.ts",  # /home SQL 분리(c6831b9) 뒤 자리 이동 — 2026-10-06 lead 판별 NA → 갱신
      "                        AND json_extract(m.canonical, '$.payload.refs[0].why') = 'reply'\n",
      "",
      "harness", "/home 참조(why=see)는 답이 아니다 = answered False"),
