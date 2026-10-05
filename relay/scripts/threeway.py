@@ -29,8 +29,6 @@ from agora import reducer, roster  # noqa: E402
 from agora.event import canonical_bytes, new_id, render_post  # noqa: E402
 
 NS = "jarvis-agora@godmeyou.kr"
-# 로컬 D1 폴더 — 기본(.wrangler/state)과 다른 폴더를 쓰는 실행기(run-admission 의 업그레이드 시험)가 넘긴다.
-_PERSIST = ["--persist-to", os.environ["AGORA_PERSIST_TO"]] if os.environ.get("AGORA_PERSIST_TO") else []
 
 
 # ── 서명 도구(테스트 전용) ───────────────────────────────────────────────────
@@ -765,7 +763,7 @@ def main():
     #   실제 운영에서도 master 가 D1 에 직접 적는다. 시험에서도 같은 경로로 세운다.
     subprocess.run([os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "node_modules/.bin/wrangler"), "d1", "execute", "agora-relay",
-                    "--local", *_PERSIST, "--command",
+                    "--local", "--command",
                     "UPDATE participants SET is_operator=1 WHERE participant_id='%s'" % op["id"]],
                    capture_output=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    env={k: v for k, v in os.environ.items() if k != "NODE_OPTIONS"})
@@ -883,7 +881,7 @@ def main():
     # 파생 캐시 자가치유(R-7) — 캐시를 지워도 조회가 다시 채운다
     subprocess.run([os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "node_modules/.bin/wrangler"), "d1", "execute", "agora-relay",
-                    "--local", *_PERSIST, "--command", "DELETE FROM rooms"],
+                    "--local", "--command", "DELETE FROM rooms"],
                    capture_output=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    env={k: v for k, v in os.environ.items() if k != "NODE_OPTIONS"})
     code, st = http("GET", args.base + "/rooms/" + results[0][1])

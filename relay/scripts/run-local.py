@@ -43,10 +43,8 @@ def ensure_local_schema(env):
     ★부재를 재는 축이니 **전제를 먼저 확인**한다: 표가 있으면 아무 일도 하지 않는다(멱등).
     """
     wrangler = os.path.join(RELAY, "node_modules/.bin/wrangler")
-    # ★0002 의 표도 본다 — 0001 만 먹은 기존 로컬 DB 에서는 아래 초기화의 `DELETE FROM admission_blocks` 가
-    #   실패해 **초기화 전체가 안 된 채** 시험이 돈다(설계 SURVEY §9-3 과 같은 병 · 0002 가 새로 부른 자리만 막는다).
     probe = subprocess.run([wrangler, "d1", "execute", "agora-relay", "--local",
-                            "--command", "SELECT 1 FROM events LIMIT 1; SELECT 1 FROM admission_blocks LIMIT 1;"],
+                            "--command", "SELECT 1 FROM events LIMIT 1;"],
                            cwd=RELAY, capture_output=True, text=True, env=env)
     if probe.returncode == 0:
         return True
@@ -74,9 +72,7 @@ def reset_local_db(env):
       두 번째 실행이 429·409 로 죽고, 그것을 「구현이 틀렸다」로 읽게 된다.
       비우는 것은 시험 환경이지 방어의 완화가 아니다(상한값은 그대로 둔다).
     """
-    # ★admission_blocks 도 비운다 — 안 비우면 차단 시험 뒤 재실행이 그 id 로 계속 막힌다(설계 §7 · r2 D2-8).
-    sql = ("DELETE FROM admission_blocks; "
-           "DELETE FROM events; DELETE FROM rooms; DELETE FROM participants; "
+    sql = ("DELETE FROM events; DELETE FROM rooms; DELETE FROM participants; "
            "DELETE FROM rate_windows; DELETE FROM roster_checkpoints;")
     r = subprocess.run([os.path.join(RELAY, "node_modules/.bin/wrangler"), "d1", "execute",
                         "agora-relay", "--local", "--command", sql],
