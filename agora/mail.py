@@ -597,7 +597,41 @@ def _fingerprint_short(fp: str | None) -> str:
     return (fp or "")[:19]      # "SHA256:" + 앞 12자
 
 
-def _verify_item(ctx: Any, item: dict[str, Any], *, inbox_rows: list[dict[str, Any]]) -> dict[str, Any]:
+class _Index:
+    """우편함 색인 — 대화 → 상대 · message_id → 대화 · 보낸이 → 마지막 해시(적대 6R #7).
+
+    ★전에는 받은 한 통마다 우편함 전체 + 발신 원장 전체를 다시 훑었다(sync 1회 = O(받은 수 × 우편함 크기)).
+      상담소처럼 수천 통이 쌓이는 자리에서 판마다 비용이 커진다 ⇒ sync 머리에서 **한 번** 세우고 적재할 때마다 더한다.
+      판정 규칙은 그대로다(같은 대화에 다른 상대 = 격리 · 답장이 다른 대화를 가리키면 격리 · 사슬 = 같은 보낸이 직전 해시).
+    """
+
+    def __init__(self, me: str, inbox_rows: list[dict[str, Any]], sent_rows: list[dict[str, Any]]) -> None:
+        self.me = me
+        self.peers: dict[str, set[str]] = {}
+        self.threads_of: dict[str, set[str]] = {}
+        self.last_hash: dict[str, str] = {}
+        for row in sent_rows:
+            self._take(row, chain=False)
+        for row in inbox_rows:
+            self.add(row)
+
+    def _take(self, row: dict[str, Any], *, chain: bool) -> None:
+        tid = row.get("thread_id")
+        if tid:
+            peer = row.get("to") if row.get("from") == self.me else row.get("from")
+            if peer:
+                self.peers.setdefault(tid, set()).add(peer)
+        if row.get("message_id"):
+            self.threads_of.setdefault(row["message_id"], set()).add(tid)
+        if chain and row.get("from") and row.get("hash"):
+            self.last_hash[row["from"]] = row["hash"]
+
+    def add(self, row: dict[str, Any]) -> None:
+        self._take(row, chain=True)
+
+
+def _verify_item(ctx: Any, item: dict[str, Any], *, inbox_rows: list[dict[str, Any]],
+                 index: _Index | None = None) -> dict[str, Any]:
     """받은 한 통을 **우리 손으로** 다시 본다. 통과면 적재할 줄, 아니면 `{"quarantine": 사유}`."""
     from agora import sign
     base = {"mail_id": item.get("mail_id"), "from": item.get("from"),
@@ -621,18 +655,12 @@ def _verify_item(ctx: Any, item: dict[str, Any], *, inbox_rows: list[dict[str, A
     if doc["from"] != item.get("from") or doc["message_id"] != item.get("message_id"):
         return {**base, "quarantine": "wrapper_mismatch"}
     # 대화 결박의 받는 쪽 재검사 — 같은 대화에 제3자가 끼거나, 답장이 다른 대화를 가리키면 격리.
-    for row in inbox_rows + _rows(_path(ctx, SENT_FILE)):
-        if row.get("thread_id") == doc["thread_id"]:
-            peer = row.get("to") if row.get("from") == ctx.participant_id else row.get("from")
-            if peer and peer != doc["from"]:
-                return {**base, "quarantine": "thread_not_yours"}
-        if doc.get("reply_to") and row.get("message_id") == doc["reply_to"] \
-                and row.get("thread_id") != doc["thread_id"]:
-            return {**base, "quarantine": "reply_outside_thread"}
-    expected_prev = GENESIS_PREV
-    for row in inbox_rows:
-        if row.get("from") == doc["from"] and row.get("hash"):
-            expected_prev = row["hash"]
+    index = index or _Index(ctx.participant_id, inbox_rows, _rows(_path(ctx, SENT_FILE)))
+    if any(peer != doc["from"] for peer in index.peers.get(doc["thread_id"], ())):
+        return {**base, "quarantine": "thread_not_yours"}
+    if doc.get("reply_to") and any(t != doc["thread_id"] for t in index.threads_of.get(doc["reply_to"], ())):
+        return {**base, "quarantine": "reply_outside_thread"}
+    expected_prev = index.last_hash.get(doc["from"], GENESIS_PREV)
     payload = doc["payload"]
     return {**base, "thread_id": doc["thread_id"], "to": doc["to"], "intent": payload["intent"],
             "subject": payload.get("subject"), "reply_to": doc.get("reply_to"),
@@ -666,6 +694,7 @@ def sync(ctx: Any, *, refresh_roster: Any = None, _refreshed: bool = False) -> d
                                 receipts_since=receipts_since, auth=_auth_header(ctx, doc))
     inbox_path = _path(ctx, INBOX_FILE)
     inbox_rows = _rows(inbox_path)
+    index = _Index(ctx.participant_id, inbox_rows, _rows(_path(ctx, SENT_FILE)))
     have = {(r.get("from"), r.get("message_id")) for r in inbox_rows}
     pin = desk_pin()
     trusted = set((ctx.config or {}).get("trusted_senders") or [])
@@ -681,7 +710,7 @@ def sync(ctx: Any, *, refresh_roster: Any = None, _refreshed: bool = False) -> d
             max_seq = max(max_seq, seq)
             if (item.get("from"), item.get("message_id")) in have:
                 continue                         # at-least-once — 한 번만 적재
-            row = _verify_item(ctx, item, inbox_rows=inbox_rows)
+            row = _verify_item(ctx, item, inbox_rows=inbox_rows, index=index)
             if row.get("purged"):
                 row["thread_id"] = thread.get("thread_id")     # 머리만 온 우편도 대화에 묶어 보인다
             if "quarantine" in row:
@@ -694,6 +723,7 @@ def sync(ctx: Any, *, refresh_roster: Any = None, _refreshed: bool = False) -> d
                 continue
             _append(inbox_path, row)
             inbox_rows.append(row)
+            index.add(row)
             have.add((row.get("from"), row.get("message_id")))
             added += 1
             if row.get("intent") in MACHINE_INTENTS or row.get("purged"):

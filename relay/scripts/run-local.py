@@ -20,6 +20,16 @@ PORT = int(os.environ.get("AGORA_PORT", "8787"))
 BASE = "http://127.0.0.1:%d" % PORT
 
 
+def port_busy():
+    """이 포트에 **이미 누가 떠 있는가**. ★떠 있으면 우리 서버는 묶지 못하고 죽는데, 그 사이 `wait_ready` 가
+    남의 서버 `/health` 에 200 을 받아 남의 D1(초기화 안 된 상태) 위에서 시험이 돈다 — 기준선 FAIL 의 정체
+    (다른 worktree 의 mutate 가 같은 8791 을 쓸 때 · 이월 2026-10-05)."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        return s.connect_ex(("127.0.0.1", PORT)) == 0
+
+
 def wait_ready(proc, deadline_s=120):
     deadline = time.time() + deadline_s
     while time.time() < deadline:
@@ -94,6 +104,9 @@ def main():
     if not ensure_local_schema(env):
         # ★차려지지 않은 환경 위에서 시험을 돌리지 않는다 — 그 결과는 아무것도 증명하지 않는다.
         return 3
+    if port_busy():
+        print("포트 %d 에 이미 다른 서버가 떠 있다 — 남의 서버로 시험하지 않는다(AGORA_PORT 로 다른 포트를 주라)" % PORT)
+        return 2
     if os.environ.get("AGORA_KEEP_DB") != "1":
         reset_local_db(env)
     log_path = os.path.join(RELAY, ".wrangler-dev.log")

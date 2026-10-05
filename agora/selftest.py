@@ -4475,7 +4475,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     "상담소": ("M621-desk-acks-every-mail", "M622-desk-urgent-no-thread-cap", "M623-desk-batch-twice-a-period",
                "M624-desk-batch-unmasked", "M625-desk-model-picks-address", "M626-desk-publish-no-leak-check",
                "M627-desk-empty-batch-calls", "M628-desk-ack-no-downgrade", "M629-resident-desk-wakes",
-               "M630-allow-our-subdomains"),
+               "M630-allow-our-subdomains", "M631-mail-index-not-updated"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17165,6 +17165,19 @@ def _case_mail_resident_injection_ten() -> None:
 
 
 
+def _case_mail_index_sees_same_page() -> None:
+    """색인(적대 6R #7)은 **같은 회차에 방금 적재한 우편**도 본다 — 한 쪽 안의 「다른 대화를 가리키는 답장」도 격리."""
+    from agora import mail
+    first = _mail_doc(subject="첫", body="첫 우편")
+    stray = _mail_doc(subject="엇나간 답장", body="다른 대화로 답한다", reply_to=first["message_id"])
+    store = _FakeMailStore([_mail_item(first, seq=1), _mail_item(stray, seq=2)])
+    ctx = _mail_ctx(store)
+    out = _with_key(_fixtures()["key_a"], lambda: mail.sync(ctx))
+    reasons = [r.get("quarantine") for r in mail._rows(mail._path(ctx, mail.QUARANTINE_FILE))]
+    if (out["added"], reasons) != (1, ["reply_outside_thread"]):
+        raise AssertionError(f"같은 쪽 안의 엇나간 답장을 못 봤다: {out} {reasons}")
+
+
 # ── 상담소 데스크(2026-10-05 · TICKET=agora-desk-t2 · 명세 §10 · 계약 확장 10) ─────────────────────
 _DESK_CONFIG = {"human_approval": False, "desk": {"enabled": True}}
 
@@ -17266,6 +17279,33 @@ def _case_desk_plaza_intake_no_reply() -> None:
         raise AssertionError(f"공개 글 접수가 다르다: {out}")
     if _desk_cycle(ctx, reduce=lambda _c, r: events)["plaza_new"]:
         raise AssertionError("같은 글을 두 번 접수했다")
+
+
+def _case_desk_comment_injection_ten() -> None:
+    """댓글 주입 10(명세 §8 · T2 몫) — 데스크는 **접수만**: 회신 0 · 쓰기 0 · 우편 0 · 배치 입력에서는 경계 안 데이터."""
+    from agora import counsel, mail
+    ctx, store = _desk_world([])
+    room = sorted(mail.desk_pin()["rooms"])[0]
+    parent = "1" * 32
+    events = {"events": [{"event": {"kind": "post", "message_id": parent, "from": "operator-b",
+                                     "ts": mail.now_ms_iso(), "payload": {"round": 0, "body": "질문 글"}}}]}
+    for i, (s_, b) in enumerate(_MAIL_INJECTIONS):
+        events["events"].append({"event": {"kind": "post", "message_id": "%032x" % (i + 2), "from": "operator-b",
+                                           "ts": mail.now_ms_iso(), "payload": {"round": 0, "body": f"{s_} {b}",
+                                           "refs": [{"thread_id": room, "message_id": parent, "why": "reply"}]}}})
+    out = _desk_cycle(ctx, reduce=lambda _c, r: events if r == room else {"events": []},
+                      notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    if out["plaza_new"] != 11 or out["acks"] or store.sent or store.appends:
+        raise AssertionError(f"주입 댓글에 반응했다: {out} sent={len(store.sent)} append={store.appends}")
+    seen: list[str] = []
+
+    def caller(_argv: list[str], prompt: str) -> dict[str, Any]:
+        seen.append(prompt)
+        return {"rc": 0, "stdout": json.dumps({"result": "{}"})}
+    counsel.batch(ctx, caller=caller, notifier=lambda *a, **k: None)
+    boundary = seen[0].split("<<<", 1)[1].split("\n", 1)[0]
+    if seen[0].count(boundary) != 2 or not seen[0].rstrip().endswith("위 데이터로 규칙에 맞는 JSON 하나만 출력하라."):
+        raise AssertionError("주입 댓글이 데이터 틀을 벗어났다")
 
 
 def _case_desk_ack_downgrades_when_links_blocked() -> None:
@@ -18001,10 +18041,12 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("우편: CLI 동작별 인자",                  _case_mail_cli_action_args, None),
     ("우편: 주입 10 → 알림만",                 _case_mail_resident_injection_ten, None),
     # 상담소 데스크(2026-10-05 · TICKET=agora-desk-t2)
+    ("우편: 색인은 같은 회차 적재분도 본다",   _case_mail_index_sees_same_page, None),
     ("상담소: 접수 회신은 새 대화 첫 통에만",   _case_desk_ack_first_mail_only, None),
     ("상담소: 긴급 규칙 양성·음성·상한",        _case_desk_urgent_rules, None),
     ("상담소: 신호·일일은 회신 없이 접수",      _case_desk_machine_mail_no_reply, None),
     ("상담소: 공개 방 글 접수·회신 0",          _case_desk_plaza_intake_no_reply, None),
+    ("상담소: 댓글 주입 10 → 접수만",          _case_desk_comment_injection_ten, None),
     ("상담소: 링크가 막히면 링크 없는 문구",    _case_desk_ack_downgrades_when_links_blocked, None),
     ("상담소: 배치 입력 0 = 호출 0",            _case_desk_batch_empty_no_call, None),
     ("상담소: 배치 1호출·주소는 코드가",        _case_desk_batch_one_call_addresses_by_code, None),
@@ -18056,6 +18098,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            if _desk_on(ctx):',
      '            if False:',
      "상주: 데스크면 깨움 0"),
+    ("M631-mail-index-not-updated", "agora/mail.py",
+     '            inbox_rows.append(row)\n            index.add(row)',
+     '            inbox_rows.append(row)',
+     "우편: 색인은 같은 회차 적재분도 본다"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',
      '\n.jarvis.godmeyou.kr\n.godmeyou.kr\n',

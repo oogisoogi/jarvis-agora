@@ -786,6 +786,8 @@ def batch(ctx: Any, *, dry_run: bool = False, now: datetime.datetime | None = No
     out_dir = os.path.join(counsel_dir(ctx), period)
     os.makedirs(out_dir, mode=0o700, exist_ok=True)
     boundary = "COUNSEL-" + secrets.token_hex(8)
+    while boundary in json.dumps(data, ensure_ascii=False):      # 본문이 경계를 흉내 내도 틀을 못 닫게(mail.read 와 같은 규칙)
+        boundary = "COUNSEL-" + secrets.token_hex(8)
     prompt = build_prompt(data, boundary)
     with open(os.path.join(out_dir, "input.json"), "w", encoding="utf-8", newline="\n") as fh:
         json.dump({"items": data["items"], "signals": data["signals"], "daily_notes": data["daily_notes"],
