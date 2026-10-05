@@ -479,23 +479,48 @@ def desk_cycle(ctx: Any, *, now: datetime.datetime | None = None,
 
 # ── 배치(하루 1회 · 분석 1호출 + 공개 답 ≤1호출) ─────────────────────────────────
 
+_PUA_RE = re.compile("[\ue000-\uf8ff]")      # 사용자 영역 글자 — 가림 표시(아래)로만 쓴다 · 입력의 것은 지운다
+
+
+def _fold_map(text: str) -> tuple[str, list[int]]:
+    """`str.lower()` 로 접은 사본 + 접은 글자마다 원문 위치. ★이름 목록·`scrub.check_names` 와 **같은 접기**다
+    (적대 6R codex — `re.IGNORECASE` 는 「İpek」→「i̇pek」 같은 접기를 못 따라가 이름이 그대로 갔다)."""
+    folded: list[str] = []
+    owner: list[int] = []
+    for i, ch in enumerate(text):
+        low = ch.lower()
+        folded.append(low)
+        owner.extend([i] * len(low))
+    return "".join(folded), owner
+
+
 def _masker(ctx: Any) -> Callable[[str], str]:
-    """스크럽 규칙(차단 17종 + 이름 목록)으로 **가린 사본**을 만든다 — 모델에 보내는 입력용(발신 검사 아님)."""
+    """스크럽 규칙(차단 17종 + 이름 목록)으로 **가린 사본**을 만든다 — 모델에 보내는 입력용(발신 검사 아님).
+
+    ★표지를 믿지 않는다(적대 6R codex — 입력이 쓴 「[가림:x]」를 「이미 가린 것」으로 건너뛰어 이름이 남았다).
+      규칙이 가린 자리는 먼저 **사용자 영역 글자 표시**로 두고(입력의 같은 글자는 지운다), 이름은 그 위에서 **한 번에**
+      (접은 사본에서 찾아 원문 자리를 가린다), 마지막에 표시를 「[가림:…]」로 편다 — 이름 단계가 규칙 표지 안을 건드릴 수 없고
+      (적대 5R — 표지 안 글자를 다시 가려 사본이 불었다) 입력이 흉내 낸 표지는 그냥 글이다.
+    """
     from agora import scrub
     rules = scrub.load_rules()
-    names = sorted({n for n in scrub.load_names(scrub.names_path(ctx.config_dir)) if n}, key=len, reverse=True)
-    # ★이름은 **한 번에**(긴 이름 먼저) · 이미 넣은 가림 표지 안은 건너뛴다 · 대소문자 무관(목록은 소문자 · scrub.check_names 와 같다).
-    #   적대 5R codex — 이름마다 차례로 바꾸면 앞서 넣은 「[가림:이름]」 안의 글자(「이」)를 다시 가려 사본이 수십 배로 불었고,
-    #   대소문자를 가리면 「Kim」이 목록의 「kim」을 비껴갔다. 한 번에 바꾸면 늘어남은 글자당 표지 하나(≤15B)다.
-    name_re = (re.compile(r"\[가림:[^\[\]]{1,40}\]|" + "|".join(re.escape(n) for n in names), re.IGNORECASE)
-               if names else None)
+    tokens = [f"[가림:{rid}]" for rid, _kind, _pattern in rules.compiled] + ["[가림:이름]"]
+    marks = ["\ue000" + chr(0xE100 + k) + "\ue001" for k in range(len(tokens))]
+    names = sorted({_PUA_RE.sub("", n) for n in scrub.load_names(scrub.names_path(ctx.config_dir))} - {""},
+                   key=len, reverse=True)
+    name_re = re.compile("|".join(re.escape(n) for n in names)) if names else None
 
     def mask(text: str) -> str:
-        out = text or ""
-        for rid, _kind, pattern in rules.compiled:
-            out = pattern.sub(f"[가림:{rid}]", out)
+        out = _PUA_RE.sub("", text or "")
+        for k, (_rid, _kind, pattern) in enumerate(rules.compiled):
+            out = pattern.sub(marks[k], out)
         if name_re is not None:
-            out = name_re.sub(lambda m: m.group(0) if m.group(0).startswith("[가림:") else "[가림:이름]", out)
+            folded, owner = _fold_map(out)
+            spans = [(owner[m.start()], owner[m.end() - 1] + 1) for m in name_re.finditer(folded) if m.end() > m.start()]
+            for a, b in reversed(spans):
+                out = out[:a] + marks[-1] + out[b:]
+        for mark, token in zip(marks, tokens):
+            out = out.replace(mark, token)
         return out
     return mask
 

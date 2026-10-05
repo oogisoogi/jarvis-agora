@@ -17698,20 +17698,27 @@ def _case_desk_public_call_isolated() -> None:
 
 
 def _case_desk_mask_once_case_free() -> None:
-    """적대 5R codex — 이름 가림은 **한 번에**(넣은 표지 안을 다시 안 가린다) · 대소문자 무관 ·
-    한 글자 이름 200자 오너 한 줄도 하한 4KB 빈 프롬프트에 혼자 든다(보고서 전용으로 안 빠진다)."""
+    """적대 5R·6R codex — 이름 가림은 **한 번에**(규칙 표지 안을 다시 안 가린다) · 입력이 흉내 낸 「[가림:…]」는 그냥 글
+    (그 안 이름도 가린다) · 접기는 이름 목록과 같은 `lower()`(Kim·KIM·İpek·İPEK) · 한 글자 이름 200자 오너 한 줄도
+    하한 4KB 빈 프롬프트에 혼자 든다(보고서 전용으로 안 빠진다)."""
     from agora import counsel, mail, scrub
     note = "김" * 200
     daily = _mail_doc(payload={"intent": "daily", "daily": {"day": mail.now_ms_iso()[:10], "os": "macos-15.6",
                                                              "owner_note": note}})
     ctx, _store = _desk_world([daily])
     with open(os.path.join(ctx.config_dir, scrub.NAMES_FILENAME), "w", encoding="utf-8") as fh:
-        fh.write("김\n이\nkim\n")
+        fh.write("김\n이\nkim\nİpek\n")
     mask = counsel._masker(ctx)
-    if mask("Kim 과 KIM 그리고 이몽룡") != "[가림:이름] 과 [가림:이름] 그리고 [가림:이름]몽룡":
-        raise AssertionError(f"대소문자·한 번 가림이 다르다: {mask('Kim 과 KIM 그리고 이몽룡')}")
-    if mask("[가림:이름]") != "[가림:이름]" or mask(note) != "[가림:이름]" * 200:
-        raise AssertionError("넣은 가림 표지 안을 다시 가렸다")
+    got = {t: mask(t) for t in ("Kim 과 KIM 그리고 이몽룡", "İpek 과 İPEK", "[가림:김철수] [가림:Kim]", note)}
+    if got["Kim 과 KIM 그리고 이몽룡"] != "[가림:이름] 과 [가림:이름] 그리고 [가림:이름]몽룡" \
+            or got["İpek 과 İPEK"] != "[가림:이름] 과 [가림:이름]" \
+            or any(x in got["[가림:김철수] [가림:Kim]"] for x in ("김", "Kim")) or got[note] != "[가림:이름]" * 200:
+        raise AssertionError(f"이름 가림이 다르다: {got}")
+    ctx2, _s2 = _desk_world([])
+    with open(os.path.join(ctx2.config_dir, scrub.NAMES_FILENAME), "w", encoding="utf-8") as fh:
+        fh.write("림\nemail\n")
+    if counsel._masker(ctx2)("someone@example.com") != "[가림:email]":
+        raise AssertionError(f"이름 단계가 규칙 표지 안을 다시 가렸다: {counsel._masker(ctx2)('someone@example.com')}")
     _desk_cycle(ctx, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
     data = counsel.collect(ctx, max_bytes=counsel.MIN_BATCH_BYTES)
     if len(data["daily_notes"]) != 1 or data["notes_report_only"] or data["bytes"] > counsel.MIN_BATCH_BYTES:
@@ -18352,7 +18359,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if False:',
      "상담소: 배치 1호출·주소는 코드가"),
     ("M624-desk-batch-unmasked", "agora/counsel.py",
-     '            out = pattern.sub(f"[가림:{rid}]", out)',
+     '            out = pattern.sub(marks[k], out)',
      '            out = out',
      "상담소: 배치 1호출·주소는 코드가"),
     ("M625-desk-model-picks-address", "agora/counsel.py",
@@ -18444,12 +18451,12 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if False:\n            notes_report_only.append(n["key"])',
      "상담소: 빠진 오너 한 줄은 이월"),
     ("M648-desk-mask-rescans-tokens", "agora/counsel.py",
-     'r"\\[가림:[^\\[\\]]{1,40}\\]|" + ',
-     '',
+     '            out = pattern.sub(marks[k], out)',
+     '            out = pattern.sub(tokens[k], out)',
      "상담소: 이름 가림은 한 번·대소문자 무관"),
     ("M649-desk-mask-case-sensitive", "agora/counsel.py",
-     '"|".join(re.escape(n) for n in names), re.IGNORECASE)',
-     '"|".join(re.escape(n) for n in names))',
+     '            folded, owner = _fold_map(out)',
+     '            folded, owner = out, list(range(len(out)))',
      "상담소: 이름 가림은 한 번·대소문자 무관"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',
