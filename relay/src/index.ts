@@ -1074,48 +1074,34 @@ function idList(body: Record<string, unknown>, key: string, max: number,
 const isMailId = (x: unknown): boolean => typeof x === "string" && mail.parseMailId(x) !== null;
 
 async function handleMailAck(req: Request, env: Env): Promise<Response> {
+  // ★v3(적대 4R R4-1): **대화 단위 읽음을 API 에서 뺐다.** 경계를 시각(1R)·서명된 upto(2R)·실재 upto(3R)로 세 번 고쳤지만
+  //   매번 재생 창(인증 ±5분) 안에서 「서명 뒤에 들어온 우편」이 경계 안으로 들어오는 길이 남았다. 읽음 대상은 이제
+  //   **받는 사람이 실제로 받아 본 우편의 mail_id 목록**뿐이다 — 아직 적재되지 않은 우편은 그 목록에 있을 수 없으므로
+  //   재생해도 새 우편이 걸리지 않는다. 「대화를 열면 대화 전체가 읽힘」은 클라이언트가 보여 준 mail_id 를 다 보내 지킨다.
   const body = await readJson(req);
-  closedBody(body, ["for", "mail_ids", "thread_ids", "upto", "ts", "signature"]);
+  closedBody(body, ["for", "mail_ids", "ts", "signature"]);
   const forId = needStr(body, "for");
   const mailIds = idList(body, "mail_ids", mail.ACK_IDS_MAX, isMailId);
-  const threadIds = idList(body, "thread_ids", mail.ACK_THREADS_MAX);
-  if (!mailIds.length && !threadIds.length) fail(ARGUMENT, "mail_ids·thread_ids 가 둘 다 비었다", null);
-  if (typeof body.upto !== "string" || (body.upto !== "" && !isMailId(body.upto))) {
-    fail(ARGUMENT, "upto 는 빈 문자열 또는 ml_ + 16자리", { key: "upto" });
-  }
-  const upto = body.upto as string;
-  if (threadIds.length && upto === "") fail(ARGUMENT, "대화 단위 읽음에는 upto 가 필요하다", { key: "upto" });
+  if (!mailIds.length) fail(ARGUMENT, "mail_ids 가 비었다", null);
   const ts = needStr(body, "ts");
   const signature = needStr(body, "signature");
   const nowMs = Date.now();
   const qb = new QueryBudget(env.DB, MAIL_ACK_D1_QUERIES_MAX);
   // ★서명 대상 = 요청 그대로의 목록(순서·중복 포함) — 서버가 고쳐 쓴 값에 서명이 걸린 척하지 않는다.
-  await verifyMailAuth(qb, env, forId, mail.ackAuthDoc(forId, mailIds, threadIds, upto, ts), ts, signature, nowMs);
+  await verifyMailAuth(qb, env, forId, mail.ackAuthDoc(forId, mailIds, ts), ts, signature, nowMs);
 
-  // ★수신자가 **자기 앞 우편에만** 붙인다 — 남의 우편·남의 대화 id 는 조용히 무시하고 계수만 준다.
+  // ★수신자가 **자기 앞 우편에만** 붙인다 — 남의 우편 id 는 조용히 무시하고 계수만 준다.
   //   대상 = mail_id(= seq · 전역 유일). message_id 로 고르면 다른 발신자의 같은 id 우편까지 붙는다(적대 2R R2-2).
   const seqs = [...new Set(mailIds.map(x => mail.parseMailId(x) as number))];
-  let matched = 0;
-  if (seqs.length) {
-    const m = await qb.prepare(
-      `SELECT COUNT(*) AS n FROM mail WHERE to_id = ?1 AND seq IN (SELECT value FROM json_each(?2))`
-    ).bind(forId, JSON.stringify(seqs)).first<{ n: number }>();
-    matched = Number(m?.n ?? 0);
-  }
+  const m = await qb.prepare(
+    `SELECT COUNT(*) AS n FROM mail WHERE to_id = ?1 AND seq IN (SELECT value FROM json_each(?2))`
+  ).bind(forId, JSON.stringify(seqs)).first<{ n: number }>();
+  const matched = Number(m?.n ?? 0);
   // ★이미 붙은 표시는 안 바뀐다(첫 시각 유지 · acked_at IS NULL).
-  // ★대화 단위 ack 는 **서명된 upto(mail_id) 이하**에만 붙는다(적대 1R R1-1 → 2R R2-1) — 받는 사람이 실제로 본
-  //   수신함 쪽의 마지막 mail_id 를 서명에 싣는다. seq 는 적재 순간에 매겨지므로 같은 요청을 재생해도, 서명 뒤에
-  //   적재된 우편(더 큰 seq)은 절대 안 걸린다. 시각(ts·created_at)은 경계로 쓰지 않는다(미래 ts·적재 지연 둘 다 새는 경계였다).
-  //   ★upto 는 **그 수신자 앞으로 실제 적재된 우편**이어야 한다(적대 3R R3-2) — 아직 없는 큰 번호를 서명해 두면 재생 때
-  //     그 사이 적재된 우편까지 걸린다. 실재하지 않으면 대화 칸은 0통(질의 추가 0 · 같은 UPDATE 안의 EXISTS).
-  const uptoSeq = upto === "" ? 0 : (mail.parseMailId(upto) as number);
   const res = await qb.prepare(
     `UPDATE mail SET acked_at = ?1
-      WHERE to_id = ?2 AND acked_at IS NULL
-        AND (seq IN (SELECT value FROM json_each(?3))
-             OR (thread_id IN (SELECT value FROM json_each(?4)) AND seq <= ?5
-                 AND EXISTS (SELECT 1 FROM mail u WHERE u.seq = ?5 AND u.to_id = ?2)))`
-  ).bind(nowIso(new Date(nowMs)), forId, JSON.stringify(seqs), JSON.stringify(threadIds), uptoSeq).run();
+      WHERE to_id = ?2 AND acked_at IS NULL AND seq IN (SELECT value FROM json_each(?3))`
+  ).bind(nowIso(new Date(nowMs)), forId, JSON.stringify(seqs)).run();
   return json({ acked: Number(res.meta?.changes ?? 0), ignored: seqs.length - matched }, 200, MAIL_HEADERS);
 }
 

@@ -762,12 +762,8 @@ describe("수신함·읽음 인증 문서 — 서명 대상 바이트(명세 §3
       .toBe('{"for":"jarvis-b","purpose":"agora-mail-inbox-v1","receipts_since":"","since":"","ts":"2026-10-05T12:00:00.000Z"}');
   });
   it("ack 문서의 canonical 모양이 계약 그대로다", () => {
-    expect(canonicalText(mailTs.ackAuthDoc("jarvis-b", ["ml_0000000000000007"], ["a".repeat(32)], "ml_0000000000000009", ts)))
-      .toBe(`{"acked":["ml_0000000000000007"],"acked_threads":["${"a".repeat(32)}"],"for":"jarvis-b","purpose":"agora-mail-ack-v2","ts":"${ts}","upto":"ml_0000000000000009"}`);
-  });
-  it("음성 대조 — upto 를 바꾸면 서명 대상이 달라진다(대화 읽음 범위를 서명이 고정한다 · 적대 2R R2-1)", () => {
-    expect(canonicalText(mailTs.ackAuthDoc("jarvis-b", [], ["a".repeat(32)], "ml_0000000000000009", ts)))
-      .not.toBe(canonicalText(mailTs.ackAuthDoc("jarvis-b", [], ["a".repeat(32)], "ml_0000000000000010", ts)));
+    expect(canonicalText(mailTs.ackAuthDoc("jarvis-b", ["ml_0000000000000007"], ts)))
+      .toBe(`{"acked":["ml_0000000000000007"],"for":"jarvis-b","purpose":"agora-mail-ack-v3","ts":"${ts}"}`);
   });
   it("음성 대조 — since 를 바꾸면 서명 대상이 달라진다(헤더 재사용 차단의 근거)", () => {
     expect(canonicalText(mailTs.inboxAuthDoc("jarvis-b", "ml_0000000000000001", "", ts)))

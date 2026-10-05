@@ -32,14 +32,13 @@ export const MAIL_TS_PAST_MS = 86_400_000;      // 우편 ts = 서버 시각 −
 export const AUTH_SKEW_MS = 300_000;            // 수신함·읽음 인증 ts = 서버 시각 ±5분
 
 export const INBOX_PURPOSE = "agora-mail-inbox-v1";
-// ★v2(적대 2R R2-1·R2-2): 읽음 대상 = 릴레이가 매긴 `mail_id`(전역 유일 · message_id 는 발신자별로만 유일) ·
-//   대화 단위 읽음 = 서명된 `upto`(mail_id) 이하만 — 시각(ts·created_at)을 경계로 쓰지 않는다.
-export const ACK_PURPOSE = "agora-mail-ack-v2";
+// ★v3(적대 2R R2-2 → 4R R4-1): 읽음 대상 = 릴레이가 매긴 `mail_id` 목록뿐(전역 유일 · message_id 는 발신자별로만 유일) ·
+//   대화 단위 읽음은 API 에 없다(재생 창 안에서 새 우편이 경계 안으로 들어오는 길을 원천 차단).
+export const ACK_PURPOSE = "agora-mail-ack-v3";
 export const INBOX_PAGE_MAX = 50;
 export const INBOX_SCAN_MAX = 500;
 export const RECEIPTS_MAX = 100;
 export const ACK_IDS_MAX = 50;
-export const ACK_THREADS_MAX = 20;
 export const KEEP_DAYS = 30;
 export const KEEP_REPLY_DAYS = 90;
 
@@ -359,8 +358,8 @@ export function inboxAuthDoc(forId: string, since: string, receiptsSince: string
   return { for: forId, purpose: INBOX_PURPOSE, receipts_since: receiptsSince, since, ts };
 }
 
-export function ackAuthDoc(forId: string, acked: string[], ackedThreads: string[], upto: string, ts: string): Obj {
-  return { acked, acked_threads: ackedThreads, for: forId, purpose: ACK_PURPOSE, ts, upto };
+export function ackAuthDoc(forId: string, acked: string[], ts: string): Obj {
+  return { acked, for: forId, purpose: ACK_PURPOSE, ts };
 }
 
 /** `X-Agora-Mail-Auth: base64(JSON {"ts","signature"})` → 두 칸. 없거나 못 읽으면 401/4. */

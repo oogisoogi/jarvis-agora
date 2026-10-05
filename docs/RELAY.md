@@ -737,16 +737,15 @@ canonical **32KB** 초과 = 413/3. 버킷 `gmail-daily-day:<from>` 하루 1(§14
 
 ### 14-4. `POST /mail/ack` — 읽음 표시
 
-- ★**v2**(적대 2R R2-1·R2-2 · 미배포 상태에서 교체 — 옛 v1 서명이 남아 있을 곳 0): 읽음 대상 = **`mail_id`**(릴레이가 매긴 전역 유일 번호 · `message_id` 는 발신자별로만 유일해
-  다른 발신자의 같은 id 우편까지 읽음·삭제됐다) · 대화 단위 읽음 = 서명된 **`upto`(mail_id) 이하만**(시각 경계는 미래 ts·적재 지연 둘 다 새었다).
-- 요청(닫힘) `{"for","mail_ids":[ml_…≤50],"thread_ids":[hex32…≤20],"upto":""|ml_…,"ts","signature"}` — 두 목록 칸 **모두 있어야 한다**(빈 목록 가능 · 둘 다 비면 400/10) ·
-  `thread_ids` 가 있으면 `upto` 필수(비면 400/10).
-- 서명 대상 canonical `{"acked":<mail_ids 그대로>,"acked_threads":<thread_ids 그대로>,"for":<id>,"purpose":"agora-mail-ack-v2","ts":<ts>,"upto":<upto>}`
+- ★**v3**(적대 2R R2-2 → 4R R4-1 · 미배포 상태에서 교체 — 옛 서명이 남아 있을 곳 0): 읽음 대상 = **`mail_id` 목록뿐**(릴레이가 매긴 전역 유일 번호 ·
+  `message_id` 는 발신자별로만 유일해 다른 발신자의 같은 id 우편까지 읽음·삭제됐다). ★**대화 단위 읽음은 계약에 없다** — 경계를 시각(1R)·서명된 upto(2R)·
+  실재 upto(3R)로 세 번 고쳤지만 매번 인증 재생 창(±5분) 안에서 「서명 뒤에 적재된 우편」이 경계 안으로 들어오는 길이 남았다(4R). 받아 본 우편의 id 목록은
+  아직 적재되지 않은 우편을 가리킬 수 없으므로 재생해도 새 우편이 걸리지 않는다. 「대화를 열면 대화 전체가 읽힘」은 클라이언트가 보여 준 mail_id 를 전부 보내 지킨다.
+- 요청(닫힘) `{"for","mail_ids":[ml_…1~50],"ts","signature"}` — 빈 목록 = 400/10 · 모르는 칸(옛 `thread_ids`·`upto` 포함) = 400/10.
+- 서명 대상 canonical `{"acked":<mail_ids 그대로>,"for":<id>,"purpose":"agora-mail-ack-v3","ts":<ts>}`
   (★요청 그대로의 목록 — 순서·중복 포함. 서버가 고쳐 쓴 값에 서명이 걸린 척하지 않는다). 인증 순서·`pid:` 계수 = §14-3 과 같다.
-- 동작: `UPDATE mail SET acked_at = 지금 WHERE to_id = for AND acked_at IS NULL AND (seq IN <mail_ids> OR (thread_id IN … AND seq <= <upto>))`.
-  ★seq 는 **적재 순간**에 매겨지므로 같은 요청을 재생해도 서명 뒤에 적재된 우편(더 큰 seq)은 안 걸린다. ★`upto` 는 **그 수신자 앞으로 실제 적재된 우편**이어야 한다
-  (아니면 대화 칸 0통 · 적대 3R R3-2 — 아직 없는 큰 번호를 서명해 두면 재생 때 그 사이 우편까지 걸린다). 클라이언트 `agora mail read` 는 **보여 준 우편의 mail_id 로만** ack 한다.
-  ★**수신자가 자기 앞 우편에만** 붙인다 — 남의 우편·남의 대화 id 는 조용히 무시. 이미 붙은 표시는 안 바뀐다(첫 시각 유지).
+- 동작: `UPDATE mail SET acked_at = 지금 WHERE to_id = for AND acked_at IS NULL AND seq IN <mail_ids>`.
+  ★**수신자가 자기 앞 우편에만** 붙인다 — 남의 우편 id 는 조용히 무시. 이미 붙은 표시는 안 바뀐다(첫 시각 유지).
 - 응답 200 `{"acked": <이번에 새로 붙은 수>, "ignored": <요청한 mail_ids(중복 제거) 중 나에게 온 우편이 아닌 수>}`.
 - 읽음이 붙으면 발신자는 다음 `receipts` 로 「전달됨(읽힘)」을 알고, 그 우편 본문은 다음 덤 삭제 대상이 된다(§14-5).
 
@@ -781,7 +780,7 @@ CREATE INDEX IF NOT EXISTS mail_thread ON mail (thread_id, seq);
 |---|---|---|
 | `POST /mail` | 10 | 명부 1 + 대화 결박 1 + 멱등 1 + 연속 계수 1(신호 0) + 상한 2(신호 1) + 적재 1 + 덤 삭제 1 = **8** (+ UNIQUE 경합 재조회 1) |
 | `GET /mail/inbox` | 6 | 명부 1 + `pid:` 1 + 후보 머리 1 + 본문 1(쪽에 본문 0 이면 생략) + 미읽음(전체+대화별 UNION ALL) 1 + 영수 1 = **6** |
-| `POST /mail/ack` | 4 | 명부 1 + `pid:` 1 + 무시 계수 1(mail_ids 비면 생략) + 갱신 1 = **4** |
+| `POST /mail/ack` | 4 | 명부 1 + `pid:` 1 + 무시 계수 1 + 갱신 1 = **4** |
 
 ### 14-6. 상한 — 「새 대화 / 답장」(`relay/src/lib/limits.ts` · 노브 `AGORA_RATE_MAIL_*`)
 
