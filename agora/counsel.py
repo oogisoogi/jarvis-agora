@@ -51,6 +51,7 @@ MODES = ("collect", "worker")
 MAX_BATCH_BYTES = 1024 * 1024        # 설정으로도 못 넘는 천장
 ACK_TRIES_MAX = 3                    # 접수 회신 재시도(상한 · 실패한 판 수)
 LEAK_RUN = 40                        # 교차 유출 검사 — 연속 일치 문자 수(명세 §10-4 · 실측 없음 · 첫 배치로 조정)
+LEAK_RUN_PUBLIC = 20                 # 공개 답은 더 엄격하게(적대 1R codex — 40자 미만 비공개 사실이 통째로 지나갔다 · 오탐 = 보류 = 안전 쪽)
 CALL_TIMEOUT_SECONDS = 900
 KST = datetime.timezone(datetime.timedelta(hours=9))
 DAY_START_HOUR = 6                   # 06:00 KST 이전은 어제(tools/plaza.py day_of 와 같은 경계)
@@ -254,7 +255,8 @@ def match_urgent(text: str, codes: list[str], table: dict[str, dict[str, list[st
             for prefix in spec["codes"]:
                 found = sorted(t for t in tokens if t.startswith(prefix))
                 if found:
-                    hits.append({"category": cat, "word": found[0][:48]})
+                    # ★알림에는 표의 접두만 싣는다 — 본문에서 잡은 낱말 자체를 실으면 보낸 이가 알림 줄에 글을 싣는 통로가 된다(적대 1R codex).
+                    hits.append({"category": cat, "word": prefix + "…"})
                     break
     return hits
 
@@ -923,6 +925,13 @@ def publish(ctx: Any, *, period: str, mail_send: Callable[..., Any] | None = Non
                                                 body=json.loads(r["mail"])["payload"].get("body") or "")
               for mid, r in inbox.items() if r.get("mail") and r.get("intent") in HUMAN_INTENTS}
     batch_mail_ids = [m for a in addresses.values() if a.get("layer") == "mail" for m in a.get("mail_ids") or []]
+    # ★일일 보고의 오너 한 줄도 비공개 원문이다(적대 1R codex) — 보낸 참가자별로 묶어 대조 원문에 더한다.
+    notes: dict[str, list[str]] = {}
+    for r in inbox.values():
+        if r.get("intent") == "daily" and r.get("mail"):
+            note = ((json.loads(r["mail"])["payload"].get("daily") or {}).get("owner_note") or "")
+            if note:
+                notes.setdefault(r.get("from"), []).append(note)
     log_path = os.path.join(out_dir, PUBLISHED_FILE)
     done = {r.get("key") for r in _rows(log_path) if r.get("status") in (200, 201, "ok")}
     head = f"{REPLY_HEAD}({period})"
@@ -942,10 +951,12 @@ def publish(ctx: Any, *, period: str, mail_send: Callable[..., Any] | None = Non
             held = "스크럽 차단"
         elif addr["layer"] == "mail":
             own = set(addr.get("mail_ids") or [])
-            if leaks(body, [bodies[m] for m in batch_mail_ids if m not in own and m in bodies]):
-                held = "교차 유출(다른 대화 우편과 40자 일치)"
-        elif leaks(body, [bodies[m] for m in batch_mail_ids if m in bodies]):
-            held = "교차 유출(비공개 우편과 40자 일치 — 공개 답)"
+            others = [n for peer, ns in notes.items() if peer != addr.get("to") for n in ns]
+            if leaks(body, [bodies[m] for m in batch_mail_ids if m not in own and m in bodies] + others):
+                held = f"교차 유출(다른 대화 우편·오너 한 줄과 {LEAK_RUN}자 일치)"
+        elif leaks(body, [bodies[m] for m in batch_mail_ids if m in bodies] + [n for ns in notes.values() for n in ns],
+                   LEAK_RUN_PUBLIC):
+            held = f"교차 유출(비공개 우편·오너 한 줄과 {LEAK_RUN_PUBLIC}자 일치 — 공개 답)"
         if held:
             row = {"key": key, "held": held, "at": _iso(_now())}
             _append(log_path, row)

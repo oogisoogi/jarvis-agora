@@ -4478,7 +4478,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M630-allow-our-subdomains", "M631-mail-index-not-updated",
                "M632-resident-visits-desk-room", "M633-desk-exempt-on-resident-path",
                "M634-resident-env-unmarked", "M635-desk-batch-lock-ignored", "M636-desk-leak-body-only",
-               "M637-desk-cap-per-group"),
+               "M637-desk-cap-per-group", "M638-desk-urgent-reflects-token",
+               "M639-desk-public-threshold-loose"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17251,6 +17252,9 @@ def _case_desk_urgent_rules() -> None:
     if not counsel.match_urgent("", ["update.sig_mismatch"], table) \
             or not counsel.match_urgent("코드 J-NET-01 이 떠요", [], table):
         raise AssertionError("오류코드 일치를 못 봤다")
+    hit = counsel.match_urgent("install.private_release_cedar_2027 이 떴다", [], table)
+    if not hit or "cedar" in hit[0]["word"]:
+        raise AssertionError(f"알림 낱말에 본문 토큰이 실렸다(반사): {hit}")
 
 
 def _case_desk_machine_mail_no_reply() -> None:
@@ -17375,7 +17379,7 @@ def _case_desk_cap_lock_subject() -> None:
     finally:
         resident._lock_acquire = real
     secret_subject = "이 제목은 비공개 우편에만 있는 길고 구체적인 제목이라 공개 답에 나오면 안 된다"
-    a = _mail_doc(subject=secret_subject, body="짧은 본문")
+    a = _mail_doc(subject=secret_subject, body="짧은본문을 그대로 옮긴 스무 자 넘는 사실 문장")
     ctx2, _s2 = _desk_world([a])
     row = mail._rows(mail._path(ctx2, mail.INBOX_FILE))[0]
     out_dir = os.path.join(counsel.counsel_dir(ctx2), "2026-10-06")
@@ -17383,12 +17387,14 @@ def _case_desk_cap_lock_subject() -> None:
     with open(os.path.join(out_dir, "drafts.json"), "w", encoding="utf-8") as fh:
         json.dump({"addresses": {"M1": {"layer": "mail", "thread_id": a["thread_id"], "to": "operator-b",
                                         "reply_to": a["message_id"], "mail_ids": [row["mail_id"]]},
-                                 "P1": {"layer": "plaza", "room": "c" * 32, "parent": "d" * 32, "keys": []}},
-                   "replies": [{"key": "P1", "body": "공개 답: " + secret_subject}]}, fh, ensure_ascii=False)
+                                 "P1": {"layer": "plaza", "room": "c" * 32, "parent": "d" * 32, "keys": []},
+                                 "P2": {"layer": "plaza", "room": "c" * 32, "parent": "e" * 32, "keys": []}},
+                   "replies": [{"key": "P1", "body": "공개 답: " + secret_subject},
+                               {"key": "P2", "body": "참고: 짧은본문을 그대로 옮긴 스무 자 넘는 사실 문장"}]}, fh, ensure_ascii=False)
     out = counsel.publish(ctx2, period="2026-10-06", mail_send=lambda *a, **k: {},
                           say=lambda *a, **k: (_ for _ in ()).throw(AssertionError("제목이 섞인 공개 답이 나갔다")))
-    if out["held"] != 1:
-        raise AssertionError(f"비공개 제목 섞임을 보류하지 않았다: {out}")
+    if out["held"] != 2:
+        raise AssertionError(f"비공개 제목·짧은 사실(20자) 섞임을 보류하지 않았다: {out}")
 
 
 def _case_desk_ack_downgrades_when_links_blocked() -> None:
@@ -18211,6 +18217,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("M637-desk-cap-per-group", "agora/counsel.py",
      '            if used + size > max_bytes and (bundle or taken):',
      '            if used + size > max_bytes and bundle:',
+     "상담소: 상한·잠금·제목 대조"),
+    ("M638-desk-urgent-reflects-token", "agora/counsel.py",
+     '                    hits.append({"category": cat, "word": prefix + "…"})',
+     '                    hits.append({"category": cat, "word": found[0][:48]})',
+     "상담소: 긴급 규칙 양성·음성·상한"),
+    ("M639-desk-public-threshold-loose", "agora/counsel.py",
+     '                   LEAK_RUN_PUBLIC):',
+     '                   LEAK_RUN):',
      "상담소: 상한·잠금·제목 대조"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',
