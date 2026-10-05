@@ -20,5 +20,5 @@
 - 내용: `trial_state` 검사에서 `workers_dev: true` (실제 가동 중) 인데 운영 기록이 `off` 로 기재된 불일치가 발생할 경우, `scan_trial` 은 `trial_log_config_mismatch` 를 `incomplete` 에 추가하지만 이후 `if state == "off": return` 에 걸려 시험 릴레이로 GET 쿼리를 보내지 않고 통과해 버립니다. 시험 릴레이가 의도치 않게 탈취되어 실제 가동 중일 경우, 가장 시급한 즉각적 도용 글 경보(`ALARM`)를 띄우지 못하고 2시간 뒤에나 단순 불완전(설정 불일치) 경보만 울리게 될 여지가 있습니다. 불일치 시에도 `workers_dev: true` 라면 강제로 GET을 쏘도록 예외 처리가 필요해 보입니다.
 
 [다음 단계 조언] 원격 적용(시험 릴레이 → 본 릴레이) 전에 반드시 재야 할 것
-1. **원격 D1 트리거 마이그레이션 적용 안전성**: `BEGIN ... END;` 블록 안의 세미콜론(`;`)이 포함된 0002_admission_blocks 마이그레이션이 로컬 `sqlite3.executescript` 에서는 잘 돌지만, 실제 원격의 `wrangler d1 migrations apply` 파서에서는 구문 오류나 분리 오작동을 일으키지 않는지 T16 이행 과정에서 반드시 실측해야 합니다. 
+1. **원격 D1 트리거 마이그레이션 적용 안전성**: `BEGIN ... END;` 블록 안의 세미콜론(`;`)이 포함된 0002_admission_blocks 마이그레이션이 로컬 `sqlite3.executescript` 에서는 잘 돌지만, 실제 원격의 `wrangler d1 migrations apply` 파서에서는 구문 오류나 분리 오작동을 일으키지 않는지 T16 이행 과정에서 반드시 실측해야 합니다.
 2. **원격 CDN 전파 지연시간 (Cache Invalidation)**: 사후 대조 스크립트에서 캐시 우회(Cache-busting) 로직을 적용하더라도 원격 워커 노드들 사이에 DB 반영이 지연될 가능성이 있습니다. 운영 스크립트가 실행 직후 즉시 0초 내에 대조를 수행할 때 발생하는 미세한 타이밍 레이스를 시험 릴레이에서 확인해야 합니다.

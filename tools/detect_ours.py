@@ -66,7 +66,7 @@ DEFAULT_TRIAL_LOG = os.path.join(ROOT, "ops", "trial-relay-state.jsonl")
 DEFAULT_TRIAL_CONFIG = os.path.join(ROOT, "relay", "wrangler.next.jsonc")
 DEFAULT_STATE_DIR = os.path.expanduser("~/.local/state/agora-detect")
 DEFAULT_INBOX_CMD = os.path.expanduser("~/.claude/channels/inbox-append.sh")
-NOTIFY_FROM = "agora-detector@launchd"   # master 판정 2026-09-29 — 헤더 `[agora-detector@launchd → cmux master]`
+NOTIFY_FROM = "agora-detector@launchd"   # master 판정 2026-09-29 — 헤더 `[agora-detector@launchd → 총괄 master]`
 INCOMPLETE_STREAK = 2                     # 불완전은 연속 이 횟수부터 알린다(망 흔들림 소음 방지 · master 판정)
 USER_AGENT = "agora-detect/1.0 (+https://agora.godmeyou.kr)"
 

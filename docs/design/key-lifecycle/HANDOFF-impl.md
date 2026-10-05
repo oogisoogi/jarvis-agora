@@ -1,7 +1,7 @@
 # HANDOFF-impl — TICKET=agora-admission-block-0929 인계
 
 worker-agoraimpl@surface:1155 · 작업트리 `~/axdev/.wt/agora-admission`(갈래 `feat/admission-block-0929` · 기반 `agora/v2-mvp` 53b21a8 + 설계 3커밋) · 갱신 2026-09-29 21:5x · 후임 worker-agoraimpl@surface:1160 갱신 22:1x(Fable r4 · 3단계)
-todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
+todo 정본 = 워커 todo 경로 도구가 내주는 파일(`WORKER_AGORAIMPL_TODO.md`)
 
 ## 끝난 것
 | 항목 | 커밋 | 증거 |
@@ -35,7 +35,7 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 - 드라이버 = 스크래치 `drive.py`(저장소 밖 · 키도 거기) · 저장소 코드 변경 0.
 
 ## 4단계 실측(본 릴레이 agora-relay · TICKET=agora-admission-stage4 · worker@surface:1264 · 2026-10-05 12:07~12:2x KST)
-박사님 10-05 09:3x 「본 릴레이 적용」 승인 → master 판정 nonce f4683cd1(범위 = RUNBOOK §4 그대로 · **우리 id 차단 = 밖**(상주가 지금도 jarvis-jk1gn50iw7 로 가동 · §7 단계 7) · 본 릴레이 T16 탐침 = 하지 않음). 한 줄마다 master 【실행】: 4-0 9cffe972 · 4-1 6cab7f86 · 4-4 c60aa7ee.
+발주자 10-05 09:3x 「본 릴레이 적용」 승인 → master 판정 nonce f4683cd1(범위 = RUNBOOK §4 그대로 · **우리 id 차단 = 밖**(상주가 지금도 jarvis-jk1gn50iw7 로 가동 · §7 단계 7) · 본 릴레이 T16 탐침 = 하지 않음). 한 줄마다 master 【실행】: 4-0 9cffe972 · 4-1 6cab7f86 · 4-4 c60aa7ee.
 
 | # | 결과 |
 |---|---|
@@ -50,7 +50,7 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 
 ## 미완(다음 사람이 이어서) — 갱신 2026-10-05
 1. 4단계 = **끝**(위 표). 차단 스위치는 두 D1 모두 장전됐고 본 릴레이 차단 행 = 0.
-2. 우리 id 차단 = §7 단계 7(새 id 전환 뒤 · 박사님 결정) — 두 D1 모두 끝나기 전 「차단 완료」 보고 금지(시험 D1 은 3단계에서 차단 행 있음).
+2. 우리 id 차단 = §7 단계 7(새 id 전환 뒤 · 발주자 결정) — 두 D1 모두 끝나기 전 「차단 완료」 보고 금지(시험 D1 은 3단계에서 차단 행 있음).
 3. 계약 문서 확정(§7 단계 5 · DRAFT-contract-admission.md) · 탐지기 2단계(§7 단계 6) = master.
 
 ## 함정

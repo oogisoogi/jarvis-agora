@@ -32,7 +32,7 @@ python3 -c 'import re,sys;print(re.findall(r"^\s*\"(name|database_id)\"\s*:\s*\"
 - 3-3·3-7 의 임시 참가자·방·글은 시험 릴레이 원장에 남는다(원장은 append-only) — 이름 머리를 `adm-t16-`·`adm-t18-` 로 가른다.
 - T12(경합) 는 원격에서 HTTP 로 재현할 수 없다(검사 통과 뒤 차단 커밋 창) — 3-3 의 직접 INSERT 가 **트리거가 원격에서 발화하고 표식 문자열이 오는지**를 재고, catch 매핑은 로컬 경합 창(run-admission race)이 잰다.
 
-## 4단계 — 본 릴레이(agora-relay · agora.godmeyou.kr) · master/박사님 게이트 · 워커는 원고만
+## 4단계 — 본 릴레이(agora-relay · agora.godmeyou.kr) · master/발주자 게이트 · 워커는 원고만
 
 ✅**기준 일치 확인 · 2026-09-29 22:2x KST(읽기만 · worker-agoraimpl@surface:1160)** — 본 릴레이 현재 배포 = 버전 `f49eac74`(2026-09-19 17:15:27 KST · `wrangler deployments list` 의 마지막 줄 · 태그·메시지 없음). 그 시각은 2cf9c1e 커밋(17:14:47) 40초 뒤 · 53b21a8(17:25:11)보다 앞이고, 2cf9c1e→53b21a8 은 문서 1커밋(relay 코드·자산·설정 차이 0). 자산 23개(`relay/board` @53b21a8) 대조 = JS·CSS·dev 18개 바이트 동일 · HTML 5개는 Cloudflare 엣지 주입(숨은 `/cdn-cgi/content` 링크 · `__CF$cv$params` 챌린지 스크립트 · Web Analytics 비콘)과 그것이 연 줄바꿈 1개를 걷어내면 바이트 동일. `/health` = ok:true · scrub_bundle 59507587…270e7(시험 릴레이의 같은 값과 동일). ⚠워커 스크립트 본문 자체는 읽는 경로가 없어 바이트 대조하지 않았다(배포 시각·자산·문서뿐인 차이로 추론).
 
@@ -44,7 +44,7 @@ python3 -c 'import re,sys;print(re.findall(r"^\s*\"(name|database_id)\"\s*:\s*\"
 | 4-3 | 사전 사진 | `GET /participants/{allowed_signers,revoked_keys,operators}` 바이트 · `GET /participants/checkpoint` · 방 2개(439fc804·0b80c218) `GET /rooms/:id` state_hash | 저장 |
 | 4-4 | 배포 | **스키마 게이트** `python3 "$R/ops/admission-block.py" --target main --remote --check-schema` = rc 0(아니면 배포 금지 — 새 코드는 새 표를 읽는다) → name 게이트(`agora-relay`) → `$W deploy --config "$R/relay/wrangler.jsonc"`(자산 = relay/board · routes = 커스텀 도메인) | `/health` 200 |
 | 4-5 | 사후 대조 | 4-3 과 같은 GET | 명부 세 파일·체크포인트·두 방 state_hash **동일**(차단 행 0 이므로 당연 — 코드 교체만의 무영향 확인) · 탐지기 OK · 우리 상주 다음 회차 정상 |
-| — | **우리 id 차단은 이 티켓 밖**(§7 단계 7 · 새 id 전환 뒤 · 박사님 결정) | `admission-block.py --target main --remote …`(상주 먼저 정지 — 스크립트가 강제) | 두 D1 모두 끝나기 전 「차단 완료」 보고 금지 |
+| — | **우리 id 차단은 이 티켓 밖**(§7 단계 7 · 새 id 전환 뒤 · 발주자 결정) | `admission-block.py --target main --remote …`(상주 먼저 정지 — 스크립트가 강제) | 두 D1 모두 끝나기 전 「차단 완료」 보고 금지 |
 
 - 되돌림: 코드 = 이전 배포본으로 재배포(`wrangler rollback` 또는 2cf9c1e 빌드) — 트리거·표는 남아도 옛 코드와 무관(롤백 창은 짧게 · §9) · 표·트리거 제거 = 별도 마이그레이션(권하지 않음).
 - 계약 문서(RELAY.md 오류표·§8 스키마·「계약 문장」 · THREAT-MODEL R-16) = 초안만(`DRAFT-contract-admission.md`) · 확정 = master(§7 단계 5).
