@@ -555,6 +555,17 @@ describe("우편 문서 — 닫힌 스키마(명세 §2·§1-1)", () => {
     const late = okDaily(); late.ts = isoAt(MAIL_NOW - 3 * 3600_000);
     late.payload.daily.updates[0].at = isoAt(MAIL_NOW - 3 * 3600_000 + 6 * 60_000);
     expect(await codeOfAsync(() => mailTs.validateMail(late, MAIL_NOW))).toBe(10);
+    // 적대 3R R3-1 — 서버 시각 창도 함께: 봉투 ts 24시간 전 + 신호 시각 8일 전 = 거부(봉투 기준만이면 통과하던 자리)
+    const old = okDaily(); old.ts = isoAt(MAIL_NOW - 86_400_000);
+    old.payload.daily.updates[0].at = isoAt(MAIL_NOW - 8 * 86_400_000);
+    expect(await codeOfAsync(() => mailTs.validateMail(old, MAIL_NOW))).toBe(10);
+    const ahead = okDaily(); ahead.ts = isoAt(MAIL_NOW + 5 * 60_000);
+    ahead.payload.daily.uptime.last_boot = isoAt(MAIL_NOW + 10 * 60_000);
+    expect(await codeOfAsync(() => mailTs.validateMail(ahead, MAIL_NOW))).toBe(10);
+    // 적대 3R R3-3 — 0000년은 양쪽 공통 범위 밖(day·시각 둘 다)
+    const y0 = okDaily(); y0.payload.daily.day = "0000-01-01";
+    expect(await codeOfAsync(() => mailTs.validateMail(y0, MAIL_NOW))).toBe(10);
+    expect(mailTs.isIsoMs("0000-01-01T00:00:00.000Z")).toBe(false);
     const note200 = okDaily(); note200.payload.daily.owner_note = "😀".repeat(200);
     await expect(mailTs.validateMail(note200, MAIL_NOW)).resolves.toBeTruthy();
     const big = okDaily(); big.payload.daily.errors.signatures = Array(100).fill("d".repeat(32));

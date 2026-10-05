@@ -104,6 +104,18 @@ def _parse_ts(value: str) -> datetime.datetime:
         tzinfo=datetime.timezone.utc)
 
 
+def _ts_ok(value: Any) -> bool:
+    """밀리초 고정폭 ISO + **실제 있는 시각**(적대 3R R3-4 — 2026-02-30 이 ValueError 로 오류 체계 밖으로 새지 않게 ·
+    릴레이 isIsoMs 의 되돌림 대조와 같은 경계 · 0000년은 양쪽 다 거부)."""
+    if type(value) is not str or not TS_RE.match(value) or value.startswith("0000"):
+        return False
+    try:
+        _parse_ts(value)
+    except ValueError:
+        return False
+    return True
+
+
 # ── 계약 검사(닫힌 모양) ───────────────────────────────────────────────────
 
 def signal_signature(*, source: str, op: str, error_code: str, version: str) -> str:
@@ -167,7 +179,7 @@ def _check_signal(payload: dict[str, Any], *, now: datetime.datetime | None) -> 
                 _fail("신호 칸 형식 밖", {"where": where, "key": key})
         first = _need(item, "first_seen", str, where)
         last = _need(item, "last_seen", str, where)
-        if not (TS_RE.match(first) and TS_RE.match(last)) or first > last:
+        if not (_ts_ok(first) and _ts_ok(last)) or first > last:
             _fail("first_seen ≤ last_seen 고정폭 시각이어야 한다", {"where": where})
         if now is not None:
             lo = now - datetime.timedelta(days=SIGNAL_WINDOW_DAYS)
@@ -248,7 +260,7 @@ def _check_daily(payload: dict[str, Any], *, now: datetime.datetime | None) -> N
             if not ERROR_CODE_RE.match(_need(u, "result", str, ww)):
                 _fail("result 형식이 아니다", {"where": ww + ".result"})
             at = _need(u, "at", str, ww)
-            if not TS_RE.match(at):
+            if not _ts_ok(at):
                 _fail("at 은 밀리초 고정폭 ISO", {"where": ww + ".at"})
             if now is not None:
                 lo = now - datetime.timedelta(days=SIGNAL_WINDOW_DAYS)
@@ -263,7 +275,7 @@ def _check_daily(payload: dict[str, Any], *, now: datetime.datetime | None) -> N
         o, ww = _need(d, "uptime", dict, w), w + ".uptime"
         _closed(o, ("last_boot", "uptime_s"), ww)
         lb = _need(o, "last_boot", str, ww)
-        if not TS_RE.match(lb) or (now is not None and _parse_ts(lb) > now + datetime.timedelta(minutes=5)):
+        if not _ts_ok(lb) or (now is not None and _parse_ts(lb) > now + datetime.timedelta(minutes=5)):
             _fail("last_boot 은 지나간 밀리초 ISO", {"where": ww + ".last_boot"})
         _int_in(o, "uptime_s", ww, 0, 31_536_000)
     if "owner_note" in d and len(_need(d, "owner_note", str, w)) > DAILY_NOTE_MAX_CHARS:
@@ -309,7 +321,7 @@ def validate(doc: Any, *, now: datetime.datetime | None = None) -> dict[str, Any
     for key in ("blocked", "redacted"):
         if _need(sc, key, int, "scrub") < 0:
             _fail("scrub 계수는 0 이상", {"where": "scrub." + key})
-    if not TS_RE.match(_need(doc, "ts", str, "mail")):
+    if not _ts_ok(_need(doc, "ts", str, "mail")):
         _fail("ts 는 밀리초 고정폭 ISO", {"ts": doc.get("ts")})
     payload = _need(doc, "payload", dict, "mail")
     intent = _need(payload, "intent", str, "payload")
@@ -375,7 +387,7 @@ def check_auth_doc(doc: Any) -> None:
         _fail("인증 문서는 계약된 칸만 가진다", {"got": sorted(doc), "want": list(keys)})
     if type(doc["for"]) is not str or not PEER_RE.match(doc["for"]):
         _fail("for 형식이 아니다", None)
-    if type(doc["ts"]) is not str or not TS_RE.match(doc["ts"]):
+    if not _ts_ok(doc["ts"]):
         _fail("ts 는 밀리초 고정폭 ISO", None)
     if purpose == PURPOSE_INBOX:
         for key in ("since", "receipts_since"):
@@ -808,6 +820,10 @@ def read(ctx: Any, *, thread: str) -> dict[str, Any]:
 
 def _ack(ctx: Any, *, mail_ids: list[str], thread_ids: list[str], upto: str = "") -> dict[str, Any]:
     from agora import sign
+    if thread_ids and upto not in {r.get("mail_id") for r in _rows(_path(ctx, INBOX_FILE))}:
+        # ★대화 읽음의 경계는 **이 우편함에 실제로 받아 둔 mail_id** 만(적대 3R R3-2) — 큰 번호를 서명하면 그 서명이
+        #   재생될 때 아직 안 당긴 우편까지 읽음·삭제된다. 릴레이도 같은 조건을 본다(그 수신자의 실재 우편).
+        _fail("대화 읽음의 upto 는 이 우편함에 받은 mail_id 여야 한다", {"upto": upto}, errors.PRECONDITION)
     doc = auth_doc(purpose=PURPOSE_ACK, participant=ctx.participant_id, ts=now_ms_iso(),
                    acked=mail_ids, acked_threads=thread_ids, upto=upto)
     check_auth_doc(doc)

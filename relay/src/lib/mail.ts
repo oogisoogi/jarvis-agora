@@ -71,7 +71,8 @@ const dec = new TextDecoder();
  * `2026-02-30T…` 처럼 형식은 맞는데 없는 날짜가 조용히 다음 달로 굴러가지 않게.
  */
 export function isIsoMs(v: unknown): v is string {
-  if (typeof v !== "string" || !ISO_MS.test(v)) return false;
+  // ★0000년은 JS 는 받지만 파이썬 datetime 은 못 받는다 — 양쪽 공통 범위(0001~9999)만(적대 3R R3-3).
+  if (typeof v !== "string" || !ISO_MS.test(v) || v.startsWith("0000")) return false;
   const t = Date.parse(v);
   return Number.isFinite(t) && new Date(t).toISOString() === v;
 }
@@ -117,15 +118,16 @@ function bad(message: string, detail: Obj): never {
   return fail(ARGUMENT, message, detail);
 }
 
-function checkTimeWindow(v: string, where: string, nowMs: number): number {
+/** ★창 기준이 여럿이면 **전부** 만족해야 한다(적대 3R R3-1) — 봉투 ts(받는 쪽과 같은 기준) + 서버 시각(입구에서 창이 넓어지지 않게). */
+function checkTimeWindow(v: string, where: string, bases: number[]): number {
   const t = Date.parse(v);
-  if (t < nowMs - SIGNAL_PAST_MS || t > nowMs + FUTURE_SKEW_MS) {
+  if (bases.some(b => t < b - SIGNAL_PAST_MS || t > b + FUTURE_SKEW_MS)) {
     bad("신호 시각이 받는 창 밖이다(지난 7일 ~ +5분)", { where, why: "signal_time_window" });
   }
   return t;
 }
 
-async function checkSignal(p: Obj, nowMs: number): Promise<void> {
+async function checkSignal(p: Obj, bases: number[]): Promise<void> {
   // ★자유문 0 — 제목·본문 칸이 아예 없다(명세 §1-1). 모르는 칸 = 10.
   closed(p, ["intent", "items"], "payload");
   const items = need<unknown[]>(p, "items", "list", "payload");
@@ -161,8 +163,8 @@ async function checkSignal(p: Obj, nowMs: number): Promise<void> {
     if (!ERROR_CODE_RE.test(errorCode)) bad("error_code 형식이 아니다", { where: `${where}.error_code` });
     if (!isIsoMs(first)) bad("first_seen 은 밀리초 고정폭 ISO", { where: `${where}.first_seen` });
     if (!isIsoMs(last)) bad("last_seen 은 밀리초 고정폭 ISO", { where: `${where}.last_seen` });
-    const tf = checkTimeWindow(first, `${where}.first_seen`, nowMs);
-    const tl = checkTimeWindow(last, `${where}.last_seen`, nowMs);
+    const tf = checkTimeWindow(first, `${where}.first_seen`, bases);
+    const tl = checkTimeWindow(last, `${where}.last_seen`, bases);
     if (tf > tl) bad("first_seen 이 last_seen 보다 늦다", { where });
     const want = await signalSignature({ error_code: errorCode, op, source, version });
     if (want !== sig) {
@@ -191,14 +193,14 @@ function strList(o: Obj, key: string, where: string, max: number, re: RegExp): s
  * (단 `version` 은 host·pack 중 하나 이상). ★자유문은 `owner_note` 1칸(≤200 코드포인트)뿐 — 나머지는 계수·판본·기계 id.
  * 크기 상한 32KB 는 validateMail 이 canonical 전체로 잰다(413/3).
  */
-function checkDaily(p: Obj, nowMs: number): void {
+function checkDaily(p: Obj, bases: number[]): void {
   closed(p, ["intent", "daily"], "payload");
   const w = "payload.daily";
   const d = need<Obj>(p, "daily", "dict", "payload");
   closed(d, DAILY_KEYS, w);
   const day = need<string>(d, "day", "string", w);
   // ★Date.parse 는 2026-02-30 을 3월 2일로 고쳐 읽는다 — 되돌려 같은 글자인지 본다(적대 2R R2-4 · 파이썬 date.fromisoformat 과 같은 경계).
-  const dayMs = DAY_RE.test(day) ? Date.parse(day + "T00:00:00.000Z") : NaN;
+  const dayMs = DAY_RE.test(day) && !day.startsWith("0000") ? Date.parse(day + "T00:00:00.000Z") : NaN;   // 0000년 = 파이썬 date 밖(R3-3)
   if (Number.isNaN(dayMs) || new Date(dayMs).toISOString().slice(0, 10) !== day) bad("day 는 실제 날짜 YYYY-MM-DD", { where: `${w}.day` });
   if ("version" in d) {
     const v = need<Obj>(d, "version", "dict", w);
@@ -239,7 +241,7 @@ function checkDaily(p: Obj, nowMs: number): void {
       if (!ERROR_CODE_RE.test(need<string>(o, "result", "string", ww))) bad("result 형식이 아니다", { where: `${ww}.result` });
       const at = need<string>(o, "at", "string", ww);
       if (!isIsoMs(at)) bad("at 은 밀리초 고정폭 ISO", { where: `${ww}.at` });
-      checkTimeWindow(at, `${ww}.at`, nowMs);
+      checkTimeWindow(at, `${ww}.at`, bases);
     });
   }
   if ("depts" in d) {
@@ -251,7 +253,7 @@ function checkDaily(p: Obj, nowMs: number): void {
     const o = need<Obj>(d, "uptime", "dict", w); const ww = `${w}.uptime`;
     closed(o, ["last_boot", "uptime_s"], ww);
     const lb = need<string>(o, "last_boot", "string", ww);
-    if (!isIsoMs(lb) || Date.parse(lb) > nowMs + FUTURE_SKEW_MS) bad("last_boot 은 지나간 밀리초 ISO", { where: `${ww}.last_boot` });
+    if (!isIsoMs(lb) || bases.some(b => Date.parse(lb) > b + FUTURE_SKEW_MS)) bad("last_boot 은 지나간 밀리초 ISO", { where: `${ww}.last_boot` });
     intIn(o, "uptime_s", ww, 0, 31_536_000);
   }
   if ("owner_note" in d) {
@@ -291,10 +293,11 @@ function checkLetter(p: Obj): void {
 /**
  * 우편 문서 닫힌 검증(명세 §2 · §1-1). 통과하면 같은 객체를 돌려준다.
  * ★신호·일일 보고의 시각 창(지난 7일 ~ +5분)은 **봉투 ts 기준**이다(적대 2R R2-3 · 받는 쪽과 같은 기준).
- *   `_nowMs` 는 부르는 쪽 계약을 그대로 두려고 남긴다(쓰지 않는다). 우편 자체의 `ts` 창(서버 −24시간 ~ +5분)은
+ *   + 서버 시각 `nowMs` 기준도 함께(적대 3R R3-1 — 봉투 ts 만 쓰면 입구 창이 과거 8일·미래 10분으로 넓어진다).
+ *   ⇒ 릴레이가 받는 집합 ⊂ 받는 쪽이 받는 집합(받는 쪽은 봉투 ts 만 본다). 우편 자체의 `ts` 창(서버 −24시간 ~ +5분)은
  *   여기서 보지 않는다 — 그것은 모양이 아니라 정책(422/3)이고, 명세의 검사 순서상 대화 결박 **뒤**다.
  */
-export async function validateMail(doc: unknown, _nowMs: number): Promise<Obj> {
+export async function validateMail(doc: unknown, nowMs: number): Promise<Obj> {
   if (typeof doc !== "object" || doc === null || Array.isArray(doc)) {
     bad("우편 문서는 객체여야 한다", { got: Array.isArray(doc) ? "list" : doc === null ? "null" : typeof doc });
   }
@@ -334,10 +337,10 @@ export async function validateMail(doc: unknown, _nowMs: number): Promise<Obj> {
   // ★신호·일일 보고의 시각 창 기준 = **우편 봉투 ts**(적대 2R R2-3) — 받는 쪽 클라이언트도 같은 기준으로 다시 잰다.
   //   서버 시각을 기준으로 두면 릴레이가 받은 문서를 받는 쪽이 계약 위반으로 격리한다. 봉투 ts 자체의 서버 창
   //   (−24시간 ~ +5분)은 handleMailPost (6) 이 따로 본다.
-  const basisMs = Date.parse(d["ts"] as string);
-  if (intent === SIGNAL_INTENT) await checkSignal(p, basisMs);
+  const bases = [Date.parse(d["ts"] as string), nowMs];
+  if (intent === SIGNAL_INTENT) await checkSignal(p, bases);
   else if (intent === DAILY_INTENT) {
-    checkDaily(p, basisMs);
+    checkDaily(p, bases);
     const bytes = canonicalBytes(d).length;
     if (bytes > DAILY_MAX_BYTES) {
       fail(GATE_REJECT, "일일 보고 크기 상한 초과", { where: "mail", bytes, limit: DAILY_MAX_BYTES }, { status: 413 });

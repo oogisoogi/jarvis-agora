@@ -345,7 +345,7 @@ GitHub 어댑터를 쓰는 설정에서는 그대로 남는다 — 「의존이 
 | 항목 | 값 |
 |---|---|
 | 대조 시각 | 2026-10-05 (TICKET=agora-mail-1to1 — RELAY §14 「우편(1:1)」 신설분 · 직전 = 2026-09-06 r4) |
-| `docs/RELAY.md` sha256 | `16acf30ac00c303bcc6fc67ba9829e05385064ab0f9ee09baebe9fba82ca199f`(직전 `d62f957d…` · 차이 = §14-4 읽음 v2(mail_id 대상 · 서명된 upto · 적대 2R R2-1·R2-2) · 그 앞 `a0acfffe…` · 차이 = §14 우편 절 — 일일 보고 payload ⓒ·버킷·미읽음 제외(D8-2 3eac2a0f) · 그 앞 `faeae200…`→`a0acfffe…` = 적대 1R 반영(봉투 닫힘 · 대화 ack 상한 · 적재 결박) · §3 기존 API 무변경 — 아래 §15-M M10~M13) |
+| `docs/RELAY.md` sha256 | `5d3215ed50fbe6bb807bc95f67f70e2fd6db69dcd125aaa308469f833878155c`(직전 `16acf30a…` · 차이 = §14 적대 3R(upto 실재 · 시각 창 두 기준 · 0001~9999년) · 그 앞 `d62f957d…` · 차이 = §14-4 읽음 v2(mail_id 대상 · 서명된 upto · 적대 2R R2-1·R2-2) · 그 앞 `a0acfffe…` · 차이 = §14 우편 절 — 일일 보고 payload ⓒ·버킷·미읽음 제외(D8-2 3eac2a0f) · 그 앞 `faeae200…`→`a0acfffe…` = 적대 1R 반영(봉투 닫힘 · 대화 ack 상한 · 적재 결박) · §3 기존 API 무변경 — 아래 §15-M M10~M13) |
 | 대조 축 | 칸 이름 · 응답 코드(§3-7 표) · 서명 대상 바이트(§3-1 등록 · §3-6b 체크포인트) · 목록 상한 · namespace |
 | 결과 | **일치**(아래 r2 표 17항 + r4 체크포인트 4항 + main C23 UA 1항) · 어긋남 0 |
 
@@ -374,7 +374,7 @@ GitHub 어댑터를 쓰는 설정에서는 그대로 남는다 — 「의존이 
 | M8 | `since` = 비움 또는 `ml_`+16자리 · `receipts_since` = 비움 또는 밀리초 ISO | 커서 파일이 그 두 모양만 쓴다(못 읽으면 비움) | 일치 |
 | M9 | 오류 사유 = `detail.why`(광장 `/events` 의 `detail.conflict` 와 다르다) | 클라이언트는 사유 문자열에 기대지 않고 code 로 가른다 | 일치(의존 0) |
 | M10 | 봉투 `roster` = 소문자 hex64 · `scrub` = 닫힌 `{rules:hex64, blocked, redacted}`(정수 ≥0) — 모양 = 400/10(적대 1R R1-2) | `mail.validate` 같은 규칙(서명기도 같은 함수) · `core.declare_scrub` 이 만드는 모양 그대로 | 일치 |
-| M11 | 읽음 대상 = `mail_id`(seq) · 대화 단위 ack = 서명된 `upto` 이하(적대 1R R1-1 → 2R R2-1·R2-2 · 시각 경계 폐기) | `mail.read`·`mail.ack` = **보여 준 우편의 mail_id** 로만(≤50씩) · 로컬 읽음 집합도 mail_id · 대화 ack 를 쓰지 않음 | 일치 |
+| M11 | 읽음 대상 = `mail_id`(seq) · 대화 단위 ack = 서명된 `upto` 이하 + `upto` 는 그 수신자의 실재 우편(적대 1R R1-1 → 2R R2-1·R2-2 → 3R R3-2 · 시각 경계 폐기) | `mail.read`·`mail.ack` = **보여 준 우편의 mail_id** 로만(≤50씩) · 로컬 읽음 집합도 mail_id · 대화 ack 를 쓰지 않음 · `_ack` 는 받지 않은 upto 를 보내기 전에 거부 | 일치 |
 | M12 | 대화 결박을 적재 문장 안에서 한 번 더 — 경합으로 걸리면 422/3 `thread_not_yours`(적대 1R R1-3) | 클라이언트는 이미 이 사유를 code 3 으로 받는다(새 사유 0) | 일치 |
 | M13 | 일일 보고 `intent="daily"` = 닫힌 `daily` 칸(`day` 필수 · 하위 칸 전부 필수 · 자유문 = `owner_note` ≤200) · 32KB 초과 413/3 · 버킷 `gmail-daily-day` 하루 1 · 연속 규칙·`unread_count` 제외 | `mail.validate` 같은 규칙(`_check_daily` · 32KB = code 3) · `MACHINE_INTENTS` 로 미읽음·알림·목록 제외 · 예외 `mail_daily` = `owner_note` 빈 통만(D8-1 ⓑ) | 일치(왕복 실측 = clientway ⑥ · mailway 9-b) |
 

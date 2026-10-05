@@ -272,6 +272,9 @@ def main():
     s2 = put("a", TA, new_id())
     record("대화 ack upto=첫 우편 → 뒤에 적재된 우편 0통(재생해도)", (0, 0), (ack_sql([], [TA], sa), ack_sql([], [TA], sa)))
     record("  upto=뒤 우편 → 1통", 1, ack_sql([], [TA], s2))
+    s3 = put("a", TA, new_id())
+    record("upto=아직 없는 큰 번호(9999) → 0통(실재하는 내 우편만 경계 · 적대 3R R3-2)", 0, ack_sql([], [TA], 9999))
+    record("  그 우편은 그대로 미읽음", None, db2.execute("SELECT acked_at FROM mail WHERE seq = ?", (s3,)).fetchone()[0])
 
     # ── 4. 상한(새 대화) ──────────────────────────────────────────────────────
     print("\n== 우편 4. 새 대화 상한 ==")

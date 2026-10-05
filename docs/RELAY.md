@@ -671,6 +671,7 @@ canonical JSON(§3-2 · `agora/event.py canonical_bytes` 와 **같은 직렬화*
 `doctor{ok,warn,fail,skip 0~999, warn_ids·fail_ids ≤64 · ^[a-z0-9-]{1,40}$}` · `errors{tick_errors·hook_rc_nonzero 0~100000, signatures ≤100 hex32}` ·
 `updates[≤10]{from,to = version 형식, result ^[a-z0-9._-]{1,48}$, at = 밀리초 ISO · 지난 7일}` · `depts{active,tombstones 0~999}` · `uptime{last_boot 지나간 밀리초 ISO, uptime_s 0~31536000}` ·
 `owner_note`(문자열 0~200 코드포인트 · ★유일한 자유문 · 스크럽 백스톱 그대로). 하위 칸은 전부 필수 · null 금지 · 모르는 칸 = 400/10.
+★시각 칸(신호 `first_seen`·`last_seen` · `updates[].at` · `uptime.last_boot`)의 창 = **봉투 `ts` 기준과 서버 시각 기준 둘 다**(지난 7일 ~ +5분 · 적대 2R R2-3·3R R3-1 — 받는 쪽은 봉투 `ts` 만 보므로 릴레이가 받은 것은 받는 쪽도 받는다) · 시각·날짜는 실제 있는 값만(0001~9999년 · 2월 30일 거부).
 canonical **32KB** 초과 = 413/3. 버킷 `gmail-daily-day:<from>` 하루 1(§14-6) · 연속 규칙·`unread_count` 에 안 센다(신호와 같다).
 
 ### 14-2. `POST /mail` — 보내기
@@ -743,7 +744,8 @@ canonical **32KB** 초과 = 413/3. 버킷 `gmail-daily-day:<from>` 하루 1(§14
 - 서명 대상 canonical `{"acked":<mail_ids 그대로>,"acked_threads":<thread_ids 그대로>,"for":<id>,"purpose":"agora-mail-ack-v2","ts":<ts>,"upto":<upto>}`
   (★요청 그대로의 목록 — 순서·중복 포함. 서버가 고쳐 쓴 값에 서명이 걸린 척하지 않는다). 인증 순서·`pid:` 계수 = §14-3 과 같다.
 - 동작: `UPDATE mail SET acked_at = 지금 WHERE to_id = for AND acked_at IS NULL AND (seq IN <mail_ids> OR (thread_id IN … AND seq <= <upto>))`.
-  ★seq 는 **적재 순간**에 매겨지므로 같은 요청을 재생해도 서명 뒤에 적재된 우편(더 큰 seq)은 안 걸린다. 클라이언트 `agora mail read` 는 **보여 준 우편의 mail_id 로만** ack 한다.
+  ★seq 는 **적재 순간**에 매겨지므로 같은 요청을 재생해도 서명 뒤에 적재된 우편(더 큰 seq)은 안 걸린다. ★`upto` 는 **그 수신자 앞으로 실제 적재된 우편**이어야 한다
+  (아니면 대화 칸 0통 · 적대 3R R3-2 — 아직 없는 큰 번호를 서명해 두면 재생 때 그 사이 우편까지 걸린다). 클라이언트 `agora mail read` 는 **보여 준 우편의 mail_id 로만** ack 한다.
   ★**수신자가 자기 앞 우편에만** 붙인다 — 남의 우편·남의 대화 id 는 조용히 무시. 이미 붙은 표시는 안 바뀐다(첫 시각 유지).
 - 응답 200 `{"acked": <이번에 새로 붙은 수>, "ignored": <요청한 mail_ids(중복 제거) 중 나에게 온 우편이 아닌 수>}`.
 - 읽음이 붙으면 발신자는 다음 `receipts` 로 「전달됨(읽힘)」을 알고, 그 우편 본문은 다음 덤 삭제 대상이 된다(§14-5).

@@ -1106,12 +1106,15 @@ async function handleMailAck(req: Request, env: Env): Promise<Response> {
   // ★대화 단위 ack 는 **서명된 upto(mail_id) 이하**에만 붙는다(적대 1R R1-1 → 2R R2-1) — 받는 사람이 실제로 본
   //   수신함 쪽의 마지막 mail_id 를 서명에 싣는다. seq 는 적재 순간에 매겨지므로 같은 요청을 재생해도, 서명 뒤에
   //   적재된 우편(더 큰 seq)은 절대 안 걸린다. 시각(ts·created_at)은 경계로 쓰지 않는다(미래 ts·적재 지연 둘 다 새는 경계였다).
+  //   ★upto 는 **그 수신자 앞으로 실제 적재된 우편**이어야 한다(적대 3R R3-2) — 아직 없는 큰 번호를 서명해 두면 재생 때
+  //     그 사이 적재된 우편까지 걸린다. 실재하지 않으면 대화 칸은 0통(질의 추가 0 · 같은 UPDATE 안의 EXISTS).
   const uptoSeq = upto === "" ? 0 : (mail.parseMailId(upto) as number);
   const res = await qb.prepare(
     `UPDATE mail SET acked_at = ?1
       WHERE to_id = ?2 AND acked_at IS NULL
         AND (seq IN (SELECT value FROM json_each(?3))
-             OR (thread_id IN (SELECT value FROM json_each(?4)) AND seq <= ?5))`
+             OR (thread_id IN (SELECT value FROM json_each(?4)) AND seq <= ?5
+                 AND EXISTS (SELECT 1 FROM mail u WHERE u.seq = ?5 AND u.to_id = ?2)))`
   ).bind(nowIso(new Date(nowMs)), forId, JSON.stringify(seqs), JSON.stringify(threadIds), uptoSeq).run();
   return json({ acked: Number(res.meta?.changes ?? 0), ignored: seqs.length - matched }, 200, MAIL_HEADERS);
 }

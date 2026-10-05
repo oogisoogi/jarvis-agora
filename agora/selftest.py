@@ -4464,7 +4464,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
              "M573-mail-exempt-typo-widens", "M574-mail-read-acks-whole-thread",
              "M575-mail-envelope-scrub-open", "M576-mail-ledger-drops-approval",
              "M577-mail-daily-exempt-ignores-note", "M578-mail-unread-counts-daily",
-             "M579-mail-read-set-by-message-id"),
+             "M579-mail-read-set-by-message-id", "M580-mail-ts-skips-real-date",
+             "M581-mail-thread-ack-any-upto"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -16704,6 +16705,32 @@ def _case_mail_ack_doc_upto_required() -> None:
     mail.check_auth_doc(doc)
 
 
+def _case_mail_impossible_ts_is_contract_error() -> None:
+    """없는 날짜의 봉투 ts(2026-02-30) = code 10 — ValueError 로 오류 체계 밖으로 새지 않는다(적대 3R R3-4)."""
+    import datetime
+    from agora import mail
+    doc = _mail_doc()
+    doc["ts"] = "2026-02-30T01:00:00.000Z"
+    mail.validate(doc, now=datetime.datetime.now(datetime.timezone.utc))
+
+
+def _case_mail_thread_ack_upto_must_be_received() -> None:
+    """대화 읽음의 upto 는 이 우편함에 받은 mail_id 만(적대 3R R3-2) — 큰 번호는 보내기 전에 막힌다(code 2)."""
+    from agora import mail
+    store = _FakeMailStore()
+    ctx = _mail_ctx(store)
+    try:
+        _with_key(_fixtures()["key_a"], lambda: mail._ack(ctx, mail_ids=[], thread_ids=["ab" * 16],
+                                                         upto="ml_0000000000001000"))
+    except AgoraError as e:
+        if e.code != errors.PRECONDITION:
+            raise AssertionError(f"code {e.code}") from None
+    else:
+        raise AssertionError("받지 않은 upto 로 대화 읽음을 서명해 보냈다")
+    if store.acks:
+        raise AssertionError(f"거부했는데 릴레이로 나갔다: {store.acks}")
+
+
 def _case_mail_signer_refuses_scrub() -> None:
     """서명기의 우편 문도 스크럽을 다시 잰다 — 이메일 형태가 든 본문은 서명 없음(code 3)."""
     from agora import sign
@@ -17460,6 +17487,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("우편: 읽음은 mail_id 단위",              _case_mail_read_marks_by_mail_id, None),
     ("우편: 형식 칸 끝까지 닫힘",              _case_mail_strict_anchors, errors.ARGUMENT),
     ("우편: 대화 읽음에는 upto 필수",          _case_mail_ack_doc_upto_required, errors.ARGUMENT),
+    ("우편: 없는 날짜 ts = 계약 오류",         _case_mail_impossible_ts_is_contract_error, errors.ARGUMENT),
+    ("우편: 대화 읽음 upto 는 받은 것만",      _case_mail_thread_ack_upto_must_be_received, None),
     ("우편: 일일 보고 예외는 빈 owner_note 만", _case_mail_daily_exempt_only_without_note, None),
     ("우편: 일일 보고는 미읽음에 안 센다",      _case_mail_daily_not_counted, None),
     ("우편: 발신 원장에 승인 결과",            _case_mail_sent_ledger_records_approval, None),
@@ -17518,6 +17547,14 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    return {r.get("mail_id") for r in _rows(_path(ctx, READ_FILE)) if r.get("mail_id")}',
      '    return {r.get("message_id") for r in _rows(_path(ctx, READ_FILE)) if r.get("message_id")}',
      "우편: 읽음은 mail_id 단위"),
+    ("M580-mail-ts-skips-real-date", "agora/mail.py",
+     '    try:\n        _parse_ts(value)\n    except ValueError:\n        return False\n    return True',
+     '    return True',
+     "우편: 없는 날짜 ts = 계약 오류"),
+    ("M581-mail-thread-ack-any-upto", "agora/mail.py",
+     '    if thread_ids and upto not in {r.get("mail_id") for r in _rows(_path(ctx, INBOX_FILE))}:',
+     '    if False:',
+     "우편: 대화 읽음 upto 는 받은 것만"),
     # ── 상주 방문(2026-09-11 · 0.1.6 · 계약 확장 8) ─────────────────────────
     # ★브리프가 요구한 여섯 자리(발언 판정 제거·발언 무시·플래그 무시·잠금 제거·깨움 상한 제거·
     #   uninstall 미삭제) + 그 둘레 여섯. 전부 「개발기에서는 초록이 기본값」인 자리다.

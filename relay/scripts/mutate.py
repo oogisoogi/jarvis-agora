@@ -166,8 +166,8 @@ MUTATIONS = [
 
     # ── 적대 1R(codex · 2026-10-05) 반영 자리 ──
     ("M30 대화 단위 ack 의 upto 상한 제거", "src/index.ts",
-     "AND seq <= ?5))`",
-     "AND ?5 = ?5))`",
+     "AND seq <= ?5\n",
+     "AND ?5 = ?5\n",
      "harness", "우편 8-b·3-c: upto 뒤에 적재된 우편 = acked 0"),
 
     ("M34 읽음 대상을 message_id 로 넓힘(다른 발신자 같은 id)", "src/index.ts",
@@ -189,6 +189,16 @@ MUTATIONS = [
      '    return [{ bucket: "gmail-daily-day:" + from, windowS: 86_400, max: l.dailyDayMax, label: "mail_daily_day" }];',
      "    return [];",
      "harness", "우편 9-b: 같은 날 두 번째 일일 보고 = 429 mail_daily_day"),
+
+    ("M35 대화 ack 의 upto 실재 확인 제거", "src/index.ts",
+     "                 AND EXISTS (SELECT 1 FROM mail u WHERE u.seq = ?5 AND u.to_id = ?2)))`",
+     "                 AND (1 OR ?5 = ?5)))`",
+     "harness", "우편 3-c: upto=아직 없는 큰 번호 → 0통"),
+
+    ("M36 신호·일일 보고 시각 창에서 서버 시각 기준 제거", "src/lib/mail.ts",
+     "  const bases = [Date.parse(d[\"ts\"] as string), nowMs];",
+     "  const bases = [Date.parse(d[\"ts\"] as string)];",
+     "vitest", "일일 보고: 봉투 24시간 전 + 8일 전 시각 = 10"),
 
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
