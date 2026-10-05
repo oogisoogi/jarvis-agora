@@ -9,8 +9,32 @@
 # ★금칙어 목록은 tests/forbidden-terms.txt 에 **한 곳에만** 둔다.
 #   그 파일은 정의상 금칙어를 담으므로 검사 대상에서 뺀다 — 그리고 **뺐다는 사실을 출력한다.**
 #   보이지 않는 억제는 미탐과 구별되지 않는다.
+#
+# ★rc 규약: 0 = PASS · 1 = 시험 실패 · **2 = 환경 결손**(시험을 한 개도 돌리지 않았다).
 set -u
 cd "$(dirname "$0")/.." || exit 2
+
+echo "== 환경 사전 점검 =="
+# ★**환경 결손을 시험 실패로 세지 않는다.** 2026-10-05 새 worktree 에 relay/node_modules 가
+#   없어 py↔ts 대조 케이스 3건이 「미측정 = 실패」로, 그 3건을 killer 로 쓰는 뮤테이션 9건이
+#   NOT-APPLIED 로 떨어졌다 — 코드는 멀쩡했는데 main 병합이 되돌려졌다.
+#   미측정은 통과가 아니지만 **실패도 아니다** — 그래서 시험 전에 따로 재고 rc 2 로 가른다.
+# 목록 = 게이트가 부르는 외부 실행 파일 전부(이 파일·tests/*.sh·selftest 의 subprocess 열거)
+#   + relay/tests/*_probe.mjs 가 import 하는 유일한 패키지 esbuild(wrangler·vitest 의 전이 의존).
+missing=0
+for bin in git python3 node gitleaks; do
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    echo "  ENV-MISSING: $bin · 설치 후 다시 실행"; missing=1
+  fi
+done
+if command -v node >/dev/null 2>&1 \
+   && ! (cd relay && node -e 'require.resolve("esbuild")') >/dev/null 2>&1; then
+  echo "  ENV-MISSING: relay/node_modules/esbuild · cd relay && npm ci"; missing=1
+fi
+if [ "$missing" -ne 0 ]; then
+  echo "== 결과: ENV-MISSING(시험 0건 실행 · rc 2) =="; exit 2
+fi
+echo "  ok"
 
 rc=0
 
