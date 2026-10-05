@@ -34,9 +34,24 @@ todo 정본 = `cys todo-path`(`~/.cys/pack/round/WORKER_AGORAIMPL_TODO.md`)
 - 되돌리기: 코드 = 지금 배포(57134b71)가 정상 코드 · 경합 사본 흔적 없음. D1 = 0002 표·트리거·차단 행 4 는 남긴다(시험 릴레이 · 옛 코드와 무관) · 전체 되돌림이 필요하면 백업 SQL(위)로 새 D1 복원 — 권하지 않음.
 - 드라이버 = 스크래치 `drive.py`(저장소 밖 · 키도 거기) · 저장소 코드 변경 0.
 
-## 미완(다음 사람이 이어서) — 갱신 22:2x
-1. 4단계 = 원고만(RUNBOOK §4) · 전제 = master 게이트 + (codex 재확인 또는 표적 두 검토자 ACCEPT + master 대조) — 두 검토자 ACCEPT 는 채워졌다(agy r3 · Fable r4) · **master 대조 끝 · 3단계 수용(nonce b9965f91)** · 4단계 = **박사님 답 대기(쓰기 0)**.
-2. 본 릴레이 기준 대조(읽기) = **일치** — RUNBOOK §4 머리 줄(배포 f49eac74 · 자산 23 대조 · 스크립트 본문은 미대조).
+## 4단계 실측(본 릴레이 agora-relay · TICKET=agora-admission-stage4 · worker@surface:1264 · 2026-10-05 12:07~12:2x KST)
+박사님 10-05 09:3x 「본 릴레이 적용」 승인 → master 판정 nonce f4683cd1(범위 = RUNBOOK §4 그대로 · **우리 id 차단 = 밖**(상주가 지금도 jarvis-jk1gn50iw7 로 가동 · §7 단계 7) · 본 릴레이 T16 탐침 = 하지 않음). 한 줄마다 master 【실행】: 4-0 9cffe972 · 4-1 6cab7f86 · 4-4 c60aa7ee.
+
+| # | 결과 |
+|---|---|
+| 사전 읽기(09:11) | name agora-relay · database_id cbdfaaef 일치 · migrations list = 0002 대기 1 · check-schema rc 3(없음 5) · 배포 = f49eac74(09-19 이후 변화 없음) |
+| 4-0 | 백업 `~/.local/state/agora-detect/backup-main-20261005-120735.sql` 64,185 B · sha256 67e2fd32…f233 · CREATE TABLE 6 · INSERT participants 13 = 원격 COUNT 13 · events 29 = 29 · 체크포인트 4 · 방 5 |
+| 4-1·4-2 | 0002 ✅(12:08:22~24) · 재 list = 적용 대기 0 · check-schema rc 0 · 표 1 + 트리거 4 · 행 수 불변 · 차단 행 0 |
+| 4-3 | 사전 사진 `~/.local/state/agora-detect/stage4-pre-20261005-120834/`(명부 3 · 체크포인트 · 방 439fc804·0b80c218 · /home 우리 id · /health) |
+| 4-4 | check-schema rc 0 → name 게이트 → deploy rc 0(12:09:36~43) · **Version 4abb01b9-2eaa-4c04-ba6d-6d01effba024** · 「No updated asset files to upload」(자산 변경 0 · dry-run 의 「27 files」 = 파일 23 + 하위 폴더 4 로 보임) · 배포 후보 = f2f74c6(배포본 대비 relay 차이 3파일 = 0002 · index.ts · lib/admission.ts) · 사전 tsc 0 · vitest 39 |
+| 4-5 | `stage4-post-20261005-120954/` · 명부 3·체크포인트·/home 우리 id·/health **바이트 동일** · 두 방 = state_hash 동일 · 바이트 차이는 `derived_at`(요청 시각) 한 칸뿐 · /home(지문) 200 notify [] · /rooms 200 · 탐지기 수동 scan OK match=4 rc 0(12:10:11) · 상주 배포 후 2회차 12:14:05·12:24:07 KST rc 0(launchd last exit 0 · runs 412) — ⚠두 회차 모두 due 0·woke 0(들를 방 없음) = 상주의 **쓰기 경로는 이번에 실행되지 않았다**(새 코드에서 우리 id 쓰기 실측 = 다음 실제 발언 때) |
+
+- 되돌리기: 코드 = `wrangler rollback f49eac74-6ac6-4874-b614-f1dbdb7b6e31`(표·트리거는 남아도 옛 코드와 무관 · 차단 행 0 이라 롤백 버킷 위험 없음) · D1 전체 = 위 백업 SQL 로 새 D1 복원(권하지 않음).
+
+## 미완(다음 사람이 이어서) — 갱신 2026-10-05
+1. 4단계 = **끝**(위 표). 차단 스위치는 두 D1 모두 장전됐고 본 릴레이 차단 행 = 0.
+2. 우리 id 차단 = §7 단계 7(새 id 전환 뒤 · 박사님 결정) — 두 D1 모두 끝나기 전 「차단 완료」 보고 금지(시험 D1 은 3단계에서 차단 행 있음).
+3. 계약 문서 확정(§7 단계 5 · DRAFT-contract-admission.md) · 탐지기 2단계(§7 단계 6) = master.
 
 ## 함정
 - ⚠launchd 탐지 작업이 **이 작업트리의 파일을 직접** 돈다 — `tools/detect_ours.py` 표적 변이는 제자리 수정 금지(사본에서). 갈래 병합·작업트리 삭제 시 경로 옮겨 재설치(master TODO).
