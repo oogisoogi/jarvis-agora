@@ -4477,7 +4477,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M627-desk-empty-batch-calls", "M628-desk-ack-no-downgrade", "M629-resident-desk-wakes",
                "M630-allow-our-subdomains", "M631-mail-index-not-updated",
                "M632-resident-visits-desk-room", "M633-desk-exempt-on-resident-path",
-               "M634-resident-env-unmarked"),
+               "M634-resident-env-unmarked", "M635-desk-batch-lock-ignored", "M636-desk-leak-body-only",
+               "M637-desk-cap-per-group"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17345,6 +17346,51 @@ def _case_desk_room_exempt_not_on_resident_path() -> None:
             os.environ[resident.RESIDENT_WAKE_ENV] = old
 
 
+def _case_desk_cap_lock_subject() -> None:
+    """적대 1R(codex) 세 처방 — ①입력 상한은 줄 단위(첫 줄만 예외)·신호도 상한 안 ②배치 잠금을 못 잡으면 code 3·호출 0
+    ③게시 대조 원문 = 제목 + 본문(비공개 제목이 공개 답에 섞이면 보류)."""
+    from agora import counsel, mail, resident
+    big = "가" * 600
+    m = _mail_doc(subject="상한", body=big)
+    m2 = _mail_doc(thread=m["thread_id"], subject="상한2", body=big)
+    sig = _mail_doc(payload={"intent": "signal", "items": [_mail_signal_item(error_code=f"e.c{i}") for i in range(30)]})
+    ctx, _store = _desk_world([m, m2, sig])
+    _desk_cycle(ctx, publish=lambda c, d: {"status": 201, "message_id": d["message_id"]},
+                notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
+    data = counsel.collect(ctx, max_bytes=2500)
+    if data["carried"] != 1 or data["bytes"] > 2500 or data["signals_trimmed"] <= 0 \
+            or len(data["addresses"]["M1"]["mail_ids"]) != 1:
+        raise AssertionError(f"상한이 줄 단위가 아니다: carried={data['carried']} bytes={data['bytes']} "
+                             f"trimmed={data['signals_trimmed']}")
+    real = resident._lock_acquire
+    resident._lock_acquire = lambda _p: (None, "test")
+    try:
+        counsel.batch(ctx, caller=lambda *_a: (_ for _ in ()).throw(AssertionError("잠금 없이 불렀다")),
+                      notifier=lambda *a, **k: None)
+    except AgoraError as e:
+        if e.code != 3:
+            raise
+    else:
+        raise AssertionError("잠금을 못 잡았는데 배치가 돌았다")
+    finally:
+        resident._lock_acquire = real
+    secret_subject = "이 제목은 비공개 우편에만 있는 길고 구체적인 제목이라 공개 답에 나오면 안 된다"
+    a = _mail_doc(subject=secret_subject, body="짧은 본문")
+    ctx2, _s2 = _desk_world([a])
+    row = mail._rows(mail._path(ctx2, mail.INBOX_FILE))[0]
+    out_dir = os.path.join(counsel.counsel_dir(ctx2), "2026-10-06")
+    os.makedirs(out_dir)
+    with open(os.path.join(out_dir, "drafts.json"), "w", encoding="utf-8") as fh:
+        json.dump({"addresses": {"M1": {"layer": "mail", "thread_id": a["thread_id"], "to": "operator-b",
+                                        "reply_to": a["message_id"], "mail_ids": [row["mail_id"]]},
+                                 "P1": {"layer": "plaza", "room": "c" * 32, "parent": "d" * 32, "keys": []}},
+                   "replies": [{"key": "P1", "body": "공개 답: " + secret_subject}]}, fh, ensure_ascii=False)
+    out = counsel.publish(ctx2, period="2026-10-06", mail_send=lambda *a, **k: {},
+                          say=lambda *a, **k: (_ for _ in ()).throw(AssertionError("제목이 섞인 공개 답이 나갔다")))
+    if out["held"] != 1:
+        raise AssertionError(f"비공개 제목 섞임을 보류하지 않았다: {out}")
+
+
 def _case_desk_ack_downgrades_when_links_blocked() -> None:
     """릴레이 백스톱이 링크를 막으면(code 3) 링크 없는 문구로 1회 낮춘다(판 어긋남 창 안전망 · master 0a9ded7f)."""
     from agora import errors as err
@@ -18086,6 +18132,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("상담소: 댓글 주입 10 → 접수만",          _case_desk_comment_injection_ten, None),
     ("상주: 상담소 방은 자동 방문 안 함",       _case_resident_skips_desk_room, None),
     ("상담소: 방 예외는 상주 경로에 없다",       _case_desk_room_exempt_not_on_resident_path, None),
+    ("상담소: 상한·잠금·제목 대조",            _case_desk_cap_lock_subject, None),
     ("상담소: 링크가 막히면 링크 없는 문구",    _case_desk_ack_downgrades_when_links_blocked, None),
     ("상담소: 배치 입력 0 = 호출 0",            _case_desk_batch_empty_no_call, None),
     ("상담소: 배치 1호출·주소는 코드가",        _case_desk_batch_one_call_addresses_by_code, None),
@@ -18153,6 +18200,18 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    env[RESIDENT_WAKE_ENV] = "1"',
      '    pass',
      "상담소: 방 예외는 상주 경로에 없다"),
+    ("M635-desk-batch-lock-ignored", "agora/counsel.py",
+     '    if held is None:\n        _fail("다른 배치가',
+     '    if False:\n        _fail("다른 배치가',
+     "상담소: 상한·잠금·제목 대조"),
+    ("M636-desk-leak-body-only", "agora/counsel.py",
+     '"{subject}\\n{body}".format(subject=json.loads(r["mail"])["payload"].get("subject") or "",',
+     '"{body}".format(subject=json.loads(r["mail"])["payload"].get("subject") or "",',
+     "상담소: 상한·잠금·제목 대조"),
+    ("M637-desk-cap-per-group", "agora/counsel.py",
+     '            if used + size > max_bytes and (bundle or taken):',
+     '            if used + size > max_bytes and bundle:',
+     "상담소: 상한·잠금·제목 대조"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',
      '\n.jarvis.godmeyou.kr\n.godmeyou.kr\n',

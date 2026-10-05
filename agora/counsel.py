@@ -598,45 +598,67 @@ def collect(ctx: Any, *, max_bytes: int) -> dict[str, Any]:
     used, carried = 0, 0
     m_no = p_no = 0
     included_keys: list[str] = []
+    def jsize(obj: Any) -> int:
+        return len(json.dumps(obj, ensure_ascii=False).encode("utf-8")) + 2
+
+    # ★상한은 **줄 단위로** 지킨다(적대 1R codex — 묶음 단위면 첫 묶음이 상한을 통째로 넘었다).
+    #   다만 묶음이 아직 하나도 없을 때의 첫 줄은 넘어도 담는다 — 안 담으면 그 한 통을 영영 못 읽는다(보고서에 크기를 적는다).
     for g in ordered:
-        if g["layer"] == "mail":
-            texts = []
-            for r in sorted(g["rows"], key=lambda x: str(x.get("ts") or "")):
+        rows = sorted(g["rows"], key=lambda x: str(x.get("ts") or ""))
+        taken: list[dict[str, Any]] = []
+        texts: list[dict[str, Any]] = []
+        for r in rows:
+            if g["layer"] == "mail":
                 _p = json.loads(inbox[r["key"]]["mail"])["payload"]
-                texts.append({"ts": r.get("ts"), "subject": mask(_p.get("subject") or ""),
-                              "body": mask(_p.get("body") or "")})
-            entry = {"layer": "비공개 우편", "from": g["peer"], "mails": texts}
-        else:
-            texts = [{"ts": r.get("ts"), "from": r.get("from"), "comment": bool(r.get("parent")),
-                      "body": mask(r.get("body") or "")}
-                     for r in sorted(g["rows"], key=lambda x: str(x.get("ts") or ""))]
-            entry = {"layer": "공개 방 글", "posts": texts}
-        size = len(json.dumps(entry, ensure_ascii=False).encode("utf-8"))
-        if used + size > max_bytes and bundle:
-            carried += len(g["rows"])
+                t = {"ts": r.get("ts"), "subject": mask(_p.get("subject") or ""), "body": mask(_p.get("body") or "")}
+            else:
+                t = {"ts": r.get("ts"), "from": r.get("from"), "comment": bool(r.get("parent")),
+                     "body": mask(r.get("body") or "")}
+            size = jsize(t)
+            if used + size > max_bytes and (bundle or taken):
+                break
+            used += size
+            taken.append(r)
+            texts.append(t)
+        carried += len(rows) - len(taken)
+        if not taken:
             continue
-        used += size
         if g["layer"] == "mail":
             m_no += 1
             key = f"M{m_no}"
-            last = sorted(g["rows"], key=lambda x: str(x.get("ts") or ""))[-1]
             addresses[key] = {"layer": "mail", "thread_id": g["thread_id"], "to": g["peer"],
-                              "reply_to": last["message_id"],
-                              "mail_ids": [r["key"] for r in g["rows"]]}
+                              "reply_to": taken[-1]["message_id"], "mail_ids": [r["key"] for r in taken]}
+            entry = {"layer": "비공개 우편", "from": g["peer"], "mails": texts}
         else:
             p_no += 1
             key = f"P{p_no}"
             addresses[key] = {"layer": "plaza", "room": g["room"], "parent": g["post"],
-                              "keys": [r["key"] for r in g["rows"]]}
+                              "keys": [r["key"] for r in taken]}
+            entry = {"layer": "공개 방 글", "posts": texts}
         bundle.append({"key": key, **entry})
-        included_keys += [r["key"] for r in g["rows"]]
+        included_keys += [r["key"] for r in taken]
     machine_keys = [r["key"] for r in items if r["layer"] == "mail" and r.get("intent") in ("signal", "daily")]
     sig_table = _signal_table(signals)
+    notes = [{"from": r.get("from"), "note": mask(_daily_view(_mail_texts(r)[2].get("daily") or {})["owner_note"])}
+             for r in dailies if _daily_view(_mail_texts(r)[2].get("daily") or {})["owner_note"]]
+    # ★기계 통도 입력 상한 안에서만 모델에 간다(적대 1R codex — 신호·오너 한 줄이 상한 계산 밖이었다).
+    #   신호는 횟수 많은 줄부터 · 넘친 줄은 모델 입력에서만 빠지고 보고서 표(결정론)에는 전부 남는다.
+    sig_llm, notes_llm = [], []
+    for row in [{k: (sorted(v) if type(v) is set else v) for k, v in a.items()} for a in sig_table]:
+        if used + jsize(row) > max_bytes:
+            break
+        used += jsize(row)
+        sig_llm.append(row)
+    for n in notes:
+        if used + jsize(n) > max_bytes:
+            break
+        used += jsize(n)
+        notes_llm.append(n)
     urgent_rows = _rows(_desk_path(ctx, URGENT_FILE))
-    return {"items": bundle, "addresses": addresses, "signals": sig_table,
+    return {"items": bundle, "addresses": addresses, "signals": sig_llm,
+            "signals_trimmed": len(sig_table) - len(sig_llm), "notes_trimmed": len(notes) - len(notes_llm),
             "fleet_md": fleet_table(dailies, old_daily), "signals_md": _signal_md(sig_table),
-            "daily_notes": [{"from": r.get("from"), "note": mask(_daily_view(_mail_texts(r)[2].get("daily") or {})["owner_note"])}
-                            for r in dailies if _daily_view(_mail_texts(r)[2].get("daily") or {})["owner_note"]],
+            "daily_notes": notes_llm,
             "keys": included_keys + machine_keys, "carried": carried, "bytes": used,
             "urgent_suppressed": sum(1 for r in urgent_rows if not r.get("notified")
                                      and r.get("key") in set(included_keys + machine_keys)),
@@ -750,7 +772,8 @@ def render_report(*, period: str, data: dict[str, Any], model: dict[str, Any] | 
     lines = [f"# 상담소 배치 보고서 — {period}", "",
              f"입력: 우편 대화 {c['mail_threads']} · 공개 글 묶음 {c['plaza_groups']} · 신호 우편 {c['signals']} · "
              f"일일 보고 {c['dailies']} · 입력 {data['bytes']:,}B · **이월 {data['carried']}건** · "
-             f"긴급 후보(알림 생략) {data['urgent_suppressed']}건",
+             f"긴급 후보(알림 생략) {data['urgent_suppressed']}건 · 상한으로 모델 입력에서 뺀 신호 {data['signals_trimmed']}줄"
+             f"·오너 한 줄 {data['notes_trimmed']}개(아래 표에는 전부)",
              f"호출: {call.get('summary', '-')}", "",
              "## 1. 함대 일지", "", data["fleet_md"], "",
              "## 2. 자동 신호 집계", "", data["signals_md"], ""]
@@ -774,7 +797,23 @@ def render_report(*, period: str, data: dict[str, Any], model: dict[str, Any] | 
 def batch(ctx: Any, *, dry_run: bool = False, now: datetime.datetime | None = None,
           caller: Callable[[list[str], str], dict[str, Any]] | None = None,
           notifier: Callable[..., Any] | None = None) -> dict[str, Any]:
-    """`agora counsel batch` — 한 기간 한 번의 호출. ★입력 0 이면 호출 0 · 같은 기간 두 번째 호출은 거절(code 3)."""
+    """`agora counsel batch` — 한 기간 한 번의 호출. ★입력 0 이면 호출 0 · 같은 기간 두 번째 호출은 거절(code 3).
+
+    ★배치는 **한 번에 하나만** 돈다(파일 잠금 · 적대 1R codex — 두 배치가 동시에 「아직 안 불렀다」를 읽고 둘 다 부르던 자리).
+    """
+    from agora import resident
+    held, _backend = resident._lock_acquire(os.path.join(counsel_dir(ctx), "batch.lock"))
+    if held is None:
+        _fail("다른 배치가 돌고 있다 — 이번 실행은 물러난다", None, errors.GATE_REJECT)
+    try:
+        return _batch_locked(ctx, dry_run=dry_run, now=now, caller=caller, notifier=notifier)
+    finally:
+        resident._lock_release(held)
+
+
+def _batch_locked(ctx: Any, *, dry_run: bool, now: datetime.datetime | None,
+                  caller: Callable[[list[str], str], dict[str, Any]] | None,
+                  notifier: Callable[..., Any] | None) -> dict[str, Any]:
     import secrets
     s = settings(ctx.config)
     now = now or _now()
@@ -879,7 +918,9 @@ def publish(ctx: Any, *, period: str, mail_send: Callable[..., Any] | None = Non
         _fail("그 기간의 답 초안이 없다 — 먼저 agora counsel batch", {"period": period}, errors.PRECONDITION)
     addresses = drafts.get("addresses") or {}
     inbox = {r.get("mail_id"): r for r in mail._rows(mail._path(ctx, mail.INBOX_FILE)) if r.get("mail_id")}
-    bodies = {mid: (json.loads(r["mail"])["payload"].get("body") or "")
+    # ★대조 원문 = 제목 + 본문(적대 1R codex — 본문만 대조하면 비공개 우편의 **제목**이 공개 답에 섞여도 지나갔다).
+    bodies = {mid: "{subject}\n{body}".format(subject=json.loads(r["mail"])["payload"].get("subject") or "",
+                                                body=json.loads(r["mail"])["payload"].get("body") or "")
               for mid, r in inbox.items() if r.get("mail") and r.get("intent") in HUMAN_INTENTS}
     batch_mail_ids = [m for a in addresses.values() if a.get("layer") == "mail" for m in a.get("mail_ids") or []]
     log_path = os.path.join(out_dir, PUBLISHED_FILE)
