@@ -4,4 +4,7 @@
 #   desk <participant_id> <SHA256:지문>   — 상담소 참가자(그 지문의 우편·댓글만 「상담소 답」)
 #   chair <SHA256:지문>                    — 상담소 방을 연 운영자(이름으로 찾은 방은 genesis 서명자가 이것일 때만)
 #   room <thread_id 32hex>                 — 상담소 방(이 방의 글쓰기만 승인 겹 예외 desk_room)
-# 지금 값 = 없음(상담소 미개설).
+# 값 = 2026-10-05 상담소 개설(참가자 등록 201 · 방 생성 = 운영자 키 의장).
+desk jarvis-counsel SHA256:yvjI714ZM9bpFldLoJFwATQgEX6JR1VT7Rh5jDGokiw
+chair SHA256:4CKkbxfRkimcSmlPXo6HQ6jg5U3XrSEqHDNulBcI9B0
+room 2a3c1932d7eccf316cc4a0b312e558c7
