@@ -23,8 +23,28 @@ from agora.errors import AgoraError
 from agora.event import render_post
 
 
+# ★승인 겹의 **purpose 예외**(명세 §1-1 (4) · master 증보 7 재판정 7cc9f6f1) — 두 경로만 겹을 비켜 간다:
+#   `mail_signal` = 신호 우편(자유문 칸이 없는 닫힌 모양) · `desk_room` = 상담소 핀 방 글쓰기.
+#   그 밖 광장 글쓰기·우편 자유문은 겹 유지. 설정 키 `approval_exempt` 하나가 정한다(없으면 이 기본값).
+APPROVAL_EXEMPT_NAMES = ("mail_signal", "desk_room")
+APPROVAL_EXEMPT_DEFAULT = APPROVAL_EXEMPT_NAMES
+
+
+def approval_exempt_set(config: dict[str, Any] | None) -> frozenset[str]:
+    """설정의 예외 목록. ★못 읽는 값(목록 아님·모르는 이름 섞임)은 **예외 0** — 오타가 예외를 넓히지 않게."""
+    cfg = config or {}
+    if "approval_exempt" not in cfg:
+        return frozenset(APPROVAL_EXEMPT_DEFAULT)
+    value = cfg["approval_exempt"]
+    if type(value) is not list or any(type(v) is not str or v not in APPROVAL_EXEMPT_NAMES
+                                      for v in value):
+        return frozenset()
+    return frozenset(value)
+
+
 def approval_gate(*, config: dict[str, Any] | None = None,
-                  prompt: Any = None, isatty: Any = None) -> dict[str, Any]:
+                  prompt: Any = None, isatty: Any = None,
+                  exempt: str | None = None) -> dict[str, Any]:
     """전송 전 주인 승인(설계 §5 H-1 · F-14). **기본은 on 이다.**
 
     ★기계가 못 잡는 것이 남기 때문에 있는 문이다 — 목록에 없는 실명·주소·자유문 개인정보는
@@ -41,6 +61,10 @@ def approval_gate(*, config: dict[str, Any] | None = None,
     cfg = config or {}
     if cfg.get("human_approval", DEFAULT_HUMAN_APPROVAL) is False:
         return {"required": False, "approved": True, "why": "config.json"}
+    # ★예외 판정은 **호출자가 원장에 쓸 사실**(우편 intent · 핀 방 id)로 고른 이름 하나로만 한다 —
+    #   글 본문 문구로는 예외가 생기지 않는다. 지나간 사실은 `why` 에 이름째 남는다.
+    if exempt is not None and exempt in approval_exempt_set(cfg):
+        return {"required": False, "approved": True, "why": "approval_exempt:" + exempt}
     tty = (isatty or _sys.stdin.isatty)()
     if not tty:
         raise AgoraError(errors.GATE_REJECT, "승인을 받을 수 없다 — 전송하지 않는다",
@@ -57,7 +81,8 @@ def publish_event(*, store: Any, event: dict[str, Any], category: str,
                   prompt: Any = None, isatty: Any = None,
                   ledger: Any = None,
                   before_write: Any = None,
-                  config_dir: str | None = None) -> dict[str, Any]:
+                  config_dir: str | None = None,
+                  approval_exempt: str | None = None) -> dict[str, Any]:
     """한 이벤트를 운반층에 올린다 — 위 5단계를 그 순서대로.
 
     ★code 8(저장 성공 불명)은 **삼키지 않는다.** 그대로 올려 호출자가 재조회로 판정하게 한다
@@ -74,7 +99,8 @@ def publish_event(*, store: Any, event: dict[str, Any], category: str,
     #   경로를 명시하고, 서명기(별도 프로세스)에는 같은 절대경로를 **호출별 env** 로 준다.
     #   두 겹이 같은 폴더를 보게 하는 통로가 하나뿐이면 어느 쪽도 조용히 다른 목록을 못 본다.
     report = scrub.enforce(event, names_path=scrub.names_path(config_dir))   # ⑵ 게이트
-    approval = approval_gate(config=config, prompt=prompt, isatty=isatty)   # ⑶ 승인
+    approval = approval_gate(config=config, prompt=prompt, isatty=isatty,
+                             exempt=approval_exempt)   # ⑶ 승인(예외 = 상담소 핀 방 글쓰기만 · 호출자가 사실로 고른다)
     signed = sign.sign_event(event, config_dir=config_dir)   # ⑷ 서명(서명기가 게이트를 재검사한다)
     body = render_post(event, signed["signature"])
     if before_write is not None:

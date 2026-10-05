@@ -152,6 +152,17 @@ MUTATIONS = [
      '        return st["head"], st["state_hash"]',
      "harness", "세트7 연속 추천 3표 = 전부 201·accepted"),
 
+    # ── 자비스 우편(1:1 · 2026-10-05) — 수신자 확인 · 읽기 시점 만료 필터 ─────────────────────
+    ("M28 수신함 인증이 키 주인(for)을 안 본다", "src/index.ts",
+     "  if (signer !== forId) {",
+     "  if (false) {",
+     "harness", "우편: C 가 B 의 수신함(C 키·for=B) = 401"),
+
+    ("M29 수신함 만료·삭제 필터 제거", "src/index.ts",
+     "  return h.purged_at === null && h.keep_until > nowIso_ && h.has_body === 1;",
+     "  return h.has_body === 1;",
+     "harness", "우편: 보존 기한 지난 본문 = 머리만(purged)"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",
@@ -166,7 +177,8 @@ def run(kind: str) -> tuple[bool, str]:
         p = subprocess.run([sys.executable, os.path.join(RELAY, "scripts/run-local.py")],
                            cwd=RELAY, capture_output=True, text=True, env=env, timeout=600)
         tail = p.stdout[-1200:]
-        return ("== 결과: PASS ==" in p.stdout), tail
+        # ★종료 코드도 본다 — run-local 은 threeway 뒤에 mailway 를 돌리고, 앞의 PASS 줄이 뒤의 FAIL 을 가린다.
+        return ("== 결과: PASS ==" in p.stdout and p.returncode == 0), tail
     p = subprocess.run([os.path.join(RELAY, "node_modules/.bin/vitest"), "run"],
                        cwd=RELAY, capture_output=True, text=True, env=env, timeout=600)
     return (p.returncode == 0), (p.stdout[-600:] + p.stderr[-400:])

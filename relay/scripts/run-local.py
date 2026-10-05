@@ -41,10 +41,13 @@ def ensure_local_schema(env):
       그 500 은 「구현이 틀렸다」처럼 보이지만 **환경이 안 차려진 것**이고, 두 사건을 가르는 데
       사람 시간이 든다(master 가 새 worktree 에서 실제로 밟았다 · 2026-09-06).
     ★부재를 재는 축이니 **전제를 먼저 확인**한다: 표가 있으면 아무 일도 하지 않는다(멱등).
+    ★우편 표(`mail` · 0002)도 같이 잰다 — 0001 만 먹은 옛 작업트리에서는 events 는 있고 mail 만 없다.
+      그때 시험은 우편 경로에서만 `500 no such table` 로 죽고, 그것이 「우편 구현이 틀렸다」처럼 보인다.
+      `migrations apply` 는 적용 기록(d1_migrations)을 보고 **안 먹은 것만** 먹인다.
     """
     wrangler = os.path.join(RELAY, "node_modules/.bin/wrangler")
     probe = subprocess.run([wrangler, "d1", "execute", "agora-relay", "--local",
-                            "--command", "SELECT 1 FROM events LIMIT 1;"],
+                            "--command", "SELECT 1 FROM events LIMIT 1; SELECT 1 FROM mail LIMIT 1;"],
                            cwd=RELAY, capture_output=True, text=True, env=env)
     if probe.returncode == 0:
         return True
@@ -73,7 +76,7 @@ def reset_local_db(env):
       비우는 것은 시험 환경이지 방어의 완화가 아니다(상한값은 그대로 둔다).
     """
     sql = ("DELETE FROM events; DELETE FROM rooms; DELETE FROM participants; "
-           "DELETE FROM rate_windows; DELETE FROM roster_checkpoints;")
+           "DELETE FROM rate_windows; DELETE FROM roster_checkpoints; DELETE FROM mail;")
     r = subprocess.run([os.path.join(RELAY, "node_modules/.bin/wrangler"), "d1", "execute",
                         "agora-relay", "--local", "--command", sql],
                        cwd=RELAY, capture_output=True, text=True, env=env)
@@ -91,9 +94,13 @@ def main():
         reset_local_db(env)
     log_path = os.path.join(RELAY, ".wrangler-dev.log")
     log = open(log_path, "w")
+    # ★로컬 덮어쓰기 1칸 — 우편 답장 간격만 2초로(운영 설정 wrangler.jsonc 는 그대로 20초).
+    #   이유: 「연속 5통 → 쿨다운」 시험은 같은 사람에게 답장 5통을 보내야 하는데, 20초 간격이면
+    #   그 시험 하나가 80초 이상을 기다린다. 간격 버킷 자체는 단위 시험(mailBuckets 기본값 표)이 잰다.
     proc = subprocess.Popen(
         [os.path.join(RELAY, "node_modules/.bin/wrangler"), "dev", "--local",
-         "--port", str(PORT), "--ip", "127.0.0.1"],
+         "--port", str(PORT), "--ip", "127.0.0.1",
+         "--var", "AGORA_RATE_MAIL_REPLY_WINDOW_S:2"],
         cwd=RELAY, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         env=env, start_new_session=True)
     pgid = os.getpgid(proc.pid)
@@ -106,6 +113,14 @@ def main():
         print("서버 준비 완료: %s (pgid %d)\n" % (BASE, pgid))
         cmd = [sys.executable, os.path.join(HERE, "threeway.py"), "--base", BASE] + sys.argv[1:]
         rc = subprocess.run(cmd, cwd=RELAY, env=env).returncode
+        # 자비스 우편(1:1) 왕복 — 같은 서버·같은 D1 위에서 threeway 뒤에 돈다(docs/RELAY.md §14).
+        # ★둘 중 하나라도 적색이면 적색이다 — 앞의 PASS 줄이 뒤의 FAIL 을 가리지 않게 종료 코드로 합친다.
+        cmd = [sys.executable, os.path.join(HERE, "mailway.py"), "--base", BASE]
+        rc_mail = subprocess.run(cmd, cwd=RELAY, env=env).returncode
+        # ★그 반대편 — **참가자 PC 가 쓰는 클라이언트 코드 그대로**(agora/mail.py·서명기)가 같은 서버와 맞물리는가.
+        cmd = [sys.executable, os.path.join(HERE, "clientway.py"), "--base", BASE]
+        rc_client = subprocess.run(cmd, cwd=RELAY, env=env).returncode
+        rc = rc or rc_mail or rc_client
     finally:
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:

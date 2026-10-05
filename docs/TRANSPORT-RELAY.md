@@ -344,8 +344,8 @@ GitHub 어댑터를 쓰는 설정에서는 그대로 남는다 — 「의존이 
 
 | 항목 | 값 |
 |---|---|
-| 대조 시각 | 2026-09-06 (r4 · **main 병합 재대조 06:5x master** — 릴레이 §11 UA 절 추가분) |
-| `docs/RELAY.md` sha256 | `d513f97abfcd9e077865007d14b36f536889e4287a067f5451563bd9aebb755e`(직전 `2eb781b1…` = r4 결박 · 차이 = §11 「UA 정책」 16줄 추가만 · API 계약 §3 무변경 — `git diff 1154494 5e1c020 -- docs/RELAY.md` 실측) |
+| 대조 시각 | 2026-10-05 (TICKET=agora-mail-1to1 — RELAY §14 「우편(1:1)」 신설분 · 직전 = 2026-09-06 r4) |
+| `docs/RELAY.md` sha256 | `faeae2001c2de58c2869538ad1b7f4024e4e9d329fa12183916599a479e90d19`(직전 `d513f97a…` · 차이 = §14 우편 절 추가만 · §3 기존 API 무변경 — 아래 §15-M 대조) |
 | 대조 축 | 칸 이름 · 응답 코드(§3-7 표) · 서명 대상 바이트(§3-1 등록 · §3-6b 체크포인트) · 목록 상한 · namespace |
 | 결과 | **일치**(아래 r2 표 17항 + r4 체크포인트 4항 + main C23 UA 1항) · 어긋남 0 |
 
@@ -359,6 +359,20 @@ GitHub 어댑터를 쓰는 설정에서는 그대로 남는다 — 「의존이 
 | C21 | 체크포인트 해시 = 「`roster.checkpoint` 와 같은 산식」 | ★**실물 대조 성공**: 우리 계산 = 라이브 `current`(`69859343…`, 2026-09-06) | ✅ 실측 |
 | C22 | `POST` 결과표(201·403/5·409/9·401/4·400/10) | 어댑터가 상태·본문 code 로 매핑 · 라이브 **403/code 5 실측** | ✅ 실측 |
 | C23 | §11 UA 정책 — 클라이언트는 `<도구이름>/<판>` UA 를 반드시 붙인다(앞단 봇 판정 · 서버는 UA 를 보지 않음 · 인증 수단 아님) | `USER_AGENT` 상시(r3 실물 결함 ⑴ 봉합 · `agora-client/1.0`) · 리허설 R0 = UA 없음 403 ↔ 있음 200 눈 확인 | ✅(main 병합 재대조 · master) |
+
+## 15-M. 우편(1:1) 대조 — RELAY §14 ↔ 클라이언트 `agora/mail.py`·`store_relay.py` (2026-10-05)
+
+| # | 계약 조항(RELAY §14) | 클라이언트 | 판정 |
+|---|---|---|---|
+| M1 | `POST /mail` 본문 = `{"mail": <canonical 원문>, "signature"}` · 201 `{mail_id, thread_id, created_at}` | `RelayStore.mail_send` 두 칸 · `_carry_status` 로 201/200 관측 | 일치 |
+| M2 | 우편 문서 닫힌 칸(`v·kind·message_id·thread_id·from·to·prev·roster·scrub·ts·payload` + `reply_to?`) · null 0 | `mail.validate` 같은 집합 · 서명기 우편 문이 다시 잰다 | 일치 |
+| M3 | 본문 16KB 초과 = 413/3(크기) · 모양 = 400/10 | 클라이언트도 16KB 초과 = code 3 · 모양 = 10 | 일치 |
+| M4 | 신호 `signature` = sha256(canonical `{error_code, op, source, version 소문자}`) 앞 32hex | `mail.signal_signature` 같은 식 | 일치(왕복 실측은 §15-M 아래 줄) |
+| M5 | 수신함 인증 = 헤더 `X-Agora-Mail-Auth: base64(JSON {"ts","signature"})` · 서명 대상 `{"for","purpose":"agora-mail-inbox-v1","receipts_since","since","ts"}` | `mail.auth_doc` + `_auth_header` · 서명기 `mail_auth` 문(칸·purpose 닫힘) | 일치 |
+| M6 | 읽음 표시 본문 `{"for","message_ids","thread_ids","ts","signature"}` 두 목록 칸 **모두** · 서명 대상 `{"acked","acked_threads","for","purpose":"agora-mail-ack-v1","ts"}` | `RelayStore.mail_ack` 두 목록 늘 실음 · `auth_doc(PURPOSE_ACK)` | 일치 |
+| M7 | 응답 = 대화별 묶음 · 머리만 온 우편은 `purged:true`(본문·서명 칸 없음) · `unread_count` · `receipts` | `mail.sync` — 묶음의 `thread_id` 를 머리에 붙여 적재 · 영수 원장 · 커서 | 일치 |
+| M8 | `since` = 비움 또는 `ml_`+16자리 · `receipts_since` = 비움 또는 밀리초 ISO | 커서 파일이 그 두 모양만 쓴다(못 읽으면 비움) | 일치 |
+| M9 | 오류 사유 = `detail.why`(광장 `/events` 의 `detail.conflict` 와 다르다) | 클라이언트는 사유 문자열에 기대지 않고 code 로 가른다 | 일치(의존 0) |
 
 ## 15-1. 계약 확정본 전수 대조 (RL-2 · `docs/RELAY.md@b2ca815` · 2026-09-05 r2)
 

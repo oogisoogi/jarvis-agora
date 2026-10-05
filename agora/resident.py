@@ -614,6 +614,22 @@ def _write_last(p: dict[str, str], *, started: str, rc: int, woke: int,
     _write_json(p["last"], doc)
 
 
+def _mail_sync(ctx: Any) -> dict[str, Any]:
+    """우편 수신함 한 번(명세 docs/SPEC-mail-1to1-2026-10-05.md §5 · §13-4) — **읽기만**.
+
+    ★우편은 깨움 조건이 아니다 — 이 결과는 `due`(깨울 방)에 한 줄도 보태지 않는다. 깨운 에이전트가
+      우편 본문을 읽는 순간이 곧 주입의 기회이기 때문이다(본문은 사람이 `agora mail read` 로 본다).
+    ★실패해도 방문 판정은 그대로 간다 — 우편함이 막혔다고 회차 발언을 놓치지 않게.
+    """
+    from agora import mail
+    if not hasattr(getattr(ctx, "store", None), "mail_inbox"):
+        return {"skipped": "store_has_no_mail"}
+    try:
+        return mail.sync(ctx)
+    except AgoraError as e:
+        return {"code": e.code, "message": e.message}
+
+
 def _verdict(rc: int, meaning: str) -> dict[str, Any]:
     return {"종료코드": rc, "뜻": meaning}
 
@@ -659,6 +675,9 @@ def once(*, directory: str | None = None, dry_run: bool = False, print_agenda: b
         agenda = [{"room_id": d["room_id"], "round": d["round"], "attempt": d["attempt"],
                    "purpose": d["purpose"]} for d in due]
         base = {"본_방": found["scanned"], "안건": agenda, "건너뛴_방": found["skipped"]}
+        if not dry_run and not print_agenda:
+            base["우편"] = _mail_sync(ctx)
+            row["mail"] = base["우편"].get("added", base["우편"].get("code"))
         row.update({"scanned": found["scanned"], "due": len(due),
                     "rooms": [d["room_id"][:8] for d in due]})
         rules = visit_rules_path()

@@ -207,6 +207,32 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
         return {"hash": _hashlib.sha256(raw).hexdigest(), "signature": signature,
                 "scrub": report, "namespace": SIGN_NAMESPACE,
                 "kind_of_request": "checkpoint"}
+    if "mail" in request:
+        # ★우편(명세 §2) — 광장 kind 9종 밖이라 이벤트 문으로는 못 들어온다. 같은 처방:
+        #   **닫힌 우편 계약**을 서명기가 다시 잰다(칸·kind 고정·크기) + 스크럽 → 그 바이트에만 서명.
+        import hashlib as _hashlib
+        from agora import mail as _mail
+        doc = request.get("mail")
+        _mail.validate(doc)
+        report = scrub.enforce(doc)
+        raw = canonical_bytes(doc)
+        if len(raw) > MAX_EVENT_BYTES:
+            raise AgoraError(errors.GATE_REJECT, "우편 크기 상한 초과",
+                             {"bytes": len(raw), "limit": MAX_EVENT_BYTES})
+        signature = sign_bytes(raw, _signing_key_path())
+        return {"hash": _hashlib.sha256(raw).hexdigest(), "signature": signature,
+                "scrub": report, "namespace": SIGN_NAMESPACE, "kind_of_request": "mail"}
+    if "mail_auth" in request:
+        # ★수신함·읽음 인증(명세 §3-2·§3-3) — purpose 값과 칸 집합을 **둘 다 닫는다**.
+        #   열어 두면 이 문이 「아무 문서나 서명해 주는 신탁」이 된다(등록·체크포인트와 같은 이유).
+        import hashlib as _hashlib
+        from agora import mail as _mail
+        doc = request.get("mail_auth")
+        _mail.check_auth_doc(doc)
+        raw = canonical_bytes(doc)
+        signature = sign_bytes(raw, _signing_key_path())
+        return {"hash": _hashlib.sha256(raw).hexdigest(), "signature": signature,
+                "namespace": SIGN_NAMESPACE, "kind_of_request": "mail_auth"}
     event = request.get("event")
     raw, report = self_check(event)
     signature = sign_bytes(raw, _signing_key_path())

@@ -84,6 +84,12 @@ COMMANDS: dict[str, dict[str, Any]] = {
     #   이 컴퓨터의 일정이 부르는 운영 동작이다: 「깨울 때인가」 판정(`once`) · 일정 놓기·거두기 · 끄기·켜기.
     #   도구가 아니다: MCP 표면에 올리면 대리인 세션 손에 「나를 깨우는 일정을 바꿔라」가 쥐어진다.
     "resident":       {"core": False, "built": True,  "slice": "S9-1"},
+    # ★계약 확장 9(master 발주 2026-10-05 · TICKET=agora-mail-1to1) — **자비스 우편**.
+    #   `mail-send` = 도구(대리인이 보낼 수 있다 · 사람 승인 겹을 탄다).
+    #   `mail` = CLI 전용 동작(send·inbox·read·ack·sync) — 받은 글을 읽고 읽음을 남기는 일은
+    #   사람(또는 사람이 시킨 master)이 한다. MCP 에 올리면 대리인 손에 「남의 우편을 읽음 처리하라」가 쥐어진다.
+    "mail-send":      {"core": True,  "built": True,  "slice": "S10-1"},
+    "mail":           {"core": False, "built": True,  "slice": "S10-1"},
 }
 
 # MCP 에 노출하지 않는 것 — 정본 = 설계 §4 「(CLI만)」 행(예외 계수는 그 한 곳에만 · J-7 2026-09-02).
@@ -97,7 +103,9 @@ MCP_EXEMPT = frozenset({"watch", "selftest", "keygen", "export", "import",
                         # 계약 확장 7(2026-09-09) — 설치 점검. 대리인이 자기 설치를 볼 일은 없다.
                         "selfcheck",
                         # 계약 확장 8(2026-09-11) — 상주 방문. 대리인을 깨우는 일정은 대리인 손에 두지 않는다.
-                        "resident"})
+                        "resident",
+                        # 계약 확장 9(2026-10-05) — 우편 받기·읽기·읽음. 보내기만 도구(`mail-send`)다.
+                        "mail"})
 
 # ── 역할별 노출표(설계 §5 「수신 격리」 H-3 · NFR-2) ─────────────────────────
 # ★**여기가 「도구 목록」의 단일 출처다.** 대리인 브리프(S6-3 `brief-reader.md`)는 이 표를
@@ -242,6 +250,9 @@ CLI_ONLY_ARGS: dict[str, tuple[str, ...]] = {
     "import":       ("file", "dir"),
     # ★동작마다 받는 인자는 `resident.ACTION_ARGS` 가 한 번 더 좁힌다(`status --interval-min` 거절).
     "resident":     ("interval_min", "dry_run", "print_agenda", "dir"),
+    # ★동작마다 받는 인자는 `mail.CLI_ACTION_ARGS` 가 한 번 더 좁힌다(`inbox --to` 거절).
+    "mail":         ("to", "subject", "body", "body_file", "intent", "reply_to", "refs",
+                     "thread_id", "message_id", "dir"),
 }
 
 # CLI 전용 명령의 **필수** 인자. ★구판은 이것을 `_run_local` 안의 분기에서 따로 봤고,
@@ -263,7 +274,8 @@ SELF_PARSED = ("selfcheck", "selftest", "keygen", "mcp-serve")
 
 # **맨몸 동작 토큰**을 받는 명령(`agora checkpoint issue`). ★표를 한 곳에 둔다 —
 # 진입점(`_run_onboard`)과 문서 시험이 같은 표를 봐야 「문서대로 치면 돈다」가 참이 된다.
-ACTION_ARG: dict[str, tuple[str, ...]] = {"checkpoint": ("issue",)}
+ACTION_ARG: dict[str, tuple[str, ...]] = {"checkpoint": ("issue",),
+                                          "mail": ("send", "inbox", "read", "ack", "sync")}
 
 
 def action_names(command: str) -> tuple[str, ...]:
@@ -344,6 +356,9 @@ def check_argv(command: str, rest: list[str]) -> dict[str, Any]:
         # ★동작마다 받는 인자가 다르다 — 그 판정도 **그 모듈**이 한다(`status --interval-min` 거절).
         from agora import resident
         resident.check_action_args(action, kw)
+    if command == "mail":
+        from agora import mail
+        mail.check_action_args(action, kw)
     return kw
 
 
@@ -409,6 +424,18 @@ def _run_resident(rest: list[str]) -> Any:
     #   (여기서 잘라 넘기면 그쪽이 「동작이 없다」로 읽는다 — 한 번 그렇게 냈다).
     action, _rest = split_action("resident", rest)
     return resident.dispatch(action, check_argv("resident", rest))
+
+
+def _run_mail(rest: list[str]) -> Any:
+    """자비스 우편 CLI(계약 확장 9) — 맨 앞 맨몸 토큰이 동작이다(`agora mail inbox`).
+
+    ★인자 검사(`check_argv`)가 **컨텍스트보다 먼저**다(codex 1R HIGH-1 과 같은 순서) — 설정이 없어도 인자 오류는 code 10.
+    """
+    from agora import mail, tools
+    action, _rest = split_action("mail", rest)
+    kw = check_argv("mail", rest)
+    ctx = tools.context_from_config(kw.pop("dir", None))
+    return mail.dispatch(ctx, action, kw)
 
 
 def _config_dir(explicit: str | None) -> str:
@@ -553,6 +580,8 @@ def dispatch(name: str, args: argparse.Namespace) -> Any:
         return _run_operator(name, list(args.rest) if hasattr(args, "rest") else [])
     if name == "resident":
         return _run_resident(list(args.rest) if hasattr(args, "rest") else [])
+    if name == "mail":
+        return _run_mail(list(args.rest) if hasattr(args, "rest") else [])
     if name in ("watch", "reconcile", "export", "import"):
         return _run_local(name, list(args.rest) if hasattr(args, "rest") else [])
     if meta["core"]:

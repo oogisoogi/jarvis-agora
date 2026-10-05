@@ -7,8 +7,9 @@
  *     파생과 `verdict` 로 드러낸다(D-R1 · PROTOCOL §3 의 stale 을 보존하기 위해).
  *   · 서버에 **개인키가 없다.** 서명 코드가 이 저장소 어디에도 없어야 한다.
  */
-import { AgoraError, ARGUMENT, GATE_REJECT, PERMISSION, SIGNATURE, STATE_CONFLICT, STORE, fail } from "./lib/errors.ts";
-import { canonicalBytes, isId } from "./lib/canonical.ts";
+import { AgoraError, ARGUMENT, GATE_REJECT, PERMISSION, PRECONDITION, SIGNATURE, STATE_CONFLICT, STORE,
+         fail } from "./lib/errors.ts";
+import { canonicalBytes, canonicalText, isId, parseEventJson, sha256Hex } from "./lib/canonical.ts";
 import { prefersHtml } from "./lib/accept.ts";
 import { parsePost, renderPost } from "./lib/post.ts";
 import * as schema from "./lib/schema.ts";
@@ -18,7 +19,9 @@ import { b64decode, checkSignatureBytes, fingerprintOf, hasArmor, parseArmored,
 import { bumpRate, deriveThread, eventIdOf, nowIso, rosterView, threadEvents,
          upsertRoom, type Env } from "./lib/store.ts";
 import { FEED_SORTS, feed, isCommunity, replyParent, type FeedEvent, type FeedSort } from "./lib/feed.ts";
-import { communityBuckets, isNewParticipant, limitsFromEnv } from "./lib/limits.ts";
+import { communityBuckets, isNewParticipant, limitsFromEnv, mailBuckets, mailConsecutive,
+         mailKindOf, mailLimitsFromEnv } from "./lib/limits.ts";
+import * as mail from "./lib/mail.ts";
 
 // 저장소의 **정본 규칙 파일**을 원문 그대로 싣는다(wrangler rules: Text).
 import rulesText from "../../config/scrub-rules-v1.json";
@@ -764,6 +767,337 @@ async function postCheckpoint(req: Request, env: Env): Promise<Response> {
   return json({ checkpoint, signer, signed_at: signedAt }, 201);
 }
 
+// ── 자비스 우편(1:1) — docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §3 ──────────
+// ★우편은 방이 아니다: 표가 따로(`mail`)라서 /rooms·/feed·/home·/communities·보드로 섞여 나갈 길이 없다.
+// ★세 경로 모두 **CORS 를 열지 않는다**(라우터의 OPTIONS 도 405) · 응답은 `Cache-Control: private, no-store`.
+// ★질의 상한은 주석이 아니라 동작이다(QueryBudget) — 명세 §3-4 질의 예산을 넘으면 503.
+const MAIL_POST_D1_QUERIES_MAX = 10;   // 명부 1 + 대화 결박 1 + 멱등 1 + 연속 1 + 상한 2 + 적재 1 + 덤 삭제 1 (+경합 재조회 1)
+const MAIL_INBOX_D1_QUERIES_MAX = 6;   // 명부 1 + pid 상한 1 + 후보 머리 1 + 본문 1 + 미읽음 1 + 영수 1
+const MAIL_ACK_D1_QUERIES_MAX = 4;     // 명부 1 + pid 상한 1 + 무시 계수 1 + 갱신 1
+const MAIL_HEADERS: Record<string, string> = { "Cache-Control": "private, no-store" };
+
+function mailRateFail(label: string, windowS: number, max: number, retryAfter: number): never {
+  return fail(STORE, "우편 속도 제한", { limit: label, window_s: windowS, max },
+    { status: 429, headers: { "Retry-After": String(retryAfter) } });
+}
+
+function closedBody(body: Record<string, unknown>, allowed: string[]): void {
+  const extra = Object.keys(body).filter(k => !allowed.includes(k));
+  if (extra.length) fail(ARGUMENT, "계약에 없는 칸", { extra: extra.sort() });
+}
+
+/**
+ * 서명 → 명부 → 폐기. `/events` 와 **같은 3값 판정**(BAD·unsigned)을 내고, 서명한 키의 주인(principal)을 돌려준다.
+ * ★주인 대조(우편 = `from` · 수신함·읽음 = `for`)는 **부르는 쪽이 한 줄로** 한다 — 그 줄이 곧 그 경로의 문이다.
+ */
+async function checkMailSigner(roster: Awaited<ReturnType<typeof rosterView>>, raw: Uint8Array,
+                               signature: string, env: Env): Promise<string> {
+  if (!hasArmor(signature)) fail(SIGNATURE, "서명이 없다", { verdict: "unsigned", why: "no_signature" });
+  const checked = await checkSignatureBytes(raw, parseArmored(signature), env.AGORA_NAMESPACE);
+  if (!checked.ok) {
+    const bad = checked.why === "signature_does_not_match_bytes";
+    fail(SIGNATURE, bad ? "서명이 본문과 맞지 않는다(BAD)" : "서명을 받아들일 수 없다",
+      { verdict: bad ? "BAD" : "unsigned", why: checked.why });
+  }
+  const entry = roster.lookup(checked.fingerprint!);
+  if (!entry) fail(SIGNATURE, "명부에 없는 키다", { verdict: "unsigned", why: "not_in_roster" });
+  if (entry.revoked) fail(SIGNATURE, "폐기된 키다", { verdict: "unsigned", why: "revoked" });
+  return entry.principal;
+}
+
+/**
+ * 수신함·읽음 인증 — ★「수신자가 아닌 자는 inbox 를 못 본다」의 **유일한 문**(명세 §3-2).
+ * 순서: ts 창 → 서명·명부·폐기 → **그 키가 `for` 의 것인가** → `pid:<for>` 분당 30.
+ * ★pid 계수는 인증 **뒤**다 — 앞에 두면 남이 서명 없이 남의 상한을 태워 그 사람의 광장 쓰기를 막을 수 있다.
+ * ⚠같은 헤더를 ±5분 안에 **그대로** 다시 쓰는 재생은 막지 않는다(nonce 없음 · 전송 TLS 전제 · 정직 고지 §14-9).
+ *   인자를 바꾼 재사용(since·acked 변경)은 서명 대상이 달라져 401 이다.
+ */
+async function verifyMailAuth(qb: QueryBudget, env: Env, forId: string, doc: Record<string, unknown>,
+                              ts: string, signature: string, nowMs: number): Promise<void> {
+  if (!mail.authTsOk(ts, nowMs)) {
+    fail(SIGNATURE, "인증 시각이 서버 시각 ±5분 밖이다", { verdict: "unsigned", why: "auth_ts_window" });
+  }
+  const raw = canonicalBytes(doc);
+  const roster = await rosterView(qb.asDb);
+  const signer = await checkMailSigner(roster, raw, signature, env);
+  if (signer !== forId) {
+    fail(SIGNATURE, "그 키는 이 수신자(for)의 키가 아니다", { verdict: "unsigned", why: "principal_mismatch" });
+  }
+  const perPid = await bumpRate(qb.asDb, "pid:" + forId, 60, EVENTS_PER_PID_MIN, nowMs);
+  if (!perPid.ok) mailRateFail("participant", 60, EVENTS_PER_PID_MIN, perPid.retryAfter);
+}
+
+// ── POST /mail ─────────────────────────────────────────────────────────────
+async function handleMailPost(req: Request, env: Env): Promise<Response> {
+  const body = await readJson(req);
+  closedBody(body, ["mail", "signature"]);
+  const mailText = needStr(body, "mail");
+  const signature = needStr(body, "signature");
+  const nowMs = Date.now();
+
+  // (1) 크기(원문·canonical 64KB → 413/3) · (2) 모양(실수·중복 키·닫힌 칸 → 400/10 · 본문 16KB → 413/3)
+  const doc = parseEventJson(mailText);
+  const raw = canonicalBytes(doc);
+  await mail.validateMail(doc, nowMs);
+  const d = doc as Record<string, any>;
+
+  // (3) 서명·명부·폐기·from 결박 — ★스크럽보다 먼저(/events 와 같은 이유: 서명 없는 쓰레기가 정규식 CPU 를 못 태우게).
+  const qb = new QueryBudget(env.DB, MAIL_POST_D1_QUERIES_MAX);
+  const roster = await rosterView(qb.asDb);
+  const signer = await checkMailSigner(roster, raw, signature, env);
+  if (signer !== d.from) {
+    fail(SIGNATURE, "그 키는 이 발신자(from)의 키가 아니다", { verdict: "unsigned", why: "principal_mismatch" });
+  }
+
+  // (4) 받는 사람 — 명부에 있고 폐기 안 됨. 폐기된 사람과 없는 사람을 **같은 응답**으로 낸다(명부 밖 탐색 차단).
+  const recipient = roster.rows.find(r => r.participant_id === d.to);
+  if (!recipient || recipient.revoked_at) {
+    fail(PRECONDITION, "받는 사람이 명부에 없다", { why: "recipient_not_in_roster", to: d.to }, { status: 404 });
+  }
+
+  // (5) 대화 결박 — 질의 1(그 대화의 첫 우편 + reply_to 가 가리킨 우편).
+  //   ★한 대화의 참가자는 첫 우편의 두 사람뿐이다 — 남의 대화에 끼어들기를 여기서 막는다.
+  const tRows = (await qb.prepare(
+    `SELECT from_id, to_id, message_id FROM mail
+      WHERE thread_id = ?1 AND (message_id = ?2 OR seq = (SELECT MIN(seq) FROM mail WHERE thread_id = ?1))`
+  ).bind(d.thread_id, typeof d.reply_to === "string" ? d.reply_to : "")
+   .all<{ from_id: string; to_id: string; message_id: string }>()).results ?? [];
+  for (const r of tRows) {
+    const same = (r.from_id === d.from && r.to_id === d.to) || (r.from_id === d.to && r.to_id === d.from);
+    if (!same) fail(GATE_REJECT, "남의 대화다", { why: "thread_not_yours", thread_id: d.thread_id }, { status: 422 });
+  }
+  let ref: { from_id: string } | null = null;
+  if (typeof d.reply_to === "string") {
+    const hits = tRows.filter(r => r.message_id === d.reply_to);
+    if (!hits.length) {
+      fail(GATE_REJECT, "reply_to 가 이 대화 안에 없다", { why: "reply_outside_thread", reply_to: d.reply_to }, { status: 422 });
+    }
+    ref = hits.find(r => r.from_id === d.to) ?? hits[0];
+  }
+
+  // (6) ts 창 — 서버 시각 −24시간 ~ +5분(오래 묵힌 서명 문서를 새 우편처럼 들이지 않게).
+  const tsMs = Date.parse(d.ts);
+  if (tsMs < nowMs - mail.MAIL_TS_PAST_MS || tsMs > nowMs + mail.FUTURE_SKEW_MS) {
+    fail(GATE_REJECT, "우편 시각이 받는 창 밖이다(−24시간 ~ +5분)", { why: "stale_ts", ts: d.ts }, { status: 422 });
+  }
+
+  // (7) 스크럽 백스톱 — fail-closed(§6 · /events 와 같은 규칙 묶음).
+  const bundle = await scrubBundle();
+  scrub.enforce(d.payload, bundle);
+
+  // (8) 멱등 — 같은 (from, message_id) + 같은 해시 = 200 기존 값. ★상한보다 먼저(재시도가 예산을 깎지 않게).
+  //   ★본문을 지운 뒤에도 머리(from·message_id·hash)가 남으므로, 지워진 우편을 같은 서명으로 다시 올려도
+  //     새로 배달되지 않는다(명세 §3-4 TTL 뒤 재게시).
+  const hash = await sha256Hex(raw);
+  const existing = await qb.prepare(
+    "SELECT seq, hash, thread_id, created_at FROM mail WHERE from_id = ?1 AND message_id = ?2"
+  ).bind(d.from, d.message_id).first<{ seq: number; hash: string; thread_id: string; created_at: string }>();
+  if (existing) {
+    if (existing.hash === hash) {
+      return json({ mail_id: mail.mailIdOf(existing.seq), thread_id: existing.thread_id,
+                    created_at: existing.created_at }, 200, MAIL_HEADERS);
+    }
+    fail(GATE_REJECT, "같은 message_id 로 다른 내용을 보냈다",
+      { why: "message_id_reused", message_id: d.message_id }, { status: 422 });
+  }
+
+  // (9) 상한(명세 §4) — 신호는 하루 1 버킷만 · 그 밖은 연속 규칙(읽기 1) 뒤 간격·하루 버킷.
+  //   ★연속 규칙을 버킷 **앞**에 둔다: 연속으로 거절될 우편이 간격·하루 칸을 먼저 태우지 않게.
+  const limits = mailLimitsFromEnv(env as unknown as Record<string, unknown>);
+  const kind = mailKindOf(d.payload.intent, d.to, ref);
+  if (kind !== "signal") {
+    // 「연속」 = 상대가 나에게 마지막으로 보낸 (신호 아닌) 우편 이후, 창 안에 내가 그 사람에게 보낸 (신호 아닌) 우편 수.
+    //   ★상대의 **신호**는 답이 아니다 — 기계가 하루 한 번 보내는 신호로 쿨다운이 풀리지 않게(엄격 쪽 · §14-9).
+    const c = await qb.prepare(
+      `SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM mail
+        WHERE from_id = ?1 AND to_id = ?2 AND intent != 'signal' AND created_at > ?3
+          AND seq > COALESCE((SELECT MAX(seq) FROM mail
+                               WHERE from_id = ?2 AND to_id = ?1 AND intent != 'signal'), 0)`
+    ).bind(d.from, d.to, new Date(nowMs - limits.consecWindowS * 1000).toISOString())
+     .first<{ n: number; oldest: string | null }>();
+    const v = mailConsecutive(Number(c?.n ?? 0), c?.oldest ?? null, nowMs, limits);
+    if (!v.ok) mailRateFail("mail_consecutive", limits.consecWindowS, limits.consecMax, v.retryAfter);
+  }
+  const me = roster.rows.find(r => r.participant_id === d.from);
+  const isNew = isNewParticipant(me?.created_at, nowMs, limitsFromEnv(env as unknown as Record<string, unknown>));
+  for (const b of mailBuckets(kind, d.from, isNew, limits)) {
+    const r = await bumpRate(qb.asDb, b.bucket, b.windowS, b.max, nowMs);
+    if (!r.ok) mailRateFail(b.label, b.windowS, b.max, r.retryAfter);
+  }
+
+  // (10) 적재 — 보존 기한은 적재 때 정한다(답장 = +90일 · 그 밖 = +30일).
+  const createdAt = nowIso(new Date(nowMs));
+  let inserted: { seq: number } | null = null;
+  try {
+    inserted = await qb.prepare(
+      `INSERT INTO mail (message_id, thread_id, from_id, to_id, prev, reply_to, intent, hash, bytes,
+         canonical, signature, keep_until, created_at)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) RETURNING seq`
+    ).bind(d.message_id, d.thread_id, d.from, d.to, d.prev,
+           typeof d.reply_to === "string" ? d.reply_to : null, d.payload.intent, hash, raw.length,
+           canonicalText(doc), signature, mail.keepUntil(nowMs, kind === "reply"), createdAt)
+     .first<{ seq: number }>();
+  } catch (e) {
+    // ★동시에 **같은** 우편이 둘 오면 하나는 UNIQUE(from,message_id) 에 걸린다 — 멱등이 뒤늦게 성립한 것이다.
+    const again = await qb.prepare(
+      "SELECT seq, hash, thread_id, created_at FROM mail WHERE from_id = ?1 AND message_id = ?2"
+    ).bind(d.from, d.message_id).first<{ seq: number; hash: string; thread_id: string; created_at: string }>();
+    if (again && again.hash === hash) {
+      return json({ mail_id: mail.mailIdOf(again.seq), thread_id: again.thread_id,
+                    created_at: again.created_at }, 200, MAIL_HEADERS);
+    }
+    throw e;
+  }
+  if (!inserted) fail(STORE, "적재 결과를 읽지 못했다", null);
+
+  // (11) 덤 삭제(질의 1 · 새 cron 0) — 보존 끝 또는 읽음 표시가 붙은 우편의 **본문**을 지운다(머리는 남긴다).
+  //   ⚠우편이 한동안 안 오면 물리 삭제가 늦어진다 — 그동안은 수신함의 읽기 시점 필터가 본문을 막는다(명세 §3-4 ⑴).
+  await qb.prepare(
+    `UPDATE mail SET canonical = NULL, signature = NULL, purged_at = ?1
+      WHERE purged_at IS NULL AND (keep_until < ?1 OR acked_at IS NOT NULL)`
+  ).bind(createdAt).run();
+
+  return json({ mail_id: mail.mailIdOf(inserted.seq), thread_id: d.thread_id, created_at: createdAt },
+              201, MAIL_HEADERS);
+}
+
+// ── GET /mail/inbox ────────────────────────────────────────────────────────
+interface MailHead {
+  seq: number; thread_id: string; from_id: string; message_id: string; created_at: string;
+  acked_at: string | null; purged_at: string | null; keep_until: string; has_body: number;
+}
+
+/** 본문을 내보내도 되나 — ★읽기 시점 강제(명세 §3-4 ⑴): 물리 삭제가 늦어도 보존 끝 본문은 절대 안 나간다. */
+function mailBodyAvailable(h: MailHead, nowIso_: string): boolean {
+  return h.purged_at === null && h.keep_until > nowIso_ && h.has_body === 1;
+}
+
+async function handleMailInbox(req: Request, env: Env): Promise<Response> {
+  const u = new URL(req.url);
+  const forId = u.searchParams.get("for") || "";
+  if (!forId) fail(ARGUMENT, "for 가 필요하다(받는 사람 참가자 id)", null);
+  const since = u.searchParams.get("since") ?? "";
+  const sinceSeq = since === "" ? 0 : mail.parseMailId(since);
+  if (sinceSeq === null) fail(ARGUMENT, "since 는 비우거나 ml_ + 16자리", { since });
+  const receiptsSince = u.searchParams.get("receipts_since") ?? "";
+  if (receiptsSince !== "" && !mail.isIsoMs(receiptsSince)) {
+    fail(ARGUMENT, "receipts_since 는 비우거나 밀리초 고정폭 ISO", { receipts_since: receiptsSince });
+  }
+  const auth = mail.parseAuthHeader(req.headers.get("X-Agora-Mail-Auth"));
+  const nowMs = Date.now();
+  const now = nowIso(new Date(nowMs));
+  const qb = new QueryBudget(env.DB, MAIL_INBOX_D1_QUERIES_MAX);
+  await verifyMailAuth(qb, env, forId, mail.inboxAuthDoc(forId, since, receiptsSince, auth.ts),
+                       auth.ts, auth.signature, nowMs);
+
+  // 후보 머리(본문 없이) — 500통 × 64KB 를 한 번에 끌어오지 않게 본문은 쪽에 든 것만 따로 읽는다.
+  const heads = (await qb.prepare(
+    `SELECT seq, thread_id, from_id, message_id, created_at, acked_at, purged_at, keep_until,
+            (canonical IS NOT NULL) AS has_body
+       FROM mail WHERE to_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3`
+  ).bind(forId, sinceSeq, mail.INBOX_SCAN_MAX).all<MailHead>()).results ?? [];
+  const page = mail.buildInboxPage(heads);
+
+  const wantBodies = page.threads.flatMap(t => t.items).filter(h => mailBodyAvailable(h, now)).map(h => h.seq);
+  const bodies = new Map<number, { canonical: string | null; signature: string | null }>();
+  if (wantBodies.length) {
+    const rows = (await qb.prepare(
+      `SELECT seq, canonical, signature FROM mail
+        WHERE to_id = ?1 AND seq IN (SELECT value FROM json_each(?2))`
+    ).bind(forId, JSON.stringify(wantBodies))
+     .all<{ seq: number; canonical: string | null; signature: string | null }>()).results ?? [];
+    for (const r of rows) bodies.set(r.seq, r);
+  }
+
+  // 미읽음 — 전체 수(쪽과 무관) + 쪽에 든 대화별 수를 질의 1 로(UNION ALL · 대화 id 는 빈 문자열이 될 수 없다).
+  //   미읽음 = 나에게 온 · 읽음 표시 없음 · 본문이 아직 있음 · 신호 아님(신호는 사람에게 알릴 글이 아니다 · 명세 §1-1 (6)).
+  const UNREAD = `to_id = ?1 AND acked_at IS NULL AND purged_at IS NULL AND keep_until > ?2 AND intent != 'signal'`;
+  const unreadRows = (await qb.prepare(
+    `SELECT '' AS thread_id, COUNT(*) AS n, NULL AS oldest FROM mail WHERE ${UNREAD}
+     UNION ALL
+     SELECT thread_id, COUNT(*) AS n, MIN(created_at) AS oldest FROM mail
+      WHERE ${UNREAD} AND thread_id IN (SELECT value FROM json_each(?3)) GROUP BY thread_id`
+  ).bind(forId, now, JSON.stringify(page.threads.map(t => t.thread_id)))
+   .all<{ thread_id: string; n: number; oldest: string | null }>()).results ?? [];
+  let unreadCount = 0;
+  const unreadBy = new Map<string, { n: number; oldest: string | null }>();
+  for (const r of unreadRows) {
+    if (r.thread_id === "") unreadCount = Number(r.n) || 0;
+    else unreadBy.set(r.thread_id, { n: Number(r.n) || 0, oldest: r.oldest });
+  }
+
+  // 영수 — 내가 보낸 우편 중 receipts_since 이후 읽음 표시가 붙은 것(발신자가 같은 호출로 전달 여부를 안다).
+  const receipts = (await qb.prepare(
+    `SELECT message_id, to_id, acked_at FROM mail
+      WHERE from_id = ?1 AND acked_at IS NOT NULL AND acked_at > ?2 ORDER BY acked_at, seq LIMIT ?3`
+  ).bind(forId, receiptsSince, mail.RECEIPTS_MAX)
+   .all<{ message_id: string; to_id: string; acked_at: string }>()).results ?? [];
+
+  return json({
+    unread_count: unreadCount,
+    threads: page.threads.map(t => ({
+      thread_id: t.thread_id,
+      peer: t.items[0].from_id,
+      unread: unreadBy.get(t.thread_id)?.n ?? 0,
+      oldest_unread_at: unreadBy.get(t.thread_id)?.oldest ?? null,
+      items: t.items.map(h => {
+        const head = { mail_id: mail.mailIdOf(h.seq), from: h.from_id, message_id: h.message_id,
+                       created_at: h.created_at };
+        const b = bodies.get(h.seq);
+        // ★본문이 없으면 머리만 — 조용히 빼지 않는다(받는 쪽이 「지워진 우편 1통」으로 적는다 · 명세 §5-2).
+        if (!mailBodyAvailable(h, now) || !b || b.canonical === null || b.signature === null) {
+          return { ...head, purged: true };
+        }
+        return { ...head, mail: b.canonical, signature: b.signature };
+      }),
+    })),
+    next: page.next,
+    receipts: receipts.map(r => ({ message_id: r.message_id, to: r.to_id, acked_at: r.acked_at })),
+  }, 200, MAIL_HEADERS);
+}
+
+// ── POST /mail/ack ─────────────────────────────────────────────────────────
+function idList(body: Record<string, unknown>, key: string, max: number): string[] {
+  const v = body[key];
+  if (!Array.isArray(v)) fail(ARGUMENT, "id 목록이어야 한다", { key });
+  if (v.length > max) fail(ARGUMENT, "id 목록이 너무 길다", { key, count: v.length, max });
+  v.forEach((x, i) => { if (!isId(x)) fail(ARGUMENT, "id 형식이 아니다", { key, index: i }); });
+  return v as string[];
+}
+
+async function handleMailAck(req: Request, env: Env): Promise<Response> {
+  const body = await readJson(req);
+  closedBody(body, ["for", "message_ids", "thread_ids", "ts", "signature"]);
+  const forId = needStr(body, "for");
+  const messageIds = idList(body, "message_ids", mail.ACK_IDS_MAX);
+  const threadIds = idList(body, "thread_ids", mail.ACK_THREADS_MAX);
+  if (!messageIds.length && !threadIds.length) fail(ARGUMENT, "message_ids·thread_ids 가 둘 다 비었다", null);
+  const ts = needStr(body, "ts");
+  const signature = needStr(body, "signature");
+  const nowMs = Date.now();
+  const qb = new QueryBudget(env.DB, MAIL_ACK_D1_QUERIES_MAX);
+  // ★서명 대상 = 요청 그대로의 목록(순서·중복 포함) — 서버가 고쳐 쓴 값에 서명이 걸린 척하지 않는다.
+  await verifyMailAuth(qb, env, forId, mail.ackAuthDoc(forId, messageIds, threadIds, ts), ts, signature, nowMs);
+
+  // ★수신자가 **자기 앞 우편에만** 붙인다 — 남의 우편·남의 대화 id 는 조용히 무시하고 계수만 준다.
+  const uniq = [...new Set(messageIds)];
+  let matched = 0;
+  if (uniq.length) {
+    const m = await qb.prepare(
+      `SELECT COUNT(DISTINCT message_id) AS n FROM mail
+        WHERE to_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))`
+    ).bind(forId, JSON.stringify(uniq)).first<{ n: number }>();
+    matched = Number(m?.n ?? 0);
+  }
+  // ★이미 붙은 표시는 안 바뀐다(첫 시각 유지 · acked_at IS NULL).
+  const res = await qb.prepare(
+    `UPDATE mail SET acked_at = ?1
+      WHERE to_id = ?2 AND acked_at IS NULL
+        AND (message_id IN (SELECT value FROM json_each(?3)) OR thread_id IN (SELECT value FROM json_each(?4)))`
+  ).bind(nowIso(new Date(nowMs)), forId, JSON.stringify(uniq), JSON.stringify(threadIds)).run();
+  return json({ acked: Number(res.meta?.changes ?? 0), ignored: uniq.length - matched }, 200, MAIL_HEADERS);
+}
+
 // ── 라우터 ─────────────────────────────────────────────────────────────────
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -771,18 +1105,23 @@ export default {
     const path = u.pathname.replace(/\/+$/, "") || "/";
     try {
       if (req.method === "OPTIONS") {
+        // ★우편 경로는 CORS 를 열지 않는다(명세 §3) — 사전 요청에도 허용 헤더를 주지 않는다.
+        if (path === "/mail" || path.startsWith("/mail/")) return new Response(null, { status: 405 });
         const h = corsHeaders(req, env);
         return new Response(null, { status: Object.keys(h).length ? 204 : 405, headers: h });
       }
       if (req.method === "POST" && path === "/register") return await handleRegister(req, env);
       if (req.method === "POST" && path === "/events") return await handleEvents(req, env);
       if (req.method === "POST" && path === "/participants/checkpoint") return await postCheckpoint(req, env);
+      if (req.method === "POST" && path === "/mail") return await handleMailPost(req, env);
+      if (req.method === "POST" && path === "/mail/ack") return await handleMailAck(req, env);
 
       if (req.method === "GET") {
         if (path === "/rooms") return await listRooms(req, env);
         if (path === "/communities") return await listCommunities(req, env);
         if (path === "/feed") return await getFeed(req, env);
         if (path === "/home") return await getHome(req, env);
+        if (path === "/mail/inbox") return await handleMailInbox(req, env);
         if (path === "/participants/checkpoint") return await getCheckpoint(req, env);
         let m = /^\/participants\/([a-z_]+)$/.exec(path);
         if (m) return await participantsFile(req, env, m[1]);

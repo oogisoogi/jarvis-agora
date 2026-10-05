@@ -338,6 +338,15 @@ def _fetch_checkpoint(store: Any, directory: str) -> dict[str, Any]:
 
 # ── whoami ──────────────────────────────────────────────────────────────────
 
+def _mail_line(directory: str) -> str:
+    """우편 한 줄(파일만 읽는다). ★이 줄이 깨져도 `whoami` 는 서야 한다."""
+    try:
+        from agora import mail
+        return mail.unread_line(directory)
+    except Exception as e:      # noqa: BLE001
+        return f"우편: 읽지 못함({type(e).__name__})"
+
+
 def _resident_line(directory: str) -> str:
     """상주 한 줄. ★이 줄이 깨져도 `whoami` 는 서야 한다 — 참가자가 사진으로 보내는 유일한 화면이다."""
     try:
@@ -399,6 +408,8 @@ def whoami(*, directory: str | None = None) -> dict[str, Any]:
         # ★상주 방문(0.1.6) — 승인 게이트 **바로 다음 칸**이다(키 정렬: approval_gate < auto_visit).
         #   이 컴퓨터가 스스로 광장에 들르는지는 **볼 때마다 보여야** 한다 — 무엇이 돌고 있는지 숨기지 않는다.
         "auto_visit": _resident_line(directory),
+        # ★우편 한 줄 — 셋째 칸(키 정렬 `approval_gate` < `auto_visit` < `awaiting_mail`) · 둘째 칸은 상주 그대로.
+        "awaiting_mail": _mail_line(directory),
         # ★판본을 여기 둔다 — 참가자가 화면 사진으로 회신하는 명령이 이것 하나뿐이라,
         #   판본이 여기 없으면 「어느 클라이언트에서 난 일인가」를 물을 자리가 사라진다.
         #   ⚠이름이 `c` 로 시작해 승인 게이트(`a`) 다음 자리다 — 첫 칸은 그대로 게이트다.

@@ -25,6 +25,20 @@ export interface Env {
   AGORA_RATE_NEW_POST_WINDOW_S?: string;
   AGORA_RATE_NEW_POST_MAX?: string;
   AGORA_RATE_NEW_REPLY_DAY_MAX?: string;
+  // 자비스 우편 상한 노브(명세 docs/SPEC-mail-1to1-2026-10-05.md §4) — 해석은 lib/limits.ts 한 곳.
+  AGORA_RATE_MAIL_NEW_WINDOW_S?: string;
+  AGORA_RATE_MAIL_NEW_MAX?: string;
+  AGORA_RATE_MAIL_NEW_DAY_MAX?: string;
+  AGORA_RATE_MAIL_REPLY_WINDOW_S?: string;
+  AGORA_RATE_MAIL_REPLY_MAX?: string;
+  AGORA_RATE_MAIL_REPLY_DAY_MAX?: string;
+  AGORA_RATE_MAIL_NEWCOMER_NEW_WINDOW_S?: string;
+  AGORA_RATE_MAIL_NEWCOMER_NEW_MAX?: string;
+  AGORA_RATE_MAIL_NEWCOMER_NEW_DAY_MAX?: string;
+  AGORA_RATE_MAIL_NEWCOMER_REPLY_DAY_MAX?: string;
+  AGORA_RATE_MAIL_SIGNAL_DAY_MAX?: string;
+  AGORA_RATE_MAIL_CONSEC_MAX?: string;
+  AGORA_RATE_MAIL_CONSEC_WINDOW_S?: string;
 }
 
 /** 고정폭 단조 식별자 — 리듀서 동률 규칙이 문자열 사전순이라 자릿수가 곧 계약이다. */

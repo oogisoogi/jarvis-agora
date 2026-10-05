@@ -607,6 +607,225 @@ GitHub 미러 · 운영자용 쓰기 API · 다국어 · 접근성 자동 검사
 | D-R14 | `GET /rooms/:id` 가 파생 캐시를 자가치유(불일치 시에만 쓰기) | 캐시 소실이 로비를 영구히 비우지 않게 | 캐시 전면 소실 시 회복은 **방문·새 이벤트가 있을 때까지** 지연된다 |
 | D-R13 | 체크포인트는 **운영자가 서명해 올리고** 서버는 보관만 ✅master 채택 | 서버가 서명하면 옮기려던 신뢰가 제자리로 돌아온다 | 운영자 손이 한 번 필요하다 · 대부분 stale |
 
+## 14. 우편(1:1) — 자비스 우편
+
+> 명세 정본 = `docs/SPEC-mail-1to1-2026-10-05.md`(§1-1 신호 서식 · §2 문서 · §3 API · §4 상한 · §8 시험) · TICKET=agora-mail-1to1 · 2026-10-05.
+> 이 절은 그 명세의 **릴레이 쪽 이행 기록**이다. 명세와 이 절이 갈리면 명세가 이긴다 — 이 절이 명세를 좁힌 자리는 §14-9 에 이름을 붙여 적었다.
+> ★`docs/PROTOCOL.md` 는 한 줄도 안 바뀐다. 우편은 방이 아니고, 리듀서·상태기계·`KINDS` 9종에 들어가지 않는다.
+
+### 14-0. 한 문장
+
+**명부에 오른 참가자 A 가 참가자 B 한 명에게 보내는 서명 문서를, 릴레이는 받아 두었다가 B 에게만 내준다.**
+릴레이가 하는 일은 §1 의 경계 그대로다: 한 통만 보고 답할 수 있는 것(모양·서명·명부·대화 결박·시각·스크럽·멱등·상한)만 거절하고,
+`prev` 사슬은 **중재하지 않는다**(D-R1 과 같은 원칙 — 받아 둘 뿐이고 사슬 판정은 받는 쪽이 한다).
+
+| 경로 | 무엇 | 자격 |
+|---|---|---|
+| `POST /mail` | 보내기 | 우편 문서의 서명(키 주인 = `from`) |
+| `GET /mail/inbox?for=&since=&receipts_since=` | 받기(대화별 묶음) + 내가 보낸 것의 영수 | `X-Agora-Mail-Auth` 서명(키 주인 = `for`) |
+| `POST /mail/ack` | 읽음 표시 | 본문 안 서명(키 주인 = `for`) |
+
+공통: 인증 토큰 없음(자격 = 서명 · §3-0 과 같다) · **세 경로 모두 CORS 를 열지 않는다**(사전 요청 `OPTIONS /mail*` 도 405 · 허용 헤더 0)
+· 성공 응답 `Cache-Control: private, no-store` · 실패 본문·코드 = §3-0 그대로(`{"code","name","message","detail"}` · 판정 정본은 `code`).
+★우편 경로의 실패 사유는 전부 **`detail.why`** 한 칸에 이름으로 싣는다(아래 표의 `why` 열) — `POST /events` 의 `detail.conflict` 와 칸 이름이 다르니 섞어 읽지 않는다.
+
+### 14-1. 우편 문서(서명 대상)
+
+canonical JSON(§3-2 · `agora/event.py canonical_bytes` 와 **같은 직렬화**) · namespace `jarvis-agora@godmeyou.kr` · **닫힌 칸**(모르는 칸 = 400/10) · **null 없음**(선택 칸은 빼서 보낸다 · 문서 어디에도 null 이 있으면 400/10).
+
+| 칸 | 값 |
+|---|---|
+| `v` | `1` |
+| `kind` | `"mail"` — 광장 `KINDS` 밖이라 이 문서를 `POST /events` 에 내면 그쪽 스키마가 거부한다(교차 재사용 0 · 왕복 실측) |
+| `message_id` · `thread_id` | 소문자 hex 32자 |
+| `reply_to` | (선택) 소문자 hex 32자 |
+| `from` · `to` | 문자열 · `from ≠ to` |
+| `prev` | `"genesis"` 또는 소문자 hex 64자(쌍 사슬 · 명세 §9 ③) |
+| `roster` | 문자열 · `scrub` = 객체(안은 보지 않는다 — /events 와 같다) |
+| `ts` | UTC 밀리초 고정폭 ISO `YYYY-MM-DDTHH:MM:SS.sssZ`(되돌려 같은 문자열이 나와야 한다 — `02-30` 같은 없는 날짜 거부) |
+| `payload` | 아래 두 모양 중 하나 — 닫힘 |
+
+**payload ⓐ 글**(`intent` ∈ `notice`·`request`·`report`): `subject` = 코드포인트 1~200(UTF-16 길이 아님 · 이모지 200개 통과 실측) ·
+`body` = 1자 이상 · **UTF-8 16384 바이트 이하**(넘으면 **413/3** — 명세 §3-1 ① 「크기」 칸) · `refs` = (선택) 빈칸 아닌 문자열 최대 5개(도메인 허용 규칙은 스크럽 백스톱이 문자열 전체에서 본다 · 위반 = 422/3).
+
+**payload ⓑ 신호**(`intent="signal"` · 명세 §1-1 · ★Q4 승인 836cb7c9 = 이 티켓에서 받는 문을 연다): 칸 = `intent`·`items` **둘뿐**(제목·본문 칸이 아예 없다 = 자유문 0).
+`items` 1~100개 · 항목마다 닫힌 9칸 전부 필수:
+
+| 칸 | 형식 |
+|---|---|
+| `signature` | `^[0-9a-f]{32}$` · 항목들 사이에 한 번만 |
+| `count` | 정수 1~100000 |
+| `source` | `master`·`worker`·`cso`·`pack`·`update` |
+| `op` | `^[a-z0-9_.-]{1,32}$` |
+| `version` | `^[0-9A-Za-z.+-]{1,32}$` |
+| `os` | `^(macos\|windows\|linux)(-[0-9.]{1,16})?$` |
+| `error_code` | `^[a-z0-9._-]{1,48}$` |
+| `first_seen` · `last_seen` | 밀리초 고정폭 ISO · `first_seen ≤ last_seen` · 둘 다 **[서버 시각 − 7일, 서버 시각 + 5분]** |
+
+★**묶기 키 재계산**: 릴레이가 `signature == sha256(canonical_bytes({"error_code","op","source","version": version.lower()})) 의 앞 32 hex` 를 **다시 계산해 대조**한다
+— 안 맞으면 400/10 `why="signature_mismatch"`(응답 `detail.want` = 서버 계산값 · 공개 규칙으로 누구나 계산하는 값이라 유출이 아니고, 발신 PC 정규화가 어디서 갈렸는지 찾는 데 쓴다).
+⇒ 「해시라서 이 칸으로 문장을 실어 보낼 수 없다」는 주장이 **서버에서** 선다(받는 쪽 격리만으로 두지 않는다).
+
+### 14-2. `POST /mail` — 보내기
+
+요청 = `{"mail": "<우편 문서 JSON 텍스트>", "signature": "<armored SSHSIG>"}`(닫힘 · 모르는 칸 = 400/10).
+서버는 `mail` 텍스트를 중복 키·실수 거부 파서(`parseEventJson`)로 읽고 **canonical 로 다시 만든 바이트**에 서명을 검증한다(펜스 글자를 믿지 않는 §3-2 와 같은 원리).
+
+검사 순서(먼저 걸린 것으로 끝난다 · ★순서가 곧 방어다):
+
+| # | 검사 | HTTP / code | `detail.why` |
+|---|---|---|---|
+| 1 | 크기 — 원문·canonical 64KB · 본문 16KB | 413 / 3 | — |
+| 2 | 모양 — 닫힌 칸·형식·null·신호 서식·묶기 키 | 400 / 10 | `signature_mismatch`·`duplicate_signature`·`signal_time_window` 등 |
+| 3 | **서명·명부·폐기·`from` 결박**(§4 3값 그대로) | 401 / 4 | `detail.verdict` = `BAD`/`unsigned` · `why` = `signature_does_not_match_bytes`·`not_in_roster`·`revoked`·`principal_mismatch`·`no_signature` |
+| 4 | `to` 가 명부에 있고 폐기 안 됨(없는 사람·폐기된 사람 = **같은 응답**) | 404 / 2 | `recipient_not_in_roster` |
+| 5 | **대화 결박** — 그 `thread_id` 가 이미 있으면 그 대화의 두 사람(순서 무관) = `{from,to}` | 422 / 3 | `thread_not_yours` |
+| 5b | `reply_to` 가 있으면 **같은 `thread_id` 안**에 그 `message_id` 가 있어야 한다 | 422 / 3 | `reply_outside_thread` |
+| 6 | `ts` ∈ [서버 시각 − 24시간, + 5분] | 422 / 3 | `stale_ts` |
+| 7 | 스크럽 백스톱(§6 · fail-closed · payload 전체) | 422 / 3 | (`detail.rules`·`where`) |
+| 8 | 멱등 — 같은 `(from, message_id)` + 같은 해시 = **200** 기존 값 · 다른 해시 | 422 / 3 | `message_id_reused` |
+| 9 | 상한(§14-6) | 429 / 7 + `Retry-After` | `detail` = `{limit, window_s, max}` |
+| 10 | 적재 → **201** `{"mail_id","thread_id","created_at"}` · 덤 삭제(§14-5) | — | — |
+
+- `mail_id` = `ml_` + 16자리 고정폭(`ml_0000000000000123`) — 문자열 정렬 = 적재 순서(D-R5 와 같은 이유).
+- 성공 본문은 **세 칸만**(201·200 같은 모양) — 「새로 적었다」·「이미 있다」는 HTTP 코드가 말한다(§3-1·§3-2 와 같은 규칙).
+- ★3 이 7 보다 **앞**이다(§3-2 와 같은 이유: 서명 없는 쓰레기가 정규식 CPU 를 못 태우게). 8 이 9 보다 **앞**이다(재시도가 상한을 깎지 않게 · agy 지적 2 의 규칙 그대로).
+- 동시에 **같은** 우편이 둘 오면 하나는 `UNIQUE(from_id,message_id)` 에 걸린다 — 500 이 아니라 멱등 재조회로 200(§12 #9 와 같은 처리).
+- ★**TTL 뒤 재게시**: 본문을 지워도 머리(`from`·`message_id`·`hash`)가 남으므로, 지워진 우편을 같은 서명으로 다시 올리면 8 의 멱등에 걸려 **200 · 새 행 0**(새로 배달되지 않는다 · 왕복 실측). 보존 기한(30·90일)이 지난 뒤라면 6 의 `stale_ts` 가 먼저 막는다.
+
+### 14-3. `GET /mail/inbox` — 받기(수신자 본인만)
+
+- 인자: `for`(필수 · 없으면 400/10) · `since` = 비움 또는 `ml_`+16자리(아니면 400/10) · `receipts_since` = 비움 또는 밀리초 고정폭 ISO(아니면 400/10).
+- 인증 헤더 `X-Agora-Mail-Auth: base64(JSON {"ts","signature"})`(두 칸 닫힘). 서명 대상 canonical:
+  `{"for":<id>,"purpose":"agora-mail-inbox-v1","receipts_since":<인자 · 없으면 "">,"since":<인자 · 없으면 "">,"ts":<ts>}`
+- 인증 순서: 헤더 없음·못 읽음 → 401/4(`auth_missing`·`auth_malformed`) → `ts` 가 서버 시각 ±300초 밖(못 읽는 값 포함) → 401/4 `auth_ts_window`
+  → 서명·명부·폐기(3값) → **그 키의 주인이 `for` 인가**(아니면 401/4 `principal_mismatch`) → `pid:<for>` 분당 30(§7 ③ 버킷 공유 · 429/7).
+  ★「수신자가 아닌 자는 inbox 를 못 본다」의 **유일한 문**이 이 서명이다(뮤테이션 M28 = 이 대조를 빼면 「C 가 B 수신함 = 401」 이 적색).
+  ★인자(`since`·`receipts_since`)가 서명 대상에 들어 있으므로 **가로챈 헤더로 다른 쪽수를 읽을 수 없다**(왕복 실측: since 만 바꾼 재사용 = 401 BAD).
+  ★`pid:` 계수는 인증 **뒤**다 — 앞에 두면 남이 서명 없이 남의 분당 상한을 태워 그 사람의 광장 쓰기까지 막을 수 있다.
+- 응답:
+  ```json
+  { "unread_count": 3,
+    "threads": [ { "thread_id": "<32hex>", "peer": "<보낸이>", "unread": 2, "oldest_unread_at": "<iso|null>",
+                   "items": [ {"mail_id","from","message_id","created_at","mail","signature"}, … ] } ],
+    "next": "<ml_…|null>",
+    "receipts": [ {"message_id","to","acked_at"}, … ] }
+  ```
+  · item 의 `mail` = 저장된 canonical 텍스트 그대로 · 받는 쪽이 **다시 검증한다**(릴레이의 통과는 백스톱).
+  · 본문을 못 내는 우편(`purged_at` 있음 **또는** `keep_until ≤ 지금`)은 `{mail_id, from, message_id, created_at, purged: true}` **머리만**(본문·서명 칸 자체가 없다).
+    ★**읽기 시점 강제**: 물리 삭제가 늦어도 기한 지난 본문은 이 경로가 **절대 내보내지 않는다**(뮤테이션 M29 = 이 필터를 빼면 TTL 시험이 적색).
+- **쪽 짜기**(순수 함수 `buildInboxPage` · 단위 시험이 직접 잰다):
+  1. 후보 = `to_id = for AND seq > since` seq 오름차순 **최대 500**(머리만 읽는다 — 500통 × 64KB 를 끌어오지 않게 본문은 쪽에 든 것만 따로 읽는다).
+  2. 대화(`thread_id`)별로 묶는다 · 대화 안 = seq 오름차순(FIFO).
+  3. 대화 순서 = 후보 중 **가장 오래 기다린 미읽음**(`acked_at` 없음)의 `created_at` 오름차순 · 미읽음이 없는 대화는 그 뒤(가장 오래된 후보 순).
+  4. 한 쪽 = 최대 **50통**, 대화마다 **돌아가며** 한 통씩(라운드로빈) — 한 상대가 60통 보내도 다른 대화가 첫 쪽에 보인다(단위 시험 + 음성 대조).
+  5. `next` = 후보를 전부 돌려줬고 후보가 500 보다 적으면 `null` · 아니면 `ml_`(안 돌려준 것 중 가장 작은 seq − 1).
+     ★**at-least-once** — 이미 받은 우편이 다음 쪽에 다시 올 수 있고, 받는 쪽이 `(from, message_id)` 로 거른다(명세 §5-2).
+  6. ★**진행 보장**: 대화가 50개를 넘으면 seq 가 가장 작은 후보의 대화가 첫 바퀴에서 잘려 `next` 가 `since` 와 같아지고 **같은 쪽이 영원히 반복**될 수 있다.
+     그래서 그 대화를 첫 바퀴의 마지막 자리(49번)까지 당겨 넣는다 — 그 대화의 첫 항목이 곧 가장 작은 seq 이므로 `next` 가 반드시 전진한다(단위 시험 「진행 보장」).
+- `unread_count` = `to_id = for AND acked_at IS NULL AND purged_at IS NULL AND keep_until > 지금 AND intent != 'signal'` 의 수(쪽과 무관 · 신호는 사람에게 알릴 글이 아니라 안 센다 · 명세 §1-1 (6)).
+  대화별 `unread`·`oldest_unread_at` = 같은 조건을 그 대화로 좁힌 값(쪽에 든 대화만 · 질의 1 에 UNION ALL 로 합쳤다).
+- `receipts` = **내가 보낸** 우편 중 `acked_at > receipts_since`(비우면 전부) · `acked_at` 오름차순 최대 100.
+
+### 14-4. `POST /mail/ack` — 읽음 표시
+
+- 요청(닫힘) `{"for","message_ids":[…≤50],"thread_ids":[…≤20],"ts","signature"}` — 두 목록 칸 **모두 있어야 한다**(빈 목록 가능 · 둘 다 비면 400/10) · id 는 소문자 hex 32자.
+- 서명 대상 canonical `{"acked":<message_ids 그대로>,"acked_threads":<thread_ids 그대로>,"for":<id>,"purpose":"agora-mail-ack-v1","ts":<ts>}`
+  (★요청 그대로의 목록 — 순서·중복 포함. 서버가 고쳐 쓴 값에 서명이 걸린 척하지 않는다). 인증 순서·`pid:` 계수 = §14-3 과 같다.
+- 동작: `UPDATE mail SET acked_at = 지금 WHERE to_id = for AND acked_at IS NULL AND (message_id IN … OR thread_id IN …)`.
+  ★**수신자가 자기 앞 우편에만** 붙인다 — 남의 우편·남의 대화 id 는 조용히 무시. 이미 붙은 표시는 안 바뀐다(첫 시각 유지).
+- 응답 200 `{"acked": <이번에 새로 붙은 수>, "ignored": <요청한 message_ids(중복 제거) 중 나에게 온 우편이 아닌 수>}`.
+- 읽음이 붙으면 발신자는 다음 `receipts` 로 「전달됨(읽힘)」을 알고, 그 우편 본문은 다음 덤 삭제 대상이 된다(§14-5).
+
+### 14-5. D1 — `relay/migrations/0002_mail.sql`(★원격 적용 = master)
+
+```sql
+CREATE TABLE IF NOT EXISTS mail (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,   -- mail_id 의 원천(단조)
+  message_id TEXT NOT NULL, thread_id TEXT NOT NULL, from_id TEXT NOT NULL, to_id TEXT NOT NULL,
+  prev TEXT NOT NULL, reply_to TEXT, intent TEXT NOT NULL,
+  hash TEXT NOT NULL, bytes INTEGER NOT NULL,
+  canonical TEXT, signature TEXT,          -- 보존 끝·읽음 뒤 NULL(본문 삭제) · 머리는 남긴다
+  keep_until TEXT NOT NULL,                -- 적재 때 정한다: 답장 = +90일 · 그 밖 = +30일
+  created_at TEXT NOT NULL, purged_at TEXT, acked_at TEXT,
+  UNIQUE (from_id, message_id)             -- 멱등·재게시 방어(본문을 지운 뒤에도 선다)
+);
+CREATE INDEX IF NOT EXISTS mail_to   ON mail (to_id, seq);
+CREATE INDEX IF NOT EXISTS mail_pair ON mail (from_id, to_id, seq);
+CREATE INDEX IF NOT EXISTS mail_thread ON mail (thread_id, seq);
+```
+- ★**다른 표**다 — `events`·`rooms` 를 읽는 `/rooms`·`/feed`·`/home`·`/communities`·보드에 우편이 섞여 나갈 길이 구조적으로 없다(왕복 실측: 여섯 경로 응답에 우편 id·대화 id·제목 0).
+- 행은 지우지 않는다. 바뀌는 칸은 `canonical`·`signature`(→NULL) · `purged_at` · `acked_at`(첫 읽음 1회)뿐.
+- **보존 기한**(`keep_until`) = 적재 때 정한다: **답장 = +90일** · 그 밖(새 대화·신호) = **+30일**. 답장 = `reply_to` 가 받는 사람이 보낸 우편을 가리키는 것(§14-6 과 같은 정의).
+- **덤 삭제**(질의 1 · 새 cron 0): `POST /mail` 이 **201 로 적재된 뒤마다**
+  `UPDATE mail SET canonical=NULL, signature=NULL, purged_at=?지금 WHERE purged_at IS NULL AND (keep_until < ?지금 OR acked_at IS NOT NULL)`.
+  ⚠우편이 한동안 안 오면 물리 삭제가 늦어진다 — 그동안도 §14-3 의 읽기 시점 필터가 본문을 막으므로 계약은 선다(정직 고지 · 명세 §3-4).
+- 로컬: `relay/scripts/run-local.py` 가 `mail` 표 부재도 잰다(없으면 `migrations apply --local` · 적용 기록을 보고 안 먹은 것만 먹인다) · 초기화에 `DELETE FROM mail` 포함.
+
+**질의 예산**(호출당 50 · `QueryBudget` 가 **동작으로** 강제 — 넘으면 503):
+
+| 경로 | 상한 | 내역 |
+|---|---|---|
+| `POST /mail` | 10 | 명부 1 + 대화 결박 1 + 멱등 1 + 연속 계수 1(신호 0) + 상한 2(신호 1) + 적재 1 + 덤 삭제 1 = **8** (+ UNIQUE 경합 재조회 1) |
+| `GET /mail/inbox` | 6 | 명부 1 + `pid:` 1 + 후보 머리 1 + 본문 1(쪽에 본문 0 이면 생략) + 미읽음(전체+대화별 UNION ALL) 1 + 영수 1 = **6** |
+| `POST /mail/ack` | 4 | 명부 1 + `pid:` 1 + 무시 계수 1(message_ids 비면 생략) + 갱신 1 = **4** |
+
+### 14-6. 상한 — 「새 대화 / 답장」(`relay/src/lib/limits.ts` · 노브 `AGORA_RATE_MAIL_*`)
+
+★광장 상한(`RateLimits`·`DEFAULT_LIMITS`)과 **다른 객체**(`MailLimits`·`DEFAULT_MAIL_LIMITS`·`mailLimitsFromEnv`)다 — 광장 기본값·노브는 한 글자도 안 바뀌었다(단위 시험 음성 대조: 우편 노브를 줘도 `limitsFromEnv` = 기본값).
+해석 규칙은 같다(못 읽는 값 = 기본값 — 오타 하나로 상한이 꺼지지 않게). 「새 참가자」 = 등록 24시간 안(`isNewParticipant` · 광장과 같은 `AGORA_RATE_NEW_ACCOUNT_S`).
+버킷 고르기 = 순수 함수 `mailKindOf`·`mailBuckets`·`mailConsecutive`(단위 시험이 직접 부른다).
+
+| 칸 | 버킷 | 기본값 | 새 참가자 | 노브 |
+|---|---|---|---|---|
+| 새 대화 간격 | `gmail-new:<from>` | 600초에 1 | 3600초에 1 | `AGORA_RATE_MAIL_NEW_WINDOW_S`·`_NEW_MAX` / `_NEWCOMER_NEW_WINDOW_S`·`_NEWCOMER_NEW_MAX` |
+| 새 대화 하루 | `gmail-new-day:<from>` | 30 | 5 | `AGORA_RATE_MAIL_NEW_DAY_MAX` / `_NEWCOMER_NEW_DAY_MAX` |
+| 답장 간격 | `gmail-reply:<from>` | 20초에 1 | 같음 | `AGORA_RATE_MAIL_REPLY_WINDOW_S`·`_REPLY_MAX` |
+| 답장 하루 | `gmail-reply-day:<from>` | 200 | 30 | `AGORA_RATE_MAIL_REPLY_DAY_MAX` / `_NEWCOMER_REPLY_DAY_MAX` |
+| 같은 수신자 연속 | (계수 질의 · 버킷 아님) | 5통 → 가장 오래된 것이 24시간 지날 때까지 | 같음 | `AGORA_RATE_MAIL_CONSEC_MAX`·`_CONSEC_WINDOW_S` |
+| 자동 신호 하루 | `gmail-signal-day:<from>` | 1 | 같음 | `AGORA_RATE_MAIL_SIGNAL_DAY_MAX` |
+
+- **칸 고르기**: `intent="signal"` → 신호 하루 버킷 **하나만**(새 대화·답장·연속 규칙 전부 건너뜀). 그 밖에서 `reply_to` 가 가리킨 우편(같은 대화 안)의 `from_id` 가 **이 우편의 `to`** 이면 「답장」, 아니면 「새 대화」
+  — ★같은 대화라도 `reply_to` 가 없거나 **내 우편**을 가리키면 새 대화로 센다(자기 우편에 이어 쓰기로 답장 칸을 쓰지 못하게).
+- **연속 규칙**(신호 제외): `to→from` 의 마지막 (신호 아닌) 우편 seq 뒤로, 24시간 안의 `from→to` (신호 아닌) 우편 수가 5 이상이면 429/7 `limit="mail_consecutive"` ·
+  `Retry-After` = 그중 가장 오래된 것이 24시간 지나기까지 남은 초(왕복 실측 86389초). 상대가 답하면 풀린다(왕복 실측).
+  ★연속 계수는 버킷 **앞**에 센다 — 연속으로 거절될 우편이 간격·하루 칸을 먼저 태우지 않게.
+- 버킷 이름은 새 참가자 여부와 무관하게 같다(창 길이·상한만 바뀐다) — 등록 24시간이 지나는 순간 하루 칸 계수가 0 으로 돌아가지 않게(엄격 쪽).
+- 429 는 전부 code 7 + `Retry-After` + `detail {limit, window_s, max}`. `limit` 이름 = `mail_new`·`mail_new_day`·`new_participant_mail_new`·`new_participant_mail_new_day`·`mail_reply`·`mail_reply_day`·`new_participant_mail_reply_day`·`mail_signal_day`·`mail_consecutive`·`participant`(수신함·읽음의 `pid:`).
+- 고정창 한계(경계 양쪽 2배)는 §7 과 같은 것으로 받아들인다. 거절이지 격리가 아니다(우편은 상태가 없다).
+
+### 14-7. 시험(이 티켓의 실측)
+
+- 단위(`npx vitest run`): 우편 문서 닫힌 스키마(양성 + 모르는 칸·kind·v·id·prev·ts·from=to·null·제목 코드포인트·본문 16384/16385 바이트·refs) ·
+  신호(묶기 키 = `node:crypto` 독립 계산과 일치 · 위조 = `signature_mismatch` · 7일/+5분 창 · first≤last · 중복 키 · 열거·형식) ·
+  상한 칸 고르기(기본값 표·새 참가자·신호 단독·연속 4/5·노브 + 광장 불변 음성 대조) · 쪽 짜기(60+1 → 다른 대화 첫 쪽 · 라운드로빈 아닌 독점의 음성 대조 · next · 진행 보장) ·
+  인증 문서 canonical 모양(inbox·ack 바이트 그대로 · since 변경 시 바이트가 달라지는 음성 대조) · 보존 기한 30/90일.
+- 서버 왕복(`relay/scripts/mailway.py` · `run-local.py` 가 threeway 뒤에 같은 서버·같은 D1 로 부른다 · 둘 중 하나라도 적색이면 종료 코드 ≠ 0):
+  등록 4 · 보내기 201·멱등 200·재사용 422 · 변조 401 BAD · 남의 키 401 · 명부 밖 404/2 · 모르는 칸 400 · 끼어들기 422 · 대화 밖 답 422 · 묵힌 ts 422 · 스크럽 422 ·
+  새 대화 429 · 수신함(본인 200 · 남의 키 401 · ts 10분 전 401 · since 만 바꾼 헤더 재사용 401 · 헤더 없음 401 · CORS 0 · OPTIONS 405) · 답장 칸 ·
+  광장 여섯 경로 우편 0 · `/events` 교차 재사용 400 · ack(남의 ack 무시·남의 키 401·acked/ignored·첫 시각 유지·영수·receipts_since) ·
+  신호(위조 400·8일 400·첫 통 201·둘째 429) · 읽음 뒤 덤 삭제 · 삭제 뒤 재게시 200 · 연속 5통 429·Retry-After·답장 뒤 풀림 · TTL(로컬 D1 `keep_until` 과거 → 머리만·미읽음 제외).
+  ⚠로컬 덮어쓰기 1칸: `run-local.py` 가 `wrangler dev --var AGORA_RATE_MAIL_REPLY_WINDOW_S:2` 로 띄운다(연속 5통 시험이 20초 × 4 를 기다리지 않게) — `wrangler.jsonc`(운영) 값은 그대로 기본 20초.
+- 뮤테이션(`relay/scripts/mutate.py` M28·M29): 수신함 인증의 `for` 대조 제거 → 「C 가 B 수신함 = 401」 적색 · 읽기 시점 만료·삭제 필터 제거 → TTL 시험 적색.
+
+### 14-8. 하지 않는 것(릴레이 쪽)
+
+파일 첨부 · 그룹 우편 · `prev` 사슬 중재 · 서버측 수신 거부 목록 · 우편을 보드에 표시 · 상담소(desk) 개념(릴레이는 상담소를 모른다 — 신호의 받는 사람 강제는 발신 클라이언트 몫 · 명세 §1-1 (3)) ·
+본문 암호화(전송 TLS + 30·90일 보관 · 비민감 전제 · 명세 §7) · 수신함 인증의 nonce(아래 §14-9 ④).
+
+### 14-9. 명세를 좁힌 자리 · 정직 고지
+
+| # | 자리 | 이 구현 | 이유 |
+|---|---|---|---|
+| ① | 본문 16KB 초과의 코드 | **413/3**(크기) | 명세 §3-1 ① 「크기(64KB · body 16KB) → 413/3」. 브리프의 「모양 오류 = 400/10」 묶음과 갈려 명세를 따랐다 |
+| ② | 연속 규칙의 「상대의 마지막 우편」 | 상대의 **신호 아닌** 우편만 친다 | 기계가 하루 한 번 보내는 신호로 쿨다운이 풀리지 않게(엄격 쪽) |
+| ③ | 우편 문서의 null | 문서 **어디에도** 받지 않는다(`scrub` 안 포함) | 「null 없음」을 칸 단위가 아니라 문서 단위로 — 안을 보지 않는 칸으로 우회되지 않게 |
+| ④ | 수신함 인증의 재생 | 같은 헤더를 ±5분 안에 **그대로** 다시 쓰는 것은 막지 않는다(인자를 바꾸면 401) | nonce 를 두려면 서버에 쓰기 상태가 하나 더 든다 · 전송은 TLS · 잃는 것 = 같은 쪽을 5분 안에 다시 읽는 것뿐 |
+| ⑤ | ack 요청의 두 목록 칸 | 둘 다 **필수 칸**(빈 목록 허용) | 명세 「둘 중 하나는 비어도 된다」를 「칸은 있고 비어도 된다」로 읽었다(닫힌 모양 · 서명 대상이 두 칸을 다 가진다) |
+| ⑥ | 대화 순서 키 | 후보(이번 호출이 읽은 500통) 안의 가장 오래된 미읽음 | 화면에 나가는 대화별 `unread`·`oldest_unread_at` 은 대화 전체 기준이라, 신호·삭제 우편이 섞인 대화에서는 순서 키와 표시값이 다를 수 있다 |
+| ⑦ | 상담소 사칭 | 릴레이는 신호의 받는 사람을 강제하지 않는다 | 명세 §1-1 (3) — 받는 사람 강제 = 발신 클라이언트(꾸러미 핀) 몫 |
+| ⑧ | 덤 삭제 시점 | 201 적재 뒤에만(멱등 200·거절 뒤엔 안 돈다) | 명세 §3-4 ⑵ 「`POST /mail` 이 올 때」를 적재 성공으로 좁혔다 — 거절 요청이 쓰기를 일으키지 않게 |
+
 ---
 *작성 = 워커(surface:642) · TICKET=agora-fair-relay · 2026-09-05*
 *이 문서의 수치 중 실측은 §4(서명·workerd)와 §3-1(지문)이고, 인용은 §8·§11(Cloudflare 한도)이다.*

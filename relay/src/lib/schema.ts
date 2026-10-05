@@ -42,7 +42,7 @@ const isObj = (v: unknown): v is Obj =>
 // ★파이썬은 bool 을 int 로 세지 않는다(`type(True) is int` = False). 같은 경계를 지킨다.
 const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
 
-function need<T>(o: Obj, key: string, kind: "string" | "int" | "dict" | "list", where: string): T {
+export function need<T>(o: Obj, key: string, kind: "string" | "int" | "dict" | "list", where: string): T {
   if (!(key in o)) fail(ARGUMENT, "필수 칸 누락", { where, key });
   const v = o[key];
   const ok = kind === "string" ? typeof v === "string"
@@ -56,7 +56,7 @@ function need<T>(o: Obj, key: string, kind: "string" | "int" | "dict" | "list", 
   return v as T;
 }
 
-function closed(o: Obj, allowed: string[], where: string): void {
+export function closed(o: Obj, allowed: string[], where: string): void {
   const extra = Object.keys(o).filter(k => !allowed.includes(k));
   if (extra.length) fail(ARGUMENT, "계약에 없는 칸", { where, extra: extra.sort() });
 }

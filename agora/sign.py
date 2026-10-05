@@ -65,6 +65,16 @@ def sign_checkpoint(doc: Any, timeout: int = 60,
     return _call_signer({"checkpoint": doc}, timeout=timeout, config_dir=config_dir)
 
 
+def sign_mail(doc: Any, timeout: int = 60, config_dir: str | None = None) -> dict[str, Any]:
+    """우편 문서 서명(명세 §2). **같은 서명기 프로세스** — 서명기가 우편 계약을 다시 잰 뒤에만 서명한다."""
+    return _call_signer({"mail": doc}, timeout=timeout, config_dir=config_dir)
+
+
+def sign_mail_auth(doc: Any, timeout: int = 60, config_dir: str | None = None) -> dict[str, Any]:
+    """수신함·읽음 표시 인증 문서 서명(명세 §3-2·§3-3). purpose 값이 고정된 닫힌 문서만."""
+    return _call_signer({"mail_auth": doc}, timeout=timeout, config_dir=config_dir)
+
+
 def _call_signer(request: dict[str, Any], *, timeout: int,
                  config_dir: str | None) -> dict[str, Any]:
     env = dict(os.environ)

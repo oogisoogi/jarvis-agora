@@ -213,6 +213,18 @@ def _accepted_by_us(ctx: Context, thread_id: str, message_id: str) -> bool | Non
                for item in (reduced.get("events") or []))
 
 
+def _desk_room_exempt(kind: str, thread_id: str) -> str | None:
+    """상담소 핀 방의 글쓰기만 승인 겹 예외 `desk_room`(명세 §1-1 (4) · 증보 7).
+
+    ★판정 = **원장에 쓸 사실**(kind 와 방 id)과 꾸러미 핀(`config/desk-pin.txt`)뿐이다 — 제목·본문 문구는 안 본다.
+      핀은 꾸러미 판올림으로만 바뀐다(§13-2). 핀에 방이 없으면 예외도 없다(지금 꾸러미 = 방 0).
+    """
+    if kind != "post":
+        return None
+    from agora import mail
+    return "desk_room" if thread_id in mail.desk_pin()["rooms"] else None
+
+
 def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any],
              prev: str, expected_state: str, category: str, title: str = "",
              is_genesis: bool = False) -> dict[str, Any]:
@@ -287,6 +299,7 @@ def _publish(ctx: Context, *, kind: str, thread_id: str, payload: dict[str, Any]
                                      config=ctx.config, prompt=ctx.prompt,
                                      isatty=ctx.isatty, ledger=ctx.ledger,
                                      config_dir=ctx.config_dir,
+                                     approval_exempt=_desk_room_exempt(kind, thread_id),
                                      # genesis 에는 견줄 앞 상태가 없다(K-4 · expected_state = "")
                                      before_write=None if is_genesis else cas)
         except AgoraError as e:
@@ -1555,6 +1568,18 @@ def check_args(name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
 # ── 계약 대조표(§4 = 이 표 = CLI 등록표) ────────────────────────────────────
 # ★도구 이름과 함수를 **한 곳에서** 잇는다. 세 곳(설계 표·CLI 등록표·이 모듈)이
 #   따로 놀면 「CLI 엔 있는데 MCP 엔 없는」 도구가 조용히 생긴다 — 시험이 셋을 대조한다.
+def mail_send(ctx: Context, *, to: str, subject: str, body: str, intent: str = "notice",
+              reply_to: str | None = None, refs: list[str] | None = None) -> dict[str, Any]:
+    """자비스 우편 한 통(1:1 · 비공개층 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §6).
+
+    ★도구에는 `body_file` 이 없다 — 대리인 손에 「이 컴퓨터의 파일을 우편으로 보내라」를 쥐여 주지 않는다
+      (파일 본문은 CLI `agora mail send --body-file` 만 · 사람이 친다). 자유문이라 사람 승인 겹을 탄다.
+    """
+    from agora import mail
+    return mail.send(ctx, to=to, subject=subject, body=body, intent=intent,
+                     reply_to=reply_to, refs=refs)
+
+
 CORE_TOOLS: dict[str, Any] = {
     "threads": threads, "read": read, "propose": propose, "say": say,
     "advance": advance, "resolve": resolve, "mark-solved": mark_solved,
@@ -1563,4 +1588,7 @@ CORE_TOOLS: dict[str, Any] = {
     #   03 §4 의 「도구 11종」이 **14종**이 된다. 06 증보 §6 의 「무변경」은 master 문면 과실로
     #   판정됐고 06 에 정오표가 남았다. 조용히 늘리지 않고 여기 근거를 적는다.
     "enter": enter, "browse": browse, "join": join,
+    # ★계약 확장 9(master 발주 2026-10-05 · TICKET=agora-mail-1to1 브리프 §1-4 「CLI + MCP 도구 1」) —
+    #   자비스 우편 보내기. 14종 → **15종**. 받기·읽기·읽음은 도구가 아니다(CLI `agora mail` · 상주).
+    "mail-send": mail_send,
 }

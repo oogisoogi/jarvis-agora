@@ -257,7 +257,8 @@ def _limit_wall(err: AgoraError, attempts: int) -> AgoraError | None:
 
 def relay_transport(method: str, url: str, *, payload: dict[str, Any] | None = None,
                     accept: str = "json", timeout: int = DEFAULT_TIMEOUT_SECONDS,
-                    write: bool = False, with_status: bool = False) -> Any:
+                    write: bool = False, with_status: bool = False,
+                    headers: dict[str, str] | None = None) -> Any:
     """실제 호출 자리 — 여기 말고는 네트워크를 만지지 않는다.
 
     ★`write` 가 실패 분류를 가른다. **응답을 못 받은 것**은 읽기에서는 그냥 재시도(7)지만,
@@ -272,8 +273,11 @@ def relay_transport(method: str, url: str, *, payload: dict[str, Any] | None = N
       「이미 있던 것을 받았다」와 「새로 적었다」가 클라이언트 쪽에서 구별되지 않는다.
     """
     data = None
+    extra = headers or {}
     headers = {"Accept": "application/json" if accept == "json" else "text/plain",
                "User-Agent": USER_AGENT}
+    # ★추가 헤더는 **우편 수신함 인증 한 칸**뿐이다(`X-Agora-Mail-Auth` · 명세 §3-2). 기본 둘을 덮지 못하게 뒤에서 거른다.
+    headers.update({k: v for k, v in extra.items() if k not in headers})
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -381,20 +385,22 @@ class RelayStore:
     # ── 내부 ────────────────────────────────────────────────────────────────
     def _run(self, method: str, path: str, *, payload: dict[str, Any] | None = None,
              accept: str = "json", write: bool = False,
-             with_status: bool = False) -> Any:
+             with_status: bool = False, headers: dict[str, str] | None = None) -> Any:
         delay = BACKOFF_BASE_SECONDS
         last: AgoraError | None = None
         for attempt in range(self._attempts):
             self.calls += 1
             try:
+                # ★헤더는 **줄 때만** 넘긴다 — 시험용 운반체 더블이 이 인자를 몰라도 기존 경로는 그대로 돈다.
+                more = {"headers": headers} if headers else {}
                 if with_status:
                     # ★주입된 운반체(시험용 더블)가 이 인자를 모를 수 있다 — 모르면 **상태 없이**
                     #   그대로 돌려받고, 부르는 쪽이 「못 쟀다」를 0 으로 본다. 지어내지 않는다.
                     return self._transport(method, self.base_url + path, payload=payload,
                                            accept=accept, timeout=self._timeout,
-                                           write=write, with_status=True)
+                                           write=write, with_status=True, **more)
                 return self._transport(method, self.base_url + path, payload=payload,
-                                       accept=accept, timeout=self._timeout, write=write)
+                                       accept=accept, timeout=self._timeout, write=write, **more)
             except AgoraError as e:
                 if not is_retryable_store(e):
                     raise                 # 기다려도 그대로인 실패(그리고 code 8)는 그대로 올린다
@@ -603,6 +609,26 @@ class RelayStore:
                 for name in CATEGORIES}
 
     # ── 계약 밖(운영 동작) ──────────────────────────────────────────────────
+    # ── 우편(1:1 · 명세 docs/SPEC-mail-1to1-2026-10-05.md §3) ─────────────────
+    def mail_send(self, *, mail: str, signature: str) -> dict[str, Any]:
+        """`POST /mail` — 서명한 우편 문서 원문 그대로. ★code 8 은 삼키지 않는다(같은 message_id 재전송이 멱등)."""
+        return _carry_status(self._run("POST", "/mail", write=True, with_status=True,
+                                       payload={"mail": mail, "signature": signature}))
+
+    def mail_inbox(self, *, participant: str, since: str, receipts_since: str,
+                   auth: str) -> dict[str, Any]:
+        """`GET /mail/inbox` — **수신자 본인만**(서명한 인증 문서를 헤더로). 받은 것도 호출자가 다시 검증한다."""
+        return self._run("GET", "/mail/inbox" + _query(**{"for": participant, "since": since,
+                                                          "receipts_since": receipts_since}),
+                         headers={"X-Agora-Mail-Auth": auth})
+
+    def mail_ack(self, *, participant: str, message_ids: list[str], thread_ids: list[str],
+                 ts: str, signature: str) -> dict[str, Any]:
+        """`POST /mail/ack` — 읽음 표시. 쓰기지만 같은 표시를 두 번 해도 첫 시각이 남는다(멱등)."""
+        return self._run("POST", "/mail/ack", write=True, payload={
+            "for": participant, "message_ids": list(message_ids),
+            "thread_ids": list(thread_ids), "ts": ts, "signature": signature})
+
     def register(self, *, participant_id: str, display_name: str,
                  public_key: str, fingerprint: str,
                  signature: str | None = None) -> dict[str, Any]:

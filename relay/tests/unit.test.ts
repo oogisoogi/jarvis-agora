@@ -429,3 +429,273 @@ describe("전역 상한 — 버킷과 노브", () => {
     expect(verdicts).toEqual([true, false]);
   });
 });
+
+// ── 자비스 우편(1:1) — docs/RELAY.md §14 · 명세 docs/SPEC-mail-1to1-2026-10-05.md ──────────
+import { createHash } from "node:crypto";
+import * as mailTs from "../src/lib/mail.ts";
+import { DEFAULT_MAIL_LIMITS, mailBuckets, mailConsecutive, mailKindOf, mailLimitsFromEnv } from "../src/lib/limits.ts";
+
+async function codeOfAsync(fn: () => Promise<unknown>): Promise<number | string> {
+  try { await fn(); return "던지지 않았다"; }
+  catch (e) { return e instanceof AgoraError ? e.code : "다른 예외"; }
+}
+async function detailOf(fn: () => Promise<unknown>): Promise<any> {
+  try { await fn(); return null; }
+  catch (e) { return e instanceof AgoraError ? { code: e.code, status: e.status, detail: e.detail } : String(e); }
+}
+
+const MAIL_NOW = Date.parse("2026-10-05T12:00:00.000Z");
+const isoAt = (ms: number) => new Date(ms).toISOString();
+
+/** 시험의 독립 대조군 — 서버 함수가 아니라 node:crypto 로 묶기 키를 따로 계산한다. */
+function signalKeyByNode(ec: string, op: string, src: string, version: string): string {
+  const text = canonicalText({ error_code: ec, op, source: src, version: version.toLowerCase() });
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 32);
+}
+
+function okLetter(): any {
+  return {
+    v: 1, kind: "mail", message_id: "a".repeat(32), thread_id: "b".repeat(32),
+    from: "jarvis-a", to: "jarvis-b", prev: "genesis", roster: "r".repeat(64),
+    scrub: { rules: "s".repeat(64), blocked: 0, redacted: 0 }, ts: isoAt(MAIL_NOW),
+    payload: { subject: "제목", body: "본문", intent: "notice" },
+  };
+}
+
+function okSignalItem(over: Record<string, unknown> = {}): any {
+  const it: any = { count: 3, source: "update", op: "cys.update", version: "1.1.8", os: "macos-15.6",
+                    error_code: "update.sig_mismatch",
+                    first_seen: isoAt(MAIL_NOW - 3600_000), last_seen: isoAt(MAIL_NOW - 60_000), ...over };
+  if (!("signature" in over)) it.signature = signalKeyByNode(it.error_code, it.op, it.source, it.version);
+  return it;
+}
+
+function okSignal(items = [okSignalItem()]): any {
+  const d = okLetter();
+  d.payload = { intent: "signal", items };
+  return d;
+}
+
+describe("우편 문서 — 닫힌 스키마(명세 §2·§1-1)", () => {
+  it("정상 일반 우편·신호 우편을 통과시킨다(= 뒤 축들의 전제)", async () => {
+    await expect(mailTs.validateMail(okLetter(), MAIL_NOW)).resolves.toBeTruthy();
+    const withOpt = okLetter();
+    withOpt.reply_to = "c".repeat(32);
+    withOpt.prev = "d".repeat(64);
+    withOpt.payload.refs = ["https://agora.godmeyou.kr/x"];
+    await expect(mailTs.validateMail(withOpt, MAIL_NOW)).resolves.toBeTruthy();
+    await expect(mailTs.validateMail(okSignal(), MAIL_NOW)).resolves.toBeTruthy();
+  });
+
+  it("모르는 칸 = 10(문서·payload·신호 항목 각각)", async () => {
+    const a = okLetter(); a.extra = 1;
+    const b = okLetter(); b.payload.extra = 1;
+    const c = okSignal([{ ...okSignalItem(), path: "/Users/x" }]);
+    const e = okSignal(); e.payload.subject = "신호에 제목 칸은 없다";
+    for (const d of [a, b, c, e]) expect(await codeOfAsync(() => mailTs.validateMail(d, MAIL_NOW))).toBe(10);
+  });
+
+  it("kind·v·id·prev·ts·from=to·null 은 모양 오류(10)", async () => {
+    const cases: Array<(d: any) => void> = [
+      d => { d.kind = "post"; }, d => { d.v = 2; }, d => { d.message_id = "A".repeat(32); },
+      d => { d.prev = "x"; }, d => { d.ts = "2026-10-05T12:00:00Z"; }, d => { d.to = d.from; },
+      d => { d.reply_to = null; }, d => { d.scrub = { rules: null }; }, d => { d.payload.intent = "chat"; },
+    ];
+    for (const f of cases) {
+      const d = okLetter(); f(d);
+      expect(await codeOfAsync(() => mailTs.validateMail(d, MAIL_NOW)), f.toString()).toBe(10);
+    }
+  });
+
+  it("제목 = 코드포인트 1~200(UTF-16 길이가 아니다)", async () => {
+    const emoji200 = okLetter(); emoji200.payload.subject = "😀".repeat(200);   // UTF-16 길이 400
+    await expect(mailTs.validateMail(emoji200, MAIL_NOW)).resolves.toBeTruthy();
+    const over = okLetter(); over.payload.subject = "가".repeat(201);
+    expect(await codeOfAsync(() => mailTs.validateMail(over, MAIL_NOW))).toBe(10);
+    const empty = okLetter(); empty.payload.subject = "";
+    expect(await codeOfAsync(() => mailTs.validateMail(empty, MAIL_NOW))).toBe(10);
+  });
+
+  it("본문 = UTF-8 16384 바이트까지 · 넘으면 413/3 · 빈 본문 = 10", async () => {
+    const edge = okLetter(); edge.payload.body = "가".repeat(5461) + "a";   // 3×5461+1 = 16384
+    await expect(mailTs.validateMail(edge, MAIL_NOW)).resolves.toBeTruthy();
+    const over = okLetter(); over.payload.body = "가".repeat(5461) + "ab";  // 16385
+    const r = await detailOf(() => mailTs.validateMail(over, MAIL_NOW));
+    expect([r.code, r.status]).toEqual([3, 413]);
+    const empty = okLetter(); empty.payload.body = "";
+    expect(await codeOfAsync(() => mailTs.validateMail(empty, MAIL_NOW))).toBe(10);
+  });
+
+  it("refs 는 문자열 5개까지", async () => {
+    const six = okLetter(); six.payload.refs = Array(6).fill("https://agora.godmeyou.kr/");
+    expect(await codeOfAsync(() => mailTs.validateMail(six, MAIL_NOW))).toBe(10);
+    const nonStr = okLetter(); nonStr.payload.refs = [1];
+    expect(await codeOfAsync(() => mailTs.validateMail(nonStr, MAIL_NOW))).toBe(10);
+  });
+});
+
+describe("신호 우편 — 묶기 키 재계산·시각 창(명세 §1-1)", () => {
+  it("서버의 묶기 키 = 독립 계산(node:crypto)과 같다 · version 은 소문자로 접는다", async () => {
+    const it0 = { error_code: "doctor.c27.fail", op: "cys.doctor", source: "pack", version: "1.1.8-RC1" };
+    expect(await mailTs.signalSignature(it0)).toBe(signalKeyByNode(it0.error_code, it0.op, it0.source, "1.1.8-rc1"));
+    expect(await mailTs.signalSignature({ ...it0, version: "1.1.8-rc1" }))
+      .toBe(await mailTs.signalSignature(it0));
+  });
+
+  it("묶기 키가 칸 넷과 안 맞으면 10 · why=signature_mismatch", async () => {
+    const r = await detailOf(() => mailTs.validateMail(okSignal([okSignalItem({ signature: "0".repeat(32) })]), MAIL_NOW));
+    expect([r.code, r.detail.why]).toEqual([10, "signature_mismatch"]);
+    // 음성 대조: 칸 하나(op)만 바꾸고 키를 그대로 두면 역시 불일치다.
+    const good = okSignalItem();
+    const r2 = await detailOf(() => mailTs.validateMail(okSignal([{ ...good, op: "cys.other" }]), MAIL_NOW));
+    expect(r2.detail.why).toBe("signature_mismatch");
+  });
+
+  it("시각 창 = 지난 7일 ~ +5분 · first_seen ≤ last_seen", async () => {
+    const old = okSignalItem({ first_seen: isoAt(MAIL_NOW - 8 * 86_400_000) });
+    expect((await detailOf(() => mailTs.validateMail(okSignal([old]), MAIL_NOW))).detail.why).toBe("signal_time_window");
+    const edge = okSignalItem({ first_seen: isoAt(MAIL_NOW - 7 * 86_400_000 + 1000) });
+    await expect(mailTs.validateMail(okSignal([edge]), MAIL_NOW)).resolves.toBeTruthy();
+    const future = okSignalItem({ last_seen: isoAt(MAIL_NOW + 10 * 60_000) });
+    expect(await codeOfAsync(() => mailTs.validateMail(okSignal([future]), MAIL_NOW))).toBe(10);
+    const swapped = okSignalItem({ first_seen: isoAt(MAIL_NOW - 60_000), last_seen: isoAt(MAIL_NOW - 3600_000) });
+    expect(await codeOfAsync(() => mailTs.validateMail(okSignal([swapped]), MAIL_NOW))).toBe(10);
+    const badDate = okSignalItem({ first_seen: "2026-02-30T00:00:00.000Z" });
+    expect(await codeOfAsync(() => mailTs.validateMail(okSignal([badDate]), MAIL_NOW))).toBe(10);
+  });
+
+  it("항목 1~100 · 같은 signature 두 번 금지 · 열거·형식 칸", async () => {
+    expect(await codeOfAsync(() => mailTs.validateMail(okSignal([]), MAIL_NOW))).toBe(10);
+    const dup = okSignalItem();
+    expect((await detailOf(() => mailTs.validateMail(okSignal([dup, { ...dup }]), MAIL_NOW))).detail.why)
+      .toBe("duplicate_signature");
+    for (const over of [{ source: "user" }, { op: "cys update" }, { os: "android" }, { error_code: "Update.Fail" },
+                        { count: 0 }, { count: 100_001 }]) {
+      expect(await codeOfAsync(() => mailTs.validateMail(okSignal([okSignalItem(over)]), MAIL_NOW)), JSON.stringify(over)).toBe(10);
+    }
+  });
+});
+
+describe("우편 상한 — 칸 고르기(명세 §4 · 순수 함수)", () => {
+  const l = DEFAULT_MAIL_LIMITS;
+  const rows = (k: any, isNew: boolean) => mailBuckets(k, "a", isNew, l).map(b => [b.bucket, b.windowS, b.max]);
+
+  it("답장 = reply_to 가 **상대가 나에게 보낸** 우편일 때만 · 내 우편에 이어 쓰기는 새 대화", () => {
+    expect(mailKindOf("notice", "b", { from_id: "b" })).toBe("reply");
+    expect(mailKindOf("notice", "b", { from_id: "a" })).toBe("new");
+    expect(mailKindOf("request", "b", null)).toBe("new");
+    expect(mailKindOf("signal", "b", { from_id: "b" })).toBe("signal");
+  });
+
+  it("기본값(명세 표)과 새 참가자 값", () => {
+    expect(rows("new", false)).toEqual([["gmail-new:a", 600, 1], ["gmail-new-day:a", 86400, 30]]);
+    expect(rows("new", true)).toEqual([["gmail-new:a", 3600, 1], ["gmail-new-day:a", 86400, 5]]);
+    expect(rows("reply", false)).toEqual([["gmail-reply:a", 20, 1], ["gmail-reply-day:a", 86400, 200]]);
+    expect(rows("reply", true)).toEqual([["gmail-reply:a", 20, 1], ["gmail-reply-day:a", 86400, 30]]);
+  });
+
+  it("신호는 하루 1 버킷 하나만(다른 칸과 따로)", () => {
+    expect(rows("signal", false)).toEqual([["gmail-signal-day:a", 86400, 1]]);
+    expect(rows("signal", true)).toEqual([["gmail-signal-day:a", 86400, 1]]);
+  });
+
+  it("연속 규칙 — 4통까지 통과 · 5통이면 가장 오래된 것이 24시간 지날 때까지", () => {
+    expect(mailConsecutive(4, isoAt(MAIL_NOW - 1000), MAIL_NOW, l).ok).toBe(true);
+    const v = mailConsecutive(5, isoAt(MAIL_NOW - 3600_000), MAIL_NOW, l);
+    expect(v).toEqual({ ok: false, retryAfter: 86_400 - 3600 });
+  });
+
+  it("노브 — AGORA_RATE_MAIL_* 를 읽고 못 읽는 값은 기본값(오타로 상한이 꺼지지 않게)", () => {
+    const env = { AGORA_RATE_MAIL_REPLY_WINDOW_S: "2", AGORA_RATE_MAIL_NEW_MAX: "0",
+                  AGORA_RATE_MAIL_SIGNAL_DAY_MAX: "x", AGORA_RATE_MAIL_CONSEC_MAX: "7" };
+    const m = mailLimitsFromEnv(env);
+    expect([m.replyWindowS, m.newMax, m.signalDayMax, m.consecMax]).toEqual([2, 1, 1, 7]);
+    // 음성 대조 — 광장 상한은 우편 노브에 안 움직인다(댓글 20초 그대로).
+    expect(limitsFromEnv(env)).toEqual(DEFAULT_LIMITS);
+  });
+});
+
+describe("수신함 쪽 — 대화별 묶음·FIFO·라운드로빈(명세 §3-2)", () => {
+  type H = { seq: number; thread_id: string; created_at: string; acked_at: string | null };
+  const mk = (seq: number, t: string, acked: string | null = null): H =>
+    ({ seq, thread_id: t, created_at: isoAt(MAIL_NOW + seq * 1000), acked_at: acked });
+  const X = "1".repeat(32), Y = "2".repeat(32);
+
+  it("한 상대가 60통 보내도 다른 대화가 첫 쪽에 보인다 · 대화 안은 FIFO", () => {
+    const rows = [...Array.from({ length: 60 }, (_, i) => mk(i + 1, X)), mk(61, Y)];
+    const p = mailTs.buildInboxPage(rows);
+    const all = p.threads.flatMap(t => t.items);
+    expect(all.length).toBe(50);
+    expect(p.threads.map(t => t.thread_id)).toEqual([X, Y]);
+    expect(p.threads[1].items.map(i => i.seq)).toEqual([61]);
+    const xs = p.threads[0].items.map(i => i.seq);
+    expect(xs).toEqual([...xs].sort((a, b) => a - b));
+  });
+
+  it("음성 대조 — 라운드로빈이 아니면(앞 대화 독점) Y 가 빠진다", () => {
+    const rows = [...Array.from({ length: 60 }, (_, i) => mk(i + 1, X)), mk(61, Y)];
+    const greedy = rows.slice(0, 50).map(r => r.thread_id);
+    expect(greedy.includes(Y)).toBe(false);
+    expect(mailTs.buildInboxPage(rows).threads.some(t => t.thread_id === Y)).toBe(true);
+  });
+
+  it("next = 안 돌려준 것 중 가장 작은 seq − 1 · 전부 돌려줬으면 null", () => {
+    const rows = [...Array.from({ length: 60 }, (_, i) => mk(i + 1, X)), mk(61, Y)];
+    // 돌려준 X = 1..49 · Y = 61 → 안 돌려준 가장 작은 seq = 50 → next = ml_…49
+    expect(mailTs.buildInboxPage(rows).next).toBe("ml_0000000000000049");
+    expect(mailTs.buildInboxPage([mk(1, X), mk(2, Y)]).next).toBe(null);
+    // 후보가 상한(500)에 닿았으면 전부 돌려줬어도 더 있을 수 있다 — null 이 아니다.
+    expect(mailTs.buildInboxPage([mk(7, X)], 50, 1).next).toBe("ml_0000000000000007");
+  });
+
+  it("미읽음이 오래 기다린 대화가 먼저 · 미읽음 없는 대화는 뒤", () => {
+    const rows = [mk(1, X, isoAt(MAIL_NOW)), mk(2, Y), mk(3, X, isoAt(MAIL_NOW))];
+    expect(mailTs.buildInboxPage(rows).threads.map(t => t.thread_id)).toEqual([Y, X]);
+  });
+
+  it("진행 보장 — 대화가 50개를 넘어도 next 가 since 에 멈추지 않는다", () => {
+    // seq 1 의 대화는 읽음(뒤로 밀린다) · 나머지 60 대화는 미읽음 → 고치기 전에는 seq 1 이 잘려 next = ml_0 (since 그대로).
+    const ids = Array.from({ length: 61 }, (_, i) => i.toString(16).padStart(32, "0"));
+    const rows = [mk(1, ids[0], isoAt(MAIL_NOW)), ...ids.slice(1).map((t, i) => mk(i + 2, t))];
+    const p = mailTs.buildInboxPage(rows);
+    expect(p.threads.some(t => t.items.some(i => i.seq === 1))).toBe(true);
+    expect(mailTs.parseMailId(p.next!)! > 0).toBe(true);
+  });
+});
+
+describe("수신함·읽음 인증 문서 — 서명 대상 바이트(명세 §3-2·§3-3)", () => {
+  const ts = "2026-10-05T12:00:00.000Z";
+  it("inbox 문서의 canonical 모양이 계약 그대로다", () => {
+    expect(canonicalText(mailTs.inboxAuthDoc("jarvis-b", "", "", ts)))
+      .toBe('{"for":"jarvis-b","purpose":"agora-mail-inbox-v1","receipts_since":"","since":"","ts":"2026-10-05T12:00:00.000Z"}');
+  });
+  it("ack 문서의 canonical 모양이 계약 그대로다", () => {
+    expect(canonicalText(mailTs.ackAuthDoc("jarvis-b", ["a".repeat(32)], [], ts)))
+      .toBe(`{"acked":["${"a".repeat(32)}"],"acked_threads":[],"for":"jarvis-b","purpose":"agora-mail-ack-v1","ts":"${ts}"}`);
+  });
+  it("음성 대조 — since 를 바꾸면 서명 대상이 달라진다(헤더 재사용 차단의 근거)", () => {
+    expect(canonicalText(mailTs.inboxAuthDoc("jarvis-b", "ml_0000000000000001", "", ts)))
+      .not.toBe(canonicalText(mailTs.inboxAuthDoc("jarvis-b", "", "", ts)));
+  });
+  it("헤더 = base64(JSON{ts,signature}) · 없거나 깨지면 401/4 · ts 창 ±5분", () => {
+    const h = btoa(JSON.stringify({ ts, signature: "x" }));
+    expect(mailTs.parseAuthHeader(h)).toEqual({ ts, signature: "x" });
+    expect(codeOf(() => mailTs.parseAuthHeader(null))).toBe(4);
+    expect(codeOf(() => mailTs.parseAuthHeader("%%%"))).toBe(4);
+    expect(codeOf(() => mailTs.parseAuthHeader(btoa(JSON.stringify({ ts, signature: "x", extra: 1 }))))).toBe(4);
+    expect(mailTs.authTsOk(ts, Date.parse(ts) + 300_000)).toBe(true);
+    expect(mailTs.authTsOk(ts, Date.parse(ts) + 300_001)).toBe(false);
+  });
+});
+
+describe("보존 기한 — 답장 90일 · 그 밖 30일(명세 §3-4)", () => {
+  it("적재 시각 기준으로 정한다", () => {
+    expect(mailTs.keepUntil(MAIL_NOW, false)).toBe(isoAt(MAIL_NOW + 30 * 86_400_000));
+    expect(mailTs.keepUntil(MAIL_NOW, true)).toBe(isoAt(MAIL_NOW + 90 * 86_400_000));
+  });
+  it("mail_id 는 고정폭 — 문자열 정렬 = 적재 순서", () => {
+    expect(mailTs.mailIdOf(9) < mailTs.mailIdOf(10)).toBe(true);
+    expect(mailTs.parseMailId("ml_0000000000000010")).toBe(10);
+    expect(mailTs.parseMailId("ml_10")).toBe(null);
+  });
+});
