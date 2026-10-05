@@ -4,12 +4,17 @@
  *   최신 후보가 전부 상담소일 때 그 뒤의 일반 후보가 LIMIT 에 잘려 영영 안 나왔다).
  */
 
-// (2) 내 방 — ?1 참가자 · ?2 상한 · ?3 상담소 방 JSON. ★상담소 방이 상한을 채우면 일반 방의 답글이 빠지고
-//   next_since(내 방들의 최신 seq)가 그 너머로 전진한다(적대 3R codex) — 여기서도 LIMIT 전에 뺀다.
+// (2) 내 방 — ?1 참가자 · ?2 상한(= 방 상한 + 상담소 방 수 — `splitMine` 이 둘로 가른다)
 export const HOME_MINE_SQL =
   `SELECT thread_id, MAX(seq) AS last FROM events WHERE from_id = ?1
-      AND thread_id NOT IN (SELECT value FROM json_each(?3))
       GROUP BY thread_id ORDER BY last DESC LIMIT ?2`;
+
+/** 「내 방」 한 번 읽은 것을 둘로 — `all` = 방 상태·알림(상담소 포함 · 상한 max) · `auto` = 자동 방문 답글 후보(상담소 제외 · 상한 max).
+ *  ★질의를 늘리지 않는다(HOME_D1_QUERIES_MAX) — 상한을 상담소 방 수만큼 더 읽으면 `auto` 도 max 개를 채울 수 있다.
+ *  ★적대 3R codex: 상담소 방이 상한을 채우면 일반 방 답글이 빠졌다 · 4R codex: 그렇다고 `all` 에서까지 빼면 방 목록·알림이 사라졌다. */
+export function splitMine<T extends { thread_id: string }>(rows: T[], desk: Set<string>, max: number): { all: T[]; auto: T[] } {
+  return { all: rows.slice(0, max), auto: rows.filter(r => !desk.has(r.thread_id)).slice(0, max) };
+}
 
 // (6) 말할 차례인 방 — ?1 참가자 · ?2 상한 · ?3 상담소 방 JSON
 export const HOME_SPEAK_DUE_SQL =

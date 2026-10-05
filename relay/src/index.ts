@@ -18,7 +18,7 @@ import { b64decode, checkSignatureBytes, fingerprintOf, hasArmor, parseArmored,
          parsePublicKeyBlob } from "./lib/sshsig.ts";
 import { bumpRate, deriveThread, eventIdOf, nowIso, rosterView, threadEvents,
          upsertRoom, type Env } from "./lib/store.ts";
-import { HOME_MINE_SQL, HOME_REPLIES_SQL, HOME_SPEAK_DUE_SQL } from "./lib/home_sql.ts";
+import { HOME_MINE_SQL, HOME_REPLIES_SQL, HOME_SPEAK_DUE_SQL, splitMine } from "./lib/home_sql.ts";
 import { FEED_SORTS, deskRooms, feed, isCommunity, replyParent, withoutDeskRooms, type FeedEvent,
          type FeedSort } from "./lib/feed.ts";
 import { communityBuckets, isNewParticipant, limitsFromEnv, mailBuckets, mailConsecutive,
@@ -666,16 +666,18 @@ async function getHome(req: Request, env: Env): Promise<Response> {
   const pid = me.participant_id;
 
   // ★상담소 방(env AGORA_DESK_ROOMS)은 자동 방문 후보에서 뺀다 — 말할 차례·답글 둘 다(명세 §13-2-4 · master ca16d9a2 B).
-  //   ★SQL WHERE 에서 LIMIT **전에** 거른다(적대 2R·3R codex — 뒤에서 거르거나 「내 방」 LIMIT 을 상담소가 채우면
-  //     일반 후보가 가려지고 next_since 가 그 너머로 전진해 일반 답글을 영영 놓쳤다).
+  //   ★LIMIT **전에** 거른다(적대 2R·3R codex — 뒤에서 거르거나 「내 방」 LIMIT 을 상담소가 채우면 일반 후보가 가려졌다).
+  //   ★방 상태·알림(rooms·notify)은 상담소도 그대로 보인다(적대 4R codex — 자동 방문만 빼는 것이지 조회·알림은 아니다).
   const desk = deskRooms(env.AGORA_DESK_ROOMS);
   const deskIds = JSON.stringify([...desk]);
 
-  // (2) 내 방 — 내가 한 번이라도 쓴 방(최근 순 · 상한 · 상담소 방 제외)
-  const mine = (await qb.prepare(
+  // (2) 내 방 — 내가 한 번이라도 쓴 방(최근 순 · 상한) · 방 상태·알림 = 전부 · 자동 방문 답글 후보 = 상담소 제외
+  const mineRows = (await qb.prepare(
     HOME_MINE_SQL
-  ).bind(pid, HOME_ROOMS_MAX, deskIds).all<{ thread_id: string; last: number }>()).results ?? [];
+  ).bind(pid, HOME_ROOMS_MAX + desk.size).all<{ thread_id: string; last: number }>()).results ?? [];
+  const { all: mine, auto: mineAuto } = splitMine(mineRows, desk, HOME_ROOMS_MAX);
   const ids = JSON.stringify(mine.map(r => r.thread_id));
+  const autoIds = JSON.stringify(mineAuto.map(r => r.thread_id));
 
   // (6) 말할 차례인 방 — 열린 토론 회차(r0~r3)인데 **이 회차에 내 post 가 없는** 방(상주 목적 speak 의 후보).
   //   ★「내 방」만이 아니라 열린 방 전체에서 고른다 — 상주는 아직 한 번도 안 쓴 방에서도 깨워야 한다.
@@ -693,7 +695,7 @@ async function getHome(req: Request, env: Env): Promise<Response> {
     // (4) 내 글에 달린 새 답글 — 부모가 **같은 방·먼저 적재된 내 post** 일 때만(plaza.feed 와 같은 조건)
     replies = (await qb.prepare(
       HOME_REPLIES_SQL
-    ).bind(ids, pid, since, HOME_ITEMS_MAX, deskIds).all<any>()).results ?? [];
+    ).bind(autoIds, pid, since, HOME_ITEMS_MAX, deskIds).all<any>()).results ?? [];
     // (5) 알림 후보 — kind 로만
     notes = (await qb.prepare(
       `SELECT seq, thread_id, kind, from_id, created_at FROM events

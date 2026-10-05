@@ -215,9 +215,14 @@ MUTATIONS = [
      "",
      "vitest", "제외는 LIMIT 전(SQL WHERE)"),
 
-    ("M42 상담소 방이 「내 방」 상한을 채운다", "src/lib/home_sql.ts",
-     "      AND thread_id NOT IN (SELECT value FROM json_each(?3))\n",
-     "",
+    ("M42 상담소 방이 「내 방」 답글 후보 상한을 채운다", "src/lib/home_sql.ts",
+     "auto: rows.filter(r => !desk.has(r.thread_id)).slice(0, max)",
+     "auto: rows.slice(0, max)",
+     "vitest", "제외는 LIMIT 전(SQL WHERE)"),
+
+    ("M43 방 상태·알림 목록에서도 상담소를 뺀다", "src/lib/home_sql.ts",
+     "return { all: rows.slice(0, max),",
+     "return { all: rows.filter(r => !desk.has(r.thread_id)).slice(0, max),",
      "vitest", "제외는 LIMIT 전(SQL WHERE)"),
 
     ("M41 상담소 방 제외를 LIMIT 뒤로(답글 SQL)", "src/lib/home_sql.ts",

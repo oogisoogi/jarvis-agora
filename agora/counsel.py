@@ -50,6 +50,7 @@ DEFAULTS: dict[str, Any] = {
 PERIODS = ("day", "week")
 MODES = ("collect", "worker")
 MAX_BATCH_BYTES = 1024 * 1024        # 설정으로도 못 넘는 천장
+MIN_BATCH_BYTES = 4 * 1024           # 설정 하한 — 오너 한 줄(계약 ≤200자 · 이스케이프 최악 6B/자 ≈1.2KB)이 빈 프롬프트에 늘 혼자 든다(적대 4R codex)
 ACK_TRIES_MAX = 3                    # 접수 회신 재시도(상한 · 실패한 판 수)
 LEAK_RUN = 40                        # 교차 유출 검사 — 연속 일치 문자 수(명세 §10-4 · 실측 없음 · 첫 배치로 조정)
 LEAK_RUN_PUBLIC = 20                 # 공개 답은 더 엄격하게(적대 1R codex — 40자 미만 비공개 사실이 통째로 지나갔다 · 오탐 = 보류 = 안전 쪽)
@@ -97,7 +98,7 @@ def settings(config: dict[str, Any] | None) -> dict[str, Any]:
     if raw.get("batch_period") in PERIODS:
         out["batch_period"] = raw["batch_period"]
     v = raw.get("batch_max_bytes")
-    if type(v) is int and 1024 <= v <= MAX_BATCH_BYTES:
+    if type(v) is int and MIN_BATCH_BYTES <= v <= MAX_BATCH_BYTES:
         out["batch_max_bytes"] = v
     v = raw.get("urgent_per_day")
     if type(v) is int and 0 <= v <= 1000:
@@ -681,15 +682,16 @@ def collect(ctx: Any, *, max_bytes: int) -> dict[str, Any]:
     # ★오너 한 줄은 상한으로 빠지면 **이월**한다(적대 2R codex — 빠진 한 줄의 일일 보고가 처리 완료로 사라졌다).
     #   보고서에는 전부 결정론으로 싣는다(§3 오너 한 줄) · 모델이 못 읽은 것만 다음 기간에 다시 읽힌다.
     #   ★넘친 한 줄 뒤에서 멈추지 않는다 — 뒤의 짧은 한 줄은 남은 자리에 담는다(적대 3R codex — 큰 한 줄 하나가 뒤를 다 막았다).
-    #   ★혼자서도 빈 프롬프트에 안 들어가는 한 줄은 **모델용 사본만** 줄여 담는다(원문은 보고서 §3) — 안 그러면 기간마다 영영 이월된다.
+    #   ★혼자서도 빈 프롬프트에 안 드는 한 줄은 **보고서 전용**(§3 에 「모델 입력 불가」 표시 · 이월하지 않는다 — 이월해도 영영 못 든다).
+    #     설정 하한(MIN_BATCH_BYTES)과 계약(≤200자)으로는 생기지 않는 자리다 — 방어 분기(적대 4R codex — 잘라 담고 완료로 치면 뒤쪽이 사라졌다).
     notes_out: list[str] = []
+    notes_report_only: list[str] = []
     alone = prompt_len(_empty_payload())
     for n in notes:
         view = {"from": n["from"], "note": n["note"]}
-        k = len(n["note"])
-        while k > 0 and alone + _jlen(view) > max_bytes:
-            k -= 1
-            view = {"from": n["from"], "note": n["note"][:k] + "…(잘림)"}
+        if alone + _jlen(view) > max_bytes:
+            notes_report_only.append(n["key"])
+            continue
         size = _jlen(view) + (1 if notes_llm else 0)
         if used + size > max_bytes:
             notes_out.append(n["key"])
@@ -717,6 +719,7 @@ def collect(ctx: Any, *, max_bytes: int) -> dict[str, Any]:
             "fleet_trimmed": (len(lines) - fixed if fixed == 2 else 0) - fleet_rows_llm,
             "signals_md": _signal_md(sig_table),
             "daily_notes": notes_llm, "notes_all": notes, "notes_carried": notes_out,
+            "notes_report_only": notes_report_only,
             "keys": included_keys + machine_keys, "carried": carried + len(notes_out), "bytes": used,
             "over_first": over_first,
             "urgent_suppressed": sum(1 for r in urgent_rows if not r.get("notified")
@@ -863,13 +866,17 @@ def render_report(*, period: str, data: dict[str, Any], model: dict[str, Any] | 
              f"긴급 후보(알림 생략) {data['urgent_suppressed']}건 · 상한으로 모델 입력에서 뺀 것: 신호 {data['signals_trimmed']}줄"
              f"(2절 표에는 전부) · 오너 한 줄 {data['notes_trimmed']}개(3절에는 전부 · 다음 기간 이월) · "
              f"함대 표 {data['fleet_trimmed']}줄(1절에는 전부)"
+             + (f" · ⚠오너 한 줄 {len(data['notes_report_only'])}개는 혼자서도 상한 초과 — 보고서 전용" if data.get("notes_report_only") else "")
              + (f" · ⚠첫 줄 하나가 상한을 넘어 그대로 담았다({data['over_first']:,}B)" if data.get("over_first") else ""),
              f"호출: {call.get('summary', '-')}", "",
              "## 1. 함대 일지", "", data["fleet_md"], "",
              "## 2. 자동 신호 집계", "", data["signals_md"], "",
              "## 3. 오너 한 줄(전부 · 결정론)", ""]
     carried = set(data.get("notes_carried") or [])
-    lines += [f"- {_md_cell(n['from'])}: {_md_cell(n['note'])}" + (" _(모델 입력 밖 · 다음 기간 이월)_" if n["key"] in carried else "")
+    only = set(data.get("notes_report_only") or [])
+    lines += [f"- {_md_cell(n['from'])}: {_md_cell(n['note'])}"
+              + (" _(모델 입력 밖 · 다음 기간 이월)_" if n["key"] in carried else "")
+              + (" _(⚠혼자서도 상한 초과 — 모델 입력 불가 · 보고서 전용)_" if n["key"] in only else "")
               for n in data.get("notes_all") or []] or ["- 없음"]
     lines.append("")
     if model is None:

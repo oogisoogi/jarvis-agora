@@ -4482,7 +4482,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M639-desk-public-threshold-loose", "M640-desk-public-sees-private",
                "M641-desk-analysis-writes-public", "M642-desk-cap-skips-wrapping", "M643-desk-fleet-outside-cap",
                "M644-desk-trimmed-notes-done", "M645-desk-final-size-unchecked",
-               "M646-desk-note-stops-at-first-overflow", "M647-desk-oversize-note-not-trimmed"),
+               "M646-desk-note-stops-at-first-overflow", "M647-desk-oversize-note-carried-forever"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17561,7 +17561,7 @@ def _case_desk_prompt_cap_is_final_bytes() -> None:
     ①큰 함대 표 + 공개 글 하나 ②작은 공개 글 12묶음 ③계산이 어긋나면(입력을 부풀리면) 부르지 않는다(code 3·호출 0)."""
     from agora import counsel, mail
     cap = 1024
-    config = {"human_approval": False, "desk": {"enabled": True, "batch_max_bytes": cap}}
+    config = {"human_approval": False, "desk": {"enabled": True, "batch_max_bytes": counsel.MIN_BATCH_BYTES}}
     daily = _mail_doc(payload={"intent": "daily", "daily": {"day": mail.now_ms_iso()[:10], "os": "macos-15.6",
                       "doctor": {"ok": 1, "warn": 0, "fail": 60, "skip": 0, "warn_ids": [],
                                  "fail_ids": [f"check-item-{i:03d}" for i in range(60)]}}})
@@ -17576,7 +17576,7 @@ def _case_desk_prompt_cap_is_final_bytes() -> None:
         raise AssertionError(f"함대 표가 상한 밖이다: 계산 {data['bytes']} 실제 {real} trimmed={data['fleet_trimmed']}")
     seen: list[tuple[list[str], str]] = []
     counsel.batch(ctx, caller=_desk_ok_caller(seen, lambda a, p: []), notifier=lambda *a, **k: None)
-    if len(seen) != 2 or any(len(p.encode("utf-8")) > cap for _a, p in seen):
+    if len(seen) != 2 or any(len(p.encode("utf-8")) > counsel.MIN_BATCH_BYTES for _a, p in seen):
         raise AssertionError(f"실제 입력이 상한을 넘었다: {[len(p.encode()) for _a, p in seen]}")
     ctx2, _s2 = _desk_world([], config=config)
     many = _desk_plaza_events(room, [("%032x" % (i + 1), f"짧은 글 {i}") for i in range(12)])
@@ -17590,7 +17590,7 @@ def _case_desk_prompt_cap_is_final_bytes() -> None:
 
     def bloated(c: Any, *, max_bytes: int) -> dict[str, Any]:
         d = orig(c, max_bytes=max_bytes)
-        d["items"] = d["items"] + [{"key": "P99", "layer": "공개 방 글", "posts": [{"body": "가" * cap}]}]
+        d["items"] = d["items"] + [{"key": "P99", "layer": "공개 방 글", "posts": [{"body": "가" * counsel.MIN_BATCH_BYTES}]}]
         return d
     counsel.collect = bloated
     try:
@@ -17609,20 +17609,20 @@ def _case_desk_owner_notes_carried() -> None:
     """적대 2R codex ③ — 상한으로 모델 입력에서 빠진 오너 한 줄은 **이월**(처리 완료로 적지 않는다) ·
     보고서 §3 에는 전부 · 다음 기간 수집에 다시 나온다."""
     from agora import counsel, mail
-    cap = 1024
+    cap = counsel.MIN_BATCH_BYTES
     config = {"human_approval": False, "desk": {"enabled": True, "batch_max_bytes": cap}}
-    notes = [f"오너메모{i} " + "나" * 120 for i in range(4)]
+    notes = [f"오너메모{i:02d} " + "나" * 120 for i in range(14)]
     dailies = [_mail_doc(payload={"intent": "daily", "daily": {"day": mail.now_ms_iso()[:10], "os": "macos-15.6",
                                                                 "owner_note": n}}) for n in notes]
     ctx, _store = _desk_world(dailies, config=config)
     _desk_cycle(ctx, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
     data = counsel.collect(ctx, max_bytes=cap)
-    if not data["notes_trimmed"] or len(data["daily_notes"]) + data["notes_trimmed"] != 4:
+    if not data["notes_trimmed"] or len(data["daily_notes"]) + data["notes_trimmed"] != 14:
         raise AssertionError(f"오너 한 줄 상한 계산이 다르다: in={len(data['daily_notes'])} trimmed={data['notes_trimmed']}")
     trimmed = data["notes_trimmed"]
     out = counsel.batch(ctx, caller=_desk_ok_caller([], lambda a, p: []), notifier=lambda *a, **k: None)
     report = open(out["report"], encoding="utf-8").read()
-    if any(f"오너메모{i}" not in report for i in range(4)) or report.count("다음 기간 이월") < trimmed:
+    if any(f"오너메모{i:02d}" not in report for i in range(14)) or report.count("다음 기간 이월") < trimmed:
         raise AssertionError("보고서에 오너 한 줄이 전부 실리지 않았다")
     again = counsel.collect(ctx, max_bytes=cap)
     if len(again["notes_all"]) != trimmed or again["counts"]["dailies"] != trimmed:
@@ -17641,7 +17641,7 @@ def _case_desk_owner_notes_carried() -> None:
         left = [n["note"].split(" ", 1)[0] for n in counsel.collect(ctx, max_bytes=cap)["notes_all"]]
     if left:
         raise AssertionError(f"이월된 오너 한 줄이 4기간 안에 다 안 읽혔다: {left}")
-    # 큰 한 줄 뒤의 짧은 한 줄은 남은 자리에 든다 · 혼자서도 안 들어가는 한 줄은 모델용 사본만 줄인다
+    # 큰 한 줄 뒤의 짧은 한 줄은 남은 자리에 든다 · 혼자서도 안 드는 한 줄 = 보고서 전용(이월 0 · 잘라 담지 않는다)
     big = [_mail_doc(payload={"intent": "daily", "daily": {"day": mail.now_ms_iso()[:10], "os": "macos-15.6",
                                                             "owner_note": n}})
            for n in ("큰메모A " + "다" * 190, "큰메모B " + "다" * 190, "짧은메모C")]
@@ -17652,9 +17652,13 @@ def _case_desk_owner_notes_carried() -> None:
     if got != ["큰메모A", "짧은메모C"] or d2["notes_trimmed"] != 1:
         raise AssertionError(f"큰 한 줄이 뒤의 짧은 한 줄을 막았다: {got} trimmed={d2['notes_trimmed']}")
     d3 = counsel.collect(ctx2, max_bytes=600)
-    if not d3["daily_notes"] or not d3["daily_notes"][0]["note"].endswith("…(잘림)") or d3["bytes"] > 600 \
-            or d3["bytes"] != counsel.prompt_len(counsel.model_payload(d3)):
-        raise AssertionError(f"혼자 넘치는 한 줄 처리가 다르다: {d3['daily_notes'][:1]} bytes={d3['bytes']}")
+    only = set(d3["notes_report_only"])
+    if [v["note"] for v in d3["daily_notes"]] != ["짧은메모C"] or len(only) != 2 or d3["notes_carried"] \
+            or not only <= set(d3["keys"]) or d3["bytes"] > 600:
+        raise AssertionError(f"혼자 넘치는 한 줄 처리가 다르다: {d3['daily_notes']} only={len(only)} "
+                             f"carried={d3['notes_carried']}")
+    if counsel.settings({"desk": {"batch_max_bytes": 1024}})["batch_max_bytes"] != counsel.DEFAULTS["batch_max_bytes"]:
+        raise AssertionError("설정 하한(4KB) 아래 상한을 받았다")
 
 
 def _case_desk_public_call_isolated() -> None:
@@ -18411,9 +18415,9 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if used + size > max_bytes:\n            notes_out.append(n["key"])',
      '        if notes_out or used + size > max_bytes:\n            notes_out.append(n["key"])',
      "상담소: 빠진 오너 한 줄은 이월"),
-    ("M647-desk-oversize-note-not-trimmed", "agora/counsel.py",
-     '        while k > 0 and alone + _jlen(view) > max_bytes:',
-     '        while False:',
+    ("M647-desk-oversize-note-carried-forever", "agora/counsel.py",
+     '        if alone + _jlen(view) > max_bytes:\n            notes_report_only.append(n["key"])',
+     '        if False:\n            notes_report_only.append(n["key"])',
      "상담소: 빠진 오너 한 줄은 이월"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',

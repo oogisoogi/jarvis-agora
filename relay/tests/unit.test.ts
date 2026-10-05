@@ -852,11 +852,14 @@ describe("상담소 방 자동 방문 제외(AGORA_DESK_ROOMS · master ca16d9a2
     post(1, plain, "p".repeat(32), "me"); post(2, d1, "q".repeat(32), "me"); post(3, d2, "r".repeat(32), "me");
     post(4, plain, "x".repeat(32), "you", "p".repeat(32));
     post(5, d1, "y".repeat(32), "you", "q".repeat(32)); post(6, d2, "z".repeat(32), "you", "r".repeat(32));
-    // 「내 방」 상한 2 — 내 글이 가장 최근인 두 방이 상담소여도 일반 방이 든다(적대 3R codex · 선행 LIMIT)
-    const mineRows = run(homeSql.HOME_MINE_SQL, "me", 2, deskJson).map((r: any) => r.thread_id);
-    expect(mineRows).toEqual([plain]);
-    expect(run(homeSql.HOME_MINE_SQL, "me", 2, "[]").map((r: any) => r.thread_id)).toEqual([d2, d1]);
-    const mine = JSON.stringify(mineRows);
+    // 「내 방」 상한 2 — 내 글이 가장 최근인 두 방이 상담소여도 답글 후보엔 일반 방이 든다(적대 3R codex · 선행 LIMIT) ·
+    //   방 상태·알림 목록(all)엔 상담소도 그대로(적대 4R codex — 조회·알림까지 빼지 않는다)
+    const rowsMine = run(homeSql.HOME_MINE_SQL, "me", 2 + 2) as any[];
+    const split = homeSql.splitMine(rowsMine, new Set([d1, d2]), 2);
+    expect(split.all.map(r => r.thread_id)).toEqual([d2, d1]);
+    expect(split.auto.map(r => r.thread_id)).toEqual([plain]);
+    expect(homeSql.splitMine(rowsMine, new Set(), 2).auto.map(r => r.thread_id)).toEqual([d2, d1]);
+    const mine = JSON.stringify(split.auto.map(r => r.thread_id));
     const got = run(homeSql.HOME_REPLIES_SQL, mine, "me", 0, 2, deskJson).map((r: any) => r.message_id);
     expect(got).toEqual(["x".repeat(32)]);
     // 답글 SQL 자체의 제외(2차 겹이 아니라 1차) — 내 방 목록에 상담소가 섞여 들어와도 일반 답글만
