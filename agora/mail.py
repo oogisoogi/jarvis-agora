@@ -48,6 +48,7 @@ SIGNAL_COUNT_MAX = 100_000
 SIGNAL_WINDOW_DAYS = 7
 ACK_IDS_MAX = 50
 ACK_THREADS_MAX = 20
+SCRUB_KEYS = ("rules", "blocked", "redacted")   # core.declare_scrub 이 만드는 모양 그대로
 SIGNAL_ITEM_KEYS = ("signature", "count", "source", "op", "version", "os",
                     "error_code", "first_seen", "last_seen")
 
@@ -196,8 +197,17 @@ def validate(doc: Any, *, now: datetime.datetime | None = None) -> dict[str, Any
     prev = _need(doc, "prev", str, "mail")
     if prev != GENESIS_PREV and not HASH_RE.match(prev):
         _fail("prev 는 genesis 또는 앞 우편 해시", {"len": len(prev)})
-    _need(doc, "roster", str, "mail")
-    _need(doc, "scrub", dict, "mail")
+    # ★봉투도 닫는다(적대 1R R1-2 · 릴레이 validateMail 과 같은 규칙) — payload 만 닫으면 `scrub`·`roster` 에
+    #   자유문을 실어 신호의 승인 겹 예외(「자유문 칸이 없는 닫힌 모양」이 전제)를 그대로 지나간다.
+    if not HASH_RE.match(_need(doc, "roster", str, "mail")):
+        _fail("roster 는 소문자 hex 64자", {"where": "mail.roster"})
+    sc = _need(doc, "scrub", dict, "mail")
+    _closed(sc, SCRUB_KEYS, "scrub")
+    if not HASH_RE.match(_need(sc, "rules", str, "scrub")):
+        _fail("scrub.rules 는 소문자 hex 64자", {"where": "scrub.rules"})
+    for key in ("blocked", "redacted"):
+        if _need(sc, key, int, "scrub") < 0:
+            _fail("scrub 계수는 0 이상", {"where": "scrub." + key})
     if not TS_RE.match(_need(doc, "ts", str, "mail")):
         _fail("ts 는 밀리초 고정폭 ISO", {"ts": doc.get("ts")})
     payload = _need(doc, "payload", dict, "mail")
@@ -410,9 +420,11 @@ def _publish(ctx: Any, doc: dict[str, Any], *, prompt: Any = None,
                                   isatty=isatty or ctx.isatty, exempt=exempt)
     signed = sign.sign_mail(doc, config_dir=ctx.config_dir)
     canonical = canonical_bytes(doc).decode("utf-8")
+    # ★승인 결과를 원장에 싣는다(명세 §1-1 (4) · 적대 1R R1-4) — 무엇이 겹 밖으로 나갔는지 원장이 말한다.
     row = {"at": now_ms_iso(), "message_id": doc["message_id"], "thread_id": doc["thread_id"],
            "to": doc["to"], "from": doc["from"], "intent": doc["payload"]["intent"],
-           "hash": signed["hash"], "mail": canonical, "signature": signed["signature"]}
+           "hash": signed["hash"], "mail": canonical, "signature": signed["signature"],
+           "approval": approval}
     try:
         result = ctx.store.mail_send(mail=canonical, signature=signed["signature"])
     except AgoraError as e:
@@ -656,7 +668,14 @@ def read(ctx: Any, *, thread: str) -> dict[str, Any]:
         boundary = "MAIL-" + secrets.token_hex(8)
     shown = [_frame(r, boundary) for r in rows]
     tid = next(iter(tids))
-    acked = _ack(ctx, message_ids=[], thread_ids=[tid])
+    # ★릴레이 읽음은 **보여 준 우편 id 로만** 붙인다(적대 1R R1-1) — 대화 단위 ack 는 아직 당겨 오지 않은
+    #   (릴레이에만 있는) 우편까지 읽음 처리하고, 읽음 = 본문 삭제라 주인이 한 번도 못 본 우편이 사라진다.
+    ids = [r["message_id"] for r in rows if r.get("message_id")]
+    parts = [_ack(ctx, message_ids=ids[i:i + ACK_IDS_MAX], thread_ids=[])
+             for i in range(0, len(ids), ACK_IDS_MAX)]
+    failed = [p for p in parts if "error" in p]
+    acked = failed[0] if failed else {"acked": sum(int(p.get("acked") or 0) for p in parts),
+                                      "ignored": sum(int(p.get("ignored") or 0) for p in parts)}
     already = _read_ids(ctx)
     for r in rows:
         if r.get("message_id") not in already:

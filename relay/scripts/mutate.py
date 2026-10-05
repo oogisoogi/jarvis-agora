@@ -163,6 +163,22 @@ MUTATIONS = [
      "  return h.has_body === 1;",
      "harness", "우편: 보존 기한 지난 본문 = 머리만(purged)"),
 
+    # ── 적대 1R(codex · 2026-10-05) 반영 자리 ──
+    ("M30 대화 단위 ack 의 서명 시각 상한 제거", "src/index.ts",
+     "AND created_at <= ?5))`",
+     "AND ?5 = ?5))`",
+     "harness", "우편 8-b: 서명 시각 이전 ts 의 대화 ack = acked 0"),
+
+    ("M31 적재 문장의 대화 결박 제거(경합 창)", "src/index.ts",
+     "        WHERE NOT EXISTS (SELECT 1 FROM mail WHERE thread_id = ?2",
+     "        WHERE NOT EXISTS (SELECT 1 FROM mail WHERE 0 AND thread_id = ?2",
+     "harness", "우편 3-b: 같은 대화에 b→v = 행 0"),
+
+    ("M32 우편 봉투 scrub 칸 열림", "src/lib/mail.ts",
+     '  closed(sc, SCRUB_KEYS, "scrub");',
+     "  void SCRUB_KEYS;",
+     "vitest", "봉투(scrub·roster)에 자유문 = 10"),
+
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",
      "  const ok = true;",

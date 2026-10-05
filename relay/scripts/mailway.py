@@ -67,7 +67,7 @@ class Mail:
     def doc(self, sender, to, thread_id, payload, *, reply_to=None, prev="genesis", ts=None, message_id=None):
         d = {"v": 1, "kind": "mail", "message_id": message_id or new_id(), "thread_id": thread_id,
              "from": sender["id"], "to": to, "prev": prev, "roster": "0" * 64,
-             "scrub": {"rules": "test", "blocked": 0, "redacted": 0},
+             "scrub": {"rules": "0" * 64, "blocked": 0, "redacted": 0},
              "ts": ts or iso(), "payload": payload}
         if reply_to:
             d["reply_to"] = reply_to
@@ -233,6 +233,23 @@ def main():
     _, _, code, body, _ = M.send(D, A["id"], new_id(), letter("경로", body="키 파일은 /Users/someone/.ssh 에 있다"))
     record("스크럽 백스톱(경로) = 422/3", (422, 3), (code, code_of(body)))
 
+    # ── 3-b. 대화 결박 경합 — 적재 문장 자체가 막는가(적대 1R R1-3 · 오프라인 · 실제 마이그레이션 + 실제 적재 SQL) ──
+    print("\n== 우편 3-b. 대화 결박 경합(적재 문장 원자성) ==")
+    import re as _re
+    import sqlite3 as _sqlite3
+    src = open(os.path.join(RELAY, "src", "index.ts"), encoding="utf-8").read()
+    ins = _re.search(r"`(INSERT INTO mail \(.*?RETURNING seq)`", src, _re.S)
+    db = _sqlite3.connect(":memory:")
+    db.executescript(open(os.path.join(RELAY, "migrations", "0002_mail.sql"), encoding="utf-8").read())
+
+    def race_insert(frm, to, tid):
+        args = (new_id(), tid, frm, to, "genesis", None, "notice", "0" * 64, 1, "{}", "sig", iso(), iso())
+        return db.execute(ins.group(1), args).fetchone() if ins else "no-sql"
+    TR = new_id()
+    record("경합: 빈 대화에 a→v 적재 = 행 1", True, bool(race_insert("a", "v", TR)))
+    record("경합: 같은 대화에 b→v(조회를 앞서 통과) = 행 0", None, race_insert("b", "v", TR))
+    record("경합: 같은 대화에 v→a(같은 쌍 · 역방향) = 행 1", True, bool(race_insert("v", "a", TR)))
+
     # ── 4. 상한(새 대화) ──────────────────────────────────────────────────────
     print("\n== 우편 4. 새 대화 상한 ==")
     _, _, code, body, hdrs = M.send(A, B["id"], new_id(), letter("두 번째 새 대화"))
@@ -330,6 +347,27 @@ def main():
            if isinstance(boxa2, dict) else "?")
     code, body, _ = M.ack(B, B["id"], [], [])
     record("빈 ack = 400/10", (400, 10), (code, code_of(body)))
+
+    # ── 8-b. 대화 단위 ack 상한(적대 1R R1-1) ────────────────────────────────
+    print("\n== 우편 8-b. 대화 단위 ack = 서명 시각까지 들어온 우편에만 ==")
+    signed_before = iso()
+    time.sleep(0.05)
+    for _ in range(3):
+        mx, _, code, body, _ = M.send(A, B["id"], T1, letter("ack 서명 뒤 도착"), reply_to=rb["message_id"])
+        if code != 429:
+            break
+        time.sleep(2.2)
+    record("A→B 답장(ack 서명 뒤 도착) = 201", 201, code)
+    code, body, _ = M.ack(B, B["id"], [], [T1], ts=signed_before)
+    record("서명 시각 이전 ts 의 대화 ack = acked 0(뒤 도착 우편 미표시)", (200, 0),
+           (code, (body or {}).get("acked")))
+    code, boxb, _ = M.inbox(B["id"], M.auth(B, B["id"]))
+    hit = find(boxb, mx["message_id"])
+    record("  뒤 도착 우편 본문 그대로 · 미읽음 1", (True, 1),
+           (bool(hit and "mail" in hit), boxb.get("unread_count") if isinstance(boxb, dict) else None))
+    code, body, _ = M.ack(B, B["id"], [], [T1])
+    record("지금 ts 의 대화 ack = acked 1", (200, 1), (code, (body or {}).get("acked")))
+    time.sleep(2.2)          # A 의 답장 간격(로컬 2초)을 비워 둔다 — 아래 10 의 「답장 5통」이 이 1통에 걸리지 않게
 
     # ── 9. 신호 우편 ─────────────────────────────────────────────────────────
     print("\n== 우편 9. 신호 우편(intent=signal) ==")

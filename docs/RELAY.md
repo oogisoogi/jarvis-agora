@@ -676,10 +676,10 @@ canonical JSON(§3-2 · `agora/event.py canonical_bytes` 와 **같은 직렬화*
 | # | 검사 | HTTP / code | `detail.why` |
 |---|---|---|---|
 | 1 | 크기 — 원문·canonical 64KB · 본문 16KB | 413 / 3 | — |
-| 2 | 모양 — 닫힌 칸·형식·null·신호 서식·묶기 키 | 400 / 10 | `signature_mismatch`·`duplicate_signature`·`signal_time_window` 등 |
+| 2 | 모양 — 닫힌 칸·형식·null·신호 서식·묶기 키 · 봉투 `roster`=hex64 · `scrub`=닫힌 `{rules:hex64,blocked,redacted}`(적대 1R R1-2) | 400 / 10 | `signature_mismatch`·`duplicate_signature`·`signal_time_window` 등 |
 | 3 | **서명·명부·폐기·`from` 결박**(§4 3값 그대로) | 401 / 4 | `detail.verdict` = `BAD`/`unsigned` · `why` = `signature_does_not_match_bytes`·`not_in_roster`·`revoked`·`principal_mismatch`·`no_signature` |
 | 4 | `to` 가 명부에 있고 폐기 안 됨(없는 사람·폐기된 사람 = **같은 응답**) | 404 / 2 | `recipient_not_in_roster` |
-| 5 | **대화 결박** — 그 `thread_id` 가 이미 있으면 그 대화의 두 사람(순서 무관) = `{from,to}` | 422 / 3 | `thread_not_yours` |
+| 5 | **대화 결박** — 그 `thread_id` 가 이미 있으면 그 대화의 두 사람(순서 무관) = `{from,to}` · ★적재 문장 안에서 한 번 더(`INSERT … SELECT … WHERE NOT EXISTS` · 조회↔적재 경합 창 봉합 · 적대 1R R1-3) | 422 / 3 | `thread_not_yours` |
 | 5b | `reply_to` 가 있으면 **같은 `thread_id` 안**에 그 `message_id` 가 있어야 한다 | 422 / 3 | `reply_outside_thread` |
 | 6 | `ts` ∈ [서버 시각 − 24시간, + 5분] | 422 / 3 | `stale_ts` |
 | 7 | 스크럽 백스톱(§6 · fail-closed · payload 전체) | 422 / 3 | (`detail.rules`·`where`) |
@@ -732,7 +732,9 @@ canonical JSON(§3-2 · `agora/event.py canonical_bytes` 와 **같은 직렬화*
 - 요청(닫힘) `{"for","message_ids":[…≤50],"thread_ids":[…≤20],"ts","signature"}` — 두 목록 칸 **모두 있어야 한다**(빈 목록 가능 · 둘 다 비면 400/10) · id 는 소문자 hex 32자.
 - 서명 대상 canonical `{"acked":<message_ids 그대로>,"acked_threads":<thread_ids 그대로>,"for":<id>,"purpose":"agora-mail-ack-v1","ts":<ts>}`
   (★요청 그대로의 목록 — 순서·중복 포함. 서버가 고쳐 쓴 값에 서명이 걸린 척하지 않는다). 인증 순서·`pid:` 계수 = §14-3 과 같다.
-- 동작: `UPDATE mail SET acked_at = 지금 WHERE to_id = for AND acked_at IS NULL AND (message_id IN … OR thread_id IN …)`.
+- 동작: `UPDATE mail SET acked_at = 지금 WHERE to_id = for AND acked_at IS NULL AND (message_id IN … OR (thread_id IN … AND created_at <= min(ts, 지금)))`.
+  ★**대화 단위 ack 는 서명 시각까지 들어온 우편에만**(적대 1R R1-1) — 서명에는 대화 id 만 걸리므로 상한이 없으면 같은 요청을 ±5분 안에 재생해
+  그 뒤 도착한 우편까지 읽음 처리하고, 읽음 = 본문 삭제라 받는 사람이 못 본 우편이 사라진다. 클라이언트 `agora mail read` 는 **보여 준 우편 id 로만** ack 한다.
   ★**수신자가 자기 앞 우편에만** 붙인다 — 남의 우편·남의 대화 id 는 조용히 무시. 이미 붙은 표시는 안 바뀐다(첫 시각 유지).
 - 응답 200 `{"acked": <이번에 새로 붙은 수>, "ignored": <요청한 message_ids(중복 제거) 중 나에게 온 우편이 아닌 수>}`.
 - 읽음이 붙으면 발신자는 다음 `receipts` 로 「전달됨(읽힘)」을 알고, 그 우편 본문은 다음 덤 삭제 대상이 된다(§14-5).

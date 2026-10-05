@@ -926,13 +926,19 @@ async function handleMailPost(req: Request, env: Env): Promise<Response> {
   }
 
   // (10) 적재 — 보존 기한은 적재 때 정한다(답장 = +90일 · 그 밖 = +30일).
+  //   ★대화 결박을 **적재 문장 안에서 한 번 더** 건다(적대 1R R1-3): (5) 의 조회와 이 적재 사이에 다른 쌍이
+  //     같은 새 thread_id 로 먼저 적재하면 둘 다 빈 조회를 보고 들어온다. 한 문장 = 원자적이라 경합 창이 닫힌다.
+  //     걸리면 행 0 → 아래에서 thread_not_yours.
   const createdAt = nowIso(new Date(nowMs));
   let inserted: { seq: number } | null = null;
   try {
     inserted = await qb.prepare(
       `INSERT INTO mail (message_id, thread_id, from_id, to_id, prev, reply_to, intent, hash, bytes,
          canonical, signature, keep_until, created_at)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) RETURNING seq`
+       SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13
+        WHERE NOT EXISTS (SELECT 1 FROM mail WHERE thread_id = ?2
+                            AND NOT ((from_id = ?3 AND to_id = ?4) OR (from_id = ?4 AND to_id = ?3)))
+       RETURNING seq`
     ).bind(d.message_id, d.thread_id, d.from, d.to, d.prev,
            typeof d.reply_to === "string" ? d.reply_to : null, d.payload.intent, hash, raw.length,
            canonicalText(doc), signature, mail.keepUntil(nowMs, kind === "reply"), createdAt)
@@ -948,7 +954,7 @@ async function handleMailPost(req: Request, env: Env): Promise<Response> {
     }
     throw e;
   }
-  if (!inserted) fail(STORE, "적재 결과를 읽지 못했다", null);
+  if (!inserted) fail(GATE_REJECT, "남의 대화다", { why: "thread_not_yours", thread_id: d.thread_id }, { status: 422 });
 
   // (11) 덤 삭제(질의 1 · 새 cron 0) — 보존 끝 또는 읽음 표시가 붙은 우편의 **본문**을 지운다(머리는 남긴다).
   //   ⚠우편이 한동안 안 오면 물리 삭제가 늦어진다 — 그동안은 수신함의 읽기 시점 필터가 본문을 막는다(명세 §3-4 ⑴).
@@ -1090,11 +1096,16 @@ async function handleMailAck(req: Request, env: Env): Promise<Response> {
     matched = Number(m?.n ?? 0);
   }
   // ★이미 붙은 표시는 안 바뀐다(첫 시각 유지 · acked_at IS NULL).
+  // ★대화 단위 ack 는 **서명 시각까지 들어온 우편에만** 붙는다(적대 1R R1-1) — 대화 id 만 서명에 걸리므로
+  //   상한이 없으면 같은 요청을 ±5분 안에 재생해 그 뒤 도착한 우편까지 읽음 처리하고, 읽음 = 본문 삭제(덤 삭제)로
+  //   받는 사람이 한 번도 못 본 우편이 사라진다. 상한 = min(서명 ts, 서버 시각) · message_id 지정 ack 는 그대로.
+  const ackUpto = nowIso(new Date(Math.min(Date.parse(ts), nowMs)));
   const res = await qb.prepare(
     `UPDATE mail SET acked_at = ?1
       WHERE to_id = ?2 AND acked_at IS NULL
-        AND (message_id IN (SELECT value FROM json_each(?3)) OR thread_id IN (SELECT value FROM json_each(?4)))`
-  ).bind(nowIso(new Date(nowMs)), forId, JSON.stringify(uniq), JSON.stringify(threadIds)).run();
+        AND (message_id IN (SELECT value FROM json_each(?3))
+             OR (thread_id IN (SELECT value FROM json_each(?4)) AND created_at <= ?5))`
+  ).bind(nowIso(new Date(nowMs)), forId, JSON.stringify(uniq), JSON.stringify(threadIds), ackUpto).run();
   return json({ acked: Number(res.meta?.changes ?? 0), ignored: uniq.length - matched }, 200, MAIL_HEADERS);
 }
 

@@ -47,6 +47,7 @@ const SIGNAL_ITEM_KEYS = ["signature", "count", "source", "op", "version", "os",
 const ISO_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const SIG_KEY = /^[0-9a-f]{32}$/;
 const PREV_HASH = /^[0-9a-f]{64}$/;
+const SCRUB_KEYS = ["rules", "blocked", "redacted"];   // 클라이언트 core.declare_scrub 이 만드는 모양 그대로
 const OP_RE = /^[a-z0-9_.-]{1,32}$/;
 const VERSION_RE = /^[0-9A-Za-z.+-]{1,32}$/;
 const OS_RE = /^(macos|windows|linux)(-[0-9.]{1,16})?$/;
@@ -222,8 +223,15 @@ export async function validateMail(doc: unknown, nowMs: number): Promise<Obj> {
   if (prev !== "genesis" && !PREV_HASH.test(prev)) {
     bad("prev 는 genesis 또는 소문자 hex 64자", { len: prev.length });
   }
-  need<string>(d, "roster", "string", "mail");
-  need<Obj>(d, "scrub", "dict", "mail");
+  // ★봉투도 닫는다(적대 1R R1-2) — payload 만 닫으면 `scrub`·`roster` 에 자유문을 실어 신호의 승인 겹 예외
+  //   (「자유문 칸이 없는 닫힌 모양」이 예외의 전제)를 그대로 지나간다. 클라이언트 `declare_scrub` 이 만드는 모양만 받는다.
+  if (!PREV_HASH.test(need<string>(d, "roster", "string", "mail"))) bad("roster 는 소문자 hex 64자", { where: "mail.roster" });
+  const sc = need<Obj>(d, "scrub", "dict", "mail");
+  closed(sc, SCRUB_KEYS, "scrub");
+  if (!PREV_HASH.test(need<string>(sc, "rules", "string", "scrub"))) bad("scrub.rules 는 소문자 hex 64자", { where: "scrub.rules" });
+  for (const key of ["blocked", "redacted"]) {
+    if (need<number>(sc, key, "int", "scrub") < 0) bad("scrub 계수는 0 이상", { where: `scrub.${key}` });
+  }
   if (!isIsoMs(need<string>(d, "ts", "string", "mail"))) bad("ts 는 밀리초 고정폭 ISO", { ts: d["ts"] });
   const p = need<Obj>(d, "payload", "dict", "mail");
   const intent = need<string>(p, "intent", "string", "payload");
