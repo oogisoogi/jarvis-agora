@@ -4484,7 +4484,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M644-desk-trimmed-notes-done", "M645-desk-final-size-unchecked",
                "M646-desk-note-stops-at-first-overflow", "M647-desk-oversize-note-carried-forever",
                "M648-desk-mask-rescans-tokens", "M649-desk-mask-case-sensitive", "M650-desk-mask-overlap-twice",
-               "M651-desk-mask-no-whole-lower"),
+               "M651-desk-mask-no-whole-lower", "M652-desk-mask-one-pass"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17726,6 +17726,15 @@ def _case_desk_mask_once_case_free() -> None:
         fh.write("Νίκος\ni\n\u0307\n\u0307x\n")
     m3 = counsel._masker(ctx3)
     sig, dot, part = m3("ΝΊΚΟΣ 님"), m3("İ" * 200), m3("İx 님")
+    # 적대 8R codex — 가린 자리가 이웃 시그마 문맥을 바꿔 남은 이름이 드러난다(「ΝΊΚΟΣA」의 A 를 가리면 앞이 νίκος)
+    ctx4, _s4 = _desk_world([])
+    with open(os.path.join(ctx4.config_dir, scrub.NAMES_FILENAME), "w", encoding="utf-8") as fh:
+        fh.write("Νίκος\na\n")
+    m4 = counsel._masker(ctx4)
+    left = [x for t in ("ΝΊΚΟΣA", "ΝΊΚΟΣA ΝΊΚΟΣ") for x in scrub.check_names({"t": m4(t)}, scrub.load_names(
+        scrub.names_path(ctx4.config_dir)))]
+    if left or m4("ΝΊΚΟΣA") != "[가림:이름][가림:이름]":
+        raise AssertionError(f"가린 뒤 드러난 이름이 남았다: {m4('ΝΊΚΟΣA')!r} 검출 {len(left)}")
     if sig != "[가림:이름] 님" or dot != "[가림:이름]" * 200 or part != "[가림:이름] 님" \
             or counsel._PUA_RE.search(sig + dot + part):
         raise AssertionError(f"접기·겹침 가림이 다르다: {sig!r} · {dot[:40]!r}… {len(dot.encode())}B")
@@ -18475,6 +18484,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("M651-desk-mask-no-whole-lower", "agora/counsel.py",
      '            hay = [folded] + ([whole] if whole != folded and len(whole) == len(owner) else [])',
      '            hay = [folded]',
+     "상담소: 이름 가림은 한 번·대소문자 무관"),
+    ("M652-desk-mask-one-pass", "agora/counsel.py",
+     '                out = out[:a] + marks[-1] + out[b:]\n',
+     '                out = out[:a] + marks[-1] + out[b:]\n            break\n',
      "상담소: 이름 가림은 한 번·대소문자 무관"),
     ("M630-allow-our-subdomains", "config/allow-domains.txt",
      '\njarvis.godmeyou.kr\n',

@@ -514,7 +514,9 @@ def _masker(ctx: Any) -> Callable[[str], str]:
         out = _PUA_RE.sub("", text or "")
         for k, (_rid, _kind, pattern) in enumerate(rules.compiled):
             out = pattern.sub(marks[k], out)
-        if name_re is not None:
+        # ★더 찾을 것이 없을 때까지 되풀이한다(적대 8R codex — 가린 자리가 이웃 시그마의 문맥을 바꿔 남은 이름이 새로 드러났다).
+        #   한 바퀴마다 원문 글자가 하나 이상 표시로 바뀌므로 원문 길이 안에 끝난다 · 표시는 이름에 없는 글자라 다시 안 걸린다.
+        while name_re is not None:
             folded, owner = _fold_map(out)
             # ★문자열 전체 lower() 도 찾는다(적대 7R codex — 끝 시그마처럼 문맥으로 접히는 글자는 글자별 접기와 다르다).
             #   길이가 같을 때만 같은 위치표를 쓴다(다르면 글자별 접기만 — 넓게 가리는 쪽).
@@ -522,6 +524,8 @@ def _masker(ctx: Any) -> Callable[[str], str]:
             hay = [folded] + ([whole] if whole != folded and len(whole) == len(owner) else [])
             spans = sorted({(owner[m.start()], owner[m.end() - 1] + 1) for h in hay for m in name_re.finditer(h)
                             if m.end() > m.start()})
+            if not spans:
+                break
             # ★겹치는 자리는 합친 뒤 한 번만 바꾼다(적대 7R codex — 접힌 두 글자가 한 원문 글자로 돌아가 두 번 바뀌며 표시가 남았다).
             merged: list[list[int]] = []
             for a, b in spans:
