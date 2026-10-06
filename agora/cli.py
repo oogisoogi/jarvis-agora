@@ -260,7 +260,7 @@ CLI_ONLY_ARGS: dict[str, tuple[str, ...]] = {
     "mail":         ("to", "subject", "body", "body_file", "intent", "reply_to", "refs",
                      "thread_id", "mail_id", "dir"),
     # ★동작마다 받는 인자는 `counsel.CLI_ACTION_ARGS` 가 한 번 더 좁힌다(`publish --dry-run` 거절).
-    "counsel":      ("dry_run", "date", "dir"),
+    "counsel":      ("dry_run", "date", "facts", "facts_nonce", "dir"),
 }
 
 # CLI 전용 명령의 **필수** 인자. ★구판은 이것을 `_run_local` 안의 분기에서 따로 봤고,
@@ -284,7 +284,7 @@ SELF_PARSED = ("selfcheck", "selftest", "keygen", "mcp-serve")
 # 진입점(`_run_onboard`)과 문서 시험이 같은 표를 봐야 「문서대로 치면 돈다」가 참이 된다.
 ACTION_ARG: dict[str, tuple[str, ...]] = {"checkpoint": ("issue",),
                                           "mail": ("send", "inbox", "read", "ack", "sync"),
-                                          "counsel": ("batch", "publish")}
+                                          "counsel": ("batch", "publish", "auto", "off", "on")}
 
 
 def action_names(command: str) -> tuple[str, ...]:
@@ -455,9 +455,13 @@ def _run_counsel(rest: list[str]) -> Any:
 
     ★인자 검사가 컨텍스트보다 먼저다(`_run_mail` 과 같은 순서).
     """
-    from agora import counsel, tools
+    from agora import collector, counsel, tools
     action, _rest = split_action("counsel", rest)
     kw = check_argv("counsel", rest)
+    counsel.check_action_args(action, kw)
+    if action in counsel.AUTO_ACTIONS:
+        # ★참가자 쪽 자동 전달(T3 · 명세 §13-5) — 데스크 설정도 가입도 없이 돈다(끄기는 가입 전에도 먹어야 한다).
+        return collector.dispatch(action, kw)
     ctx = tools.context_from_config(kw.pop("dir", None))
     return counsel.dispatch(ctx, action, kw)
 

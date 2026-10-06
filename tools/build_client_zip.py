@@ -61,6 +61,9 @@ MANIFEST: tuple[dict[str, object], ...] = (
     # ★skill.md 판본 핀(명세 E) — 에이전트가 받은 안내 문서를 이것과 대조한다. 문서 원본(docs/skill.md)과
     #   갈리면 빌드가 거부한다(`_assert_skill_pin_fresh`) — 낡은 핀이 나가면 진짜 문서가 가짜로 읽힌다.
     {"path": "config/skill-pin.txt", "kind": "file", "mode": 0o644},
+    # ★상담소 핀(명세 SPEC-mail-1to1 §13-2 1. 「꾸러미의 config/desk-pin.txt」) — 0.1.13 까지 **빠져 있었다**(zip 실측 · T3).
+    #   없으면 참가자 PC 의 `mail.desk_pin()` 이 빈 핀 → 자동 전달(신호·일일·주간)이 받는 이를 못 정해 한 통도 안 나간다.
+    {"path": "config/desk-pin.txt", "kind": "file", "mode": 0o644},
     {"path": "config/config.json.example", "kind": "file", "mode": 0o644},
     {"path": "config/participant.json.example", "kind": "file", "mode": 0o644},
     {"path": "config/README.md", "kind": "file", "mode": 0o644},

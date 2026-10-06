@@ -470,8 +470,10 @@ def agent_argv(agent_path: str, prompt: str, shell: list[str]) -> list[str]:
             "--output-format", "text"]
 
 
-def run_agent(argv: list[str], *, cwd: str, timeout: int, env: dict[str, str]) -> dict[str, Any]:
-    """깨운다. 시간을 넘기면 **프로세스 그룹째** 끝낸다(래퍼만 죽이면 일하는 자식이 산다)."""
+def run_agent(argv: list[str], *, cwd: str, timeout: int, env: dict[str, str],
+              keep_output: bool = False) -> dict[str, Any]:
+    """깨운다. 시간을 넘기면 **프로세스 그룹째** 끝낸다(래퍼만 죽이면 일하는 자식이 산다).
+    `keep_output` = 표준출력 본문을 `output` 칸으로 돌려준다(주간 성찰 작성기 `collector` 만 · 상주 깨움은 글자 수만)."""
     started = time.monotonic()
     kwargs: dict[str, Any] = {"cwd": cwd, "env": env, "stdin": subprocess.DEVNULL,
                               "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
@@ -488,8 +490,11 @@ def run_agent(argv: list[str], *, cwd: str, timeout: int, env: dict[str, str]) -
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
         return {"rc": "timeout", "seconds": round(time.monotonic() - started, 1)}
-    return {"rc": proc.returncode, "seconds": round(time.monotonic() - started, 1),
-            "output_chars": len(out or "")}
+    result = {"rc": proc.returncode, "seconds": round(time.monotonic() - started, 1),
+              "output_chars": len(out or "")}
+    if keep_output:
+        result["output"] = out or ""
+    return result
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
