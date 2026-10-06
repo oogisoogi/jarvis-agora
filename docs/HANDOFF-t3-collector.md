@@ -54,3 +54,6 @@
 - BACKLOG(데스크 T2 다음 판 · 구현 0): 데스크의 긴급 후보 분류기가 `intent=signal` 봉투의 `update.*` 코드를 긴급으로 센다(§4 「`urgent: 1`」 실측이 그 자리).
 - BACKLOG(터미널 데몬 · 이 티켓 밖): 시간 초과된 command 잡의 자식 프로세스 그룹을 데몬이 끝내지 않는다(작성기는 `resident.run_agent` 가 스스로 그룹째 끝낸다).
 - BACKLOG(문서 · 비동봉 · 수정 금지 판정 = 리뷰 4판 ⑤): whoami 칸 순서가 옛 꼴로 남은 문서 3곳 — `.appbuild/05-gate.md`:163 · `docs/skill.md`:41 · `docs/ONBOARDING.md`:34(현행 = 첫 칸 `advice_autosend` · 둘째 `approval_gate` · 셋째 상주). 0.1.14 zip 에는 이 문서들이 없어 발행물 결함 아님 — 다음 문서 정비 판에서 고친다.
+- BACKLOG(N1 · Fable 최종 판정 MINOR · 안전 쪽): `on` 이 `run.lock` 을 기다리는 동안 도는 판의 OFF 경로가 표식을 먼저 빼면 `expect_due` 불일치로 「켜지_않음」(「그사이 다른 끄기가 끼어들었다」) 사유가 잘못 나간다 — 두 번째 `on` 에서는 켜진다. 처방: 잠금 안에서 `cur = due_token()` 이 None 이면 이미 지워진 것으로 보고 켜기를 진행 + 사유 문구 교정.
+- BACKLOG(N2 · Fable MINOR): 그날 일일이 끝난 날의 tick 은 팩이 facts 를 안 써서(비대상 판) nonce 불일치 → `facts={}` — 같은 판 주간 문서에 `version`·`os` 칸이 빠지고 `counsel.log` 에 `no_nonce_match` 가 판마다 찍힌다(소음). 처방 후보: 비대상 판은 nonce 표식만 갱신하거나, 주간 칸 재료를 일일 facts 와 분리.
+- BACKLOG(N3 · Fable MINOR): `_write_json`(임시 → fsync → `os.replace`)이 윈 공유 위반(다른 프로세스가 config.json 을 연 채)의 `OSError` 를 잡지 않는다 — `agora counsel on|off` 가 CLI 오류로 끝나고 설정은 그대로(상태 불변 · 안전 쪽). 처방: 짧은 재시도 + 사유 반환.
