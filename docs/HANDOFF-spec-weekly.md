@@ -49,6 +49,8 @@
 - 부득이 되돌리면: ⑴ 되돌리기 전에 `UPDATE mail SET acked_at = <지금> WHERE intent = 'weekly' AND acked_at IS NULL`(weekly 행 격리 = 미읽음·상한 계수에서 빠짐 · 본문은 다음 덤 삭제) — master D1 집행 ⑵ 데스크 쪽 격리분 재생 = 데스크 설정 폴더 `mailbox/quarantine.jsonl` 의 `contract` 사유 weekly·daily 줄의 `mail_id` 최소값으로 `mailbox/cursor.json` 을 되감고 새 판 클라이언트로 `agora mail inbox` 1회(같은 `(from,message_id)` 는 한 번만 적재 = 중복 0).
 
 ## 4. 전체 게이트
+- **2판(커밋 4a7835d) `bash tests/commit_gate.sh` = `== 결과: PASS ==` rc 0** — 공개 표현 0 · 비밀 누출 0 · selftest **582/582 PASS · 616/616 KILLED** · F-1 재현 25/25 · codex 0.1.4 사후 재현 11/11 · 공백 위생 PASS. 릴레이: vitest **86/86** · 로컬 하네스 rc 0(우편 109/109 · 클라이언트 왕복 14/14 · 「핀 밖 받는 이 신호 = code 3」 신설) · 뮤테이션 M45~M53 **9/9 KILLED**.
+- (아래 = 1판 기록)
 - 클라이언트 전체 `selftest.run()`(커밋 56c3ac9 트리 · 08:52 끝): **케이스 580/580 PASS · 뮤테이션 608/608 KILLED · NOT_APPLIED 0 · 미발생 오류코드 0 · ok=True**.
   · 1차 전체 실행(커밋 전)은 579 중 1 적색 = 「배선: 안 불리는 정의 0」(`weekly_is_empty` · 부르는 곳 없음) + 그 여파 M208 NOT-APPLIED → 함수 삭제로 해소(§2-10) · 2차 = 위 초록.
 - 릴레이(커밋 7d28ef1 · src 이후 무변경): vitest **84/84** · 로컬 하네스 기준선 PASS(mailway 109/109 · 클라이언트 왕복 13/13) · 뮤테이션 M45~M52 **8/8 KILLED**(`isBlank` 교체 뒤 재실행).
