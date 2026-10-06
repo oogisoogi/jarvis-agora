@@ -18770,10 +18770,12 @@ def _case_auto_daily_closed_fields() -> None:
     now = _auto_now()
     facts = {**_AUTO_FACTS, "seats": {"count": 1, "roles": ["Master"]}, "owner_note": "새면 안 된다",
              "doctor": {"ok": 12, "warn": 1, "fail": 0, "skip": 1, "warn_ids": ["dept-awakening-seed"], "fail_ids": []},
-             "uptime": {"last_boot": "2026-10-04T23:45:00.000Z", "uptime_s": 8106}, "nope": 1}
+             "uptime": {"last_boot": "2026-10-04T23:45:00.000Z", "uptime_s": 8106}, "nope": 1,
+             "depts": {"active": -1, "tombstones": 0}}
     out = collector.daily_payload(facts, today="2026-10-06", signatures=["a" * 32], weekly_skipped="2026-W40", now=now)
     d = out["daily"]
-    if "seats" in d or "owner_note" in d or "nope" in d or d.get("weekly_skipped") != "2026-W40" \
+    # ★`depts` = 형식 밖 값(받는 쪽 검사기가 거부) — 범주 거르기(⑬)와 따로 **검사기 거르기**를 잰다(M702).
+    if "seats" in d or "depts" in d or "owner_note" in d or "nope" in d or d.get("weekly_skipped") != "2026-W40" \
             or d.get("doctor", {}).get("warn_ids") != ["dept-awakening-seed"] or d["errors"]["signatures"] != ["a" * 32] \
             or d.get("version") != {"host": "1.1.8", "pack": "1.1.8"}:
         raise AssertionError(f"일일 칸 거르기가 틀렸다: {sorted(d)}")
