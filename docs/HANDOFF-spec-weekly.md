@@ -5,7 +5,8 @@
 > **2판**(master ca36b166 · codex 적대 1R BLOCK 6·MAJOR 10·MINOR 4 반영 + 게이트 수리 3f1ae4e0·b653203e) — 번호별 처방 = **§11 1R 반영표**.
 > **3판**(master 1363219c · 재개 121e6ee0 · codex 적대 2R BLOCK 3·MAJOR 8·MINOR 3 반영) — 번호별 처방 = **§11 2R 반영표**.
 
-## 0. 이어받기(현재 상태 · 11:4x · 3판 끝)
+## 0. 이어받기(현재 상태 · 13:1x · 라이브 완료)
+- ★**라이브 완료 13:1x**(master ddd4fea6) · main = 152e3be · 릴레이 ac6c2e6b · 사이트 5277712e · 라이브 zip sha 3876029b 일치 · 데스크 d0d45e8(호환 실측 PASS = added 2 · quarantined 0 · `docs/DESK-COMPAT-0113.md` 그대로) · 시험 참가자 jarvis-test-weekly0113 보존 · 다음 = T3 팩 수집기(`TICKET=agora-t3-pack-collector` · §6 의무).
 - ★**4판 = 집행 끝**(ef54d1f 본체 + 275e264 게이트 수리 + b0ac641 문서 + 이 §4 줄) · 3R(Fable · 마지막) = 수렴 예·BLOCK 0 · 번호별 = **§11-3** · 다음 = master diff 정독 + 스냅샷 게이트 → 머지(4R 없음).
 - (3판 기록) 8128ba9 본체 + 95783e4 게이트 수리 + 1c7544a · 번호별 = §11-2.
 - ★**3판 지시(10:02 · master 1363219c · 원장 yes) = 후임 첫 집행 대상** — 지시 원문 = master 인박스 발신 `[master#1363219c]`(판정표: BLOCK M7·N1·B5 · MAJOR M3 부분·M4·M6·M8·M10·N2·B2·B4 · MINOR N3·N4·B3 문면 · 기각 유지 B6 · M5 4종 확정 · 직전 7주 창 불변) · codex 2R 원문 = `~/axdev/master/reports/REVIEW-SPEC-WEEKLY-codex-2r.md` · 순서 = 3판 집행 → `bash tests/commit_gate.sh` 전건 PASS 줄 인용 → §11 에 「2R 반영표」 추가 → 【확인요청】 3판(상한 60분 · 중단 2h) · push 0 · deploy 0.
