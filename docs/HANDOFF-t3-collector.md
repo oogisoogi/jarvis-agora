@@ -1,9 +1,10 @@
 # HANDOFF — T3 상담소 자동 전달(TICKET=agora-t3-pack-collector · 2026-10-06)
 
-## 0. 지금 상태(한눈) — 3판 끝(2026-10-06 16:4x · 이종 리뷰 1R·2R 반영 · 3R = 마지막 대기)
+## 0. 지금 상태(한눈) — 4판 끝(2026-10-06 18:4x · 이종 리뷰 1R·2R·3R 반영 · 다음 = master 정독·게이트·Fable 판정 → 머지)
 - 아고라 가지 `feat/t3-collector`(main e0f5df5 위) — push 0. 판별 커밋 = 1판 §2 · 2판 `77c5f8c`·`65d9058`·`499d98c`·`d9e0e7d` · 3판 `8d40331`(끄기 = 설정 먼저·잠금 대기 상한·지우기 미룸 표식 · 일일 cutoff = facts 값·낡은 facts 거부)·`9dd0c83`(스킬 문서 칸 이름)·`9aadf40`(이 문서 함정 줄) · commit_gate PASS @9aadf40 = 605/605 · 679/679 KILLED · NOT-APPLIED 0.
-- 팩 가지 `t3/collector-118` = **merge 4d0aab95(U1 병합) 위로 rebase** — 머리 `434f06cc` · 본 가지 push 0 · CI 전용 미러 `fix/t3-collector-118`(= 434f06cc · master 재승인 9b2fe6f3) · 설계 1장 = 그 저장소 `docs/design/T3-COLLECTOR-DESIGN-2026-10-06.md`(§8~§10 = 판정·리뷰 반영).
-- 동봉 = 0.1.14 zip sha256 `1117fa98e76536a2ac4ed82c10541330792aec29e33fb2d40e15efdeae879366` · 711,863 B · 57 파일 · 빌드 트리 = 아고라 `9aadf40` · 핀 넷째 칸 = 트리 지문 v2 `8fae9158473027dd1970b3f61e10982bc8fc3a0f79ea13dc4aa497ad7431a136` · known(자동 교체 대상) = 0.1.12·0.1.13·0.1.14(산식 v2 · 다음 판 동봉 때 그 판 줄을 더한다).
+- 4판(codex 3R BLOCK1·MAJOR3) = 아고라 `1e89611`(off = `auto=false`+`purge_due` 한 설정 문서 원자 기록 · 지운 뒤에만 표식 뺌 · on = 표식 남으면 run.lock 잡고 지운 뒤에만 켬 · 발신 직전 auto ∧ 표식 없음 · facts nonce 일치 때만 · cutoff 미래 +5분 초과 거부)·`7cd7b04`(CLI 명령 표 `facts_nonce` — 꾸러미 E2E 적발)·`b9c92ab`(M699 앵커 재조준) · commit_gate PASS @b9c92ab = 607/607 · 687/687 KILLED · 팩 `45054930`(tick 판 nonce → facts.json + `--facts-nonce`)·`89512f67`(tick 총 ≤540 = 끝내기 몫 40 선차감 · agora 몫 ≤500 · 실측 499.0초)·`1368c5eb`(windows-health 필수 검체 같은 줄 ok · skipped 0 · awk 자가 시험)·`429c1d6b`·`1b304707`(동봉 재빌드).
+- 팩 가지 `t3/collector-118` = **merge 4d0aab95(U1 병합) 위로 rebase** — 머리 `1b304707` · 본 가지 push 0 · CI 전용 미러 `fix/t3-collector-118`(= 1b304707 · master 재승인 f0642410) · 설계 1장 = 그 저장소 `docs/design/T3-COLLECTOR-DESIGN-2026-10-06.md`(§8~§10 = 판정·리뷰 반영).
+- 동봉 = 0.1.14 zip sha256 `276b64f55e9de9c6ea92141c000a22e31551acdfe4ef1b006631fc492c892bf6` · 715,390 B · 57 파일 · 빌드 트리 = 아고라 `b9c92ab` · 핀 넷째 칸 = 트리 지문 v2 `c7d9c679b7d0868fc2f8b13c4e39d3b89bc6920da81a2d3fdca08365f8734640` · known(자동 교체 대상) = 0.1.12·0.1.13·0.1.14(산식 v2 · 3판·4판 중간 빌드 줄 = 미배포라 교체 · 다음 판 동봉 때 그 판 줄을 더한다).
 - 다음 사람이 먼저 볼 것: ①판을 올리면 known 에 지금 판 줄 추가 + 핀 4칸 재계산(팩 시험 `test_known_file_rows` 가 핀 넷째 칸 = known 동봉 판 줄을 대조) ②아고라 소스를 고쳐 zip 이 바뀌면 팩 b64·핀도 함께(같은 커밋 세트) ③윈 = windows-health 레인의 팩 파이썬 스텝이 교차 잠금·0번 바이트를 잰다.
 - 판 = 클라이언트 0.1.14 후보(`__version__` · RELEASES 후보 행) · 동봉 zip = 팩 원본 `install/agora-client-0.1.14.zip.b64` + `install/agora-client.pin`.
 - 게시·릴레이 /join 핀·main 병합·팩 발행 = master(1.1.8 발행과 묶음 · 0.1.13 존치).
@@ -52,3 +53,4 @@
 - 적대 라운드(codex 1R·2R → Fable 3R · 발주 = master).
 - BACKLOG(데스크 T2 다음 판 · 구현 0): 데스크의 긴급 후보 분류기가 `intent=signal` 봉투의 `update.*` 코드를 긴급으로 센다(§4 「`urgent: 1`」 실측이 그 자리).
 - BACKLOG(터미널 데몬 · 이 티켓 밖): 시간 초과된 command 잡의 자식 프로세스 그룹을 데몬이 끝내지 않는다(작성기는 `resident.run_agent` 가 스스로 그룹째 끝낸다).
+- BACKLOG(문서 · 비동봉 · 수정 금지 판정 = 리뷰 4판 ⑤): whoami 칸 순서가 옛 꼴로 남은 문서 3곳 — `.appbuild/05-gate.md`:163 · `docs/skill.md`:41 · `docs/ONBOARDING.md`:34(현행 = 첫 칸 `advice_autosend` · 둘째 `approval_gate` · 셋째 상주). 0.1.14 zip 에는 이 문서들이 없어 발행물 결함 아님 — 다음 문서 정비 판에서 고친다.
