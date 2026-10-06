@@ -4426,7 +4426,8 @@ def _case_every_mutation_belongs_to_an_axis() -> None:
 S8_AXES: dict[str, tuple[str, ...]] = {
     # ★T3(2026-10-06) — 상담소 자동 전달. 잃는 것: 같은 날 두 통(버킷 429)·보낸 줄 재발신·근거 끊김(바이트 변형)·
     #   꺼도 나감·모델 재호출(토큰)·빈 보고와 실패의 혼동 — 전부 오류 없이 조용히 난다.
-    "상담소자동": ('M693-auto-signal-day-gate-dropped', 'M694-auto-sent-lines-not-moved', 'M695-auto-sent-ledger-reserialized', 'M696-auto-unknown-commit-dropped', 'M697-auto-signal-pending-never-expires', 'M698-auto-items-uncapped', 'M699-auto-unreadable-config-on', 'M700-auto-off-keeps-lines', 'M701-auto-any-desk', 'M702-auto-daily-field-unfiltered', 'M703-auto-daily-signatures-empty', 'M704-auto-weekly-rejects-kept', 'M705-auto-weekly-rewrites-dead-cycle', 'M706-auto-weekly-empty-unreported', 'M707-auto-writer-failure-as-empty', 'M708-auto-features-not-machine', 'M709-auto-old-lines-kept', 'M710-auto-weekly-429-retried', 'M711-auto-run-lock-ignored', 'M712-auto-day-utc-not-kst', 'M713-auto-writer-tools-open', 'M714-package-drops-desk-pin'),
+    "상담소자동": ('M693-auto-signal-day-gate-dropped', 'M694-auto-sent-lines-not-moved', 'M695-auto-sent-ledger-reserialized', 'M696-auto-unknown-commit-dropped', 'M697-auto-signal-pending-never-expires', 'M698-auto-items-uncapped', 'M699-auto-unreadable-config-on', 'M700-auto-off-keeps-lines', 'M701-auto-any-desk', 'M702-auto-daily-field-unfiltered', 'M703-auto-daily-signatures-empty', 'M704-auto-weekly-rejects-kept', 'M705-auto-weekly-rewrites-dead-cycle', 'M706-auto-weekly-empty-unreported', 'M707-auto-writer-failure-as-empty', 'M708-auto-features-not-machine', 'M709-auto-old-lines-kept', 'M710-auto-weekly-429-retried', 'M711-auto-run-lock-ignored', 'M712-auto-day-utc-not-kst', 'M713-auto-writer-tools-open', 'M714-package-drops-desk-pin',
+                'M715-auto-off-skips-run-lock', 'M716-auto-signal-send-unchecked', 'M717-auto-daily-send-unchecked', 'M718-auto-weekly-send-unchecked', 'M719-auto-run-continues-after-off', 'M720-auto-daily-resend-unchecked', 'M721-auto-off-keeps-weekly-pending-cycle', 'M722-auto-off-keeps-daily-pending', 'M723-auto-off-keeps-mailbox-weekly-pending', 'M724-auto-empty-scan-marks-day', 'M725-auto-daily-ok-at-success-time', 'M726-evidence-window-ignored', 'M727-evidence-bad-cycle-whole-ledger', 'M728-writer-input-drops-by-sort-order', 'M729-writer-input-unwindowed', 'M731-auto-daily-seats-unfolded-kept'),
     # ★09-19 신설 — **광장v2**. 피드 순서와 「어느 방이 커뮤니티인가」를 계산이 정하는 자리.
     #   여기서 잃는 것은 조용하다: 서버 피드와 클라이언트 피드가 다른 순서를 보이거나, 일반 토론방이
     #   커뮤니티로 읽혀 전역 상한이 토론을 막는다 — 오류 없이.
@@ -18551,13 +18552,13 @@ def _auto_pub(sent: list[dict[str, Any]], mode: dict[str, str] | None = None, *,
 
 
 def _auto_run(ctx: Any, *, pub: Any, now: Any = None, facts: dict[str, Any] | None = None,
-              runner: Any = None, send: Any = None) -> dict[str, Any]:
+              runner: Any = None, send: Any = None, ctx_factory: Any = None) -> dict[str, Any]:
     from agora import collector, mail
     fpath = os.path.join(ctx.config_dir, "facts-test.json")
     with open(fpath, "w", encoding="utf-8") as fh:
         json.dump(facts or {}, fh)
     return _with_key(_fixtures()["key_a"], lambda: collector.run(
-        directory=ctx.config_dir, facts_path=fpath, now=now or _auto_now(), ctx_factory=lambda _d: ctx,
+        directory=ctx.config_dir, facts_path=fpath, now=now or _auto_now(), ctx_factory=ctx_factory or (lambda _d: ctx),
         publish=pub, send_weekly=send or (lambda c, w: mail._send_weekly(c, w, publish=pub)),
         runner=runner or (lambda *a, **k: (_ for _ in ()).throw(AssertionError("작성기를 부르면 안 되는 판"))),
         which=lambda _n: "/fake/bin/claude"))
@@ -18757,13 +18758,20 @@ def _case_auto_daily_closed_fields() -> None:
         raise AssertionError(f"일일 칸 거르기가 틀렸다: {sorted(d)}")
     if "errors" in collector.daily_payload(facts, today="2026-10-06", signatures=None, weekly_skipped=None, now=now)["daily"]:
         raise AssertionError("서명 집합을 모르는데 errors 칸을 실었다")
+    # ★리뷰 ⑬: 자리 역할 = 접힌 범주(master·cso·worker·pack)만 — 형식(소문자 토큰)은 맞아도 범주 밖 이름이 하나면 칸째 뺀다.
+    folded = {"count": 4, "roles": ["cso", "master", "pack", "worker"]}
+    for roles, keep in ((folded["roles"], True), (["master", "w3"], False), (["edu-dept", "master"], False)):
+        got = collector.daily_payload({"seats": {"count": len(roles), "roles": roles}}, today="2026-10-06",
+                                      signatures=None, weekly_skipped=None, now=now)["daily"]
+        if ("seats" in got) is not keep:
+            raise AssertionError(f"자리 역할 범주 거르기가 틀렸다: {roles} → {got.get('seats')}")
 
 
 def _auto_prev_cycle(now: Any) -> tuple[str, Any, Any]:
     from agora import collector, mail
     pol = mail.weekly_policy({}, now)
     cyc = mail.previous_cycle(mail.cycle_of(now, pol), pol)
-    start, end = collector.cycle_window(cyc, pol)
+    start, end = mail.cycle_window(cyc, pol)
     return cyc, start, end
 
 
@@ -18863,7 +18871,8 @@ def _case_auto_deterministic_payloads() -> None:
         sent: list[dict[str, Any]] = []
         with _PinnedDesk(ctx, "operator-b"):
             _auto_run(ctx, pub=_auto_pub(sent), now=now, facts=_AUTO_FACTS)
-        out.append(([mail.canonical_bytes(d["payload"]) for d in sent], collector.writer_input(ctx)))
+        out.append(([mail.canonical_bytes(d["payload"]) for d in sent],
+                    collector.writer_input(ctx, mail.cycle_week_of(now), now)))
     if out[0] != out[1]:
         raise AssertionError("같은 입력에서 다른 payload·작성기 입력이 나왔다")
 
@@ -18913,6 +18922,256 @@ def _case_auto_cli_actions() -> None:
             raise
     else:
         raise AssertionError("데스크 dispatch 가 auto 를 받았다")
+
+
+def _auto_flip_off(config_dir: str) -> None:
+    """손으로 끈 설정(판 밖의 손) — `set_auto` 를 거치지 않는다(잠금 없이 파일만 바뀐다)."""
+    with open(os.path.join(config_dir, "config.json"), "w", encoding="utf-8") as fh:
+        json.dump({"counsel": {"auto": False}}, fh)
+
+
+def _case_auto_off_waits_for_round_and_rechecks() -> None:
+    """리뷰 ① — `counsel off` 는 `run.lock` 을 **기다려** 쥔 채 설정을 쓰고 지운다(도는 판이 끝난 뒤 돌아온다) ·
+    판은 발신 **직전마다** 다시 본다: 판 도중 꺼지면 그 통부터 0(신호·주간·일일·일일 재전송) · 판은 state 를 되쓰지 않고 지운다."""
+    import datetime as _dt
+    import threading
+    import time
+    from agora import collector, mail
+    # (가) off 는 도는 판을 기다린다 — 판 안(신호 발신 중)에서 off 를 부르면 판이 끝날 때까지 설정이 안 바뀐다.
+    ctx = _mail_ctx(_FakeMailStore())
+    d = ctx.config_dir
+    _signal_ledger(ctx, [_sig_row()])
+    sent: list[dict[str, Any]] = []
+    base = _auto_pub(sent)
+    seen: dict[str, Any] = {}
+
+    def pub(c: Any, doc: dict[str, Any]) -> dict[str, Any]:
+        out = base(c, doc)
+        if doc["payload"]["intent"] == "signal":
+            t = threading.Thread(target=lambda: collector.set_auto(d, on=False), daemon=True)
+            t.start()
+            time.sleep(0.3)
+            seen.update(thread=t, waiting=t.is_alive(), cfg=os.path.exists(os.path.join(d, "config.json")))
+        return out
+    with _PinnedDesk(ctx, "operator-b"):
+        _auto_run(ctx, pub=pub, facts=_AUTO_FACTS)
+    seen["thread"].join(10)
+    if not seen["waiting"] or seen["cfg"]:
+        raise AssertionError("counsel off 가 도는 판을 기다리지 않고 설정을 썼다(판이 지운 pending 을 되쓴다)")
+    if collector.auto_enabled(d) or seen["thread"].is_alive():
+        raise AssertionError("판이 끝난 뒤에도 off 가 안 들었다")
+    # (나) 판 도중 꺼짐(손으로 고친 설정) — 신호 발신 직전에 본다: 0통 · 모은 줄 지움 · 표식·pending 0
+    ctx = _mail_ctx(_FakeMailStore())
+    d = ctx.config_dir
+    _signal_ledger(ctx, [_sig_row()])
+    sent = []
+
+    def flip_then_ctx(_d: str) -> Any:
+        _auto_flip_off(d)
+        return ctx
+    with _PinnedDesk(ctx, "operator-b"):
+        out = _auto_run(ctx, pub=_auto_pub(sent), facts=_AUTO_FACTS, ctx_factory=flip_then_ctx)
+    st = collector.collector_state(d)
+    with open(os.path.join(d, "counsel", "signals.jsonl"), encoding="utf-8") as fh:
+        left = fh.read()
+    if sent or out.get("signal", {}).get("result") != "off" or left.strip() or "signal_day" in st \
+            or "signal_pending" in st:
+        raise AssertionError(f"신호 발신 직전에 꺼짐을 안 봤다: sent={len(sent)} {out} {sorted(st)}")
+    # (다) 신호를 보낸 뒤 꺼짐 — 같은 판 일일은 0 · 앞서 보낸 신호의 대화 id 는 남는다(되쓰지 않아도 지운 칸만 빠진다)
+    ctx = _mail_ctx(_FakeMailStore())
+    d = ctx.config_dir
+    _signal_ledger(ctx, [_sig_row()])
+    sent = []
+    base = _auto_pub(sent)
+
+    def pub_then_off(c: Any, doc: dict[str, Any]) -> dict[str, Any]:
+        out = base(c, doc)
+        _auto_flip_off(d)
+        return out
+    with _PinnedDesk(ctx, "operator-b"):
+        _auto_run(ctx, pub=pub_then_off, facts=_AUTO_FACTS)
+    st = collector.collector_state(d)
+    if [x["payload"]["intent"] for x in sent] != ["signal"] or "daily_pending" in st or "daily_day" in st \
+            or not st.get("signal_thread"):
+        raise AssertionError(f"판 도중 꺼졌는데 일일을 보냈거나 앞 통 상태를 잃었다: {[x['payload']['intent'] for x in sent]} {sorted(st)}")
+    # (라) 주간 — 작성기가 도는 사이 꺼짐 = 주간 발신 0 · 일일 0
+    now = _auto_now()
+    _cyc, start, _end = _auto_prev_cycle(now)
+    ctx = _mail_ctx(_FakeMailStore())
+    d = ctx.config_dir
+    _signal_ledger(ctx, [_sig_row(ts=mail.now_ms_iso(start + _dt.timedelta(hours=1)))], name="signals-sent.jsonl")
+    good = {"text": "업데이트가 막혔다", "evidence_ref": {"kind": "cmd", "id": "host.update", "quote": "host.update"}}
+    sent = []
+
+    def writer_then_off(argv: list[str], **kw: Any) -> dict[str, Any]:
+        _auto_flip_off(d)
+        return {"rc": 0, "output": json.dumps({"blocked": [good]})}
+    with _PinnedDesk(ctx, "operator-b"):
+        out = _auto_run(ctx, pub=_auto_pub(sent), now=now, facts=_AUTO_FACTS, runner=writer_then_off)
+    if sent or out.get("weekly", {}).get("result") != "off":
+        raise AssertionError(f"작성 중 꺼졌는데 주간·일일을 보냈다: {[x['payload']['intent'] for x in sent]} {out.get('weekly')}")
+    # (마) 일일 재전송(code 8 pending) 직전에 꺼짐 = 같은 문서도 안 나간다
+    ctx = _mail_ctx(_FakeMailStore())
+    d = ctx.config_dir
+    sent = []
+    mode = {"m": "8"}
+    with _PinnedDesk(ctx, "operator-b"):
+        _auto_run(ctx, pub=_auto_pub(sent, mode), now=now, facts=_AUTO_FACTS)
+        n = len(_auto_by(sent, "daily"))
+        mode["m"] = "ok"
+
+        def flip_then_ctx2(_d: str) -> Any:
+            _auto_flip_off(d)
+            return ctx
+        _auto_run(ctx, pub=_auto_pub(sent, mode), now=now + _dt.timedelta(minutes=30), facts=_AUTO_FACTS,
+                  ctx_factory=flip_then_ctx2)
+    if n != 1 or len(_auto_by(sent, "daily")) != 1:
+        raise AssertionError(f"꺼졌는데 일일 pending 을 다시 보냈다: {n} → {len(_auto_by(sent, 'daily'))}")
+
+
+def _case_auto_off_on_never_resends_old() -> None:
+    """리뷰 ② — off 는 같은 잠금 안에서 **일관되게** 지운다: 모은 줄 · signal_pending · daily_pending · weekly_doc ·
+    `weekly[주기] == "pending"` · weekly_skipped · 우편함 weekly_pending.json → off → on → auto 가 옛 문서(옛 message_id)를 안 보낸다."""
+    import datetime as _dt
+    from agora import collector, mail
+    now = _auto_now()
+    cyc, start, _end = _auto_prev_cycle(now)
+    ctx = _mail_ctx(_FakeMailStore())
+    d = ctx.config_dir
+    _signal_ledger(ctx, [_sig_row()])
+    _signal_ledger(ctx, [_sig_row(ts=mail.now_ms_iso(start + _dt.timedelta(hours=1)))], name="signals-sent.jsonl")
+    good = {"text": "업데이트가 막혔다", "evidence_ref": {"kind": "cmd", "id": "host.update", "quote": "host.update"}}
+    runner = lambda argv, **kw: {"rc": 0, "output": json.dumps({"blocked": [good]})}
+    sent: list[dict[str, Any]] = []
+    mode = {"m": "8"}
+    with _PinnedDesk(ctx, "operator-b"):
+        pub = _auto_pub(sent, mode)
+        _auto_run(ctx, pub=pub, now=now, facts=_AUTO_FACTS, runner=runner,
+                  send=lambda c, w: mail._send_weekly(c, w, publish=pub))
+        st = collector.collector_state(d)
+        st["weekly_skipped"] = mail.previous_cycle(cyc, mail.weekly_policy({}, now))
+        collector._write_json(os.path.join(collector.counsel_dir(d), collector.STATE_FILE), st)
+        old = {x["message_id"] for x in sent}
+        if len(old) != 3 or not st.get("signal_pending") or not st.get("daily_pending") \
+                or st.get("weekly", {}).get(cyc) != "pending" or not st.get("weekly_doc") \
+                or not mail._load_json(mail._path(ctx, mail.WEEKLY_PENDING_FILE)).get("doc"):
+            raise AssertionError(f"준비(세 통 pending)가 안 됐다: {len(old)} {sorted(st)}")
+        collector.set_auto(d, on=False)
+        st = collector.collector_state(d)
+        left = [k for k in ("signal_pending", "daily_pending", "weekly_doc", "weekly_skipped") if k in st]
+        if left or "pending" in (st.get("weekly") or {}).values() \
+                or mail._load_json(mail._path(ctx, mail.WEEKLY_PENDING_FILE)):
+            raise AssertionError(f"off 가 일부만 지웠다: 남은 칸 {left} · 주기 {st.get('weekly')}")
+        collector.set_auto(d, on=True)
+        mode["m"] = "ok"
+        before = len(sent)
+        for later in (now + _dt.timedelta(hours=1), now + _dt.timedelta(days=1)):
+            _auto_run(ctx, pub=pub, now=later, facts=_AUTO_FACTS, runner=runner,
+                      send=lambda c, w: mail._send_weekly(c, w, publish=pub))
+    again = [x["message_id"] for x in sent[before:] if x["message_id"] in old]
+    if again:
+        raise AssertionError(f"off → on 뒤 옛 문서를 다시 보냈다: {again}")
+    if any(x["payload"]["intent"] == "daily" and "weekly_skipped" in x["payload"]["daily"] for x in sent[before:]):
+        raise AssertionError("off 가 지운 weekly_skipped 이월이 다시 실렸다")
+
+
+def _case_auto_signal_mark_only_when_sent() -> None:
+    """리뷰 ③ — 신호 하루 표식은 **발신을 시도할 때만** — 빈 판(신호 0)은 표식 0 → 같은 날 늦게 쌓인 줄은 그날 다음 판에 나간다 ·
+    「하루 한 번 시도」는 그대로(보낸 뒤 쌓인 줄은 다음 날)."""
+    import datetime as _dt
+    from agora import collector
+    ctx = _mail_ctx(_FakeMailStore())
+    now = _auto_now()
+    sent: list[dict[str, Any]] = []
+    with _PinnedDesk(ctx, "operator-b"):
+        _auto_run(ctx, pub=_auto_pub(sent), now=now, facts=_AUTO_FACTS)
+        if "signal_day" in collector.collector_state(ctx.config_dir) or _auto_by(sent, "signal"):
+            raise AssertionError("신호 0 인 판이 하루 표식을 적었다")
+        _signal_ledger(ctx, [_sig_row()])
+        _auto_run(ctx, pub=_auto_pub(sent), now=now + _dt.timedelta(minutes=30), facts=_AUTO_FACTS)
+        if len(_auto_by(sent, "signal")) != 1:
+            raise AssertionError("같은 날 늦게 쌓인 신호가 그날 나가지 않았다(빈 판 표식)")
+        _signal_ledger(ctx, [_sig_row()])
+        _auto_run(ctx, pub=_auto_pub(sent), now=now + _dt.timedelta(minutes=60), facts=_AUTO_FACTS)
+    if len(_auto_by(sent, "signal")) != 1:
+        raise AssertionError("하루 두 번 신호를 보냈다")
+
+
+def _case_auto_daily_ok_at_is_cutoff() -> None:
+    """리뷰 ④ — 일일 pending 에 마감 시각(`cutoff` = 만든 판의 now) · 성공이 다음 판(code 8 재전송)이어도
+    `daily_ok_at` = 그 마감 시각(성공 시각 아님 — 팩 `facts` 가 이 칸부터 센다)."""
+    import datetime as _dt
+    from agora import collector, mail
+    ctx = _mail_ctx(_FakeMailStore())
+    now = _auto_now()
+    sent: list[dict[str, Any]] = []
+    base = _auto_pub(sent)
+    mode = {"m": "8"}
+
+    def pub(c: Any, doc: dict[str, Any]) -> dict[str, Any]:
+        if doc["payload"]["intent"] == "daily" and mode["m"] == "8":
+            sent.append(doc)
+            raise AgoraError(errors.UNKNOWN_COMMIT, "성공 불명")
+        return base(c, doc)
+    with _PinnedDesk(ctx, "operator-b"):
+        _auto_run(ctx, pub=pub, now=now, facts=_AUTO_FACTS)
+        pending = collector.collector_state(ctx.config_dir).get("daily_pending") or {}
+        if pending.get("cutoff") != mail.now_ms_iso(now):
+            raise AssertionError(f"일일 pending 에 마감 시각이 없다: {sorted(pending)}")
+        mode["m"] = "ok"
+        _auto_run(ctx, pub=pub, now=now + _dt.timedelta(hours=1), facts=_AUTO_FACTS)
+    st = collector.collector_state(ctx.config_dir)
+    if len(_auto_by(sent, "daily")) != 2 or st.get("daily_ok_at") != mail.now_ms_iso(now):
+        raise AssertionError(f"daily_ok_at 이 마감 시각이 아니다: {st.get('daily_ok_at')} ≠ {mail.now_ms_iso(now)}")
+
+
+def _case_auto_evidence_cycle_window() -> None:
+    """리뷰 ⑤ — 근거 표 = **그 주기 창 안 줄만**(`mail.cycle_window` 하나 · 시작 = 월요일 06:00 KST) · 대조(`verify_evidence`)와
+    작성기 입력(`writer_input`)이 같은 표 · 주기 id 가 틀리면 빈 표(전부 거부) · 24KB 를 넘으면 **가장 오래된 근거부터** 뺀다."""
+    import datetime as _dt
+    import hashlib
+    from agora import collector, mail
+    now = _auto_now()
+    cyc, start, end = _auto_prev_cycle(now)
+    if mail.cycle_window(cyc, mail.weekly_policy({}, now)) != (start, end) \
+            or start.astimezone(_dt.timezone(_dt.timedelta(hours=9))).strftime("%a %H:%M") != "Mon 06:00":
+        raise AssertionError(f"주기 창이 월요일 06:00 KST 시작이 아니다: {start}")
+    ctx = _mail_ctx(_FakeMailStore())
+    hook_in = _sig_row(ts=mail.now_ms_iso(start + _dt.timedelta(hours=1)), source="worker", op="hook.session-start",
+                       error_code="hook.rc1")
+    hook_out = _sig_row(ts=mail.now_ms_iso(end + _dt.timedelta(hours=1)), source="worker", op="hook.session-start",
+                        error_code="hook.rc1")
+    raws = _signal_ledger(ctx, [hook_in, hook_out, _sig_row(ts=mail.now_ms_iso(start + _dt.timedelta(hours=2))),
+                                _sig_row(ts=mail.now_ms_iso(start - _dt.timedelta(minutes=1)))],
+                          name="signals-sent.jsonl")
+    hid_in, hid_out = (hashlib.sha256(r.encode("utf-8")).hexdigest()[:16] for r in raws[:2])
+    wk = {"cycle": cyc, "blocked": [{"text": "a", "evidence_ref": _wev(quote="host.update ×1")},
+                                    {"text": "b", "evidence_ref": _wev("hook", hid_in, "hook.rc1")},
+                                    {"text": "c", "evidence_ref": _wev("hook", hid_out, "hook.rc1")}]}
+    bad = [(b["index"], b["why"]) for b in mail.verify_evidence(ctx, wk)]
+    if bad != [(2, "evidence_unknown")]:
+        raise AssertionError(f"주기 창 밖 줄로 근거를 맞췄거나 창 안 집계가 틀렸다: {bad}")
+    if len(mail.verify_evidence(ctx, dict(wk, cycle="2026-W00"))) != 3:
+        raise AssertionError("주기 id 가 틀렸는데 원장 전체로 대조했다(빈 표여야 한다)")
+    table = collector.writer_input(ctx, cyc, now)
+    if hid_in not in table or hid_out in table or "host.update ×1" not in table:
+        raise AssertionError(f"작성기 입력이 대조와 같은 창의 표가 아니다: {table}")
+    # 24KB 자르기 — 창 안 훅 줄 400개(줄마다 다른 ts) · 살아남는 훅 = 가장 늦은 것들
+    ctx = _mail_ctx(_FakeMailStore())
+    rows = [_sig_row(ts=mail.now_ms_iso(start + _dt.timedelta(minutes=i)), source="worker", op="hook.session-start",
+                     error_code="hook.rc1") for i in range(400)]
+    raws = _signal_ledger(ctx, rows, name="signals-sent.jsonl")
+    ts_of = {hashlib.sha256(r.encode("utf-8")).hexdigest()[:16]: json.loads(r)["ts"] for r in raws}
+    text = collector.writer_input(ctx, cyc, now)
+    kept = [json.loads(x) for x in text.split("\n")]
+    hooks = {x["id"] for x in kept if x["kind"] == "hook"}
+    dropped = set(ts_of) - hooks
+    if len(text.encode("utf-8")) > collector.WRITER_INPUT_MAX or not dropped or not hooks \
+            or max(ts_of[h] for h in dropped) > min(ts_of[h] for h in hooks) \
+            or {x["kind"] for x in kept} != {"cmd", "hook", "sig"}:
+        raise AssertionError(f"24KB 자르기가 오래된 근거부터가 아니다: 남은 훅 {len(hooks)} · 뺀 훅 {len(dropped)}")
+    if [(x["kind"], x["id"]) for x in kept] != sorted((x["kind"], x["id"]) for x in kept):
+        raise AssertionError("작성기 입력 줄 순서가 결정론((kind,id) 순)이 아니다")
 
 
 CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
@@ -19531,6 +19790,11 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ('상담소자동: 결정론 payload', _case_auto_deterministic_payloads, None),
     ('상담소자동: 잠금·06시 경계', _case_auto_run_lock_and_day_boundary, None),
     ('상담소자동: CLI 동작 갈림', _case_auto_cli_actions, None),
+    ('상담소자동: off 는 판을 기다리고 판은 발신 직전마다 본다', _case_auto_off_waits_for_round_and_rechecks, None),
+    ('상담소자동: off→on 옛 문서 재발신 0', _case_auto_off_on_never_resends_old, None),
+    ('상담소자동: 신호 표식은 시도할 때만', _case_auto_signal_mark_only_when_sent, None),
+    ('상담소자동: daily_ok_at = 마감 시각', _case_auto_daily_ok_at_is_cutoff, None),
+    ('상담소자동: 근거 = 그 주기 창', _case_auto_evidence_cycle_window, None),
 )
 
 
@@ -22380,6 +22644,71 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    return [agent_path, "-p", prompt, "--tools", "", ',
      '    return [agent_path, "-p", prompt, "--tools", "default", ',
      '상담소자동: 주간 작성기 계약'),
+    # ★T3 리뷰 반영(①~⑤·⑫·⑬ · TICKET=agora-t3-pack-collector)
+    ('M715-auto-off-skips-run-lock', "agora/collector.py",
+     '    with _file_lock(_p(config_dir, RUN_LOCK), wait=True):\n        return _set_auto_locked(config_dir, on=on)',
+     '    with contextlib.nullcontext(True):\n        return _set_auto_locked(config_dir, on=on)',
+     '상담소자동: off 는 판을 기다리고 판은 발신 직전마다 본다'),
+    ('M716-auto-signal-send-unchecked', "agora/collector.py",
+     '    if not _still_on(ctx.config_dir):\n        return dict(OFF)\n    if new:',
+     '    if False:\n        return dict(OFF)\n    if new:',
+     '상담소자동: off 는 판을 기다리고 판은 발신 직전마다 본다'),
+    ('M717-auto-daily-send-unchecked', "agora/collector.py",
+     '        if not _still_on(ctx.config_dir):\n            return dict(OFF)\n        state["daily_day"] = today',
+     '        if False:\n            return dict(OFF)\n        state["daily_day"] = today',
+     '상담소자동: off 는 판을 기다리고 판은 발신 직전마다 본다'),
+    ('M718-auto-weekly-send-unchecked', "agora/collector.py",
+     '    if not _still_on(ctx.config_dir):\n        return {"cycle": cycle, **OFF}',
+     '    if False:\n        return {"cycle": cycle, **OFF}',
+     '상담소자동: off 는 판을 기다리고 판은 발신 직전마다 본다'),
+    ('M719-auto-run-continues-after-off', "agora/collector.py",
+     '            if steps[name].get("result") == OFF["result"]:',
+     '            if False:',
+     '상담소자동: off 는 판을 기다리고 판은 발신 직전마다 본다'),
+    ('M720-auto-daily-resend-unchecked', "agora/collector.py",
+     '    elif not _still_on(ctx.config_dir):\n        return dict(OFF)',
+     '    elif False:\n        return dict(OFF)',
+     '상담소자동: off 는 판을 기다리고 판은 발신 직전마다 본다'),
+    ('M721-auto-off-keeps-weekly-pending-cycle', "agora/collector.py",
+     '        state["weekly"] = {c: v for c, v in book.items() if v != "pending"}',
+     '        state["weekly"] = dict(book)',
+     '상담소자동: off→on 옛 문서 재발신 0'),
+    ('M722-auto-off-keeps-daily-pending', "agora/collector.py",
+     '    for key in ("signal_pending", "daily_pending", "weekly_doc", "weekly_skipped"):',
+     '    for key in ("signal_pending", "weekly_doc", "weekly_skipped"):',
+     '상담소자동: off→on 옛 문서 재발신 0'),
+    ('M723-auto-off-keeps-mailbox-weekly-pending', "agora/collector.py",
+     '    if os.path.exists(weekly_pending):\n        _write_json(weekly_pending, {})',
+     '    if False:\n        _write_json(weekly_pending, {})',
+     '상담소자동: off→on 옛 문서 재발신 0'),
+    ('M724-auto-empty-scan-marks-day', "agora/collector.py",
+     '        if not items:\n            state["signal_sent"] = {"day": today, "signatures": []}',
+     '        if not items:\n            state["signal_day"] = today\n            state["signal_sent"] = {"day": today, "signatures": []}',
+     '상담소자동: 신호 표식은 시도할 때만'),
+    ('M725-auto-daily-ok-at-success-time', "agora/collector.py",
+     '        state["daily_ok_at"] = pending.get("cutoff") or pending["at"]',
+     '        state["daily_ok_at"] = _iso(now)',
+     '상담소자동: daily_ok_at = 마감 시각'),
+    ('M726-evidence-window-ignored', "agora/mail.py",
+     '        if window is not None and not window[0] <= ts < window[1]:\n            continue',
+     '        if False:\n            continue',
+     '상담소자동: 근거 = 그 주기 창'),
+    ('M727-evidence-bad-cycle-whole-ledger', "agora/mail.py",
+     '    sources = evidence_sources(ctx, window) if window is not None else {}',
+     '    sources = evidence_sources(ctx, window)',
+     '상담소자동: 근거 = 그 주기 창'),
+    ('M728-writer-input-drops-by-sort-order', "agora/collector.py",
+     '    for key in sorted(table, key=lambda k: (table[k][1], k)):       # 오래된 근거부터',
+     '    for key in sorted(table):',
+     '상담소자동: 근거 = 그 주기 창'),
+    ('M729-writer-input-unwindowed', "agora/collector.py",
+     '    table = mail.evidence_table(ctx, window) if window is not None else {}',
+     '    table = mail.evidence_table(ctx)',
+     '상담소자동: 근거 = 그 주기 창'),
+    ('M731-auto-daily-seats-unfolded-kept', "agora/collector.py",
+     '    if "seats" in candidates and not (type(roles) is list and all(type(r) is str and r in SEAT_CATEGORIES for r in roles)):',
+     '    if "seats" in candidates and not type(roles) is list:',
+     '상담소자동: 일일 닫힌 칸만'),
 )
 
 

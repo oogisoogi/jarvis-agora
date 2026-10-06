@@ -42,6 +42,7 @@ WRITER_TIMEOUT = 300                 # 터미널 일정 command 잡 600초 안 �
 WRITER_INPUT_MAX = 24 * 1024         # 작성기 입력 상한(근거 표) — 넘으면 오래된 줄부터 뺀다
 WRITER_BUDGET_USD = "0.50"           # 1회 호출 비용 상한(`--max-budget-usd` · -p 전용)
 OK_STATUS = (200, 201)
+SEAT_CATEGORIES = frozenset({"master", "cso", "worker", "pack"})   # 일일 `seats.roles` 에 실을 수 있는 접힌 범주(리뷰 ⑬)
 
 # 주간 성찰 작성기 지시문 — ★근거 표의 (kind,id) 와 그 원문의 부분 문자열만 인용(명세 §1-3 (4) · 자유 인용·자유 생성 금지).
 WRITER_PROMPT = """너는 이 컴퓨터의 터미널이 지난 한 주 동안 겪은 오류 신호를 정리하는 기록원이다. 사람은 옆에 없다.
@@ -152,7 +153,9 @@ def auto_enabled(config_dir: str) -> bool:
 
 
 def _purge(config_dir: str) -> None:
-    """꺼진 동안 모은 것은 버린다(몰아 보내기 0) — 모은 신호 줄 · 신호/일일 pending · 주간 pending."""
+    """꺼진 동안 모은 것은 버린다(몰아 보내기 0) — 모은 신호 줄 · 신호/일일 pending · 주간 문서·pending 주기·빈 보고 이월 ·
+    우편함 주간 pending. ★부르는 쪽이 `run.lock` 을 쥔 채 부른다(판이 메모리의 state 를 되써서 pending 을 되살리지 못하게).
+    ★다시 켠 뒤 옛 문서(옛 message_id)가 나가는 길을 전부 끊는다 — 하나라도 남으면 그 문서가 다음 판에 재전송된다."""
     from agora import mail
     with _file_lock(_p(config_dir, SIGNALS_LOCK), wait=True):
         path = _p(config_dir, SIGNALS_FILE)
@@ -160,7 +163,13 @@ def _purge(config_dir: str) -> None:
             with open(path, "w", encoding="utf-8", newline="\n"):
                 pass
     state = _load(_p(config_dir, STATE_FILE))
-    if state.pop("signal_pending", None) is not None or state.pop("daily_pending", None) is not None:
+    before = json.dumps(state, sort_keys=True)
+    for key in ("signal_pending", "daily_pending", "weekly_doc", "weekly_skipped"):
+        state.pop(key, None)
+    book = state.get("weekly")
+    if type(book) is dict:
+        state["weekly"] = {c: v for c, v in book.items() if v != "pending"}
+    if json.dumps(state, sort_keys=True) != before:
         _write_json(_p(config_dir, STATE_FILE), state)
     weekly_pending = os.path.join(config_dir, mail.MAILBOX_DIR, mail.WEEKLY_PENDING_FILE)
     if os.path.exists(weekly_pending):
@@ -168,7 +177,17 @@ def _purge(config_dir: str) -> None:
 
 
 def set_auto(config_dir: str, *, on: bool) -> dict[str, Any]:
-    """`agora counsel on|off` — `config.json` 의 그 키만 고친다(다른 칸은 그대로) · 못 읽는 파일은 덮어쓰지 않는다."""
+    """`agora counsel on|off` — `config.json` 의 그 키만 고친다(다른 칸은 그대로) · 못 읽는 파일은 덮어쓰지 않는다.
+
+    ★`run.lock` 을 **기다려** 쥔 채 설정을 쓰고 지운다 — 도는 판이 있으면 그 판이 끝난 뒤에 돌아온다(판이 메모리의 state 를
+      되써서 지운 pending 을 되살리던 자리 · 리뷰 ①). 판 안쪽은 발신 직전마다 `auto_enabled` 를 다시 본다(손으로 고친 설정).
+    """
+    os.makedirs(config_dir, mode=0o700, exist_ok=True)
+    with _file_lock(_p(config_dir, RUN_LOCK), wait=True):
+        return _set_auto_locked(config_dir, on=on)
+
+
+def _set_auto_locked(config_dir: str, *, on: bool) -> dict[str, Any]:
     path = os.path.join(config_dir, "config.json")
     doc: Any = {}
     if os.path.exists(path):
@@ -182,7 +201,6 @@ def set_auto(config_dir: str, *, on: bool) -> dict[str, Any]:
                              {"path": path})
     section = doc.get("counsel") if type(doc.get("counsel")) is dict else {}
     doc["counsel"] = {**section, "auto": on}
-    os.makedirs(config_dir, mode=0o700, exist_ok=True)
     _write_json(path, doc)
     if not on:
         _purge(config_dir)
@@ -334,19 +352,30 @@ def _outcome(publish: Callable[..., dict[str, Any]], ctx: Any, doc: dict[str, An
 
 
 # ── 한 통씩 ─────────────────────────────────────────────────────────────────
+OFF = {"result": "off"}                  # 판 도중 꺼짐을 봤다 — 그 통부터 발신 0(판은 멈추고 지운다)
+
+
+def _still_on(config_dir: str) -> bool:
+    """발신 **직전마다** 다시 본다(리뷰 ①) — 판이 도는 사이 설정이 꺼졌으면 그 통부터 안 보낸다."""
+    return auto_enabled(config_dir)
+
+
 def _signal_step(ctx: Any, state: dict[str, Any], *, today: str, now: datetime.datetime,
                  to: str, publish: Callable[..., dict[str, Any]]) -> dict[str, Any]:
-    """그날 첫 판에 한 통(명세 §1-1 (3) · §13-3 2.~4.) · 신호 0 = 발신 0 · 429 = 그날 포기 · code 8 = 다음 판에 같은 문서."""
+    """그날 첫 판에 한 통(명세 §1-1 (3) · §13-3 2.~4.) · 신호 0 = 발신 0 · 429 = 그날 포기 · code 8 = 다음 판에 같은 문서.
+
+    ★하루 표식(`signal_day`)은 **발신을 시도할 때만** 적는다(리뷰 ③) — 빈 판(신호 0)이 표식을 쓰면 그날 늦게 쌓인 줄이
+      다음 날까지 묶인다. 「하루 한 번 시도」는 그대로다(표식 = 첫 시도 직전)."""
     from agora import mail
     pending = state.get("signal_pending")
     if pending is not None and not _fresh(pending, now):
         state.pop("signal_pending")
         pending = None
-    if pending is None:
+    new = pending is None
+    if new:
         if state.get("signal_day") == today:
             return {"result": "done_today"}
         items, lines = signal_items(_signal_lines(_p(ctx.config_dir, SIGNALS_FILE)))
-        state["signal_day"] = today
         if not items:
             state["signal_sent"] = {"day": today, "signatures": []}
             return {"result": "nothing"}
@@ -354,6 +383,10 @@ def _signal_step(ctx: Any, state: dict[str, Any], *, today: str, now: datetime.d
         doc = mail.build(ctx, to=to, payload={"intent": mail.SIGNAL, "items": items}, thread_id=thread)
         pending = {"at": _iso(now), "doc": doc, "lines": lines, "day": today,
                    "signatures": sorted(it["signature"] for it in items)}
+    if not _still_on(ctx.config_dir):
+        return dict(OFF)
+    if new:
+        state["signal_day"] = today
         state["signal_pending"] = pending
         _write_json(_p(ctx.config_dir, STATE_FILE), state)       # 보내기 전에 적는다(죽어도 같은 문서)
     result = _outcome(publish, ctx, pending["doc"])
@@ -380,6 +413,12 @@ def daily_payload(facts: dict[str, Any], *, today: str, signatures: list[str] | 
     base: dict[str, Any] = {"day": today}
     candidates: dict[str, Any] = {k: facts[k] for k in ("version", "os", "seats", "doctor", "depts", "uptime", "updates")
                                   if k in facts}
+    # ★방어(리뷰 ⑬): 자리 역할은 **접힌 범주**(master·cso·worker·pack)만 — 하나라도 밖이면 칸째 뺀다.
+    #   팩이 접어 보내지만, 접지 않은 판(워커 이름 `w3`·부서 이름)이 오면 형식 검사(소문자 토큰)는 통과해 이름이 샌다.
+    seats = candidates.get("seats")
+    roles = seats.get("roles") if type(seats) is dict else None
+    if "seats" in candidates and not (type(roles) is list and all(type(r) is str and r in SEAT_CATEGORIES for r in roles)):
+        candidates.pop("seats")
     errs = facts.get("errors")
     if type(errs) is dict and signatures is not None:
         candidates["errors"] = {"tick_errors": errs.get("tick_errors"), "hook_rc_nonzero": errs.get("hook_rc_nonzero"),
@@ -413,17 +452,23 @@ def _daily_step(ctx: Any, state: dict[str, Any], *, today: str, now: datetime.da
         payload = daily_payload(facts, today=today, signatures=sigs, weekly_skipped=skipped, now=now)
         thread = state.get("daily_thread") if mail.is_id(str(state.get("daily_thread") or "")) else None
         doc = mail.build(ctx, to=to, payload=payload, thread_id=thread)
-        pending = {"at": _iso(now), "doc": doc, "day": today, "weekly_skipped": skipped}
+        # ★`cutoff` = 이 통 사실의 마감 시각(리뷰 ④) — 성공이 다음 판(code 8 재전송)이어도 `daily_ok_at` 은 이 값이다
+        #   (성공 시각을 적으면 마감 ~ 성공 사이 사실이 다음 일일에서 빠진다 · 팩 `facts` 가 이 칸을 기준으로 센다).
+        pending = {"at": _iso(now), "cutoff": _iso(now), "doc": doc, "day": today, "weekly_skipped": skipped}
+        if not _still_on(ctx.config_dir):
+            return dict(OFF)
         state["daily_day"] = today
         state["daily_pending"] = pending
         _write_json(_p(ctx.config_dir, STATE_FILE), state)
+    elif not _still_on(ctx.config_dir):
+        return dict(OFF)
     result = _outcome(publish, ctx, pending["doc"])
     if result == "unknown":
         return {"result": "pending", "message_id": pending["doc"]["message_id"]}
     state.pop("daily_pending", None)
     if result == "ok":
         state["daily_thread"] = pending["doc"]["thread_id"]
-        state["daily_ok_at"] = _iso(now)
+        state["daily_ok_at"] = pending.get("cutoff") or pending["at"]
         if pending.get("weekly_skipped") and state.get("weekly_skipped") == pending["weekly_skipped"]:
             state.pop("weekly_skipped")
         return {"result": "sent", "칸": sorted(pending["doc"]["payload"]["daily"])}
@@ -431,14 +476,6 @@ def _daily_step(ctx: Any, state: dict[str, Any], *, today: str, now: datetime.da
 
 
 # ── 주간 성찰(명세 §1-3) ────────────────────────────────────────────────────
-def cycle_window(cycle: str, policy: dict[str, Any]) -> tuple[datetime.datetime, datetime.datetime]:
-    """주기 [시작, 끝) — 시작 = 그 주 월요일 06:00 KST(= 일요일 21:00Z · `mail.CYCLE_SHIFT`)."""
-    from agora import mail
-    monday = mail.iso_week_monday(cycle)
-    start = datetime.datetime(monday.year, monday.month, monday.day, tzinfo=datetime.timezone.utc) - mail.CYCLE_SHIFT
-    return start, start + datetime.timedelta(days=policy["period_days"])
-
-
 def _ledger_rows(config_dir: str) -> list[dict[str, Any]]:
     out = []
     for name in (SIGNALS_FILE, SENT_FILE):
@@ -466,14 +503,21 @@ def top_features(config_dir: str, start: datetime.datetime, end: datetime.dateti
     return [{"op": op, "count": min(n, mail.SIGNAL_COUNT_MAX)} for op, n in ranked]
 
 
-def writer_input(ctx: Any) -> str:
-    """근거 표(결정론 · `mail.evidence_sources`) → 줄마다 JSON · 상한을 넘으면 **앞(오래된 쪽 정렬순)** 을 뺀다."""
+def writer_input(ctx: Any, cycle: str, now: datetime.datetime | None = None) -> str:
+    """근거 표 → 줄마다 JSON(결정론 · (kind,id) 순). ★표 = 발신 전 대조(`mail.verify_evidence`)와 **같은 창**의 표
+    (`mail.cycle_evidence_window` · 리뷰 ⑤ — 창 밖 줄을 보여 주면 작성기가 인용한 항목이 대조에서 전부 빠진다).
+    상한을 넘으면 **가장 늦은 ts 가 오래된 근거부터** 뺀다(정렬순으로 빼면 사전순 앞 kind·id 가 늘 먼저 잘린다)."""
     from agora import mail
-    rows = [json.dumps({"kind": k, "id": i, "text": t}, ensure_ascii=False, sort_keys=True)
-            for (k, i), t in sorted(mail.evidence_sources(ctx).items())]
-    while rows and len("\n".join(rows).encode("utf-8")) > WRITER_INPUT_MAX:
-        rows.pop(0)
-    return "\n".join(rows)
+    window = mail.cycle_evidence_window(cycle, now)
+    table = mail.evidence_table(ctx, window) if window is not None else {}
+    rows = {key: json.dumps({"kind": key[0], "id": key[1], "text": text}, ensure_ascii=False, sort_keys=True)
+            for key, (text, _last) in table.items()}
+    size = sum(len(r.encode("utf-8")) for r in rows.values()) + max(len(rows) - 1, 0)
+    for key in sorted(table, key=lambda k: (table[k][1], k)):       # 오래된 근거부터
+        if size <= WRITER_INPUT_MAX:
+            break
+        size -= len(rows.pop(key).encode("utf-8")) + (1 if rows else 0)
+    return "\n".join(rows[key] for key in sorted(rows))
 
 
 def writer_argv(agent_path: str, prompt: str) -> list[str]:
@@ -547,7 +591,7 @@ def _weekly_step(ctx: Any, state: dict[str, Any], *, now: datetime.datetime, fac
     if status == "pending" and type(state.get("weekly_doc")) is dict:
         weekly = state["weekly_doc"]
     else:
-        start, end = cycle_window(cycle, policy)
+        start, end = mail.cycle_window(cycle, policy)
         features = top_features(ctx.config_dir, start, end)
         in_cycle = any(start <= mail._parse_ts(r["ts"]) < end for r in _ledger_rows(ctx.config_dir))
         doc: dict[str, Any] = {}
@@ -560,7 +604,8 @@ def _weekly_step(ctx: Any, state: dict[str, Any], *, now: datetime.datetime, fac
             wdir = _p(ctx.config_dir, WRITER_DIR)
             os.makedirs(wdir, mode=0o700, exist_ok=True)
             p = resident.paths(ctx.config_dir)
-            out = (runner or resident.run_agent)(writer_argv(agent, WRITER_PROMPT + writer_input(ctx)), cwd=wdir,
+            prompt = WRITER_PROMPT + writer_input(ctx, cycle, now)
+            out = (runner or resident.run_agent)(writer_argv(agent, prompt), cwd=wdir,
                                                  timeout=WRITER_TIMEOUT, env=resident._agent_env(p), keep_output=True)
             parsed = parse_writer(out.get("output", "")) if out.get("rc") == 0 else None
             if parsed is None:
@@ -577,6 +622,8 @@ def _weekly_step(ctx: Any, state: dict[str, Any], *, now: datetime.datetime, fac
             state["weekly_skipped"] = cycle
             return {"cycle": cycle, "result": "empty", "dropped": len(bad)}
         state["weekly_doc"] = weekly
+    if not _still_on(ctx.config_dir):
+        return {"cycle": cycle, **OFF}
     out = send(ctx, weekly)
     if out.get("skipped"):
         book[cycle] = "empty"
@@ -625,14 +672,14 @@ def run(*, directory: str | None = None, facts_path: str | None = None, now: dat
     d = os.path.abspath(directory or default_dir())
     now = now or _now()
     row: dict[str, Any] = {"at": _iso(now)}
-    if not auto_enabled(d):
-        _purge(d)
-        row["result"] = "off"
-        _log(d, row)
-        return {"상담소_자동_전달": "꺼짐", "보냄": 0}
     with _file_lock(_p(d, RUN_LOCK), wait=False) as held:
         if not held:
             return {"result": "locked"}
+        if not auto_enabled(d):
+            _purge(d)                                    # ★잠금 안에서 지운다(`set_auto` 와 같은 규칙)
+            row["result"] = "off"
+            _log(d, row)
+            return {"상담소_자동_전달": "꺼짐", "보냄": 0}
         row["pruned"] = _prune(d, now)
         state = collector_state(d)
         try:
@@ -665,6 +712,12 @@ def run(*, directory: str | None = None, facts_path: str | None = None, now: dat
             except (AgoraError, OSError, ValueError) as e:
                 steps[name] = {"result": "error", "why": f"code {e.code}" if isinstance(e, AgoraError)
                                else type(e).__name__}
+            if steps[name].get("result") == OFF["result"]:
+                # ★판 도중 꺼졌다 — 남은 통은 안 보내고, 메모리의 state 는 **되쓰지 않고** 지운다(되쓰면 pending 이 살아난다).
+                _purge(d)
+                row.update({"day": today, "result": "off", **steps})
+                _log(d, row)
+                return {"상담소_자동_전달": "꺼짐", "보냄": 0, **steps}
             _write_json(_p(d, STATE_FILE), state)
         book = state.get("weekly") or {}
         if len(book) > WEEKLY_KEEP_CYCLES:

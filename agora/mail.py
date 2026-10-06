@@ -384,6 +384,17 @@ def cycle_of(moment: datetime.datetime, policy: dict[str, Any]) -> str:
     return f"{year:04d}-W{week:02d}"
 
 
+def cycle_window(cycle: str, policy: dict[str, Any]) -> tuple[datetime.datetime, datetime.datetime] | None:
+    """주기 [시작, 끝) — 시작 = 그 주기 시작 주 월요일 06:00 KST(= 그 월요일 00:00Z − `CYCLE_SHIFT`) · 끝 = 시작 + 주기 일수.
+    ★주기 id 가 실제 주가 아니면 None(= 빈 창 — 부르는 쪽은 「창 없음 = 전부」로 넓히지 않는다).
+    ★근거 표(`evidence_sources`)·근거 대조(`verify_evidence`)·T3 작성기 입력·`top_features` 가 **이 함수 하나**로 창을 정한다."""
+    monday = iso_week_monday(cycle) if type(cycle) is str else None
+    if monday is None:
+        return None
+    start = datetime.datetime(monday.year, monday.month, monday.day, tzinfo=datetime.timezone.utc) - CYCLE_SHIFT
+    return start, start + datetime.timedelta(days=policy["period_days"])
+
+
 def previous_cycle(cycle: str, policy: dict[str, Any]) -> str:
     """직전 주기 id(시작 주에서 주기 일수만큼 앞)."""
     year, week, _ = (iso_week_monday(cycle) - datetime.timedelta(days=policy["period_days"])).isocalendar()
@@ -431,36 +442,59 @@ def _signal_ledger_rows(ctx: Any) -> list[tuple[str, dict[str, Any]]]:
     return out
 
 
-def evidence_sources(ctx: Any) -> dict[tuple[str, str], str]:
+def evidence_sources(ctx: Any, window: tuple[datetime.datetime, datetime.datetime] | None = None
+                     ) -> dict[tuple[str, str], str]:
     """근거로 인용할 수 있는 원문 표 `{(종류, id): 원문}`(3판 M7) — **원장 필드에서만** 결정론으로 만든다(자유문 0).
+    `window` = `(시작, 끝)` 이면 `시작 <= ts < 끝` 인 줄만 센다(그 주기 보고의 근거 = 그 주기 안 줄 · 리뷰 ⑤).
 
     - `sig` = 신호 서명(§1-1 (2) · 32 hex) → `"<source> <op> <error_code> <version> <os> ×<줄 수>"`
     - `hook` = 훅 오류 줄 id(그 줄 원문 UTF-8 의 sha256 앞 16 hex · `op` 가 `hook.` 인 줄만) → `"<ts> <source> <op> <error_code>"`
     - `cmd` = 명령 op 집계 → `"<op> ×<줄 수>"`
     원문의 글자는 전부 형식 정규식이 닫은 기계 값이라, 인용(부분 문자열)으로 세션 문장·파일 내용을 실어 나를 수 없다.
     """
+    return {key: text for key, (text, _last) in evidence_table(ctx, window).items()}
+
+
+def evidence_table(ctx: Any, window: tuple[datetime.datetime, datetime.datetime] | None = None
+                   ) -> dict[tuple[str, str], tuple[str, datetime.datetime]]:
+    """`evidence_sources` 의 몸통 — 값 = (원문, 그 근거에 든 줄 중 **가장 늦은 ts**). 늦은 ts = T3 작성기 입력을 자를 때
+    오래된 근거부터 빼는 기준(정렬순으로 빼면 (kind,id) 사전순이 곧 「오래됨」이 된다 · 리뷰 ⑤)."""
     by_sig: dict[str, list[dict[str, Any]]] = {}
-    by_op: dict[str, int] = {}
-    out: dict[tuple[str, str], str] = {}
+    by_op: dict[str, list[datetime.datetime]] = {}
+    out: dict[tuple[str, str], tuple[str, datetime.datetime]] = {}
     for raw, row in _signal_ledger_rows(ctx):
+        ts = _parse_ts(row["ts"])
+        if window is not None and not window[0] <= ts < window[1]:
+            continue
         sig = signal_signature(source=row["source"], op=row["op"], error_code=row["error_code"], version=row["version"])
         by_sig.setdefault(sig, []).append(row)
-        by_op[row["op"]] = by_op.get(row["op"], 0) + 1
+        by_op.setdefault(row["op"], []).append(ts)
         if row["op"].startswith("hook."):
             hid = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-            out[("hook", hid)] = f"{row['ts']} {row['source']} {row['op']} {row['error_code']}"
+            out[("hook", hid)] = (f"{row['ts']} {row['source']} {row['op']} {row['error_code']}", ts)
     for sig, rows in by_sig.items():
         r = rows[0]
-        out[("sig", sig)] = f"{r['source']} {r['op']} {r['error_code']} {r['version']} {r['os']} ×{len(rows)}"
-    for op, n in by_op.items():
-        out[("cmd", op)] = f"{op} ×{n}"
+        out[("sig", sig)] = (f"{r['source']} {r['op']} {r['error_code']} {r['version']} {r['os']} ×{len(rows)}",
+                             max(_parse_ts(x["ts"]) for x in rows))
+    for op, stamps in by_op.items():
+        out[("cmd", op)] = (f"{op} ×{len(stamps)}", max(stamps))
     return out
+
+
+def cycle_evidence_window(cycle: Any, now: datetime.datetime | None = None
+                          ) -> tuple[datetime.datetime, datetime.datetime] | None:
+    """주간 보고 주기 → 근거 창(핀의 주기 정책 · `cycle_window`) · 주기 id 가 틀리면 None(= 빈 표 · 전부 거부)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return cycle_window(cycle, weekly_policy(desk_pin(), now)) if type(cycle) is str else None
 
 
 def verify_evidence(ctx: Any, weekly: dict[str, Any]) -> list[dict[str, Any]]:
     """주간 보고 항목 근거를 허용 원장과 대조(3판 M7) — 못 맞춘 항목 목록(빈 목록 = 전건 통과).
-    `why` = `evidence_unknown`(그 종류·id 의 원장 줄 없음) · `evidence_quote_mismatch`(인용이 그 줄 원문의 부분 문자열이 아님)."""
-    sources = evidence_sources(ctx)
+    `why` = `evidence_unknown`(그 종류·id 의 원장 줄 없음) · `evidence_quote_mismatch`(인용이 그 줄 원문의 부분 문자열이 아님).
+    ★표 = **그 주기 창 안 줄만**(리뷰 ⑤ · 지난 주기 줄로 이번 주기 보고를 뒷받침하지 못하게) · 주기 id 가 틀리면 빈 표(전부 거부 ·
+      「창 없음 = 원장 전체」로 넓히지 않는다)."""
+    window = cycle_evidence_window(weekly.get("cycle"))
+    sources = evidence_sources(ctx, window) if window is not None else {}
     bad = []
     for sec in WEEKLY_SECTIONS:
         for i, it in enumerate(weekly.get(sec) or []):
