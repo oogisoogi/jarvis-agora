@@ -6,7 +6,8 @@
 > **3판**(master 1363219c · 재개 121e6ee0 · codex 적대 2R BLOCK 3·MAJOR 8·MINOR 3 반영) — 번호별 처방 = **§11 2R 반영표**.
 
 ## 0. 이어받기(현재 상태 · 11:4x · 3판 끝)
-- ★**3판 = 집행 끝**(8128ba9 본체 + 95783e4 게이트 수리 + 이 HANDOFF 커밋) · 번호별 처방 = **§11-2 2R 반영표** · 게이트 = §4 첫 줄 · 다음 = master codex 3R(마지막) + 스냅샷 게이트 → 머지.
+- ★**4판 = 집행 끝**(ef54d1f 본체 + 275e264 게이트 수리 + b0ac641 문서 + 이 §4 줄) · 3R(Fable · 마지막) = 수렴 예·BLOCK 0 · 번호별 = **§11-3** · 다음 = master diff 정독 + 스냅샷 게이트 → 머지(4R 없음).
+- (3판 기록) 8128ba9 본체 + 95783e4 게이트 수리 + 1c7544a · 번호별 = §11-2.
 - ★**3판 지시(10:02 · master 1363219c · 원장 yes) = 후임 첫 집행 대상** — 지시 원문 = master 인박스 발신 `[master#1363219c]`(판정표: BLOCK M7·N1·B5 · MAJOR M3 부분·M4·M6·M8·M10·N2·B2·B4 · MINOR N3·N4·B3 문면 · 기각 유지 B6 · M5 4종 확정 · 직전 7주 창 불변) · codex 2R 원문 = `~/axdev/master/reports/REVIEW-SPEC-WEEKLY-codex-2r.md` · 순서 = 3판 집행 → `bash tests/commit_gate.sh` 전건 PASS 줄 인용 → §11 에 「2R 반영표」 추가 → 【확인요청】 3판(상한 60분 · 중단 2h) · push 0 · deploy 0.
 - **상태**: 2판 = 4a7835d(본체) + 7aab475(§4 게이트 줄) · commit_gate @4a7835d PASS · **codex 적대 2R + master 독립 스냅샷 게이트(7aab475) 가동 중** → 결과가 오면 master 가 반영분을 지시한다(새 작업은 그 지시 뒤에만).
 - **확정된 결정**: 스킬 메타 서명 = 비공개층만(67d60f6c) · M5 상태 = **4종**(보냄 / 빈 생략 / 주간 없음(일일은 옴) / 일일도 없음 · 2773748b 채택) · gitleaks 역사 1건(56c3ac9 옛 뮤턴트 이름 오탐) = **스쿼시 안 함**(현 트리 0 · 머지 때 master squash-merge 판단) · 09:09·09:16 지시 = 원장 실재 진짜 발신(queued = 제출 관측 지연).
@@ -66,6 +67,7 @@
   ⑷ **데스크 쪽 격리분 재생** — 데스크 설정 폴더 `mailbox/quarantine.jsonl` 의 `contract` 사유 weekly·daily 줄 `mail_id` 중 최소 seq 를 `n` 이라 할 때 `mailbox/cursor.json` 의 `since` = **`ml_<n − 1 을 16자리 0 채움>`**(= `min(mail_id) − 1` · 수신은 `since` **보다 큰** 것만 받는다 — 최소값 그대로면 그 첫 통을 잃는다 · `agora/mail.py` 의 `hold - 1` 커서 관례와 같다) → 새 판 클라이언트로 `agora mail inbox` 1회(중복 0).
 
 ## 4. 전체 게이트
+- **4판(커밋 b0ac641) `bash tests/commit_gate.sh` = `== 결과: PASS ==` rc 0** — 공개 표현 0 · 비밀 누출 0 · selftest **587/587 PASS · 633/633 KILLED · NOT-APPLIED 0** · F-1 25/25 · codex 0.1.4 사후 11/11 · 공백 위생 clean · 릴레이 vitest **87/87**(relay/ 는 8128ba9 이후 무변경). 1차(ef54d1f) = FAIL 586/587 — M690 앵커 미이동(pending 저장 줄 재구성) → 275e264 수리.
 - **3판(커밋 95783e4) `bash tests/commit_gate.sh` = `== 결과: PASS ==` rc 0** — 공개 표현 0 · 비밀 누출 0 · selftest **587/587 PASS · 632/632 KILLED · NOT-APPLIED 0** · 미발생 오류코드 0 · F-1 재현 25/25 · codex 0.1.4 사후 재현 11/11 · 공백 위생 clean · 릴레이(8128ba9 · src 이후 무변경): vitest **87/87** · 로컬 하네스 rc 0(`== 결과: PASS ==` · 우편 **110/110**(「근거 출처 종류 밖 = 400/10 evidence_kind」 신설) · 클라이언트 왕복 14/14) · 뮤테이션 M45~M55 **11/11 KILLED**(M54·M55 신설 · M47 재조준).
   · 1차 commit_gate(8128ba9) = **FAIL**(정직): 케이스 579/587 — 새 픽스처 `_ev` 가 같은 파일의 광장 픽스처 `_ev`(selftest.py:13517)를 덮어 광장·피드 7 케이스 TypeError + M623 앵커 미이동 1 → 그 여파 NOT-APPLIED 21 · 수리 = 95783e4(`_wev` 개명 · M623 재조준) · 대상 케이스 재실행 0 적색.
 - **2판(커밋 4a7835d) `bash tests/commit_gate.sh` = `== 결과: PASS ==` rc 0** — 공개 표현 0 · 비밀 누출 0 · selftest **582/582 PASS · 616/616 KILLED** · F-1 재현 25/25 · codex 0.1.4 사후 재현 11/11 · 공백 위생 PASS. 릴레이: vitest **86/86** · 로컬 하네스 rc 0(우편 109/109 · 클라이언트 왕복 14/14 · 「핀 밖 받는 이 신호 = code 3」 신설) · 뮤테이션 M45~M53 **9/9 KILLED**.
