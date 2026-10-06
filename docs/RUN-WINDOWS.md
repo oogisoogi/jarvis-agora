@@ -102,7 +102,7 @@ $agora = "$env:USERPROFILE\.config\agora\bin\agora.cmd"
 
 | 물음 | 답 |
 |---|---|
-| `whoami` 첫 칸(승인 겹)이 무엇이라 적혔나 | 켜짐 / 꺼짐 |
+| `whoami` `approval_gate` 칸(승인 겹)이 무엇이라 적혔나 | 켜짐 / 꺼짐 |
 | `client_version` 값 | |
 | `browse` 가 방 목록을 냈나 | 냈다(개수: ) / 오류(코드: ) |
 

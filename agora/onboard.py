@@ -374,8 +374,9 @@ def _resident_line(directory: str) -> str:
 def whoami(*, directory: str | None = None) -> dict[str, Any]:
     """나는 누구이고, 어디에 대고 말하며, **어떤 겹이 꺼져 있는가**.
 
-    ★`approval_gate` 를 **첫 칸**에 오게 이름 지었다(출력은 키 정렬이라 `a` 가 맨 앞이다).
-      사람 승인 겹이 꺼진 것은 설치가 내린 결정이고, 그 결정은 **볼 때마다 보여야** 한다.
+    ★출력은 키 정렬(`cli.main` 의 `sort_keys=True`)이라 **이름이 곧 자리**다 — 칸 순서 계약:
+      첫 칸 = `advice_autosend`(상담소 자동 전달 · 명세 §13-5 「whoami 첫 줄」 · `ad` < `ap`) ·
+      둘째 칸 = `approval_gate`(사람 승인 겹 — 꺼진 결정은 **볼 때마다 보여야** 한다) · 셋째 칸 = `auto_visit`(상주).
     """
     directory = os.path.abspath(directory or config_dir())
     doc = load(directory)
@@ -408,6 +409,9 @@ def whoami(*, directory: str | None = None) -> dict[str, Any]:
         "participants/revoked_keys": os.path.join(directory, "revoked_keys"),
         "participants/operators": os.path.join(directory, "operators")})
     return {
+        # ★상담소 자동 전달(T3 · 명세 §13-5 「끈 상태는 whoami **첫 줄**에 늘 보인다」) — 렌더된 화면의 첫 칸(`{` 다음 줄).
+        #   이름 `advice_autosend` = 키 정렬에서 `approval_gate` 보다 앞(`ad` < `ap`)이라 고른 이름이다 — 바꾸면 자리가 바뀐다.
+        "advice_autosend": _counsel_line(directory),
         "approval_gate": {
             # ★「설치가 껐다」가 아니라 **설정이 껐다**(2026-09-09). 참가 경로가 설치 도우미에서
             #   풀리면서 이 겹을 끄는 것은 `--unattended` 를 손으로 쓴 **그 사람**이 됐다 —
@@ -420,18 +424,14 @@ def whoami(*, directory: str | None = None) -> dict[str, Any]:
             "note": ("켜져 있으면 현재 구현에서는 모든 발신이 code 3 으로 거부된다"
                      " — 승인자 배선은 v1.1(도구가 「승인 대기」 반환)"),
         },
-        # ★상주 방문(0.1.6) — 승인 게이트 **바로 다음 칸**이다(키 정렬: approval_gate < auto_visit).
+        # ★상주 방문(0.1.6) — 승인 게이트 **바로 다음 칸**(셋째 칸)이다(키 정렬: advice_autosend < approval_gate < auto_visit).
         #   이 컴퓨터가 스스로 광장에 들르는지는 **볼 때마다 보여야** 한다 — 무엇이 돌고 있는지 숨기지 않는다.
         "auto_visit": _resident_line(directory),
-        # ★우편 한 줄 — 셋째 칸(키 정렬 `approval_gate` < `auto_visit` < `awaiting_mail`) · 둘째 칸은 상주 그대로.
+        # ★우편 한 줄 — 넷째 칸(키 정렬 `auto_visit` < `awaiting_mail`) · 셋째 칸은 상주 그대로.
         "awaiting_mail": _mail_line(directory),
-        # ★상담소 자동 전달(T3 · 명세 §13-5) — 꺼졌으면 「상담소 자동 전달: 꺼짐」이 늘 보인다. 자리 = 셋째 칸
-        #   (키 정렬 approval_gate < auto_visit < autosend_counsel < awaiting_mail) — 첫 칸 게이트·둘째 칸 상주 계약을 지킨 채
-        #   머리 칸 안에 둔다(명세 「첫 줄」의 뜻을 「머리 칸」으로 읽은 설계 판단 · 보고서 작성자 판단 목록).
-        "autosend_counsel": _counsel_line(directory),
         # ★판본을 여기 둔다 — 참가자가 화면 사진으로 회신하는 명령이 이것 하나뿐이라,
         #   판본이 여기 없으면 「어느 클라이언트에서 난 일인가」를 물을 자리가 사라진다.
-        #   ⚠이름이 `c` 로 시작해 승인 게이트(`a`) 다음 자리다 — 첫 칸은 그대로 게이트다.
+        #   ⚠이름이 `c` 로 시작해 `a…` 칸들 다음 자리다 — 머리 칸 순서는 그대로다.
         "client_version": __version__,
         "config_dir": directory,
         # ★이 기계가 **무엇으로 파일을 잠그는가**(0.1.3). 여기 두는 이유: 잠글 수단이 없는

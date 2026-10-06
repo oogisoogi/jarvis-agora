@@ -4427,7 +4427,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     # ★T3(2026-10-06) — 상담소 자동 전달. 잃는 것: 같은 날 두 통(버킷 429)·보낸 줄 재발신·근거 끊김(바이트 변형)·
     #   꺼도 나감·모델 재호출(토큰)·빈 보고와 실패의 혼동 — 전부 오류 없이 조용히 난다.
     "상담소자동": ('M693-auto-signal-day-gate-dropped', 'M694-auto-sent-lines-not-moved', 'M695-auto-sent-ledger-reserialized', 'M696-auto-unknown-commit-dropped', 'M697-auto-signal-pending-never-expires', 'M698-auto-items-uncapped', 'M699-auto-unreadable-config-on', 'M700-auto-off-keeps-lines', 'M701-auto-any-desk', 'M702-auto-daily-field-unfiltered', 'M703-auto-daily-signatures-empty', 'M704-auto-weekly-rejects-kept', 'M705-auto-weekly-rewrites-dead-cycle', 'M706-auto-weekly-empty-unreported', 'M707-auto-writer-failure-as-empty', 'M708-auto-features-not-machine', 'M709-auto-old-lines-kept', 'M710-auto-weekly-429-retried', 'M711-auto-run-lock-ignored', 'M712-auto-day-utc-not-kst', 'M713-auto-writer-tools-open', 'M714-package-drops-desk-pin',
-                'M715-auto-off-skips-run-lock', 'M716-auto-signal-send-unchecked', 'M717-auto-daily-send-unchecked', 'M718-auto-weekly-send-unchecked', 'M719-auto-run-continues-after-off', 'M720-auto-daily-resend-unchecked', 'M721-auto-off-keeps-weekly-pending-cycle', 'M722-auto-off-keeps-daily-pending', 'M723-auto-off-keeps-mailbox-weekly-pending', 'M724-auto-empty-scan-marks-day', 'M725-auto-daily-ok-at-success-time', 'M726-evidence-window-ignored', 'M727-evidence-bad-cycle-whole-ledger', 'M728-writer-input-drops-by-sort-order', 'M729-writer-input-unwindowed', 'M731-auto-daily-seats-unfolded-kept'),
+                'M715-auto-off-skips-run-lock', 'M716-auto-signal-send-unchecked', 'M717-auto-daily-send-unchecked', 'M718-auto-weekly-send-unchecked', 'M719-auto-run-continues-after-off', 'M720-auto-daily-resend-unchecked', 'M721-auto-off-keeps-weekly-pending-cycle', 'M722-auto-off-keeps-daily-pending', 'M723-auto-off-keeps-mailbox-weekly-pending', 'M724-auto-empty-scan-marks-day', 'M725-auto-daily-ok-at-success-time', 'M726-evidence-window-ignored', 'M727-evidence-bad-cycle-whole-ledger', 'M728-writer-input-drops-by-sort-order', 'M729-writer-input-unwindowed', 'M730-whoami-counsel-not-first', 'M731-auto-daily-seats-unfolded-kept'),
     # ★09-19 신설 — **광장v2**. 피드 순서와 「어느 방이 커뮤니티인가」를 계산이 정하는 자리.
     #   여기서 잃는 것은 조용하다: 서버 피드와 클라이언트 피드가 다른 순서를 보이거나, 일반 토론방이
     #   커뮤니티로 읽혀 전역 상한이 토론을 막는다 — 오류 없이.
@@ -12416,25 +12416,46 @@ def _case_whoami_reports_the_lock_backend() -> None:
         raise AssertionError(f"잠글 수단이 없는데 화면은 {said!r} 라고 적는다")
 
 
-def _case_whoami_puts_the_approval_gate_first() -> None:
-    """`whoami` 의 **첫 칸이 승인 게이트**다(RC-2 · master 결정 2026-09-05).
+def _whoami_screen(d: str) -> list[str]:
+    """`agora whoami --dir d` 가 **실제로 찍는 화면**(cli.main 의 JSON 렌더 그대로)의 줄 목록."""
+    import contextlib as _ctx
+    import io as _io
+    from agora import cli
+    said = _io.StringIO()
+    with _ctx.redirect_stdout(said):
+        rc = cli.main(["whoami", "--dir", d])
+    if rc != 0:
+        raise AssertionError(f"whoami 가 실패했다: rc={rc}")
+    return said.getvalue().splitlines()
 
-    ★사람 승인 겹이 꺼진 것은 설치가 내린 결정이고, 그 결정은 **볼 때마다 보여야** 한다.
-      출력은 키 정렬이라 이름이 곧 자리다 — 이름을 바꾸면 그 사실이 화면 아래로 내려간다.
+
+def _case_whoami_head_columns_counsel_then_gate() -> None:
+    """`whoami` 화면의 **첫 칸 = 상담소 자동 전달**(명세 §13-5 「끈 상태는 whoami 첫 줄에」) · **둘째 칸 = 승인 게이트**
+    (RC-2 · master 결정 2026-09-05) · 셋째 칸 = 상주.
+
+    ★사람 승인 겹이 꺼진 것·상담소 자동 전달이 꺼진 것은 **볼 때마다 보여야** 한다.
+      출력은 키 정렬이라 이름이 곧 자리다 — 이름을 바꾸면 그 사실이 화면 아래로 내려간다. 그래서 dict 키가 아니라
+      **찍힌 화면의 줄**을 잰다(`{` 다음 줄이 첫 칸).
     """
-    import json as _json
-    from agora import onboard
+    from agora import collector, onboard
     d = _onboard_dir()
     key = os.path.join(d, "id_ed25519")
     with _fake_relay().serving() as (url, relay):
         relay.roster_text["allowed_signers"] = "operator-a ssh-ed25519 AAAA\n"
         _with_key(key, lambda: onboard.register(directory=d, relay_url=url, unattended=True, skill_pin=_PIN()))
         onboard.sync_roster(directory=d, relay_url=url)
+    screen = _whoami_screen(d)
+    head = [ln.strip().split('"')[1] for ln in screen if ln.startswith('  "')][:3]     # 맨 위 칸만(들여쓰기 2)
+    if screen[0] != "{" or head != ["advice_autosend", "approval_gate", "auto_visit"]:
+        raise AssertionError(f"머리 칸 순서가 다르다(첫 칸 상담소 · 둘째 칸 승인 게이트 · 셋째 칸 상주): {head}")
+    if screen[1].strip() != '"advice_autosend": "상담소 자동 전달: 켜짐",':
+        raise AssertionError(f"첫 칸이 상담소 자동 전달 한 줄이 아니다: {screen[1]}")
+    collector.set_auto(d, on=False)
+    if _whoami_screen(d)[1].strip() != '"advice_autosend": "상담소 자동 전달: 꺼짐",':
+        raise AssertionError("상담소 자동 전달을 껐는데 첫 칸이 「꺼짐」이 아니다")
+    if any('"autosend_counsel"' in ln for ln in screen):
+        raise AssertionError("옛 칸 autosend_counsel 이 남았다")
     out = onboard.whoami(directory=d)
-    rendered = _json.dumps(out, ensure_ascii=False, sort_keys=True, indent=2)
-    first_key = rendered.splitlines()[1].strip().split('"')[1]
-    if first_key != "approval_gate":
-        raise AssertionError(f"첫 칸이 승인 게이트가 아니다: {first_key}")
     if "꺼짐" not in out["approval_gate"]["state"]:
         raise AssertionError(f"꺼진 사실을 안 적는다: {out['approval_gate']}")
     if not out["roster_checkpoint"]["sha256"]:
@@ -16438,8 +16459,8 @@ def _case_resident_failed_wake_does_not_spend_the_room() -> None:
             raise AssertionError("다시 켰는데 연속 실패 계수가 남았다")
 
 
-def _case_whoami_second_column_is_resident() -> None:
-    """`whoami` **둘째 칸이 상주 한 줄**이다 — 미설치 · 켜짐 · 꺼짐이 볼 때마다 보인다."""
+def _case_whoami_third_column_is_resident() -> None:
+    """`whoami` **셋째 칸이 상주 한 줄**이다(첫 칸 상담소 · 둘째 칸 승인 게이트 다음) — 미설치 · 켜짐 · 꺼짐이 볼 때마다 보인다."""
     import json as _json
     from agora import onboard, resident
     with _resident_temp_home("whoami") as _home:
@@ -16453,8 +16474,8 @@ def _case_whoami_second_column_is_resident() -> None:
             rendered = _json.dumps(onboard.whoami(directory=d), ensure_ascii=False, sort_keys=True, indent=2)
             return [ln.strip().split('"')[1] for ln in rendered.splitlines() if ln.startswith('  "')]
 
-        if keys()[:2] != ["approval_gate", "auto_visit"]:
-            raise AssertionError(f"둘째 칸이 상주가 아니다: {keys()[:3]}")
+        if keys()[:3] != ["advice_autosend", "approval_gate", "auto_visit"]:
+            raise AssertionError(f"셋째 칸이 상주가 아니다: {keys()[:4]}")
         if not onboard.whoami(directory=d)["auto_visit"].startswith("상주: 미설치"):
             raise AssertionError(onboard.whoami(directory=d)["auto_visit"])
         # ★`first_visit=False` — 이 케이스가 재는 것은 **whoami 의 칸**이지 첫 판의 결말이 아니다.
@@ -19192,7 +19213,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("상주: 시도와 방문을 가른다",   _case_resident_last_splits_try_and_visit, None),
     ("상주: 설치 직후 한 판",        _case_resident_install_visits_once_right_away, None),
     ("상주: 실패는 방을 안 깎는다",  _case_resident_failed_wake_does_not_spend_the_room, None),
-    ("whoami: 둘째 칸이 상주",      _case_whoami_second_column_is_resident, None),
+    ("whoami: 셋째 칸이 상주",      _case_whoami_third_column_is_resident, None),
     ("상주: CLI 입구가 선다",       _case_resident_cli_entry_stands, None),
     ("초대: 1단계가 혼자 선다",     _case_invite_join_brief_stands_alone, None),
     ("잠금: 수단은 셋 중 하나",    _case_lock_backend_is_one_of_three, None),
@@ -19631,7 +19652,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("명부: TOFU 뒤 변경은 확인",     _case_sync_roster_is_tofu_then_confirmed, None),
     ("명부: 자동 갱신은 추가만",      _case_sync_roster_additive_only_policy, None),
     ("명부: 폐기 목록 없으면 멈춤",   _case_sync_roster_stops_when_revocations_are_missing, None),
-    ("whoami: 첫 칸이 승인 게이트",   _case_whoami_puts_the_approval_gate_first, None),
+    ("whoami: 첫 칸 상담소·둘째 칸 승인 게이트", _case_whoami_head_columns_counsel_then_gate, None),
     ("whoami: 잠금 수단을 적는다",  _case_whoami_reports_the_lock_backend, None),
     ("여정: 기존 도구를 부른다",      _case_journey_tools_call_the_existing_ones, None),
     ("CLI: 진입점이 플래그를 받는다", _case_cli_surface_accepts_flag_arguments, None),
@@ -20196,7 +20217,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("M451-whoami-drops-resident-line", "agora/onboard.py",
      '        "auto_visit": _resident_line(directory),\n',
      "",
-     "whoami: 둘째 칸이 상주"),
+     "whoami: 셋째 칸이 상주"),
     # ★기다리지 않는 잠금이 「남이 쥐고 있다」를 「잡았다」로 답하면 두 판이 겹쳐 돈다(창구 = _lock).
     ("M452-try-acquire-says-yes-when-busy", "agora/_lock.py",
      "            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):\n                return False",
@@ -21026,7 +21047,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("M314-whoami-buries-the-gate", "agora/onboard.py",
      '        "approval_gate": {',
      '        "zz_gate": {',
-     "whoami: 첫 칸이 승인 게이트"),
+     "whoami: 첫 칸 상담소·둘째 칸 승인 게이트"),
     ("M315-enter-opens-its-own-write-path", "agora/tools.py",
      '    if kind not in ROOM_KINDS:\n        raise AgoraError(errors.ARGUMENT, "방은 debate 나 problem 이다",\n                         {"kind": kind, "allowed": list(ROOM_KINDS)})',
      '    if kind not in ROOM_KINDS:\n        _publish(ctx, kind="genesis", thread_id=topic, payload={}, prev="",\n                 expected_state="", category=kind)',
@@ -22705,6 +22726,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    table = mail.evidence_table(ctx, window) if window is not None else {}',
      '    table = mail.evidence_table(ctx)',
      '상담소자동: 근거 = 그 주기 창'),
+    ('M730-whoami-counsel-not-first', "agora/onboard.py",
+     '        "advice_autosend": _counsel_line(directory),',
+     '        "counsel_autosend": _counsel_line(directory),',
+     "whoami: 첫 칸 상담소·둘째 칸 승인 게이트"),
     ('M731-auto-daily-seats-unfolded-kept', "agora/collector.py",
      '    if "seats" in candidates and not (type(roles) is list and all(type(r) is str and r in SEAT_CATEGORIES for r in roles)):',
      '    if "seats" in candidates and not type(roles) is list:',
