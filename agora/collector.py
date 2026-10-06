@@ -17,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import time
 from typing import Any, Callable, Iterator
 
 from agora import errors
@@ -36,9 +37,13 @@ WRITER_DIR = "writer"                # 주간 작성기 전용 빈 cwd(master cw
 SIGNAL_KEEP = datetime.timedelta(days=7) - datetime.timedelta(hours=1)   # 릴레이 first_seen 창(지난 7일) 안쪽 여유 1시간
 SIGNAL_KEEP_LINES = 5000             # 미가입·미발신 PC 의 무한 증가 막기(master 📌3 채택)
 SIGNAL_FUTURE = datetime.timedelta(minutes=5)
+FACTS_MAX_AGE = datetime.timedelta(hours=2)  # 팩 facts 의 `cutoff` 가 이보다 오래면 일일 0(묵은 사실 · 리뷰 3R ③)
 PENDING_TTL = datetime.timedelta(hours=23)   # 릴레이 봉투 ts 창(−24h)보다 짧게(mail.WEEKLY_PENDING_TTL 과 같은 이유)
 WEEKLY_KEEP_CYCLES = 12
 WRITER_TIMEOUT = 300                 # 터미널 일정 command 잡 600초 안 · 넘으면 프로세스 그룹째 끝낸다(resident.run_agent)
+OFF_LOCK_WAIT = WRITER_TIMEOUT + 30  # off 가 도는 판(`run.lock`)을 기다리는 상한 — 넘으면 지우기는 다음 판(리뷰 3R ②)
+LOCK_POLL = 0.2                      # 상한 있는 기다림의 재시도 간격(POSIX·윈 같은 `try_acquire` 로 잰다)
+PURGE_DUE = "purge.due"              # 미룬 지우기 표식 — 다음 판이 켜짐·꺼짐과 무관하게 **먼저** 지운다(off→on 이 미룬 것을 살리지 않게)
 WRITER_INPUT_MAX = 24 * 1024         # 작성기 입력 상한(근거 표) — 넘으면 오래된 줄부터 뺀다
 WRITER_BUDGET_USD = "0.50"           # 1회 호출 비용 상한(`--max-budget-usd` · -p 전용)
 OK_STATUS = (200, 201)
@@ -108,14 +113,22 @@ def _log(config_dir: str, row: dict[str, Any]) -> None:
 
 
 @contextlib.contextmanager
-def _file_lock(path: str, *, wait: bool) -> Iterator[bool]:
+def _file_lock(path: str, *, wait: bool, limit: float | None = None) -> Iterator[bool]:
     """옆 잠금 파일 · ★0번 바이트를 잠근다(`a+` 는 위치가 끝이라 윈 `msvcrt.locking` 이 다른 바이트를 잠근다 — 팩과 어긋남).
-    `wait=False` 이면 남이 쥐고 있을 때 바로 False 를 내준다(한 번에 한 판)."""
+    `wait=False` 이면 남이 쥐고 있을 때 바로 False 를 내준다(한 번에 한 판) · `limit` 초 = 그만큼만 기다리고 False."""
     from agora import _lock
     fh = open(path, "a+", encoding="utf-8")
     try:
         fh.seek(0)
-        got = _lock.acquire(fh) if wait else _lock.try_acquire(fh)
+        if limit is not None:
+            deadline = time.monotonic() + limit
+            got = _lock.try_acquire(fh)
+            while got is False and time.monotonic() < deadline:
+                time.sleep(LOCK_POLL)
+                fh.seek(0)
+                got = _lock.try_acquire(fh)
+        else:
+            got = _lock.acquire(fh) if wait else _lock.try_acquire(fh)
         if got is False:
             yield False
             return
@@ -179,15 +192,32 @@ def _purge(config_dir: str) -> None:
 def set_auto(config_dir: str, *, on: bool) -> dict[str, Any]:
     """`agora counsel on|off` — `config.json` 의 그 키만 고친다(다른 칸은 그대로) · 못 읽는 파일은 덮어쓰지 않는다.
 
-    ★`run.lock` 을 **기다려** 쥔 채 설정을 쓰고 지운다 — 도는 판이 있으면 그 판이 끝난 뒤에 돌아온다(판이 메모리의 state 를
-      되써서 지운 pending 을 되살리던 자리 · 리뷰 ①). 판 안쪽은 발신 직전마다 `auto_enabled` 를 다시 본다(손으로 고친 설정).
+    ★off = **먼저 설정을 끈다**(원자 쓰기 · 리뷰 3R ②) — 도는 판은 발신 직전 재확인(`_still_on`)에서 멈춘다. 그다음
+      `run.lock` 을 상한(`OFF_LOCK_WAIT`)까지 기다려 쥔 채 지운다(판이 메모리의 state 를 되써서 지운 pending 을 되살리던
+      자리 · 리뷰 ①). 못 쥐면(상한·잠금 오류) 설정은 **꺼진 채** 두고 지우기는 다음 판으로 미룬다(「아직 켜짐」 길 0).
+    ★on = 미룬 지우기가 남았으면 다음 판이 먼저 지운다(`PURGE_DUE`) — 켜도 옛 pending 이 나가지 않는다.
     """
     os.makedirs(config_dir, mode=0o700, exist_ok=True)
-    with _file_lock(_p(config_dir, RUN_LOCK), wait=True):
-        return _set_auto_locked(config_dir, on=on)
+    path = _write_auto(config_dir, on=on)
+    if on:
+        return {"상담소_자동_전달": "켜짐", "설정": path,
+                "뜻": "신호·일일·주간 성찰을 하루 한 번(주간은 주 1회) 상담소로 보낸다"}
+    due = _p(config_dir, PURGE_DUE)
+    with open(due, "a", encoding="utf-8"):
+        pass                                             # ★잠금 전에 표식 — 기다리다 죽어도 다음 판이 지운다
+    try:
+        with _file_lock(_p(config_dir, RUN_LOCK), wait=True, limit=OFF_LOCK_WAIT) as held:
+            if held:
+                _purge(config_dir)
+                os.remove(due)
+    except OSError:
+        held = False                                     # 윈 잠금이 자기 기다림 끝에 올린다 — 설정은 꺼진 채(되돌리지 않는다)
+    return {"상담소_자동_전달": "꺼짐", "설정": path,
+            "지우기": "지웠다" if held else "미룸(도는 판을 못 기다렸다 — 다음 판이 먼저 지운다)",
+            "뜻": "세 통 모두 작성·발신하지 않는다"}
 
 
-def _set_auto_locked(config_dir: str, *, on: bool) -> dict[str, Any]:
+def _write_auto(config_dir: str, *, on: bool) -> str:
     path = os.path.join(config_dir, "config.json")
     doc: Any = {}
     if os.path.exists(path):
@@ -202,11 +232,7 @@ def _set_auto_locked(config_dir: str, *, on: bool) -> dict[str, Any]:
     section = doc.get("counsel") if type(doc.get("counsel")) is dict else {}
     doc["counsel"] = {**section, "auto": on}
     _write_json(path, doc)
-    if not on:
-        _purge(config_dir)
-    return {"상담소_자동_전달": "켜짐" if on else "꺼짐", "설정": path,
-            "뜻": "신호·일일·주간 성찰을 하루 한 번(주간은 주 1회) 상담소로 보낸다" if on
-                  else "세 통 모두 작성·발신하지 않는다 · 모은 신호 줄은 지웠다"}
+    return path
 
 
 def summary_line(config_dir: str) -> str:
@@ -446,15 +472,20 @@ def _daily_step(ctx: Any, state: dict[str, Any], *, today: str, now: datetime.da
     if pending is None:
         if state.get("daily_day") == today:
             return {"result": "done_today"}
+        # ★마감 = 팩이 오류 기록을 읽기 **전에** 정한 `facts["cutoff"]`(리뷰 3R ③ · 팩은 `(since, cutoff]` 를 센다) — 여기 now 로
+        #   적으면 cutoff ~ now 사이 오류가 이번 통에도 다음 통에도 안 실린다. 없음·형식 밖·2시간 넘게 묵음 = 일일 0 · 표식 0.
+        cutoff = facts.get("cutoff")
+        if not mail._ts_ok(cutoff) or mail._parse_ts(cutoff) < now - FACTS_MAX_AGE:
+            return {"result": "no_fresh_facts"}
         sent = state.get("signal_sent") or {}
         sigs = sent.get("signatures") if sent.get("day") == today else []
         skipped = state.get("weekly_skipped") if type(state.get("weekly_skipped")) is str else None
         payload = daily_payload(facts, today=today, signatures=sigs, weekly_skipped=skipped, now=now)
         thread = state.get("daily_thread") if mail.is_id(str(state.get("daily_thread") or "")) else None
         doc = mail.build(ctx, to=to, payload=payload, thread_id=thread)
-        # ★`cutoff` = 이 통 사실의 마감 시각(리뷰 ④) — 성공이 다음 판(code 8 재전송)이어도 `daily_ok_at` 은 이 값이다
-        #   (성공 시각을 적으면 마감 ~ 성공 사이 사실이 다음 일일에서 빠진다 · 팩 `facts` 가 이 칸을 기준으로 센다).
-        pending = {"at": _iso(now), "cutoff": _iso(now), "doc": doc, "day": today, "weekly_skipped": skipped}
+        # ★pending 에 그 마감을 박는다(리뷰 ④) — 성공이 다음 판(code 8 재전송)이어도 `daily_ok_at` 은 이 값이다
+        #   (성공 시각을 적으면 마감 ~ 성공 사이 사실이 다음 일일에서 빠진다 · 팩 `facts` 가 이 칸을 `since` 로 센다).
+        pending = {"at": _iso(now), "cutoff": cutoff, "doc": doc, "day": today, "weekly_skipped": skipped}
         if not _still_on(ctx.config_dir):
             return dict(OFF)
         state["daily_day"] = today
@@ -675,6 +706,10 @@ def run(*, directory: str | None = None, facts_path: str | None = None, now: dat
     with _file_lock(_p(d, RUN_LOCK), wait=False) as held:
         if not held:
             return {"result": "locked"}
+        due = _p(d, PURGE_DUE)
+        if os.path.exists(due):
+            _purge(d)                                    # ★off 가 미룬 지우기 — 켜짐이어도 먼저(옛 pending 재발신 0)
+            os.remove(due)
         if not auto_enabled(d):
             _purge(d)                                    # ★잠금 안에서 지운다(`set_auto` 와 같은 규칙)
             row["result"] = "off"
