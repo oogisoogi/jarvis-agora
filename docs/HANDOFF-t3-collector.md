@@ -10,10 +10,10 @@
 | 부품 | 자리 | 비고 |
 |---|---|---|
 | 신호 줄 쓰기 | 팩 `bin/javis_counsel.py signal` ← 훅 공용 실패 기록 함수(6곳) · preflight `main()` C 번호 FAIL/WARN · 부서 도구 EXIT trap(rc∉{0,2}) · CLI rotate·pack-update 비0 | 형식 밖 = 버림 · 끔 = 안 씀 · 2MB 넘으면 버림 · 잠금 2초 넘으면 버림 |
-| 일일 사실 | 팩 `javis_counsel.py facts` → `<설정>/counsel/facts.json` | 꺼짐·그날 일일 끝 = 수집 0 |
+| 일일 사실 | 팩 `javis_counsel.py facts` → `<설정>/counsel/facts.json` | 꺼짐·그날 일일 끝 = 수집 0 · 일일 마감 = facts `cutoff`(pending 에 박음 → 성공 시 `daily_ok_at`) · 없음·형식 밖·2시간 넘게 묵음 = 일일 0·표식 0(`no_fresh_facts`) |
 | 일정 | 팩 `schedule.json` 잡 `agora-counsel`(30분 · base_only · bulk:false · publish:true) → `javis_counsel.py tick` | tick = 동봉본 첫 설치 → facts → `agora counsel auto` |
 | 발신 전부 | 아고라 `agora/collector.py`(`agora counsel auto`) | 순서 = 신호 → 주간 → 일일 · 결과 = `counsel/state.json`·`counsel.log` · 화면 0 |
-| 끄기 | `agora counsel off|on` = `config.json` `counsel.auto` 그 키만 · `run.lock` 을 기다려 쥔 채 쓰고 지운다 | 끄면 모은 줄·신호/일일 pending·주간 문서·pending 주기·`weekly_skipped`·우편함 주간 pending 지움 · 판은 발신 직전마다 다시 본다 |
+| 끄기 | `agora counsel off|on` = `config.json` `counsel.auto` 그 키만 · off = 설정 먼저 끔 → `run.lock` 을 `WRITER_TIMEOUT + 30`초까지 기다려 지운다(못 쥐면 꺼진 채 「미룸」 · 표식 `purge.due` → 다음 판이 먼저 지움) | 끄면 모은 줄·신호/일일 pending·주간 문서·pending 주기·`weekly_skipped`·우편함 주간 pending 지움 · 판은 발신 직전마다 다시 본다 |
 | 보이기 | `agora whoami` 첫 칸 `advice_autosend`(「상담소 자동 전달: 켜짐/꺼짐」) | 키 정렬 `ad` < `ap` — 둘째 칸 승인 게이트 · 셋째 칸 상주(리뷰 ⑫) |
 
 ## 2. 커밋
@@ -35,6 +35,7 @@
 - **top_features = 그 주기 안 줄의 op 집계**(원장 전체 아님 · 작성자 판단 — 원장 전체로 세면 신호가 한 번이라도 있던 PC 는 영원히 빈 보고가 안 된다).
 - **꾸러미 핀 누락(수리)**: 0.1.13 까지 zip 에 `config/desk-pin.txt` 가 없었다 → 0.1.14 MANIFEST 에 추가 + 케이스 「꾸러미: 상담소 핀이 실린다」 + M714.
 - **429 와 버킷**: 신호(`gmail-signal-day`)·일일(`gmail-daily-day`) = 발신자당 하루 1 · 주간(`gmail-weekly-week`) = 월요일 06:00 KST 칸 주 1(명세 §1-3 (2)) — 시험 참가자로 같은 날 두 번 보내면 429 가 정상(수집기는 그날·그 주기 포기).
+- **터미널 데몬의 동결 1회 잡 재적재가 `bulk`/`publish` 를 떨궜다**: `schedule.rs` `requeue_oneshot_after_frozen_at` 이 Job 구조체를 다시 직렬화하면서 두 칸이 빠졌다 — 리뷰 3R ⑥ 에서 팩 저장소 터미널 데몬 Job 의 두 칸을 `Option<bool>` + `skip_serializing_if` 로 바꿔 해소(TICKET=agora-t3-pack-collector).
 - **selftest·뮤테이션 도는 동안 소스 편집 금지**(전임 함정 그대로) · `relay/node_modules` = 심볼릭 링크(`git add -A` 금지).
 
 ## 4. 라이브 실측(시험 참가자 `jarvis-test-weekly0113` · 설정 폴더 격리)
