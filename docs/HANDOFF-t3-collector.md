@@ -13,8 +13,8 @@
 | 일일 사실 | 팩 `javis_counsel.py facts` → `<설정>/counsel/facts.json` | 꺼짐·그날 일일 끝 = 수집 0 |
 | 일정 | 팩 `schedule.json` 잡 `agora-counsel`(30분 · base_only · bulk:false · publish:true) → `javis_counsel.py tick` | tick = 동봉본 첫 설치 → facts → `agora counsel auto` |
 | 발신 전부 | 아고라 `agora/collector.py`(`agora counsel auto`) | 순서 = 신호 → 주간 → 일일 · 결과 = `counsel/state.json`·`counsel.log` · 화면 0 |
-| 끄기 | `agora counsel off|on` = `config.json` `counsel.auto` 그 키만 | 끄면 모은 줄·신호/일일 pending·주간 pending 지움 |
-| 보이기 | `agora whoami` 셋째 칸 `autosend_counsel` | 첫 칸 게이트·둘째 칸 상주 계약 유지(작성자 판단) |
+| 끄기 | `agora counsel off|on` = `config.json` `counsel.auto` 그 키만 · `run.lock` 을 기다려 쥔 채 쓰고 지운다 | 끄면 모은 줄·신호/일일 pending·주간 문서·pending 주기·`weekly_skipped`·우편함 주간 pending 지움 · 판은 발신 직전마다 다시 본다 |
+| 보이기 | `agora whoami` 첫 칸 `advice_autosend`(「상담소 자동 전달: 켜짐/꺼짐」) | 키 정렬 `ad` < `ap` — 둘째 칸 승인 게이트 · 셋째 칸 상주(리뷰 ⑫) |
 
 ## 2. 커밋
 | 저장소 · 가지 | 커밋 | 내용 |
@@ -47,3 +47,5 @@
 - 명세 §13-6 1줄 정정(팩 PC = 일정이 대신) · AUTO-UPDATE-118 L331 문면 정정 · 게시·핀 · 병합 순서 U1 → U3 → T3(rebase 시점 = master).
 - 윈 실기(문안 = 팩 저장소 `docs/design/T3-WIN-HANDS-ON-2026-10-06.md`).
 - 적대 라운드(codex 1R·2R → Fable 3R · 발주 = master).
+- BACKLOG(데스크 T2 다음 판 · 구현 0): 데스크의 긴급 후보 분류기가 `intent=signal` 봉투의 `update.*` 코드를 긴급으로 센다(§4 「`urgent: 1`」 실측이 그 자리).
+- BACKLOG(터미널 데몬 · 이 티켓 밖): 시간 초과된 command 잡의 자식 프로세스 그룹을 데몬이 끝내지 않는다(작성기는 `resident.run_agent` 가 스스로 그룹째 끝낸다).
