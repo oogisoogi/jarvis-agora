@@ -17888,7 +17888,7 @@ def _case_resident_desk_branch_never_wakes() -> None:
 
 # ── 주간 성찰 보고(명세 §1-3 · 10-06 개정 · TICKET=agora-spec-weekly) ─────────────────────
 
-def _ev(kind: str = "cmd", rid: str = "host.update", quote: str = "host.update") -> dict[str, str]:
+def _wev(kind: str = "cmd", rid: str = "host.update", quote: str = "host.update") -> dict[str, str]:
     """구조화 근거(3판 M7) — 기본 = 명령 집계 `host.update`(`_signal_ledger` 기본 줄과 맞는다)."""
     return {"kind": kind, "id": rid, "quote": quote}
 
@@ -17897,7 +17897,7 @@ def _weekly_payload(**over: Any) -> dict[str, Any]:
     from agora import mail
     import datetime as _dt
     wk = {"cycle": mail.cycle_week_of(_dt.datetime.now(_dt.timezone.utc)), "version": "1.1.8", "os": "macos-15.6",
-          "blocked": [{"text": "업데이트 뒤 같은 경고가 사흘 이어졌다", "evidence_ref": _ev()}],
+          "blocked": [{"text": "업데이트 뒤 같은 경고가 사흘 이어졌다", "evidence_ref": _wev()}],
           "top_features": [{"op": "host.update", "count": 3}], "owner_note": ""}
     wk.update(over)
     return {"intent": "weekly", "weekly": wk}
@@ -17927,8 +17927,8 @@ def _case_mail_weekly_closed_shape() -> None:
     from agora import mail
     import datetime as _dt
     mail.validate(_mail_doc(payload=_weekly_payload()))
-    item = {"text": "t", "evidence_ref": _ev(quote="e")}
-    it = lambda **ref: [{"text": "t", "evidence_ref": dict(_ev(quote="e"), **ref)}]
+    item = {"text": "t", "evidence_ref": _wev(quote="e")}
+    it = lambda **ref: [{"text": "t", "evidence_ref": dict(_wev(quote="e"), **ref)}]
 
     def code_of(payload: dict[str, Any]) -> tuple[Any, Any]:
         try:
@@ -17940,8 +17940,8 @@ def _case_mail_weekly_closed_shape() -> None:
     future = mail.cycle_week_of(now + _dt.timedelta(days=8))
     old = mail.cycle_week_of(now - _dt.timedelta(days=57))
     bad = [(_weekly_payload(extra=1), None), (_weekly_payload(blocked=[item] * 4), None),
-           (_weekly_payload(blocked=[{"text": "가" * 201, "evidence_ref": _ev()}]), None),
-           (_weekly_payload(blocked=[{"text": " ", "evidence_ref": _ev()}]), None),
+           (_weekly_payload(blocked=[{"text": "가" * 201, "evidence_ref": _wev()}]), None),
+           (_weekly_payload(blocked=[{"text": " ", "evidence_ref": _wev()}]), None),
            (_weekly_payload(blocked=[{"text": "t", "evidence": "자유문 근거"}]), None),          # 옛 자유문 칸 = 모르는 칸
            (_weekly_payload(blocked=[{"text": "t"}]), None),
            (_weekly_payload(blocked=it(quote="")), "evidence_required"),
@@ -17953,8 +17953,8 @@ def _case_mail_weekly_closed_shape() -> None:
            (_weekly_payload(blocked=it(kind="hook", id="a" * 32)), "evidence_id"),
            (_weekly_payload(blocked=it(kind="sig", id="a" * 8)), "evidence_id"),
            (_weekly_payload(blocked=it(kind="cmd", id="/Users/kim")), "evidence_id"),
-           (_weekly_payload(blocked=[{"text": "t", "evidence_ref": dict(_ev(), note="자유문")}]), None),
-           (_weekly_payload(blocked=[{"text": "t", "evidence_ref": _ev(quote="e"), "signatures": ["c" * 32] * 2}]), "duplicate_signature"),
+           (_weekly_payload(blocked=[{"text": "t", "evidence_ref": dict(_wev(), note="자유문")}]), None),
+           (_weekly_payload(blocked=[{"text": "t", "evidence_ref": _wev(quote="e"), "signatures": ["c" * 32] * 2}]), "duplicate_signature"),
            (_weekly_payload(top_features=[{"op": "x", "count": 1}, {"op": "x", "count": 2}]), "duplicate_op"),
            (_weekly_payload(top_features=[{"op": "x", "count": 0}]), None),
            (_weekly_payload(cycle="2027-W53"), None), (_weekly_payload(cycle=future), "cycle_future"),
@@ -17965,7 +17965,7 @@ def _case_mail_weekly_closed_shape() -> None:
         got = code_of(payload)
         if got[0] != errors.ARGUMENT or (why and got[1] != why):
             raise AssertionError(f"주간 보고 위반을 못 잡았다: {got} ← {json.dumps(payload, ensure_ascii=False)[:160]}")
-    ok_edge = _weekly_payload(blocked=[{"text": "😀" * 200, "evidence_ref": _ev("hook", "0123456789abcdef", "😀" * 120),
+    ok_edge = _weekly_payload(blocked=[{"text": "😀" * 200, "evidence_ref": _wev("hook", "0123456789abcdef", "😀" * 120),
                                         "signatures": [c * 32 for c in "abcde"]}] * 3)
     if code_of(ok_edge)[0] is not None:
         raise AssertionError("코드포인트 상한 끝값을 거부했다")
@@ -18021,9 +18021,9 @@ def _case_mail_weekly_exempt_only_without_note() -> None:
     with _PinnedDesk(ctx, "operator-b"):
         # ★3판 M7: 근거가 허용 원장과 하나라도 안 맞으면 예외 없음(사람 승인 겹)
         refused(mail.build(ctx, to="operator-b", payload=_weekly_payload(
-            wishes=[{"text": "t", "evidence_ref": _ev(rid="agora.mail", quote="agora.mail")}])), "원장에 없는 근거")
+            wishes=[{"text": "t", "evidence_ref": _wev(rid="agora.mail", quote="agora.mail")}])), "원장에 없는 근거")
         refused(mail.build(ctx, to="operator-b", payload=_weekly_payload(
-            blocked=[{"text": "t", "evidence_ref": _ev(quote="host.update ×9")}])), "원장 원문과 다른 인용")
+            blocked=[{"text": "t", "evidence_ref": _wev(quote="host.update ×9")}])), "원장 원문과 다른 인용")
         for note in ("", " \u3000"):           # 빈 값 = is_blank(받는 쪽과 같은 글자 목록 · 2판 m1)
             out = _with_key(key, lambda: mail._publish(ctx, mail.build(ctx, to="operator-b",
                                                                          payload=_weekly_payload(owner_note=note))))
@@ -18080,7 +18080,7 @@ def _case_mail_send_weekly_pending_resend() -> None:
             raise AssertionError(f"실패 반환에 pending·문서가 없다: {out}")
         state["mode"] = "500"
         changed = dict(w1, owner_note="")
-        changed["blocked"] = [{"text": "다른 글", "evidence_ref": _ev()}]
+        changed["blocked"] = [{"text": "다른 글", "evidence_ref": _wev()}]
         out = _with_key(_fixtures()["key_a"], lambda: mail._send_weekly(ctx, changed, publish=pub))
         if not (out.get("pending") and out.get("resent")) or sent[1] != sent[0]:
             raise AssertionError("같은 주기 재시도가 같은 문서(같은 message_id)가 아니다")
@@ -18116,10 +18116,10 @@ def _case_mail_weekly_evidence_ledger() -> None:
     if src.get(("cmd", "host.update")) != "host.update ×1" or ("hook", hid) not in src \
             or src.get(("sig", sig)) != "update host.update update.sig_mismatch 1.1.8 macos-15.6 ×1" or len(src) != 5:
         raise AssertionError(f"허용 원장 원문 표가 다르다(중복 줄 1번 · 형식 밖 버림): {src}")
-    wk = _weekly_payload(blocked=[{"text": "a", "evidence_ref": _ev("sig", sig, "update.sig_mismatch")},
-                                  {"text": "b", "evidence_ref": _ev("hook", hid, "hook.rc1")},
-                                  {"text": "c", "evidence_ref": _ev("sig", "f" * 32, "x")}],
-                         wishes=[{"text": "d", "evidence_ref": _ev(quote="host.update ×2")}])["weekly"]
+    wk = _weekly_payload(blocked=[{"text": "a", "evidence_ref": _wev("sig", sig, "update.sig_mismatch")},
+                                  {"text": "b", "evidence_ref": _wev("hook", hid, "hook.rc1")},
+                                  {"text": "c", "evidence_ref": _wev("sig", "f" * 32, "x")}],
+                         wishes=[{"text": "d", "evidence_ref": _wev(quote="host.update ×2")}])["weekly"]
     bad = mail.verify_evidence(ctx, wk)
     if [(b["section"], b["index"], b["why"]) for b in bad] != [("blocked", 2, "evidence_unknown"),
                                                                 ("wishes", 0, "evidence_quote_mismatch")]:
@@ -18131,7 +18131,7 @@ def _case_mail_weekly_evidence_ledger() -> None:
         body = sent[0]["payload"]["weekly"]
         if len(out["rejected"]) != 2 or [x["text"] for x in body["blocked"]] != ["a", "b"] or "wishes" in body:
             raise AssertionError(f"못 맞춘 항목이 통에 남았거나 rejected 로 안 돌아왔다: {out['rejected']} · {body}")
-        lone = {"cycle": wk["cycle"], "wishes": [{"text": "d", "evidence_ref": _ev("sig", "e" * 32, "x")}]}
+        lone = {"cycle": wk["cycle"], "wishes": [{"text": "d", "evidence_ref": _wev("sig", "e" * 32, "x")}]}
         out = mail._send_weekly(ctx, lone, publish=pub)
         if not out.get("skipped") or len(out["rejected"]) != 1 or len(sent) != 1:
             raise AssertionError(f"항목이 전부 빠진 통을 보냈다: {out}")
@@ -18303,9 +18303,9 @@ def _case_desk_weekly_mode() -> None:
     today = counsel.day_of(now).weekday()
     sig = _mail_signal_item()
     weekly = _mail_doc(payload=_weekly_payload(
-        blocked=[{"text": "갱신이 막혔다 someone@example.com", "evidence_ref": _ev("sig", sig["signature"], "update.sig_mismatch"),
+        blocked=[{"text": "갱신이 막혔다 someone@example.com", "evidence_ref": _wev("sig", sig["signature"], "update.sig_mismatch"),
                   "signatures": [sig["signature"]]}],
-        wishes=[{"text": "알림을 줄여 달라", "evidence_ref": _ev("cmd", "agora.notify", "agora.notify ×40")}]))
+        wishes=[{"text": "알림을 줄여 달라", "evidence_ref": _wev("cmd", "agora.notify", "agora.notify ×40")}]))
     signal = _mail_doc(payload={"intent": "signal", "items": [sig]})
     # ⑴ 주간 모드가 아닌 날 — 호출은 신호 때문에 1번 · 주간 보고는 대기
     off = dict(_DESK_CONFIG, desk={"enabled": True, "weekly_dow": (today + 1) % 7})
@@ -18454,7 +18454,7 @@ def _case_desk_weekly_policy_generations() -> None:
     now = _dt.datetime.now(_dt.timezone.utc)
     sig = _mail_signal_item()
     prev = mail.cycle_week_of(now - _dt.timedelta(days=7))
-    weekly = _mail_doc(payload=_weekly_payload(cycle=prev, blocked=[{"text": "갱신 막힘", "evidence_ref": _ev(),
+    weekly = _mail_doc(payload=_weekly_payload(cycle=prev, blocked=[{"text": "갱신 막힘", "evidence_ref": _wev(),
                                                                       "signatures": [sig["signature"]]}]))
     ctx, _s = _desk_world([weekly, _mail_doc(payload={"intent": "signal", "items": [sig]})])
     _desk_cycle(ctx, notifier=lambda *a, **k: type("P", (), {"returncode": 0})())
@@ -19097,7 +19097,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        allowed = True',
      "상담소: 긴급 규칙 양성·음성·상한"),
     ("M623-desk-batch-twice-a-period", "agora/counsel.py",
-     '    if not dry_run and any(r.get("period") == period and r.get("called") for r in _rows(calls_path)):',
+     '    if not dry_run and not retry and any(r.get("period") == period and r.get("called") for r in _rows(calls_path)):',
      '    if False:',
      "상담소: 배치 1호출·주소는 코드가"),
     ("M624-desk-batch-unmasked", "agora/counsel.py",
