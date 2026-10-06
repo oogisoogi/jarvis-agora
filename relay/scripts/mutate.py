@@ -247,9 +247,9 @@ MUTATIONS = [
      "vitest", "주 칸 경계 = 월요일 06:00 KST"),
 
     ("M47 근거 인용 빈 값 허용", "src/lib/mail.ts",
-     '      if (isBlank(ev)) bad("evidence 가 비었다 — 근거 인용 의무", { where: `${ww}.evidence`, why: "evidence_required" });',
+     '      if (isBlank(ev)) bad("근거 인용이 비었다 — 근거 인용 의무", { where: `${wr}.quote`, why: "evidence_required" });',
      "      void ev;",
-     "vitest", "근거 인용 의무 — evidence 빈 값 = 10"),
+     "vitest", "근거 인용 의무 — evidence_ref.quote 빈 값 = 10"),
 
     ("M48 섹션 항목 상한 3 → 4", "src/lib/mail.ts",
      "export const WEEKLY_SECTION_MAX = 3;",
@@ -279,7 +279,17 @@ MUTATIONS = [
     ("M52 evidence 길이 상한 120 → 121", "src/lib/mail.ts",
      "export const WEEKLY_EVIDENCE_MAX_CHARS = 120;",
      "export const WEEKLY_EVIDENCE_MAX_CHARS = 121;",
-     "vitest", "evidence 121자 = 10"),
+     "vitest", "evidence_ref.quote 121자 = 10"),
+
+    ("M54 근거 출처 종류 검사 제거(3판 M7)", "src/lib/mail.ts",
+     '      if (!Object.prototype.hasOwnProperty.call(EVIDENCE_ID_RES, kind)) bad(',
+     '      if (false) bad(',
+     "vitest", "근거 출처 = 구조화 evidence_ref — evidence_kind"),
+
+    ("M55 근거 id 형식 검사 제거(3판 M7)", "src/lib/mail.ts",
+     '      if (!EVIDENCE_ID_RES[kind].test(rid)) bad(',
+     '      if (false) bad(',
+     "vitest", "근거 출처 = 구조화 evidence_ref — evidence_id"),
 
     ("M7 서명 검증 결과 무시", "src/lib/sshsig.ts",
      "  const ok = await crypto.subtle.verify({ name: \"Ed25519\" }, key, sb.sig as BufferSource, signed as BufferSource);",

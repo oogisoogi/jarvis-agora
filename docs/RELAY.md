@@ -677,9 +677,9 @@ canonical **32KB** 초과 = 413/3. 버킷 `gmail-daily-day:<from>` 하루 1(§14
 
 **payload ⓓ 주간 성찰 보고**(`intent="weekly"` · 명세 §1-3 · 10-06 개정 · TICKET=agora-spec-weekly): 칸 = `intent`·`weekly` **둘뿐**.
 `weekly` = 닫힌 칸 `cycle`(필수 · 주기 id = 주기 시작 주 `YYYY-Www` · 주는 **월요일 06:00 KST 경계**(+3시간 UTC 날짜의 ISO 주) · 실제 있는 주 · **미래 = 400/10 `why="cycle_future"`** · 직전 7주 밖 = `cycle_too_old` · 기준 = 봉투 `ts`·서버 시각 둘 다) + 선택 `version`·`os`(신호 규칙) ·
-`blocked`·`workarounds`·`wishes`(각 ≤3 · 항목 = 닫힌 `{text 1~200 코드포인트, evidence 1~120 코드포인트 · 한 줄, signatures? ≤5 hex32 · 겹침 금지}`) ·
+`blocked`·`workarounds`·`wishes`(각 ≤3 · 항목 = 닫힌 `{text 1~200 코드포인트, evidence_ref, signatures? ≤5 hex32 · 겹침 금지}` · `evidence_ref` = 닫힌 `{kind ∈ hook·sig·cmd, id = 종류별 형식(hook hex16 · sig hex32 · cmd 신호 op 형식), quote 1~120 코드포인트 · 한 줄}` · 3판 M7) ·
 `top_features`(≤5 · 닫힌 `{op = 신호 op 형식 · 겹침 금지, count 1~100000}`) · `owner_note`(0~200 코드포인트).
-★`evidence` 가 없거나 빈 값 = 400/10 `why="evidence_required"`(근거 인용 의무) · 줄바꿈(CR·LF·U+2028·U+2029) = `evidence_multiline` · ★다섯 칸이 전부 비면 400/10 `why="weekly_empty"` ·
+★`evidence_ref.quote` 가 빈 값 = 400/10 `why="evidence_required"`(근거 인용 의무 · `evidence_ref` 없음 = 400/10) · 줄바꿈(CR·LF·U+2028·U+2029) = `evidence_multiline` · 종류 밖 = `evidence_kind` · id 형식 어긋남 = `evidence_id` · ★릴레이는 **형식만** 본다(원장 실재·인용 일치 = 송신 클라이언트) · ★다섯 칸이 전부 비면 400/10 `why="weekly_empty"` ·
 「빈 값」 = 명시 글자 목록(탭·줄바꿈·공백·`\x1c-\x1f`·U+0085·U+00A0·U+1680·U+2000~U+200D·U+2028·U+2029·U+202F·U+205F·U+2060·U+3000·U+FEFF 만 — JS `trim()` 과 파이썬 `strip()` 이 달라 양쪽 같은 목록).
 canonical **32KB** 초과 = 413/3. 버킷 `gmail-weekly-week:<from>` 주기 주 1(§14-6 · 칸 경계 월요일 06:00 KST) · 연속 규칙·받는 이 축·`unread_count` 에 안 센다. 스크럽 백스톱 = 자유문 칸 전부(422/3).
 

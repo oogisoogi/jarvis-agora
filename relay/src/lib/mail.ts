@@ -25,7 +25,7 @@ export const WEEKLY_MAX_BYTES = 32 * 1024;       // 주간 보고 canonical 상�
 export const WEEKLY_SECTIONS = ["blocked", "workarounds", "wishes"] as const;   // 각 ≤3 항목
 export const WEEKLY_SECTION_MAX = 3;
 export const WEEKLY_TEXT_MAX_CHARS = 200;        // 항목 text · 코드포인트 1~200
-export const WEEKLY_EVIDENCE_MAX_CHARS = 120;    // 항목 evidence(근거 인용 의무) · 코드포인트 1~120 · 빈 값 거부
+export const WEEKLY_EVIDENCE_MAX_CHARS = 120;    // 항목 evidence_ref.quote(근거 인용 의무) · 코드포인트 1~120 · 빈 값 거부
 export const WEEKLY_ITEM_SIGS_MAX = 5;
 export const WEEKLY_FEATURES_MAX = 5;
 /** 신호·일일·주간 = 기계가 보내는 통 — 미읽음·연속·받는 이 축에 안 센다(명세 §1-1 (6) · §1-2 (4) · §1-3 (6)). */
@@ -78,7 +78,11 @@ const WEEKLY_KEYS = ["cycle", "version", "os", ...WEEKLY_SECTIONS, "top_features
 //   그 시각 + 3시간의 UTC 날짜로 ISO 주를 매기면 경계가 정확히 월요일 06:00 KST 에 선다.
 export const CYCLE_SHIFT_MS = 3 * 3_600_000;
 export const CYCLE_BACK_WEEKS_MAX = 7;           // 허용 = 현재 주기 또는 직전 주기 1개 — 주기 최대 28일이면 직전 주기 시작은 7주 전까지(2판 M3)
-const WEEKLY_ITEM_KEYS = ["text", "evidence", "signatures"];
+const WEEKLY_ITEM_KEYS = ["text", "evidence_ref", "signatures"];
+// ★근거 = 구조화 출처(3판 M7) — 종류 hook(훅 오류 줄 id · hex 16)·sig(신호 서명 · hex 32)·cmd(명령 op) + 인용.
+//   릴레이는 **형식만** 본다(종류·id 형식·인용 길이·한 줄) — 인용이 원장 줄과 맞는지는 송신 클라이언트가 본다(릴레이는 원장을 모른다).
+const EVIDENCE_REF_KEYS = ["kind", "id", "quote"];
+const EVIDENCE_ID_RES: Record<string, RegExp> = { hook: /^[0-9a-f]{16}$/, sig: /^[0-9a-f]{32}$/, cmd: /^[a-z0-9_.-]{1,32}$/ };
 const DAY_MS = 86_400_000;
 // ★「빈 값」 = 아래 글자만으로 된 문자열(클라이언트 agora/mail.py BLANK_RE 와 **같은 목록**) — JS trim() 과 파이썬 strip() 은
 //   공백 집합이 다르다(U+FEFF ↔ \x1c-\x1f·U+0085) · 한쪽만 「빈 값」이라 하면 릴레이가 받은 것을 받는 쪽이 격리한다.
@@ -335,7 +339,7 @@ function cpLen(s: string): number { return [...s].length; }
 
 /**
  * 주간 성찰 보고(명세 §1-3) — 닫힌 모양 · `cycle` 만 필수 · 섹션 5 = 막힌 곳·우회·바라는 것(각 ≤3) · 자주 쓴 기능(≤5 · 기계 집계) · owner_note.
- * ★자유문 = 항목 `text`(≤200)·`evidence`(≤120 · 근거 인용 의무 = 빈 값 거부)·`owner_note`(≤200) — 그 밖은 기계 값.
+ * ★자유문 = 항목 `text`(≤200)·`owner_note`(≤200) · 근거 = 구조화 `evidence_ref`(종류·id 형식 닫힘 + 인용 ≤120 · 빈 값 거부 · 3판 M7) — 그 밖은 기계 값.
  * ★다섯 칸이 전부 비면 거부(빈 보고 생략 = 보내는 쪽 규칙의 서버 쪽 짝 · `weekly_empty`).
  */
 function checkWeekly(p: Obj, bases: number[]): void {
@@ -358,12 +362,19 @@ function checkWeekly(p: Obj, bases: number[]): void {
       const o = it as Obj;
       closed(o, WEEKLY_ITEM_KEYS, ww);
       const text = need<string>(o, "text", "string", ww);
-      const ev = need<string>(o, "evidence", "string", ww);
+      const wr = `${ww}.evidence_ref`;
+      const ref = need<Obj>(o, "evidence_ref", "dict", ww);
+      closed(ref, EVIDENCE_REF_KEYS, wr);
+      const kind = need<string>(ref, "kind", "string", wr);
+      const rid = need<string>(ref, "id", "string", wr);
+      const ev = need<string>(ref, "quote", "string", wr);
       if (isBlank(text) || cpLen(text) > WEEKLY_TEXT_MAX_CHARS) bad("text 는 1~200자(공백만 = 빈 값)", { where: `${ww}.text`, max: WEEKLY_TEXT_MAX_CHARS });
-      if (isBlank(ev)) bad("evidence 가 비었다 — 근거 인용 의무", { where: `${ww}.evidence`, why: "evidence_required" });
+      if (!Object.prototype.hasOwnProperty.call(EVIDENCE_ID_RES, kind)) bad("evidence_ref.kind 는 hook·sig·cmd 중 하나", { where: `${wr}.kind`, why: "evidence_kind" });
+      if (!EVIDENCE_ID_RES[kind].test(rid)) bad("evidence_ref.id 형식이 그 종류와 다르다", { where: `${wr}.id`, why: "evidence_id" });
+      if (isBlank(ev)) bad("근거 인용이 비었다 — 근거 인용 의무", { where: `${wr}.quote`, why: "evidence_required" });
       // ★근거는 **한 줄**(2판 m2) — 줄바꿈(CR·LF·U+2028·U+2029)이 든 근거는 거부한다(보고서에서 뒤늦게 치환하지 않는다).
-      if (/[\r\n\u2028\u2029]/.test(ev)) bad("evidence 는 한 줄(줄바꿈 금지)", { where: `${ww}.evidence`, why: "evidence_multiline" });
-      if (cpLen(ev) > WEEKLY_EVIDENCE_MAX_CHARS) bad("evidence 는 120자까지", { where: `${ww}.evidence`, max: WEEKLY_EVIDENCE_MAX_CHARS });
+      if (/[\r\n\u2028\u2029]/.test(ev)) bad("근거 인용은 한 줄(줄바꿈 금지)", { where: `${wr}.quote`, why: "evidence_multiline" });
+      if (cpLen(ev) > WEEKLY_EVIDENCE_MAX_CHARS) bad("근거 인용은 120자까지", { where: `${wr}.quote`, max: WEEKLY_EVIDENCE_MAX_CHARS });
       if ("signatures" in o) {
         const sigs = strList(o, "signatures", ww, WEEKLY_ITEM_SIGS_MAX, SIG_KEY);
         if (new Set(sigs).size !== sigs.length) bad("같은 signature 가 두 번 나왔다", { where: `${ww}.signatures`, why: "duplicate_signature" });

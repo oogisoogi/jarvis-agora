@@ -21,7 +21,7 @@ import json
 import os
 import re
 import secrets
-from typing import Any
+from typing import Any, Callable
 
 from agora import errors
 from agora.contract_open import MAX_EVENT_BYTES
@@ -75,7 +75,7 @@ WEEKLY_MAX_BYTES = 32 * 1024
 WEEKLY_SECTIONS = ("blocked", "workarounds", "wishes")   # 막힌 곳 · 우회 · 바라는 것 — 각 ≤3
 WEEKLY_SECTION_MAX = 3
 WEEKLY_TEXT_MAX_CHARS = 200
-WEEKLY_EVIDENCE_MAX_CHARS = 120     # 근거 인용 의무 — 빈 값 거부
+WEEKLY_EVIDENCE_MAX_CHARS = 120     # 근거 인용(`evidence_ref.quote`) — 빈 값 거부
 WEEKLY_ITEM_SIGS_MAX = 5
 WEEKLY_FEATURES_MAX = 5
 WEEKLY_KEYS = ("cycle", "version", "os") + WEEKLY_SECTIONS + ("top_features", "owner_note")
@@ -83,7 +83,14 @@ CYCLE_SHIFT = datetime.timedelta(hours=3)   # 주기 경계 = 월요일 06:00 KS
 CYCLE_BACK_WEEKS_MAX = 7                    # 허용 = 현재 주기 또는 직전 주기 1개(주기 최대 28일 → 직전 시작은 7주 전까지)
 EVIDENCE_NEWLINE_RE = re.compile("[\r\n\u2028\u2029]")
 WEEKLY_THREAD_FILE = "weekly_thread.json"   # 데스크별 안정 주간 대화(2판 M9)
-WEEKLY_ITEM_KEYS = ("text", "evidence", "signatures")
+WEEKLY_PENDING_FILE = "weekly_pending.json"  # 성공 판정 전 주간 보고 한 통(3판 N2 — 같은 message_id 로만 재전송)
+WEEKLY_ITEM_KEYS = ("text", "evidence_ref", "signatures")
+# ★근거 = 구조화 출처(3판 M7) — 자유문 근거 칸을 없앴다. 종류별 id 형식(닫힘) · 인용(quote)은 송신 클라이언트가
+#   허용 원장(`<설정 폴더>/counsel/signals*.jsonl` · 명세 §13-3)의 실제 줄에서 만든 원문의 부분 문자열일 때만 통과한다.
+EVIDENCE_REF_KEYS = ("kind", "id", "quote")
+HOOK_ID_RE = re.compile(r"^[0-9a-f]{16}\Z", re.ASCII)
+SIGNAL_LEDGER_FILES = ("signals.jsonl", "signals-sent.jsonl")   # 모은 줄 · 보낸 줄(옮겨 적기 = 같은 바이트 · §13-3 2.)
+EVIDENCE_ID_RES = {"hook": HOOK_ID_RE, "sig": SIG32_RE, "cmd": OP_RE}   # hook = 훅 오류 줄 id · sig = 신호 서명 · cmd = 명령 op
 WEEK_RE = re.compile(r"^(\d{4})-W(\d{2})\Z", re.ASCII)
 # ★「빈 값」 = 아래 글자만으로 된 문자열(릴레이 mail.ts BLANK_RE 와 **같은 목록**) — 파이썬 strip() 과 JS trim() 은
 #   공백 집합이 다르다(\x1c-\x1f·U+0085 ↔ U+FEFF) · 한쪽만 「빈 값」이라 하면 릴레이가 받은 것을 받는 쪽이 격리한다.
@@ -348,14 +355,21 @@ def _check_cycle(value: str, where: str, ts: datetime.datetime) -> None:
         _fail("주기가 너무 오래됐다(직전 7주까지)", {"where": where, "why": "cycle_too_old"})
 
 
+WEEKLY_POLICY_DEFAULT = {"period_days": WEEKLY_PERIOD_DEFAULT, "epoch": None, "effective_at": None, "generation": "7/-/-"}
+
+
 def weekly_policy(pin: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
-    """핀의 주간 주기 정책(2판 M4) — `{"period_days", "epoch"}`. ★효력 시각 전이거나 위상(epoch)이 없는 7 아닌 주기는 **7**(넓히지 않는다)."""
+    """핀의 주간 주기 정책 — `{"period_days", "epoch", "effective_at", "generation"}`.
+
+    ★3판 M4: 14·28 은 위상(`weekly_epoch`) **과** 효력 시각(`weekly_effective_at`)이 **둘 다** 있고 그 시각이 지났을 때만 효력 —
+      하나라도 없으면 기본 7(넓히지 않는다 · 효력 시각 없는 전환이 지난 보고의 해석까지 바꾸던 자리).
+    `generation` = 정책 세대 id(`<주기>/<위상>/<효력 시각>`) — 데스크 주기 원장이 세대·효력 시각을 적어 전환 전 자료를 옛 정책으로 읽는다.
+    """
     period, epoch, eff = pin.get("weekly_period_days", 7), pin.get("weekly_epoch"), pin.get("weekly_effective_at")
-    if eff is not None and now < eff:
-        return {"period_days": WEEKLY_PERIOD_DEFAULT, "epoch": None}
-    if period != 7 and epoch is None:
-        return {"period_days": WEEKLY_PERIOD_DEFAULT, "epoch": None}
-    return {"period_days": period, "epoch": epoch}
+    if period == WEEKLY_PERIOD_DEFAULT or epoch is None or eff is None or now < eff:
+        return dict(WEEKLY_POLICY_DEFAULT)
+    at = now_ms_iso(eff)
+    return {"period_days": period, "epoch": epoch, "effective_at": at, "generation": f"{period}/{epoch}/{at}"}
 
 
 def cycle_of(moment: datetime.datetime, policy: dict[str, Any]) -> str:
@@ -382,30 +396,149 @@ def weekly_is_empty(weekly: dict[str, Any]) -> bool:
                 or not is_blank(str(weekly.get("owner_note") or "")))
 
 
-def send_weekly(ctx: Any, weekly: dict[str, Any], *, publish: Any = None) -> dict[str, Any]:
-    """주간 성찰 보고 전용 발신(2판 M9) — 받는 이 = 핀의 데스크 · 데스크별 **안정 대화**(`mailbox/weekly_thread.json`) ·
-    빈 보고면 보내지 않는다(`{"skipped": True}`). ★T3 작성기가 부른다 · 429·실패 처리(그 주 포기·같은 message_id 재전송)는 부르는 쪽.
+def _signal_ledger_rows(ctx: Any) -> list[tuple[str, dict[str, Any]]]:
+    """허용 원장(명세 §13-3) — `<설정 폴더>/counsel/signals.jsonl` + `signals-sent.jsonl` 의 형식 맞는 줄 (원문, 객체).
+    ★같은 줄(옮겨 적는 중 두 파일에 다 있는 줄)은 한 번만 · 형식 밖 줄은 버린다(§13-3 1. 「형식 밖이면 그 줄을 버린다」)."""
+    seen: set[str] = set()
+    out: list[tuple[str, dict[str, Any]]] = []
+    for name in SIGNAL_LEDGER_FILES:
+        try:
+            with open(os.path.join(ctx.config_dir, "counsel", name), encoding="utf-8") as fh:
+                lines = fh.read().split("\n")
+        except OSError:
+            continue
+        for raw in lines:
+            if not raw or raw in seen:
+                continue
+            try:
+                row = json.loads(raw)
+            except ValueError:
+                continue
+            if type(row) is not dict or not _ts_ok(row.get("ts")) or row.get("source") not in SIGNAL_SOURCES \
+                    or not all(type(row.get(k)) is str and rx.match(row[k]) for k, rx in
+                               (("op", OP_RE), ("error_code", ERROR_CODE_RE), ("version", VERSION_RE), ("os", OS_RE))):
+                continue
+            seen.add(raw)
+            out.append((raw, row))
+    return out
+
+
+def evidence_sources(ctx: Any) -> dict[tuple[str, str], str]:
+    """근거로 인용할 수 있는 원문 표 `{(종류, id): 원문}`(3판 M7) — **원장 필드에서만** 결정론으로 만든다(자유문 0).
+
+    - `sig` = 신호 서명(§1-1 (2) · 32 hex) → `"<source> <op> <error_code> <version> <os> ×<줄 수>"`
+    - `hook` = 훅 오류 줄 id(그 줄 원문 UTF-8 의 sha256 앞 16 hex · `op` 가 `hook.` 인 줄만) → `"<ts> <source> <op> <error_code>"`
+    - `cmd` = 명령 op 집계 → `"<op> ×<줄 수>"`
+    원문의 글자는 전부 형식 정규식이 닫은 기계 값이라, 인용(부분 문자열)으로 세션 문장·파일 내용을 실어 나를 수 없다.
     """
-    if weekly_is_empty(weekly):
-        return {"skipped": True, "cycle": weekly.get("cycle")}
+    by_sig: dict[str, list[dict[str, Any]]] = {}
+    by_op: dict[str, int] = {}
+    out: dict[tuple[str, str], str] = {}
+    for raw, row in _signal_ledger_rows(ctx):
+        sig = signal_signature(source=row["source"], op=row["op"], error_code=row["error_code"], version=row["version"])
+        by_sig.setdefault(sig, []).append(row)
+        by_op[row["op"]] = by_op.get(row["op"], 0) + 1
+        if row["op"].startswith("hook."):
+            hid = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+            out[("hook", hid)] = f"{row['ts']} {row['source']} {row['op']} {row['error_code']}"
+    for sig, rows in by_sig.items():
+        r = rows[0]
+        out[("sig", sig)] = f"{r['source']} {r['op']} {r['error_code']} {r['version']} {r['os']} ×{len(rows)}"
+    for op, n in by_op.items():
+        out[("cmd", op)] = f"{op} ×{n}"
+    return out
+
+
+def verify_evidence(ctx: Any, weekly: dict[str, Any]) -> list[dict[str, Any]]:
+    """주간 보고 항목 근거를 허용 원장과 대조(3판 M7) — 못 맞춘 항목 목록(빈 목록 = 전건 통과).
+    `why` = `evidence_unknown`(그 종류·id 의 원장 줄 없음) · `evidence_quote_mismatch`(인용이 그 줄 원문의 부분 문자열이 아님)."""
+    sources = evidence_sources(ctx)
+    bad = []
+    for sec in WEEKLY_SECTIONS:
+        for i, it in enumerate(weekly.get(sec) or []):
+            ref = it.get("evidence_ref") if type(it) is dict else None
+            ref = ref if type(ref) is dict else {}
+            src = sources.get((str(ref.get("kind")), str(ref.get("id"))))
+            why = ("evidence_unknown" if src is None
+                   else None if type(ref.get("quote")) is str and ref["quote"] and ref["quote"] in src
+                   else "evidence_quote_mismatch")
+            if why:
+                bad.append({"section": sec, "index": i, "kind": ref.get("kind"), "id": ref.get("id"), "why": why})
+    return bad
+
+
+def _drop_items(weekly: dict[str, Any], bad: list[dict[str, Any]]) -> dict[str, Any]:
+    """못 맞춘 항목을 뺀 사본(빈 섹션은 칸째 뺀다)."""
+    out = dict(weekly)
+    for sec in WEEKLY_SECTIONS:
+        if sec not in weekly:
+            continue
+        drop = {b["index"] for b in bad if b["section"] == sec}
+        kept = [it for i, it in enumerate(weekly[sec]) if i not in drop]
+        if kept:
+            out[sec] = kept
+        else:
+            out.pop(sec)
+    return out
+
+
+def send_weekly(ctx: Any, weekly: dict[str, Any]) -> dict[str, Any]:
+    """주간 성찰 보고 전용 발신(2판 M9 · 3판 M7·N2·N3) — ★공개 API 는 언제나 `_publish`(계약·스크럽·승인·서명·원장)를 지난다."""
+    return _send_weekly(ctx, weekly, publish=_publish)
+
+
+def _send_weekly(ctx: Any, weekly: dict[str, Any], *, publish: Callable[..., dict[str, Any]]) -> dict[str, Any]:
+    """받는 이 = 핀의 데스크 · 데스크별 **안정 대화**(`mailbox/weekly_thread.json`) · 빈 보고면 보내지 않는다(`skipped`).
+
+    ★3판 M7: 근거(`evidence_ref`)를 허용 원장과 대조해 못 맞춘 항목은 **통에서 빼고 `rejected` 로 돌려준다**(조용히 보내지 않는다 ·
+      작성기가 고쳐 쓴다) · 남은 항목이 없으면 발신 0.
+    ★3판 N2: 발신 **전에** 문서(message_id·thread_id 포함)를 `mailbox/weekly_pending.json` 에 적고, 성공(200·201) 판정 전까지
+      같은 주기 호출은 **그 문서만** 다시 보낸다(새 id 0 · 릴레이 멱등 §3-1 ⑧) · 실패는 예외 대신 `{"pending": True, "doc": …}` 로 돌려준다.
+      다른 주기를 보내면 그 전 pending 은 버린다(`superseded` · 429 = 그 주기 포기 규칙).
+    `publish` = 시험 주입점(비공개 · 3판 N3).
+    """
     desks = sorted(desk_pin()["desk"].values())
     if len(desks) != 1:
         _fail("핀의 상담소 데스크가 하나가 아니다", {"desks": len(desks)}, errors.PRECONDITION)
-    to = desks[0]
-    path = _path(ctx, WEEKLY_THREAD_FILE)
-    state = _load_json(path)
-    thread = state.get(to) if is_id(str(state.get(to) or "")) else None
-    doc = build(ctx, to=to, payload={"intent": WEEKLY, "weekly": weekly}, thread_id=thread)
-    out = (publish or _publish)(ctx, doc)
-    if out.get("status") in (200, 201) and thread != doc["thread_id"]:
-        _write_atomic(path, {**state, to: doc["thread_id"]})
-    return out
+    to, cycle = desks[0], weekly.get("cycle")
+    ppath = _path(ctx, WEEKLY_PENDING_FILE)
+    pending = _load_json(ppath)
+    resend = pending.get("to") == to and pending.get("cycle") == cycle and type(pending.get("doc")) is dict
+    superseded = None if resend or not pending.get("doc") else (pending.get("doc") or {}).get("message_id")
+    rejected: list[dict[str, Any]] = []
+    if resend:
+        doc = pending["doc"]
+    else:
+        if weekly_is_empty(weekly):
+            return {"skipped": True, "cycle": cycle, "rejected": rejected}
+        rejected = verify_evidence(ctx, weekly)
+        kept = _drop_items(weekly, rejected)
+        if weekly_is_empty(kept):
+            return {"skipped": True, "cycle": cycle, "rejected": rejected}
+        state = _load_json(_path(ctx, WEEKLY_THREAD_FILE))
+        thread = state.get(to) if is_id(str(state.get(to) or "")) else None
+        doc = build(ctx, to=to, payload={"intent": WEEKLY, "weekly": kept}, thread_id=thread)
+        _write_atomic(ppath, {"to": to, "cycle": cycle, "at": now_ms_iso(), "doc": doc})
+    extra = {"rejected": rejected, "resent": resend, "superseded": superseded}
+    try:
+        out = publish(ctx, doc)
+    except AgoraError as e:
+        return {"status": None, "error": e.code, "message": e.message, "pending": True, "doc": doc, **extra}
+    if out.get("status") not in (200, 201):
+        return {**out, "pending": True, "doc": doc, **extra}
+    tpath = _path(ctx, WEEKLY_THREAD_FILE)
+    state = _load_json(tpath)
+    if state.get(to) != doc["thread_id"]:
+        _write_atomic(tpath, {**state, to: doc["thread_id"]})
+    _write_atomic(ppath, {})
+    return {**out, **extra}
 
 
 def _check_weekly(payload: dict[str, Any], *, ts: datetime.datetime) -> None:
     """주간 성찰 보고(명세 §1-3) — 릴레이 `checkWeekly` 와 같은 규칙.
 
-    ★자유문 = 항목 `text`(≤200)·`evidence`(≤120 · 근거 인용 의무)·`owner_note`(≤200) · 다섯 칸이 전부 비면 거부.
+    ★자유문 = 항목 `text`(≤200)·`owner_note`(≤200) · 근거 = 구조화 `evidence_ref`(종류·id 형식 닫힘 + 인용 ≤120 · 3판 M7 —
+      원장 대조는 송신 클라이언트 `verify_evidence`) · 다섯 칸이 전부 비면 거부.
     """
     _closed(payload, ("intent", "weekly"), "payload")
     w = "payload.weekly"
@@ -430,15 +563,22 @@ def _check_weekly(payload: dict[str, Any], *, ts: datetime.datetime) -> None:
                 _fail("섹션 항목은 객체여야 한다", {"where": ww})
             _closed(it, WEEKLY_ITEM_KEYS, ww)
             text = _need(it, "text", str, ww)
-            ev = _need(it, "evidence", str, ww)
+            wr = ww + ".evidence_ref"
+            ref = _need(it, "evidence_ref", dict, ww)
+            _closed(ref, EVIDENCE_REF_KEYS, wr)
+            kind, rid, ev = _need(ref, "kind", str, wr), _need(ref, "id", str, wr), _need(ref, "quote", str, wr)
             if is_blank(text) or len(text) > WEEKLY_TEXT_MAX_CHARS:
                 _fail("text 는 1~200자(공백만 = 빈 값)", {"where": ww + ".text"})
+            if kind not in EVIDENCE_ID_RES:
+                _fail("evidence_ref.kind 는 hook·sig·cmd 중 하나", {"where": wr + ".kind", "why": "evidence_kind"})
+            if not EVIDENCE_ID_RES[kind].match(rid):
+                _fail("evidence_ref.id 형식이 그 종류와 다르다", {"where": wr + ".id", "why": "evidence_id"})
             if is_blank(ev):
-                _fail("evidence 가 비었다 — 근거 인용 의무", {"where": ww + ".evidence", "why": "evidence_required"})
+                _fail("근거 인용이 비었다 — 근거 인용 의무", {"where": wr + ".quote", "why": "evidence_required"})
             if EVIDENCE_NEWLINE_RE.search(ev):                # 근거는 한 줄(2판 m2)
-                _fail("evidence 는 한 줄(줄바꿈 금지)", {"where": ww + ".evidence", "why": "evidence_multiline"})
+                _fail("근거 인용은 한 줄(줄바꿈 금지)", {"where": wr + ".quote", "why": "evidence_multiline"})
             if len(ev) > WEEKLY_EVIDENCE_MAX_CHARS:
-                _fail("evidence 는 120자까지", {"where": ww + ".evidence"})
+                _fail("근거 인용은 120자까지", {"where": wr + ".quote"})
             if "signatures" in it:
                 sigs = _str_list(it, "signatures", ww, WEEKLY_ITEM_SIGS_MAX, SIG32_RE)
                 if len(set(sigs)) != len(sigs):
@@ -652,7 +792,8 @@ def _load_json(path: str) -> dict[str, Any]:
 
 
 def desk_pin(path: str | None = None) -> dict[str, Any]:
-    """`config/desk-pin.txt` — 상담소 지문·방 id(꾸러미 판올림으로만 바뀐다 · §13-2).
+    """`config/desk-pin.txt` — 상담소 지문·방 id·주간 주기 정책. ★바뀌는 길 = **꾸러미 판올림으로만**(= 서명된 클라이언트 꾸러미 교체 ·
+    T3 자동 교체 포함 · 호스트 터미널 판 불요) · **우편·원격 명령으로는 불가**(그 통로가 사칭 통로다 · §13-2).
 
     줄 서식: `desk <id> <SHA256:…>` · `chair <SHA256:…>` · `room <thread_id>` · `#` 주석.
     ★모르는 줄은 버린다(넓히지 않는다). 파일이 없으면 빈 핀 = 상담소 판별 0.
@@ -770,7 +911,7 @@ def _publish(ctx: Any, doc: dict[str, Any], *, prompt: Any = None,
     """
     # ★일일 보고는 `owner_note` 가 빈 통만 예외 `mail_daily`(D8-1 ⓑ · 3eac2a0f) — 오너 말은 **적을 때** 승인한다.
     intent = doc["payload"].get("intent")
-    # ★주간 보고도 같은 규칙 — `owner_note` 가 빈 통만 예외 `mail_weekly`(§1-3 (5) · 항목 자유문은 서식 상한·스크럽 2중으로 한정).
+    # ★주간 보고도 같은 규칙 — `owner_note` 가 빈 통만 예외 `mail_weekly`(§1-3 (5) · 항목 자유문은 서식 상한·근거 원장 대조·스크럽 2중으로 한정).
     # ★2판 B1·m1: 빈 판정 = `is_blank`(받는 쪽과 같은 글자 목록) · 기계 통 예외 셋 다 **받는 이 = 서명 검증된 핀 데스크**일 때만
     #   (실측: 1판까지 signal·daily 예외도 `to` 를 안 봤다 — 임의 참가자에게 무승인 기계 우편이 나갈 수 있었다).
     note = ((doc["payload"].get("daily") or {}).get("owner_note") if intent == DAILY
@@ -780,6 +921,9 @@ def _publish(ctx: Any, doc: dict[str, Any], *, prompt: Any = None,
               else "mail_daily" if intent == DAILY and blank
               else "mail_weekly" if intent == WEEKLY and blank else None)
     if exempt and not _to_is_pinned_desk(ctx, doc["to"]):
+        exempt = None
+    # ★3판 M7: 주간 보고 예외는 항목 근거가 **전건** 허용 원장과 맞을 때만 — 하나라도 못 맞추면 사람 승인 겹을 탄다.
+    if exempt == "mail_weekly" and verify_evidence(ctx, doc["payload"].get("weekly") or {}):
         exempt = None
     from agora import core, scrub, sign
     validate(doc, now=datetime.datetime.now(datetime.timezone.utc))

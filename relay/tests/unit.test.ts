@@ -876,7 +876,8 @@ describe("상담소 방 자동 방문 제외(AGORA_DESK_ROOMS · master ca16d9a2
 // ── 주간 성찰 보고(intent=weekly · 명세 §1-3 · 10-06 개정) ─────────────────────────────────
 describe("주간 성찰 보고 — 닫힌 서식·근거 인용 의무·빈 보고 거부(명세 §1-3)", () => {
   const item = (over: Record<string, unknown> = {}): any =>
-    ({ text: "업데이트 뒤 팩 점검에서 같은 경고가 사흘 이어졌다", evidence: "doctor 요약 줄 warn 1 · dept-awakening-seed", ...over });
+    ({ text: "업데이트 뒤 팩 점검에서 같은 경고가 사흘 이어졌다",
+       evidence_ref: { kind: "sig", id: "c".repeat(32), quote: "pack preflight.c27 doctor.c27.warn" }, ...over });
   const okWeekly = (): any => {
     const d = okLetter();
     d.payload = { intent: "weekly", weekly: {
@@ -894,7 +895,8 @@ describe("주간 성찰 보고 — 닫힌 서식·근거 인용 의무·빈 보�
       await expect(ok(d), JSON.stringify(only)).resolves.toBeTruthy();
     }
     const big = okWeekly();
-    const full = { text: "😀".repeat(200), evidence: "😀".repeat(120), signatures: ["a", "b", "c", "d", "e"].map(c => c.repeat(32)) };
+    const full = { text: "😀".repeat(200), evidence_ref: { kind: "cmd", id: "o".repeat(32), quote: "😀".repeat(120) },
+      signatures: ["a", "b", "c", "d", "e"].map(c => c.repeat(32)) };
     for (const sec of ["blocked", "workarounds", "wishes"]) big.payload.weekly[sec] = [full, full, full];
     big.payload.weekly.top_features = ["a", "b", "c", "d", "e"].map(c => ({ op: c.repeat(32), count: 100_000 }));
     big.payload.weekly.owner_note = "😀".repeat(200);
@@ -929,18 +931,39 @@ describe("주간 성찰 보고 — 닫힌 서식·근거 인용 의무·빈 보�
     }
   });
 
-  it("근거 인용 의무 — evidence 가 없거나 비거나 공백뿐이면 10(evidence_required) · 121자 = 10", async () => {
+  it("근거 인용 의무 — evidence_ref.quote 가 비거나 공백뿐이면 10(evidence_required) · 121자 = 10 · evidence_ref 없음 = 10", async () => {
     for (const ev of ["", "  \n "]) {
-      const d = okWeekly(); d.payload.weekly.workarounds[0].evidence = ev;
+      const d = okWeekly(); d.payload.weekly.workarounds[0].evidence_ref.quote = ev;
       const r = await detailOf(() => ok(d));
       expect([r.code, r.detail.why], JSON.stringify(ev)).toEqual([10, "evidence_required"]);
     }
-    const missing = okWeekly(); delete missing.payload.weekly.workarounds[0].evidence;
+    const missing = okWeekly(); delete missing.payload.weekly.workarounds[0].evidence_ref;
     expect(await codeOfAsync(() => ok(missing))).toBe(10);
-    const long = okWeekly(); long.payload.weekly.workarounds[0].evidence = "가".repeat(121);
+    const old = okWeekly(); old.payload.weekly.workarounds[0] = { text: "t", evidence: "자유문 근거" };   // 옛 자유문 칸 = 모르는 칸
+    expect(await codeOfAsync(() => ok(old))).toBe(10);
+    const long = okWeekly(); long.payload.weekly.workarounds[0].evidence_ref.quote = "가".repeat(121);
     expect(await codeOfAsync(() => ok(long))).toBe(10);
-    const edge = okWeekly(); edge.payload.weekly.workarounds[0].evidence = "😀".repeat(120);   // 코드포인트로 센다
+    const edge = okWeekly(); edge.payload.weekly.workarounds[0].evidence_ref.quote = "😀".repeat(120);   // 코드포인트로 센다
     await expect(ok(edge)).resolves.toBeTruthy();
+  });
+
+  it("근거 출처 = 구조화 evidence_ref — 종류 hook·sig·cmd 만(evidence_kind) · id 형식 = 종류별(evidence_id) · 닫힌 칸(3판 M7)", async () => {
+    for (const [kind, id] of [["hook", "0123456789abcdef"], ["sig", "a".repeat(32)], ["cmd", "host.update"]]) {
+      const d = okWeekly(); d.payload.weekly.blocked[0].evidence_ref = { kind, id, quote: "x" };
+      await expect(ok(d), kind).resolves.toBeTruthy();
+    }
+    const cases: Array<[Record<string, unknown>, string | null]> = [
+      [{ kind: "file", id: "a".repeat(32), quote: "x" }, "evidence_kind"], [{ kind: "toString", id: "x", quote: "x" }, "evidence_kind"],
+      [{ kind: "hook", id: "a".repeat(32), quote: "x" }, "evidence_id"], [{ kind: "sig", id: "a".repeat(8), quote: "x" }, "evidence_id"],
+      [{ kind: "cmd", id: "/Users/kim", quote: "x" }, "evidence_id"], [{ kind: "sig", id: "A".repeat(32), quote: "x" }, "evidence_id"],
+      [{ kind: "sig", id: "a".repeat(32), quote: "x", note: "자유문" }, null], [{ kind: "sig", id: "a".repeat(32) }, null],
+    ];
+    for (const [ref, why] of cases) {
+      const d = okWeekly(); d.payload.weekly.blocked[0].evidence_ref = ref;
+      const r = await detailOf(() => ok(d));
+      expect(r?.code, JSON.stringify(ref)).toBe(10);
+      if (why) expect(r.detail.why, JSON.stringify(ref)).toBe(why);
+    }
   });
 
   it("빈 값 판정 = 클라이언트와 같은 글자 목록(JS trim·파이썬 strip 차이를 메운다)", () => {
@@ -1031,19 +1054,19 @@ describe("주간 성찰 보고 — 닫힌 서식·근거 인용 의무·빈 보�
 
   it("근거는 한 줄 — CR·LF·U+2028·U+2029 = 10(evidence_multiline)", async () => {
     for (const ev of ["줄\n바꿈", "줄\r바꿈", "줄\u2028바꿈", "줄\u2029바꿈"]) {
-      const d = okWeekly(); d.payload.weekly.wishes[0].evidence = ev;
+      const d = okWeekly(); d.payload.weekly.wishes[0].evidence_ref.quote = ev;
       const r = await detailOf(() => ok(d));
       expect([r.code, r.detail.why], JSON.stringify(ev)).toEqual([10, "evidence_multiline"]);
     }
   });
 
-  it("스크럽 백스톱이 주간 보고 자유문(text·evidence·owner_note)까지 훑는다", async () => {
+  it("스크럽 백스톱이 주간 보고 자유문(text·evidence_ref.quote·owner_note)까지 훑는다", async () => {
     const b = await loadBundle(readFileSync(REPO + "config/scrub-rules-v1.json", "utf8"),
       readFileSync(REPO + "config/allowlist-v1.json", "utf8"), readFileSync(REPO + "config/allow-domains.txt", "utf8"));
-    for (const where of ["text", "evidence"]) {
-      const d = okWeekly(); d.payload.weekly.blocked[0][where] = "연락은 someone@example.com 으로";
-      expect(scrubCheck(d.payload, b).blocked, where).toBeGreaterThan(0);
-    }
+    const t = okWeekly(); t.payload.weekly.blocked[0].text = "연락은 someone@example.com 으로";
+    expect(scrubCheck(t.payload, b).blocked).toBeGreaterThan(0);
+    const q = okWeekly(); q.payload.weekly.blocked[0].evidence_ref.quote = "연락은 someone@example.com 으로";
+    expect(scrubCheck(q.payload, b).blocked).toBeGreaterThan(0);
     const n = okWeekly(); n.payload.weekly.owner_note = "010-1234-5678 로 연락";
     expect(scrubCheck(n.payload, b).blocked).toBeGreaterThan(0);
     expect(scrubCheck(okWeekly().payload, b).blocked).toBe(0);
