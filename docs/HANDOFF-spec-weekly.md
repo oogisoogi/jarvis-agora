@@ -5,6 +5,7 @@
 > **2판**(master ca36b166 · codex 적대 1R BLOCK 6·MAJOR 10·MINOR 4 반영 + 게이트 수리 3f1ae4e0·b653203e) — 번호별 처방 = **§11 1R 반영표**.
 
 ## 0. 이어받기(현재 상태 · 09:4x · master 2773748b)
+- ★**3판 지시(10:02 · master 1363219c · 원장 yes) = 후임 첫 집행 대상** — 지시 원문 = master 인박스 발신 `[master#1363219c]`(판정표: BLOCK M7·N1·B5 · MAJOR M3 부분·M4·M6·M8·M10·N2·B2·B4 · MINOR N3·N4·B3 문면 · 기각 유지 B6 · M5 4종 확정 · 직전 7주 창 불변) · codex 2R 원문 = `~/axdev/master/reports/REVIEW-SPEC-WEEKLY-codex-2r.md` · 순서 = 3판 집행 → `bash tests/commit_gate.sh` 전건 PASS 줄 인용 → §11 에 「2R 반영표」 추가 → 【확인요청】 3판(상한 60분 · 중단 2h) · push 0 · deploy 0.
 - **상태**: 2판 = 4a7835d(본체) + 7aab475(§4 게이트 줄) · commit_gate @4a7835d PASS · **codex 적대 2R + master 독립 스냅샷 게이트(7aab475) 가동 중** → 결과가 오면 master 가 반영분을 지시한다(새 작업은 그 지시 뒤에만).
 - **확정된 결정**: 스킬 메타 서명 = 비공개층만(67d60f6c) · M5 상태 = **4종**(보냄 / 빈 생략 / 주간 없음(일일은 옴) / 일일도 없음 · 2773748b 채택) · gitleaks 역사 1건(56c3ac9 옛 뮤턴트 이름 오탐) = **스쿼시 안 함**(현 트리 0 · 머지 때 master squash-merge 판단) · 09:09·09:16 지시 = 원장 실재 진짜 발신(queued = 제출 관측 지연).
 - **이어받는 사람 첫 행동**: ①이 파일 §11(1R 반영표)·§2·§3 ②`git log --oneline 8b81a60..HEAD` ③2R 반영 지시를 받으면 번호별 처방 → 커밋 → `bash tests/commit_gate.sh` PASS 줄 인용 → 【확인요청】 ④릴레이 시험 = `relay/node_modules`(본 저장소 심볼릭 링크 · 커밋 금지) · 하네스 `AGORA_PORT=<빈 포트> python3 scripts/run-local.py`(터미널의 프로세스 그룹 정리 실행으로 감싼다).
