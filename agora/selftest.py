@@ -4426,7 +4426,7 @@ def _case_every_mutation_belongs_to_an_axis() -> None:
 S8_AXES: dict[str, tuple[str, ...]] = {
     # ★T3(2026-10-06) — 상담소 자동 전달. 잃는 것: 같은 날 두 통(버킷 429)·보낸 줄 재발신·근거 끊김(바이트 변형)·
     #   꺼도 나감·모델 재호출(토큰)·빈 보고와 실패의 혼동 — 전부 오류 없이 조용히 난다.
-    "상담소자동": ('M693-auto-signal-day-gate-dropped', 'M694-auto-sent-lines-not-moved', 'M695-auto-sent-ledger-reserialized', 'M696-auto-unknown-commit-dropped', 'M697-auto-signal-pending-never-expires', 'M698-auto-items-uncapped', 'M699-auto-unreadable-config-on', 'M700-auto-off-keeps-lines', 'M701-auto-any-desk', 'M702-auto-daily-field-unfiltered', 'M703-auto-daily-signatures-empty', 'M704-auto-weekly-rejects-kept', 'M705-auto-weekly-rewrites-dead-cycle', 'M706-auto-weekly-empty-unreported', 'M707-auto-writer-failure-as-empty', 'M708-auto-features-not-machine', 'M709-auto-old-lines-kept', 'M710-auto-weekly-429-retried', 'M711-auto-run-lock-ignored', 'M712-auto-day-utc-not-kst', 'M713-auto-writer-tools-open'),
+    "상담소자동": ('M693-auto-signal-day-gate-dropped', 'M694-auto-sent-lines-not-moved', 'M695-auto-sent-ledger-reserialized', 'M696-auto-unknown-commit-dropped', 'M697-auto-signal-pending-never-expires', 'M698-auto-items-uncapped', 'M699-auto-unreadable-config-on', 'M700-auto-off-keeps-lines', 'M701-auto-any-desk', 'M702-auto-daily-field-unfiltered', 'M703-auto-daily-signatures-empty', 'M704-auto-weekly-rejects-kept', 'M705-auto-weekly-rewrites-dead-cycle', 'M706-auto-weekly-empty-unreported', 'M707-auto-writer-failure-as-empty', 'M708-auto-features-not-machine', 'M709-auto-old-lines-kept', 'M710-auto-weekly-429-retried', 'M711-auto-run-lock-ignored', 'M712-auto-day-utc-not-kst', 'M713-auto-writer-tools-open', 'M714-package-drops-desk-pin'),
     # ★09-19 신설 — **광장v2**. 피드 순서와 「어느 방이 커뮤니티인가」를 계산이 정하는 자리.
     #   여기서 잃는 것은 조용하다: 서버 피드와 클라이언트 피드가 다른 순서를 보이거나, 일반 토론방이
     #   커뮤니티로 읽혀 전역 상한이 토론을 막는다 — 오류 없이.
@@ -16624,6 +16624,32 @@ def _case_skill_pin_matches_the_doc() -> None:
     mod._assert_skill_pin_fresh(root)                # 대조군 — 맞는 핀은 통과해야 한다
 
 
+def _case_package_ships_desk_pin() -> None:
+    """꾸러미에 상담소 핀(`config/desk-pin.txt`)이 실린다(T3) — 0.1.13 까지 빠져 참가자 PC 의 자동 전달이 받는 이를 못 정했다.
+    푼 자리의 핀이 저장소 핀과 같은 바이트이고, 데스크 줄이 하나 이상 읽힌다."""
+    import tempfile
+    import zipfile
+    from agora import mail
+    import importlib.util as _util
+    spec = _util.spec_from_file_location("build_client_zip_desk", os.path.join(_ROOT, "tools", "build_client_zip.py"))
+    mod = _util.module_from_spec(spec)
+    spec.loader.exec_module(mod)                     # type: ignore[union-attr]
+    out = os.path.join(tempfile.mkdtemp(prefix="agora-zip-desk-"), "c.zip")
+    mod.build(out)
+    with zipfile.ZipFile(out) as z:
+        if "config/desk-pin.txt" not in z.namelist():
+            raise AssertionError("꾸러미에 config/desk-pin.txt 가 없다 — 참가자 자동 전달이 받는 이를 못 정한다")
+        body = z.read("config/desk-pin.txt")
+        unpacked = os.path.join(tempfile.mkdtemp(prefix="agora-zip-desk-"), "desk-pin.txt")
+        with open(unpacked, "wb") as fh:
+            fh.write(body)
+    with open(os.path.join(_ROOT, "config", "desk-pin.txt"), "rb") as fh:
+        if fh.read() != body:
+            raise AssertionError("꾸러미 핀이 저장소 핀과 다른 바이트다")
+    if not mail.desk_pin(unpacked)["desk"]:
+        raise AssertionError("꾸러미 핀에서 데스크 줄을 못 읽었다")
+
+
 def _case_resident_cli_entry_stands() -> None:
     """`bin/agora resident …` 가 **진입점에서** 선다(등록됐다 ≠ 동작한다 — 이 저장소가 세 번 다친 자리)."""
     import json as _json
@@ -19494,6 +19520,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("상담소: 주간 정책 세대·항목 주기",        _case_desk_weekly_policy_generations, None),
     ("상담소: 밀린 주간 보고 우선·표본 4 알림",  _case_desk_weekly_retry_and_samples, None),
     # ★T3 상담소 자동 전달(agora/collector.py)
+    ("꾸러미: 상담소 핀이 실린다", _case_package_ships_desk_pin, None),
     ('상담소자동: 신호 하루 한 통·같은 바이트 이동', _case_auto_signal_once_same_bytes, None),
     ('상담소자동: 429 그날 포기·code 8 같은 문서', _case_auto_rate_limit_and_unknown, None),
     ('상담소자동: items 100 상한', _case_auto_signal_items_cap, None),
@@ -22265,6 +22292,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "    proc = subprocess.run(cmd, input=data, capture_output=True, timeout=timeout)\n    return proc.returncode",
      "윈도우: 자식은 _proc 으로만 뜬다"),
     # ★T3 상담소 자동 전달(agora/collector.py · TICKET=agora-t3-pack-collector)
+    ("M714-package-drops-desk-pin", "tools/build_client_zip.py",
+     '    {"path": "config/desk-pin.txt", "kind": "file", "mode": 0o644},\n',
+     '',
+     "꾸러미: 상담소 핀이 실린다"),
     ('M693-auto-signal-day-gate-dropped', "agora/collector.py",
      '        if state.get("signal_day") == today:\n            return {"result": "done_today"}',
      '        if False:\n            return {"result": "done_today"}',
