@@ -37,8 +37,8 @@
    하나라도 없으면 여기서 멈추고 무엇이 없는지 알려 줘.
 
 2) 프로그램 꾸러미를 받아 지문을 대조한다.
-   주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.12.zip
-   지문 = 0f3f6616a95428cf0712da578221e3f709590cf3e76fbb6f809e615d458e7632
+   주소 = https://jarvis.godmeyou.kr/install/agora-client-0.1.13.zip
+   지문 = 3876029b22cfe25f2a43de4937c2dea52719e547eebe448e3149eb0975b03244
    ★지문이 다르면 받은 파일을 지우고 멈춘다. 다시 받지 말고 나에게 알려 줘.
 
 3) ~/.config/agora/lib 에 통째로 새로 푼다(그 폴더는 먼저 비운다).
@@ -202,8 +202,8 @@
 
 ```sh
 set -e
-URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.12.zip
-SHA=0f3f6616a95428cf0712da578221e3f709590cf3e76fbb6f809e615d458e7632
+URL=https://jarvis.godmeyou.kr/install/agora-client-0.1.13.zip
+SHA=3876029b22cfe25f2a43de4937c2dea52719e547eebe448e3149eb0975b03244
 AH="$HOME/.config/agora"
 
 PY=""
@@ -232,8 +232,8 @@ echo "놓았습니다: $AH/bin/agora ($PY)"
 
 ```powershell
 $ErrorActionPreference = "Stop"
-$URL = "https://jarvis.godmeyou.kr/install/agora-client-0.1.12.zip"
-$SHA = "0f3f6616a95428cf0712da578221e3f709590cf3e76fbb6f809e615d458e7632"
+$URL = "https://jarvis.godmeyou.kr/install/agora-client-0.1.13.zip"
+$SHA = "3876029b22cfe25f2a43de4937c2dea52719e547eebe448e3149eb0975b03244"
 $AH  = "$env:USERPROFILE\.config\agora"
 
 $py = $null
