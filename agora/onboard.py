@@ -357,6 +357,11 @@ def _mail_line(directory: str) -> str:
         return f"우편: 읽지 못함({type(e).__name__})"
 
 
+def _counsel_line(directory: str) -> str:
+    from agora import collector
+    return collector.summary_line(directory)
+
+
 def _resident_line(directory: str) -> str:
     """상주 한 줄. ★이 줄이 깨져도 `whoami` 는 서야 한다 — 참가자가 사진으로 보내는 유일한 화면이다."""
     try:
@@ -420,6 +425,10 @@ def whoami(*, directory: str | None = None) -> dict[str, Any]:
         "auto_visit": _resident_line(directory),
         # ★우편 한 줄 — 셋째 칸(키 정렬 `approval_gate` < `auto_visit` < `awaiting_mail`) · 둘째 칸은 상주 그대로.
         "awaiting_mail": _mail_line(directory),
+        # ★상담소 자동 전달(T3 · 명세 §13-5) — 꺼졌으면 「상담소 자동 전달: 꺼짐」이 늘 보인다. 자리 = 셋째 칸
+        #   (키 정렬 approval_gate < auto_visit < autosend_counsel < awaiting_mail) — 첫 칸 게이트·둘째 칸 상주 계약을 지킨 채
+        #   머리 칸 안에 둔다(명세 「첫 줄」의 뜻을 「머리 칸」으로 읽은 설계 판단 · 보고서 작성자 판단 목록).
+        "autosend_counsel": _counsel_line(directory),
         # ★판본을 여기 둔다 — 참가자가 화면 사진으로 회신하는 명령이 이것 하나뿐이라,
         #   판본이 여기 없으면 「어느 클라이언트에서 난 일인가」를 물을 자리가 사라진다.
         #   ⚠이름이 `c` 로 시작해 승인 게이트(`a`) 다음 자리다 — 첫 칸은 그대로 게이트다.

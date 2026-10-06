@@ -397,6 +397,15 @@ def weekly_is_empty(weekly: dict[str, Any]) -> bool:
                 or not is_blank(str(weekly.get("owner_note") or "")))
 
 
+def signal_row_ok(row: Any) -> bool:
+    """신호 원장 한 줄의 형식(명세 §13-3 1.) — `{"ts","source","op","error_code","version","os"}` 가 정규식 안인가.
+    ★모으는 쪽(팩)·옮기는 쪽(수집기 `collector`)·근거 표(`evidence_sources`)가 **같은 판정**을 쓴다 — 한쪽만 넓으면
+      한쪽이 버린 줄을 다른 쪽이 근거로 세거나 보낸다."""
+    return (type(row) is dict and _ts_ok(row.get("ts")) and row.get("source") in SIGNAL_SOURCES
+            and all(type(row.get(k)) is str and rx.match(row[k]) for k, rx in
+                    (("op", OP_RE), ("error_code", ERROR_CODE_RE), ("version", VERSION_RE), ("os", OS_RE))))
+
+
 def _signal_ledger_rows(ctx: Any) -> list[tuple[str, dict[str, Any]]]:
     """허용 원장(명세 §13-3) — `<설정 폴더>/counsel/signals.jsonl` + `signals-sent.jsonl` 의 형식 맞는 줄 (원문, 객체).
     ★같은 줄(옮겨 적는 중 두 파일에 다 있는 줄)은 한 번만 · 형식 밖 줄은 버린다(§13-3 1. 「형식 밖이면 그 줄을 버린다」)."""
@@ -415,9 +424,7 @@ def _signal_ledger_rows(ctx: Any) -> list[tuple[str, dict[str, Any]]]:
                 row = json.loads(raw)
             except ValueError:
                 continue
-            if type(row) is not dict or not _ts_ok(row.get("ts")) or row.get("source") not in SIGNAL_SOURCES \
-                    or not all(type(row.get(k)) is str and rx.match(row[k]) for k, rx in
-                               (("op", OP_RE), ("error_code", ERROR_CODE_RE), ("version", VERSION_RE), ("os", OS_RE))):
+            if not signal_row_ok(row):
                 continue
             seen.add(raw)
             out.append((raw, row))

@@ -1684,14 +1684,20 @@ def publish(ctx: Any, *, period: str, mail_send: Callable[..., Any] | None = Non
 CLI_ACTION_ARGS: dict[str, tuple[str, ...]] = {
     "batch":   ("dry_run",),
     "publish": ("date",),
+    # ★참가자 쪽 자동 전달(T3 · `agora.collector`) — 데스크 동작이 아니다(데스크 설정 없이 돈다).
+    "auto":    ("facts",),
+    "off":     (),
+    "on":      (),
 }
+AUTO_ACTIONS = ("auto", "off", "on")
 CLI_ACTION_REQUIRED: dict[str, tuple[str, ...]] = {"publish": ("date",)}
 
 
 def check_action_args(action: str, kw: dict[str, Any]) -> None:
     if not action:
         _fail("counsel 은 동작이 필요하다", {"accepts": list(CLI_ACTION_ARGS),
-                                            "usage": "agora counsel batch [--dry-run] | publish --date <YYYY-MM-DD>"})
+                                            "usage": "agora counsel batch [--dry-run] | publish --date <YYYY-MM-DD>"
+                                                     " | auto [--facts <파일>] | off | on"})
     extra = sorted(k for k in kw if k not in CLI_ACTION_ARGS[action] + ("dir",))
     if extra:
         _fail(f"counsel {action} 이 모르는 인자", {"extra": extra, "accepts": list(CLI_ACTION_ARGS[action])})
@@ -1702,6 +1708,8 @@ def check_action_args(action: str, kw: dict[str, Any]) -> None:
 
 def dispatch(ctx: Any, action: str, kw: dict[str, Any]) -> dict[str, Any]:
     check_action_args(action, kw)
+    if action in AUTO_ACTIONS:
+        _fail("auto·off·on 은 데스크 동작이 아니다 — `agora counsel <동작>`(collector)", {"action": action})
     if not desk_enabled(ctx.config):
         _fail("이 설정 폴더는 상담소 데스크가 아니다(config.json desk.enabled)", None, errors.PRECONDITION)
     if action == "batch":
