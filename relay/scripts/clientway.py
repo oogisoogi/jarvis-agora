@@ -97,6 +97,17 @@ def main() -> int:
             "error_code": "update.sig_mismatch", "count": 2, "first_seen": now, "last_seen": now}
     item["signature"] = mail.signal_signature(source="update", op="host.update",
                                               error_code="update.sig_mismatch", version="1.1.8")
+    # ★2판 B1 — 기계 통 예외는 받는 이 = 서명 검증된 핀 데스크일 때만. 핀 밖(alice 가 데스크가 아님) = code 3.
+    try:
+        mail._publish(ctx_b, mail.build(ctx_b, to=alice_id, payload={"intent": mail.SIGNAL, "items": [item]}))
+        check(False, "핀 데스크가 아닌 받는 이에게 신호가 겹을 지났다")
+    except AgoraError as e:
+        check(e.code == errors.GATE_REJECT, f"핀 밖 받는 이 신호 = code 3 (got {e.code})")
+    import tempfile
+    pin_path = os.path.join(tempfile.mkdtemp(prefix="clientway-pin-"), "desk-pin.txt")
+    with open(pin_path, "w", encoding="utf-8") as fh:
+        fh.write(f"desk {alice_id} {mail.principal_fingerprint(ctx_b, alice_id)}\n")
+    mail.DESK_PIN_PATH = pin_path               # 이 시험에서만 alice = 상담소 데스크
     doc = mail.build(ctx_b, to=alice_id, payload={"intent": mail.SIGNAL, "items": [item]})
     out = mail._publish(ctx_b, doc)
     check(out["status"] == 201 and out["approval"].get("why") == "approval_exempt:mail_signal",

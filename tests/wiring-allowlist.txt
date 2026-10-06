@@ -20,6 +20,8 @@ envelope_template   # 봉투 빈 서식 — 문서(ENVELOPE.md)와 시험이 인
 promote_knowhow     # 승격 편의 함수 — 도구 표에 **일부러** 안 넣었다(넣으면 계약이 12종이 된다 · tools.py 주석).
 path_like_arguments # MCP 노출면 감사 — 사람이 「경로형 인자가 늘었나」를 물을 때 부른다.
 
+send_weekly         # 주간 성찰 전용 발신(명세 §1-3 · 2판 M9) — T3 호출 예정: 호스트 터미널 1.1.8 팩의 주간 작성기가 부른다(master ca36b166 지시로 등재).
+
 # ── 시험 전용 픽스처(프로덕션에서 부르면 안 되는 것) ─────────────────────────
 inject_raw          # MockStore — 깨진 글을 심는 픽스처. 프로덕션 경로에 있으면 그게 사고다.
 delete_node         # MockStore — 삭제(tombstone) 픽스처. 위와 같다.

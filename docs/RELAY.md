@@ -673,15 +673,15 @@ canonical JSON(§3-2 · `agora/event.py canonical_bytes` 와 **같은 직렬화*
 `owner_note`(문자열 0~200 코드포인트 · ★유일한 자유문 · 스크럽 백스톱 그대로). 하위 칸은 전부 필수 · null 금지 · 모르는 칸 = 400/10.
 ★시각 칸(신호 `first_seen`·`last_seen` · `updates[].at` · `uptime.last_boot`)의 창 = **봉투 `ts` 기준과 서버 시각 기준 둘 다**(지난 7일 ~ +5분 · 적대 2R R2-3·3R R3-1 — 받는 쪽은 봉투 `ts` 만 보므로 릴레이가 받은 것은 받는 쪽도 받는다) · 시각·날짜는 실제 있는 값만(0001~9999년 · 2월 30일 거부).
 canonical **32KB** 초과 = 413/3. 버킷 `gmail-daily-day:<from>` 하루 1(§14-6) · 연속 규칙·`unread_count` 에 안 센다(신호와 같다).
-(10-06 개정) 선택 칸 `weekly_skipped` = `true` 뿐(그 주 주간 성찰 보고를 빈 보고라 생략한 날 · `false`·글자 = 400/10).
+(10-06 개정 · 2판) 선택 칸 `weekly_skipped` = 생략한 주기 id(`cycle` 과 같은 규칙 · 미래 = 400/10 `cycle_future`).
 
 **payload ⓓ 주간 성찰 보고**(`intent="weekly"` · 명세 §1-3 · 10-06 개정 · TICKET=agora-spec-weekly): 칸 = `intent`·`weekly` **둘뿐**.
-`weekly` = 닫힌 칸 `week`(필수 · ISO 주 `YYYY-Www` · 실제 있는 주 · 봉투 `ts` 의 ISO 주 ±1주 — 밖이면 400/10 `why="week_far_from_ts"`) + 선택 `version`·`os`(신호 규칙) ·
-`blocked`·`workarounds`·`wishes`(각 ≤3 · 항목 = 닫힌 `{text 1~200 코드포인트, evidence 1~120 코드포인트, signatures? ≤5 hex32 · 겹침 금지}`) ·
+`weekly` = 닫힌 칸 `cycle`(필수 · 주기 id = 주기 시작 주 `YYYY-Www` · 주는 **월요일 06:00 KST 경계**(+3시간 UTC 날짜의 ISO 주) · 실제 있는 주 · **미래 = 400/10 `why="cycle_future"`** · 직전 7주 밖 = `cycle_too_old` · 기준 = 봉투 `ts`·서버 시각 둘 다) + 선택 `version`·`os`(신호 규칙) ·
+`blocked`·`workarounds`·`wishes`(각 ≤3 · 항목 = 닫힌 `{text 1~200 코드포인트, evidence 1~120 코드포인트 · 한 줄, signatures? ≤5 hex32 · 겹침 금지}`) ·
 `top_features`(≤5 · 닫힌 `{op = 신호 op 형식 · 겹침 금지, count 1~100000}`) · `owner_note`(0~200 코드포인트).
-★`evidence` 가 없거나 빈 값 = 400/10 `why="evidence_required"`(근거 인용 의무) · ★다섯 칸이 전부 비면 400/10 `why="weekly_empty"` ·
+★`evidence` 가 없거나 빈 값 = 400/10 `why="evidence_required"`(근거 인용 의무) · 줄바꿈(CR·LF·U+2028·U+2029) = `evidence_multiline` · ★다섯 칸이 전부 비면 400/10 `why="weekly_empty"` ·
 「빈 값」 = 명시 글자 목록(탭·줄바꿈·공백·`\x1c-\x1f`·U+0085·U+00A0·U+1680·U+2000~U+200D·U+2028·U+2029·U+202F·U+205F·U+2060·U+3000·U+FEFF 만 — JS `trim()` 과 파이썬 `strip()` 이 달라 양쪽 같은 목록).
-canonical **32KB** 초과 = 413/3. 버킷 `gmail-weekly-week:<from>` ISO 주 1(§14-6 · 칸 경계 월요일 00:00Z) · 연속 규칙·받는 이 축·`unread_count` 에 안 센다. 스크럽 백스톱 = 자유문 칸 전부(422/3).
+canonical **32KB** 초과 = 413/3. 버킷 `gmail-weekly-week:<from>` 주기 주 1(§14-6 · 칸 경계 월요일 06:00 KST) · 연속 규칙·받는 이 축·`unread_count` 에 안 센다. 스크럽 백스톱 = 자유문 칸 전부(422/3).
 
 ### 14-2. `POST /mail` — 보내기
 
@@ -806,7 +806,7 @@ CREATE INDEX IF NOT EXISTS mail_thread ON mail (thread_id, seq);
 | 같은 수신자 연속 | (계수 질의 · 버킷 아님) | 5통 → 가장 오래된 것이 24시간 지날 때까지 | 같음 | `AGORA_RATE_MAIL_CONSEC_MAX`·`_CONSEC_WINDOW_S` |
 | 자동 신호 하루 | `gmail-signal-day:<from>` | 1 | 같음 | `AGORA_RATE_MAIL_SIGNAL_DAY_MAX` |
 | 일일 보고 하루(명세 §1-2 · 신호와 따로 · 연속 규칙·미읽음에 안 셈) | `gmail-daily-day:<from>` | 1 | 같음 | `AGORA_RATE_MAIL_DAILY_DAY_MAX` |
-| 주간 성찰 ISO 주(명세 §1-3 · 10-06 개정 · 칸 = 7일 고정창을 4일 옮겨 월요일 00:00Z 경계 · 연속 규칙·받는 이 축·미읽음에 안 셈) | `gmail-weekly-week:<from>` | 1 | 같음 | `AGORA_RATE_MAIL_WEEKLY_WEEK_MAX` |
+| 주간 성찰 주기 주(명세 §1-3 · 10-06 개정 · 칸 = 7일 고정창을 3일 21시간 옮겨 월요일 06:00 KST 경계 · 연속 규칙·받는 이 축·미읽음에 안 셈) | `gmail-weekly-week:<from>` | 1 | 같음 | `AGORA_RATE_MAIL_WEEKLY_WEEK_MAX` |
 | ★받는 이 하루 유입(사람 글만 · 명세 §4-1 · 적대 6R #2) | `gmail-in-day:<to>` | 200 | 같음 | `AGORA_RATE_MAIL_IN_DAY_MAX` |
 | ★받는 이 미읽음 상한(사람 글 · 버킷 아님 = 계수 질의 1 · 보낸이 칸보다 **먼저**) | — | 1,000 | 같음 | `AGORA_RATE_MAIL_UNREAD_MAX` → 429/7 `limit=mail_inbox_full` · `why=recipient_inbox_full` · Retry-After 3600 |
 

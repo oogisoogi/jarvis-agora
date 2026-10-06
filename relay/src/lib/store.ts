@@ -205,7 +205,7 @@ export async function upsertRoom(db: D1Database, threadId: string, d: Derived,
 export async function bumpRate(db: D1Database, bucket: string, windowSeconds: number,
                                limit: number, atMs = Date.now(),
                                offsetSeconds = 0): Promise<{ ok: boolean; retryAfter: number }> {
-  // `offsetSeconds` = 칸 경계 이동(주 칸 = ISO 주 월요일 00:00Z · limits.ts ISO_WEEK_OFFSET_S). 기본 0 = 종전과 같은 칸.
+  // `offsetSeconds` = 칸 경계 이동(주 칸 = 월요일 06:00 KST · limits.ts CYCLE_OFFSET_S). 기본 0 = 종전과 같은 칸.
   const windowStart = Math.floor((atMs / 1000 - offsetSeconds) / windowSeconds) * windowSeconds + offsetSeconds;
   // ★증가와 읽기를 **한 문장**으로 한다(RETURNING). 두 문장으로 나누면 그 사이에 다른 요청이
   //   끼어들어 같은 값을 읽거나 남의 차례를 자기 것으로 읽는다 — 상한이 조용히 새는 창이다

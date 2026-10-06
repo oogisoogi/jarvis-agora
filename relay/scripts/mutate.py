@@ -244,7 +244,7 @@ MUTATIONS = [
     ("M46 주 칸 경계 이동 제거(목요일 경계)", "src/lib/store.ts",
      "  const windowStart = Math.floor((atMs / 1000 - offsetSeconds) / windowSeconds) * windowSeconds + offsetSeconds;",
      "  const windowStart = Math.floor(atMs / 1000 / windowSeconds) * windowSeconds;",
-     "vitest", "주 칸 경계 = 월요일 00:00Z"),
+     "vitest", "주 칸 경계 = 월요일 06:00 KST"),
 
     ("M47 근거 인용 빈 값 허용", "src/lib/mail.ts",
      '      if (isBlank(ev)) bad("evidence 가 비었다 — 근거 인용 의무", { where: `${ww}.evidence`, why: "evidence_required" });',
@@ -261,10 +261,15 @@ MUTATIONS = [
      "  void filled;",
      "vitest", "빈 보고 = 10 weekly_empty"),
 
-    ("M50 week 의 봉투 ts ±1주 검사 제거", "src/lib/mail.ts",
-     '  if (Math.abs((mon as number) - tsMon) > 7 * DAY_MS) bad(',
-     '  if (false) bad(',
-     "vitest", "week = 봉투 ts 의 주 ±1주"),
+    ("M50 미래 주기 허용", "src/lib/mail.ts",
+     '    if ((mon as number) > cur) bad(',
+     '    if (false) bad(',
+     "vitest", "cycle 미래 = 10 cycle_future"),
+
+    ("M53 근거 줄바꿈 허용", "src/lib/mail.ts",
+     '      if (/[\\r\\n\\u2028\\u2029]/.test(ev)) bad(',
+     '      if (false) bad(',
+     "vitest", "근거는 한 줄 — evidence_multiline"),
 
     ("M51 미읽음 계수에서 주간 보고를 뺀다(세게 된다)", "src/index.ts",
      "  const UNREAD = `to_id = ?1 AND acked_at IS NULL AND purged_at IS NULL AND keep_until > ?2 AND intent NOT IN ('signal', 'daily', 'weekly')`;",

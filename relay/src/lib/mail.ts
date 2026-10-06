@@ -73,7 +73,11 @@ const CHECK_ID_RE = /^[a-z0-9-]{1,40}$/;
 const DAILY_KEYS = ["day", "version", "os", "seats", "doctor", "errors", "updates", "depts", "uptime", "owner_note",
   "weekly_skipped"];
 const WEEK_RE = /^(\d{4})-W(\d{2})$/;
-const WEEKLY_KEYS = ["week", "version", "os", ...WEEKLY_SECTIONS, "top_features", "owner_note"];
+const WEEKLY_KEYS = ["cycle", "version", "os", ...WEEKLY_SECTIONS, "top_features", "owner_note"];
+// ★주간 주기 경계 = **월요일 06:00 KST**(= 일요일 21:00Z · 광장·데스크 하루 경계 06:00 KST 와 같은 선 · 2판 M2).
+//   그 시각 + 3시간의 UTC 날짜로 ISO 주를 매기면 경계가 정확히 월요일 06:00 KST 에 선다.
+export const CYCLE_SHIFT_MS = 3 * 3_600_000;
+export const CYCLE_BACK_WEEKS_MAX = 7;           // 허용 = 현재 주기 또는 직전 주기 1개 — 주기 최대 28일이면 직전 주기 시작은 7주 전까지(2판 M3)
 const WEEKLY_ITEM_KEYS = ["text", "evidence", "signatures"];
 const DAY_MS = 86_400_000;
 // ★「빈 값」 = 아래 글자만으로 된 문자열(클라이언트 agora/mail.py BLANK_RE 와 **같은 목록**) — JS trim() 과 파이썬 strip() 은
@@ -281,8 +285,8 @@ function checkDaily(p: Obj, bases: number[]): void {
     const n = [...need<string>(d, "owner_note", "string", w)].length;
     if (n > DAILY_NOTE_MAX_CHARS) bad("owner_note 는 200자까지", { where: `${w}.owner_note`, chars: n, max: DAILY_NOTE_MAX_CHARS });
   }
-  // ★주간 보고를 빈 보고라 생략한 날의 표지(명세 §1-3 (3)) — 값은 true 뿐(생략 안 한 날 = 칸을 뺀다 · 「안 온 것/꺼진 것」 구분).
-  if ("weekly_skipped" in d && d["weekly_skipped"] !== true) bad("weekly_skipped 는 true 만(아니면 칸을 뺀다)", { where: `${w}.weekly_skipped` });
+  // ★주간 보고를 빈 보고라 생략한 **주기**(명세 §1-3 (3) · 2판 M5) — 값 = 그 주기 id(`cycle` 과 같은 규칙) · 생략 안 한 날 = 칸을 뺀다.
+  if ("weekly_skipped" in d) checkCycle(need<string>(d, "weekly_skipped", "string", w), `${w}.weekly_skipped`, bases);
 }
 
 /** ISO 주 `YYYY-Www` → 그 주 월요일 00:00Z(ms). 없는 주(W00 · 53주가 없는 해의 W53)는 null. */
@@ -296,6 +300,23 @@ export function isoWeekMonday(week: string): number | null {
   const mon1 = jan4 - ((new Date(jan4).getUTCDay() + 6) % 7) * DAY_MS;
   const mon = mon1 + (wk - 1) * 7 * DAY_MS;
   return isoWeekOf(mon) === week ? mon : null;   // 되돌려 같은 글자인지(W53 이 없는 해 차단)
+}
+
+/** 시각 → 그 시각이 든 **주기 주** `YYYY-Www`(월요일 06:00 KST 경계 · 2판 M2). */
+export function cycleWeekOf(ms: number): string { return isoWeekOf(ms + CYCLE_SHIFT_MS); }
+
+/**
+ * 주기 칸(`cycle`·`weekly_skipped`) 검사 — 실제 있는 주 · **미래 금지** · 직전 7주까지(2판 M3).
+ * ★기준 = 봉투 ts 와 서버 시각 **둘 다**(신호 시각 창과 같은 원칙 — 받는 쪽은 봉투 ts 만 본다).
+ */
+function checkCycle(v: string, where: string, bases: number[]): void {
+  const mon = isoWeekMonday(v);
+  if (mon === null) bad("주기는 실제 ISO 주 YYYY-Www", { where });
+  for (const b of bases) {
+    const cur = isoWeekMonday(cycleWeekOf(b)) as number;
+    if ((mon as number) > cur) bad("미래 주기는 받지 않는다", { where, why: "cycle_future" });
+    if (cur - (mon as number) > CYCLE_BACK_WEEKS_MAX * 7 * DAY_MS) bad("주기가 너무 오래됐다(직전 7주까지)", { where, why: "cycle_too_old" });
+  }
 }
 
 /** 시각 → 그 시각이 든 ISO 주 `YYYY-Www`(UTC). */
@@ -313,7 +334,7 @@ export function isoWeekOf(ms: number): string {
 function cpLen(s: string): number { return [...s].length; }
 
 /**
- * 주간 성찰 보고(명세 §1-3) — 닫힌 모양 · `week` 만 필수 · 섹션 5 = 막힌 곳·우회·바라는 것(각 ≤3) · 자주 쓴 기능(≤5 · 기계 집계) · owner_note.
+ * 주간 성찰 보고(명세 §1-3) — 닫힌 모양 · `cycle` 만 필수 · 섹션 5 = 막힌 곳·우회·바라는 것(각 ≤3) · 자주 쓴 기능(≤5 · 기계 집계) · owner_note.
  * ★자유문 = 항목 `text`(≤200)·`evidence`(≤120 · 근거 인용 의무 = 빈 값 거부)·`owner_note`(≤200) — 그 밖은 기계 값.
  * ★다섯 칸이 전부 비면 거부(빈 보고 생략 = 보내는 쪽 규칙의 서버 쪽 짝 · `weekly_empty`).
  */
@@ -322,12 +343,7 @@ function checkWeekly(p: Obj, bases: number[]): void {
   const w = "payload.weekly";
   const d = need<Obj>(p, "weekly", "dict", "payload");
   closed(d, WEEKLY_KEYS, w);
-  const week = need<string>(d, "week", "string", w);
-  const mon = isoWeekMonday(week);
-  if (mon === null) bad("week 는 실제 ISO 주 YYYY-Www", { where: `${w}.week` });
-  // ★봉투 ts 의 ISO 주 ±1주(= 월요일끼리 ±7일) — 06:00 KST 경계·전송 지연으로 한 주 어긋날 수 있다 · 그 이상은 엉뚱한 주 합산.
-  const tsMon = isoWeekMonday(isoWeekOf(bases[0])) as number;
-  if (Math.abs((mon as number) - tsMon) > 7 * DAY_MS) bad("week 는 봉투 ts 의 주 ±1주", { where: `${w}.week`, why: "week_far_from_ts" });
+  checkCycle(need<string>(d, "cycle", "string", w), `${w}.cycle`, bases);
   if ("version" in d && !VERSION_RE.test(need<string>(d, "version", "string", w))) bad("version 형식이 아니다", { where: `${w}.version` });
   if ("os" in d && !OS_RE.test(need<string>(d, "os", "string", w))) bad("os 형식이 아니다", { where: `${w}.os` });
   let filled = 0;
@@ -345,6 +361,8 @@ function checkWeekly(p: Obj, bases: number[]): void {
       const ev = need<string>(o, "evidence", "string", ww);
       if (isBlank(text) || cpLen(text) > WEEKLY_TEXT_MAX_CHARS) bad("text 는 1~200자(공백만 = 빈 값)", { where: `${ww}.text`, max: WEEKLY_TEXT_MAX_CHARS });
       if (isBlank(ev)) bad("evidence 가 비었다 — 근거 인용 의무", { where: `${ww}.evidence`, why: "evidence_required" });
+      // ★근거는 **한 줄**(2판 m2) — 줄바꿈(CR·LF·U+2028·U+2029)이 든 근거는 거부한다(보고서에서 뒤늦게 치환하지 않는다).
+      if (/[\r\n\u2028\u2029]/.test(ev)) bad("evidence 는 한 줄(줄바꿈 금지)", { where: `${ww}.evidence`, why: "evidence_multiline" });
       if (cpLen(ev) > WEEKLY_EVIDENCE_MAX_CHARS) bad("evidence 는 120자까지", { where: `${ww}.evidence`, max: WEEKLY_EVIDENCE_MAX_CHARS });
       if ("signatures" in o) {
         const sigs = strList(o, "signatures", ww, WEEKLY_ITEM_SIGS_MAX, SIG_KEY);

@@ -78,14 +78,18 @@ WEEKLY_TEXT_MAX_CHARS = 200
 WEEKLY_EVIDENCE_MAX_CHARS = 120     # 근거 인용 의무 — 빈 값 거부
 WEEKLY_ITEM_SIGS_MAX = 5
 WEEKLY_FEATURES_MAX = 5
-WEEKLY_KEYS = ("week", "version", "os") + WEEKLY_SECTIONS + ("top_features", "owner_note")
+WEEKLY_KEYS = ("cycle", "version", "os") + WEEKLY_SECTIONS + ("top_features", "owner_note")
+CYCLE_SHIFT = datetime.timedelta(hours=3)   # 주기 경계 = 월요일 06:00 KST(= 일요일 21:00Z) — +3시간의 UTC 날짜로 ISO 주를 매긴다(릴레이 CYCLE_SHIFT_MS)
+CYCLE_BACK_WEEKS_MAX = 7                    # 허용 = 현재 주기 또는 직전 주기 1개(주기 최대 28일 → 직전 시작은 7주 전까지)
+EVIDENCE_NEWLINE_RE = re.compile("[\r\n\u2028\u2029]")
+WEEKLY_THREAD_FILE = "weekly_thread.json"   # 데스크별 안정 주간 대화(2판 M9)
 WEEKLY_ITEM_KEYS = ("text", "evidence", "signatures")
 WEEK_RE = re.compile(r"^(\d{4})-W(\d{2})\Z", re.ASCII)
 # ★「빈 값」 = 아래 글자만으로 된 문자열(릴레이 mail.ts BLANK_RE 와 **같은 목록**) — 파이썬 strip() 과 JS trim() 은
 #   공백 집합이 다르다(\x1c-\x1f·U+0085 ↔ U+FEFF) · 한쪽만 「빈 값」이라 하면 릴레이가 받은 것을 받는 쪽이 격리한다.
 BLANK_RE = re.compile(r"^[\t\n\v\f\r \x1c-\x1f\x85\xa0\u1680\u2000-\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff]*\Z")
 WEEKLY_PERIOD_DEFAULT = 7           # 데스크 핀 `weekly_period_days`(§1-3 (2)) — 없거나 못 읽으면 7
-WEEKLY_PERIOD_MIN, WEEKLY_PERIOD_MAX = 7, 28   # 7 미만 = 릴레이 주 1 버킷에 걸린다 · 28 = 4주
+WEEKLY_PERIODS = (7, 14, 28)        # 허용 주기 = 닫힌 집합(2판 M4 · 8~27 같은 비주간 값 거부)
 
 # ── 로컬 우편함(명세 §5 · §11 · §13-4) ─────────────────────────────────────
 MAILBOX_DIR = "mailbox"
@@ -299,9 +303,11 @@ def _check_daily(payload: dict[str, Any], *, now: datetime.datetime | None,
         _int_in(o, "uptime_s", ww, 0, 31_536_000)
     if "owner_note" in d and len(_need(d, "owner_note", str, w)) > DAILY_NOTE_MAX_CHARS:
         _fail("owner_note 는 200자까지", {"where": w + ".owner_note"})
-    # ★주간 보고를 빈 보고라 생략한 날의 표지(§1-3 (3)) — 값은 true 뿐(생략 안 한 날 = 칸을 뺀다).
-    if "weekly_skipped" in d and d["weekly_skipped"] is not True:
-        _fail("weekly_skipped 는 true 만(아니면 칸을 뺀다)", {"where": w + ".weekly_skipped"})
+    # ★주간 보고를 빈 보고라 생략한 **주기**(§1-3 (3) · 2판 M5) — 값 = 그 주기 id(`cycle` 과 같은 규칙).
+    if "weekly_skipped" in d and ts is not None:
+        _check_cycle(_need(d, "weekly_skipped", str, w), w + ".weekly_skipped", ts)
+    elif "weekly_skipped" in d:
+        _need(d, "weekly_skipped", str, w)
 
 
 def iso_week_monday(week: str) -> datetime.date | None:
@@ -325,6 +331,77 @@ def is_blank(text: str) -> bool:
     return bool(BLANK_RE.match(text))
 
 
+def cycle_week_of(moment: datetime.datetime) -> str:
+    """시각 → 그 시각이 든 **주기 주** `YYYY-Www`(월요일 06:00 KST 경계 · 릴레이 cycleWeekOf 와 같은 값)."""
+    return iso_week_of(moment.astimezone(datetime.timezone.utc) + CYCLE_SHIFT)
+
+
+def _check_cycle(value: str, where: str, ts: datetime.datetime) -> None:
+    """주기 칸 — 실제 있는 주 · **미래 금지** · 직전 7주까지(릴레이 checkCycle 과 같은 규칙 · 기준 = 봉투 ts)."""
+    monday = iso_week_monday(value)
+    if monday is None:
+        _fail("주기는 실제 ISO 주 YYYY-Www", {"where": where})
+    current = iso_week_monday(cycle_week_of(ts))
+    if monday > current:
+        _fail("미래 주기는 받지 않는다", {"where": where, "why": "cycle_future"})
+    if (current - monday).days > CYCLE_BACK_WEEKS_MAX * 7:
+        _fail("주기가 너무 오래됐다(직전 7주까지)", {"where": where, "why": "cycle_too_old"})
+
+
+def weekly_policy(pin: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
+    """핀의 주간 주기 정책(2판 M4) — `{"period_days", "epoch"}`. ★효력 시각 전이거나 위상(epoch)이 없는 7 아닌 주기는 **7**(넓히지 않는다)."""
+    period, epoch, eff = pin.get("weekly_period_days", 7), pin.get("weekly_epoch"), pin.get("weekly_effective_at")
+    if eff is not None and now < eff:
+        return {"period_days": WEEKLY_PERIOD_DEFAULT, "epoch": None}
+    if period != 7 and epoch is None:
+        return {"period_days": WEEKLY_PERIOD_DEFAULT, "epoch": None}
+    return {"period_days": period, "epoch": epoch}
+
+
+def cycle_of(moment: datetime.datetime, policy: dict[str, Any]) -> str:
+    """그 시각이 든 주기의 id = 주기 **시작 주** `YYYY-Www`(주기 7 = 그 주 · 14·28 = epoch 에 맞춘 시작 주)."""
+    monday = iso_week_monday(cycle_week_of(moment))
+    if policy["period_days"] != 7:
+        anchor = iso_week_monday(policy["epoch"])
+        span = policy["period_days"]
+        monday = anchor + datetime.timedelta(days=((monday - anchor).days // span) * span)
+    year, week, _ = monday.isocalendar()
+    return f"{year:04d}-W{week:02d}"
+
+
+def previous_cycle(cycle: str, policy: dict[str, Any]) -> str:
+    """직전 주기 id(시작 주에서 주기 일수만큼 앞)."""
+    year, week, _ = (iso_week_monday(cycle) - datetime.timedelta(days=policy["period_days"])).isocalendar()
+    return f"{year:04d}-W{week:02d}"
+
+
+def weekly_is_empty(weekly: dict[str, Any]) -> bool:
+    """보내는 쪽 「빈 보고 생략」 판정(§1-3 (3)) — 다섯 칸이 전부 비면 참(발신 0 · 다음 일일 보고에 weekly_skipped).
+    ★받는 쪽 `weekly_empty` 거부와 **같은 규칙**(빈 값 = `is_blank`) · T3 작성기가 부른다."""
+    return not (any(weekly.get(sec) for sec in WEEKLY_SECTIONS) or weekly.get("top_features")
+                or not is_blank(str(weekly.get("owner_note") or "")))
+
+
+def send_weekly(ctx: Any, weekly: dict[str, Any], *, publish: Any = None) -> dict[str, Any]:
+    """주간 성찰 보고 전용 발신(2판 M9) — 받는 이 = 핀의 데스크 · 데스크별 **안정 대화**(`mailbox/weekly_thread.json`) ·
+    빈 보고면 보내지 않는다(`{"skipped": True}`). ★T3 작성기가 부른다 · 429·실패 처리(그 주 포기·같은 message_id 재전송)는 부르는 쪽.
+    """
+    if weekly_is_empty(weekly):
+        return {"skipped": True, "cycle": weekly.get("cycle")}
+    desks = sorted(desk_pin()["desk"].values())
+    if len(desks) != 1:
+        _fail("핀의 상담소 데스크가 하나가 아니다", {"desks": len(desks)}, errors.PRECONDITION)
+    to = desks[0]
+    path = _path(ctx, WEEKLY_THREAD_FILE)
+    state = _load_json(path)
+    thread = state.get(to) if is_id(str(state.get(to) or "")) else None
+    doc = build(ctx, to=to, payload={"intent": WEEKLY, "weekly": weekly}, thread_id=thread)
+    out = (publish or _publish)(ctx, doc)
+    if out.get("status") in (200, 201) and thread != doc["thread_id"]:
+        _write_atomic(path, {**state, to: doc["thread_id"]})
+    return out
+
+
 def _check_weekly(payload: dict[str, Any], *, ts: datetime.datetime) -> None:
     """주간 성찰 보고(명세 §1-3) — 릴레이 `checkWeekly` 와 같은 규칙.
 
@@ -334,12 +411,7 @@ def _check_weekly(payload: dict[str, Any], *, ts: datetime.datetime) -> None:
     w = "payload.weekly"
     d = _need(payload, "weekly", dict, "payload")
     _closed(d, WEEKLY_KEYS, w)
-    monday = iso_week_monday(_need(d, "week", str, w))
-    if monday is None:
-        _fail("week 는 실제 ISO 주 YYYY-Www", {"where": w + ".week"})
-    ts_monday = iso_week_monday(iso_week_of(ts))
-    if abs((monday - ts_monday).days) > 7:          # 봉투 ts 의 주 ±1주(릴레이와 같은 경계)
-        _fail("week 는 봉투 ts 의 주 ±1주", {"where": w + ".week", "why": "week_far_from_ts"})
+    _check_cycle(_need(d, "cycle", str, w), w + ".cycle", ts)
     if "version" in d and not VERSION_RE.match(_need(d, "version", str, w)):
         _fail("version 형식이 아니다", {"where": w + ".version"})
     if "os" in d and not OS_RE.match(_need(d, "os", str, w)):
@@ -363,6 +435,8 @@ def _check_weekly(payload: dict[str, Any], *, ts: datetime.datetime) -> None:
                 _fail("text 는 1~200자(공백만 = 빈 값)", {"where": ww + ".text"})
             if is_blank(ev):
                 _fail("evidence 가 비었다 — 근거 인용 의무", {"where": ww + ".evidence", "why": "evidence_required"})
+            if EVIDENCE_NEWLINE_RE.search(ev):                # 근거는 한 줄(2판 m2)
+                _fail("evidence 는 한 줄(줄바꿈 금지)", {"where": ww + ".evidence", "why": "evidence_multiline"})
             if len(ev) > WEEKLY_EVIDENCE_MAX_CHARS:
                 _fail("evidence 는 120자까지", {"where": ww + ".evidence"})
             if "signatures" in it:
@@ -584,7 +658,8 @@ def desk_pin(path: str | None = None) -> dict[str, Any]:
     ★모르는 줄은 버린다(넓히지 않는다). 파일이 없으면 빈 핀 = 상담소 판별 0.
     """
     pin: dict[str, Any] = {"desk": {}, "chair": set(), "rooms": set(),
-                           "weekly_period_days": WEEKLY_PERIOD_DEFAULT}
+                           "weekly_period_days": WEEKLY_PERIOD_DEFAULT, "weekly_epoch": None,
+                           "weekly_effective_at": None}
     try:
         with open(path or DESK_PIN_PATH, encoding="utf-8") as fh:
             lines = fh.read().splitlines()
@@ -599,12 +674,15 @@ def desk_pin(path: str | None = None) -> dict[str, Any]:
         elif len(parts) == 2 and parts[0] == "room" and is_id(parts[1]):
             pin["rooms"].add(parts[1])
         elif len(parts) == 2 and parts[0] == "weekly_period_days":
-            # 주간 보고 주기(§1-3 (2) · 판올림 없이 정책만 바꾸는 손잡이) — 7~28 정수만 · 못 읽으면 7(넓히지 않는다).
-            v = parts[1]
-            if re.fullmatch(r"[0-9]{1,2}", v, re.ASCII) and WEEKLY_PERIOD_MIN <= int(v) <= WEEKLY_PERIOD_MAX:
-                pin["weekly_period_days"] = int(v)
-            else:
-                pin["weekly_period_days"] = WEEKLY_PERIOD_DEFAULT
+            # 주간 보고 주기(§1-3 (2) · 2판 M4) — {7, 14, 28} 만 · 못 읽으면 7(넓히지 않는다).
+            pin["weekly_period_days"] = int(parts[1]) if parts[1] in ("7", "14", "28") else WEEKLY_PERIOD_DEFAULT
+        elif len(parts) == 2 and parts[0] == "weekly_epoch":
+            # 주기 위상 = 주기가 시작하는 주(YYYY-Www) — 14·28 은 이것이 있어야 효력(없으면 7).
+            pin["weekly_epoch"] = parts[1] if iso_week_monday(parts[1]) is not None else None
+        elif len(parts) == 2 and parts[0] == "weekly_effective_at":
+            # 효력 시각(밀리초 고정폭 UTC) — 그 전에는 기본 정책(7). 못 읽으면 「아직 효력 없음」 쪽(먼 미래).
+            pin["weekly_effective_at"] = (_parse_ts(parts[1]) if _ts_ok(parts[1])
+                                          else datetime.datetime.max.replace(tzinfo=datetime.timezone.utc))
     return pin
 
 
@@ -633,10 +711,11 @@ def _pair_prev(ctx: Any, to: str) -> str:
 
 
 def build(ctx: Any, *, to: str, payload: dict[str, Any],
-          reply_to: str | None = None) -> dict[str, Any]:
-    """우편 문서 한 통. `scrub` 칸은 **만들 때** 채운다(서명 대상 안 · core.declare_scrub 와 같은 이유)."""
+          reply_to: str | None = None, thread_id: str | None = None) -> dict[str, Any]:
+    """우편 문서 한 통. `scrub` 칸은 **만들 때** 채운다(서명 대상 안 · core.declare_scrub 와 같은 이유).
+    `thread_id` = (답장이 아닐 때) 이어 붙일 내 대화 — 기계 통의 「한 발신자 = 대화 하나」(`send_weekly`)."""
     from agora import core, tools
-    thread_id = new_id()
+    thread_id = thread_id if thread_id and is_id(thread_id) else new_id()
     if reply_to:
         known = _known_mail(ctx, reply_to, to)
         if known is None:
@@ -653,6 +732,35 @@ def build(ctx: Any, *, to: str, payload: dict[str, Any],
     return doc
 
 
+def principal_fingerprint(ctx: Any, principal: str) -> str | None:
+    """명부(`allowed_signers`)에서 그 참가자 키의 지문 `SHA256:…`(ssh-keygen -l 과 같은 값). 없거나 둘 이상이면 None."""
+    found: set[str] = set()
+    try:
+        with open(ctx.allowed_signers_path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        parts = line.split()
+        if not parts or parts[0].startswith("#") or principal not in parts[0].split(","):
+            continue
+        for i, tok in enumerate(parts[1:-1], 1):
+            if tok.startswith(("ssh-", "ecdsa-", "sk-")):
+                try:
+                    blob = base64.b64decode(parts[i + 1], validate=True)
+                except ValueError:
+                    return None
+                found.add("SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("="))
+                break
+    return found.pop() if len(found) == 1 else None
+
+
+def _to_is_pinned_desk(ctx: Any, to: str) -> bool:
+    """받는 이가 핀의 상담소 데스크이고, 명부의 그 키 지문이 핀 지문과 같은가(2판 B1 — 이름만 같은 사칭 데스크 차단)."""
+    fp = principal_fingerprint(ctx, to)
+    return fp is not None and desk_pin()["desk"].get(fp) == to
+
+
 def _publish(ctx: Any, doc: dict[str, Any], *, prompt: Any = None,
              isatty: Any = None) -> dict[str, Any]:
     """계약 → 스크럽 → 승인 → 서명 → 쓰기 → 발신 원장. **건너뛰는 길을 두지 않는다.**
@@ -663,11 +771,16 @@ def _publish(ctx: Any, doc: dict[str, Any], *, prompt: Any = None,
     # ★일일 보고는 `owner_note` 가 빈 통만 예외 `mail_daily`(D8-1 ⓑ · 3eac2a0f) — 오너 말은 **적을 때** 승인한다.
     intent = doc["payload"].get("intent")
     # ★주간 보고도 같은 규칙 — `owner_note` 가 빈 통만 예외 `mail_weekly`(§1-3 (5) · 항목 자유문은 서식 상한·스크럽 2중으로 한정).
+    # ★2판 B1·m1: 빈 판정 = `is_blank`(받는 쪽과 같은 글자 목록) · 기계 통 예외 셋 다 **받는 이 = 서명 검증된 핀 데스크**일 때만
+    #   (실측: 1판까지 signal·daily 예외도 `to` 를 안 봤다 — 임의 참가자에게 무승인 기계 우편이 나갈 수 있었다).
     note = ((doc["payload"].get("daily") or {}).get("owner_note") if intent == DAILY
             else (doc["payload"].get("weekly") or {}).get("owner_note") if intent == WEEKLY else None)
+    blank = is_blank(str(note or ""))
     exempt = ("mail_signal" if intent == SIGNAL
-              else "mail_daily" if intent == DAILY and not note
-              else "mail_weekly" if intent == WEEKLY and not note else None)
+              else "mail_daily" if intent == DAILY and blank
+              else "mail_weekly" if intent == WEEKLY and blank else None)
+    if exempt and not _to_is_pinned_desk(ctx, doc["to"]):
+        exempt = None
     from agora import core, scrub, sign
     validate(doc, now=datetime.datetime.now(datetime.timezone.utc))
     report = scrub.enforce(doc, names_path=scrub.names_path(ctx.config_dir))

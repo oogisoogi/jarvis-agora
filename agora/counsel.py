@@ -49,8 +49,10 @@ DEFAULTS: dict[str, Any] = {
     "daily_cost_cap_usd": 10,        # 하루(06:00 KST 경계) 합산 천장 = 분석 5 + 공개 답 5 — 넘을 호출은 거절(code 3 · master f78aa7c6 R2)
     "agent": None,                   # 배치 에이전트 실행 파일(없으면 PATH 의 claude)
     "weekly_dow": 0,                 # 주간 모드 요일(0=월 … 6=일 · day_of 기준) — 그날 배치가 주간 성찰 보고를 같은 분석 호출에 합산(명세 §1-3 (6))
-    "regress_ratio": 0.10,           # 회귀 후보 문턱 — 발생 좌석·일 / 활성 좌석·일(실측 없음 · 발행 뒤 4주 실측으로 교정 · 설계 §9-2 ⑦)
 }
+WEEKLY_CYCLES_FILE = "weekly_cycles.jsonl"   # 주기별 완료·계수 원장(2판 M8·M10·m4 · append-only)
+WEEKLY_SAMPLE_TARGET = 4             # 표본 4장(주간 모드 배치에서 주간 보고 ≥1통) — 닿으면 master 에 1줄(주기·문턱 재판정)
+ROSTER_LOOKBACK_DAYS = 28            # 「예상 참가자」 = 최근 28일 안에 기계 우편(신호·일일·주간)을 보낸 참가자
 WEEKLY_WINDOW_DAYS = 7               # 주간 모드 표(§9·§10)가 보는 창 = 배치 날까지 7일(그날 포함 — 월요일 첫 판 신호는 그날 것으로 센다)
 RATIO_ROWS_MAX = 30                  # §10 비율표 줄 상한(비율 높은 순)
 PERIODS = ("day", "week")
@@ -131,9 +133,6 @@ def settings(config: dict[str, Any] | None) -> dict[str, Any]:
     v = raw.get("weekly_dow")
     if type(v) is int and 0 <= v <= 6:
         out["weekly_dow"] = v
-    v = raw.get("regress_ratio")
-    if type(v) in (int, float) and type(v) is not bool and 0 < v <= 1:
-        out["regress_ratio"] = v
     return out
 
 
@@ -706,10 +705,13 @@ def window_days(end_day: datetime.date, days: int = WEEKLY_WINDOW_DAYS) -> set[d
     return {end_day - datetime.timedelta(days=k) for k in range(days)}
 
 
-def signature_mismatch(dailies: list[dict[str, Any]], signal_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def signature_mismatch(dailies: list[dict[str, Any]], signal_rows: list[dict[str, Any]],
+                       today: datetime.date | None = None) -> list[dict[str, Any]]:
     """§1-2 대조 규칙(10-06 개정) — 같은 날 같은 발신자의 `daily.errors.signatures` ⊆ 신호 items 서명 집합이 아니면 불일치.
 
     ★릴레이 변경 0 · 받는 쪽 결정론 플래그(수집기 결함 신호) — 「같은 날」 = 두 우편 봉투 ts 의 day_of.
+    ★2판 m3: 부르는 쪽이 **최근 이틀**의 일일 보고를 매 배치 다시 넘긴다(처리 완료 여부 무관) — 신호가 뒤늦게 오면 다음 배치에서 저절로 풀린다.
+      그날(`today`) 것은 아직 신호가 올 수 있어 `provisional`(잠정)로 표시한다.
     """
     sent: dict[tuple[Any, Any], set[str]] = {}
     for row in signal_rows:
@@ -722,23 +724,19 @@ def signature_mismatch(dailies: list[dict[str, Any]], signal_rows: list[dict[str
         listed = set(((payload.get("daily") or {}).get("errors") or {}).get("signatures") or [])
         missing = sorted(listed - sent.get((row.get("from"), _row_day(row)), set()))
         if missing:
-            out.append({"from": row.get("from"), "day": str(_row_day(row)), "missing": missing})
+            out.append({"from": row.get("from"), "day": str(_row_day(row)), "missing": missing,
+                        "provisional": today is not None and _row_day(row) == today})
     return out
 
 
-def _vkey(v: str) -> tuple[Any, ...]:
-    """판본 정렬 키 — 숫자 마디는 숫자로(1.1.10 > 1.1.9)."""
-    return tuple((0, int(x)) if x.isdigit() else (1, x) for x in re.split(r"[.+-]", v))
-
-
-def ratio_table(rows: list[dict[str, Any]], *, end_day: datetime.date, threshold: float,
+def ratio_table(rows: list[dict[str, Any]], *, end_day: datetime.date,
                 days: int = WEEKLY_WINDOW_DAYS) -> list[dict[str, Any]]:
-    """§10 비율표(설계 §9-2 ⑦) — 판본 × 서명별 `발생 좌석·일 / 활성 좌석·일 / 관찰일`. ★원시 횟수(count)는 쓰지 않는다.
+    """§10 비율표(설계 §9-2 ⑦ · 2판 M6 = **원자료만 · 「회귀 후보」 판정 0**) — 판본 × 서명별 `발생 좌석·일 / 활성 좌석·일 / 관찰일`.
 
+    ★원시 횟수(count)는 쓰지 않는다 · 문턱·판본 매핑 정의는 4주 실측 뒤 master 승인(그 전에는 판정 칸 자체가 없다).
     - 창 = end_day 까지 `days` 일(end_day 포함 · `window_days`) · 날 = 봉투 ts 의 day_of.
-    - 활성 좌석·일(분모) = 그 판본(daily version.host·pack 중 하나)인 일일 보고의 `seats.count` 합. 좌석 칸이 없는 보고는 분모에서 뺀다.
+    - 활성 좌석·일(분모) = 그 판본(daily version.host·pack 중 하나 — 두 칸이 같으면 한 번)인 일일 보고의 `seats.count` 합. 좌석 칸이 없는 보고는 분모 밖.
     - 발생 좌석·일(분자) = 그 판본·서명이 난 (참가자, 날, source) 수 — 한 (참가자, 날)의 몫은 그날 좌석 수를 넘지 않는다.
-    - 회귀 후보 = 비율 ≥ threshold 이고 (직전 판본에 그 서명이 없거나 직전 비율의 2배 이상). 직전 판본 = 창 안 분모가 있는 판본 중 바로 아래.
     """
     window = window_days(end_day, days)
     active: dict[str, int] = {}
@@ -764,76 +762,62 @@ def ratio_table(rows: list[dict[str, Any]], *, end_day: datetime.date, threshold
             for it in payload.get("items") or []:
                 occ.setdefault((it["version"], it["signature"]), set()).add((row.get("from"), day, it["source"]))
                 codes[it["signature"]] = it["error_code"]
-    ratio: dict[tuple[str, str], float | None] = {}
-    numer: dict[tuple[str, str], int] = {}
-    for key, hits in occ.items():
+    out = []
+    for (v, sig), hits in occ.items():
         per: dict[tuple[Any, Any], int] = {}
         for who, day, _src in hits:
             per[(who, day)] = per.get((who, day), 0) + 1
-        numer[key] = sum(min(c, seats_of.get(pd, c)) for pd, c in per.items())
-        ratio[key] = numer[key] / active[key[0]] if active.get(key[0]) else None
-    versions = sorted((v for v in active if active[v]), key=_vkey)
-    out = []
-    for (v, sig), n in numer.items():
-        r = ratio[(v, sig)]
-        lower = [x for x in versions if _vkey(x) < _vkey(v)]
-        prev = lower[-1] if lower else None
-        prev_r = (ratio.get((prev, sig)) or 0.0) if prev else None
-        if r is None:
-            verdict = "분모 0(좌석 칸 없음)"
-        elif r >= threshold and (prev_r is None or prev_r == 0 or r >= 2 * prev_r):
-            verdict = "⚠회귀 후보" + ("(비교 판 없음)" if prev is None else "")
-        else:
-            verdict = "-"
+        n = sum(min(c, seats_of.get(pd, c)) for pd, c in per.items())
         out.append({"version": v, "signature": sig, "error_code": codes.get(sig, "?"), "occurred": n,
-                    "active": active.get(v, 0), "days": len(observed.get(v, ())), "ratio": r,
-                    "prev": prev, "prev_ratio": prev_r, "verdict": verdict})
+                    "active": active.get(v, 0), "days": len(observed.get(v, ())),
+                    "ratio": n / active[v] if active.get(v) else None})
     return sorted(out, key=lambda x: (-(x["ratio"] or 0), x["version"], x["signature"]))[:RATIO_ROWS_MAX]
 
 
-def _ratio_md(table: list[dict[str, Any]], threshold: float) -> str:
+def _ratio_md(table: list[dict[str, Any]]) -> str:
     if not table:
         return "_창 안 신호 0건 — 비율표 없음._"
-    pct = lambda r: "-" if r is None else f"{r * 100:.1f}%"
-    lines = [f"회귀 문턱 = {threshold * 100:.0f}%(실측 없음 · 발행 뒤 4주 실측으로 교정) · 원시 횟수는 싣지 않는다(설계 §9-2 ⑦).", "",
-             "| 판본 | signature(앞 8) | error_code | 발생 좌석·일 | 활성 좌석·일 | 관찰일 | 비율 | 직전 판 비율 | 판정 |",
-             "|---|---|---|---|---|---|---|---|---|"]
+    pct = lambda r: "-(분모 0)" if r is None else f"{r * 100:.1f}%"
+    lines = ["원자료만(2판 M6) — 「회귀 후보」 판정·문턱 없음(4주 실측 뒤 master 승인) · 원시 횟수는 싣지 않는다(설계 §9-2 ⑦).", "",
+             "| 판본 | signature(앞 8) | error_code | 발생 좌석·일 | 활성 좌석·일 | 관찰일 | 비율 |",
+             "|---|---|---|---|---|---|---|"]
     for x in table:
-        lines.append(f"| {x['version']} | {x['signature'][:8]} | {x['error_code']} | {x['occurred']} | {x['active']} | {x['days']} | "
-                     f"{pct(x['ratio'])} | {(x['prev'] + ' ' + pct(x['prev_ratio'])) if x['prev'] else '-'} | {x['verdict']} |")
+        lines.append(f"| {x['version']} | {x['signature'][:8]} | {x['error_code']} | {x['occurred']} | {x['active']} | "
+                     f"{x['days']} | {pct(x['ratio'])} |")
     return "\n".join(lines)
 
 
 WEEKLY_SECTION_NAMES = {"blocked": ("b", "막힌 곳"), "workarounds": ("a", "우회"), "wishes": ("w", "바라는 것")}
 
 
-def weekly_status(rows: list[dict[str, Any]], *, end_day: datetime.date,
-                  period_days: int = WEEKLY_WINDOW_DAYS) -> list[dict[str, str]]:
-    """최근 7일 일일 보고를 보낸 참가자마다 주간 보고 상태 — 보냄 · 생략(빈 보고 · weekly_skipped) · 안 옴(일일은 옴 = 주간 수집 결함 의심).
+def cycle_days(cycle: str, period_days: int) -> set[datetime.date]:
+    """주기 id(시작 주) → 그 주기에 드는 날(`day_of` 날짜) — 시작 월요일부터 주기 일수만큼."""
+    from agora import mail
+    start = mail.iso_week_monday(cycle)
+    return {start + datetime.timedelta(days=k) for k in range(period_days)} if start else set()
 
-    ★주간 보고·생략 표지를 보는 창 = **핀 주기**(`weekly_period_days`) 일 — 격주 핀에서 쉬는 주를 「안 옴」으로 오판하지 않게.
-      주간 보고는 이번 배치 것만이 아니라 받은 것 전부(지난 배치에서 처리한 것 포함)에서 찾는다.
+
+def weekly_status(rows: list[dict[str, Any]], *, cycle: str, end_day: datetime.date) -> list[dict[str, str]]:
+    """주기 `cycle` 의 주간 보고 상태(2판 M5 · **payload 주기에 결박**) — 「예상 참가자」(최근 28일 안에 기계 우편을 보낸 집)마다:
+    보냄(그 주기 `cycle` 의 주간 보고) · 빈 생략(일일 `weekly_skipped == cycle`) · 주간 없음(최근 7일 일일은 옴 = 결함 의심) · 일일도 없음(꺼짐·미설치·장애).
     """
-    recent, period = window_days(end_day), window_days(end_day, max(period_days, WEEKLY_WINDOW_DAYS))
-    senders: dict[Any, str] = {}
-    skipped: set[Any] = set()
-    sent: set[Any] = set()
+    expected, sent, skipped, daily_recent = set(), set(), set(), set()
+    lookback, recent = window_days(end_day, ROSTER_LOOKBACK_DAYS), window_days(end_day)
     for row in rows:
         payload, _ts = _env(row)
-        day = _row_day(row)
-        if payload.get("intent") == "daily":
+        day, who = _row_day(row), row.get("from")
+        if day in lookback:
+            expected.add(who)
+        if payload.get("intent") == "weekly" and (payload.get("weekly") or {}).get("cycle") == cycle:
+            sent.add(who)
+        elif payload.get("intent") == "daily":
+            if (payload.get("daily") or {}).get("weekly_skipped") == cycle:
+                skipped.add(who)
             if day in recent:
-                senders.setdefault(row.get("from"), "안 옴(일일은 옴 — 주간 수집 결함 의심)")
-            if day in period and (payload.get("daily") or {}).get("weekly_skipped") is True:
-                skipped.add(row.get("from"))
-        elif payload.get("intent") == "weekly" and day in period:
-            sent.add(row.get("from"))
-    for p in senders:
-        if p in sent:
-            senders[p] = "보냄"
-        elif p in skipped:
-            senders[p] = "생략(빈 보고)"
-    return [{"from": str(p), "state": st} for p, st in sorted(senders.items(), key=lambda kv: str(kv[0]))]
+                daily_recent.add(who)
+    state = lambda p: ("보냄" if p in sent else "빈 생략" if p in skipped
+                       else "주간 없음(일일은 옴 — 결함 의심)" if p in daily_recent else "일일도 없음(꺼짐·미설치·장애)")
+    return [{"from": str(p), "state": state(p)} for p in sorted(expected | sent, key=str)]
 
 
 BOUNDARY_LEN = len("COUNSEL-") + 16    # build_prompt 경계 길이(token_hex(8) = 16자 · 바뀌면 상한 계산이 틀린다)
@@ -854,12 +838,14 @@ def prompt_len(payload: dict[str, Any]) -> int:
 
 
 def collect(ctx: Any, *, max_bytes: int, now: datetime.datetime | None = None, weekly_mode: bool = False,
-            regress_ratio: float = DEFAULTS["regress_ratio"]) -> dict[str, Any]:
+            policy: dict[str, Any] | None = None) -> dict[str, Any]:
     """아직 안 묶은 접수 → 배치 입력 묶음. ★오래된 대화부터 담고 넘치면 **이월**(조용히 자르지 않는다).
 
     ★상한 = **최종 프롬프트 바이트**(적대 2R codex — 글 바이트만 세고 함대 표·묶음 포장·직렬화는 상한 밖이었다).
       담을 때마다 그 한 조각이 프롬프트에 더하는 바이트(쉼표·묶음 머리 포함)를 더한다 — `prompt_len` 과 같은 값이 된다.
-    ★주간 모드(`weekly_mode` · 명세 §1-3 (6))에서만 주간 성찰 보고를 담는다(W 묶음 · 사람 글 뒤 · 같은 상한) — 그 밖의 날은 그대로 둔다(대기).
+    ★주간 모드(`weekly_mode` · 명세 §1-3 (6))에서만 새 주간 성찰 보고를 담는다(W 묶음 · 사람 글 뒤 · 같은 상한) — 그 밖의 날은 대기.
+    ★2판 M8: 주간 모드 배치가 한 번 지나갔는데도 아직 못 묶인 주간 보고(그 배치 실패·상한 이월)는 **밀린 것**이다 —
+      다음 배치(요일 무관)에서 사람 글보다 **먼저** 담는다(반복 기아 차단).
     """
     from agora import mail
     mask = _masker(ctx)
@@ -872,6 +858,13 @@ def collect(ctx: Any, *, max_bytes: int, now: datetime.datetime | None = None, w
     signals = [r for r in machine if r.get("intent") == "signal"]
     dailies = [r for r in machine if r.get("intent") == "daily"]
     weeklies = [inbox[r["key"]] for r in items if r["layer"] == "mail" and r.get("intent") == "weekly" and r["key"] in inbox]
+    now = now or _now()
+    policy = policy or mail.weekly_policy(mail.desk_pin(), now)
+    last_weekly_batch = max((str(r.get("at") or "") for r in _rows(_desk_path(ctx, WEEKLY_CYCLES_FILE))
+                             if r.get("type") == "cycle"), default="")
+    arrived = {r["key"]: str(r.get("at") or "") for r in items}
+    overdue_rows = [r for r in weeklies if last_weekly_batch and arrived.get(r["mail_id"], "") <= last_weekly_batch]
+    fresh_rows = [r for r in weeklies if r not in overdue_rows]
     old_daily = [inbox[r["key"]] for r in intake if r.get("type") == "item" and r.get("key") in done
                  and r.get("intent") == "daily" and r["key"] in inbox]
     # 대화 단위로 묶는다 — 우편 대화(M) · 공개 글(P · 방 글 하나 = 묶음 하나, 댓글은 부모 묶음에)
@@ -892,6 +885,40 @@ def collect(ctx: Any, *, max_bytes: int, now: datetime.datetime | None = None, w
     carried, over_first = 0, 0
     m_no = p_no = 0
     included_keys: list[str] = []
+
+    # 주간 성찰 보고(W) — 한 통 = 한 묶음 · 항목 key = W<n>-<b|a|w><k>(제안 묶음이 항목을 가리킨다) · 밀린 것은 사람 글보다 먼저.
+    weekly_items: dict[str, dict[str, Any]] = {}
+    weekly_in: list[dict[str, Any]] = []
+    weekly_bytes = 0
+    w_no = 0
+
+    def add_weekly(row: dict[str, Any]) -> bool:
+        nonlocal used, weekly_bytes, w_no
+        wk = (_env(row)[0].get("weekly") or {})
+        key = f"W{w_no + 1}"
+        entry: dict[str, Any] = {"key": key, "layer": "주간 성찰 보고(가설)", "cycle": wk.get("cycle"),
+                                 "version": wk.get("version", "-"), "items": [],
+                                 "top_features": wk.get("top_features") or [], "owner_note": mask(wk.get("owner_note") or "")}
+        pending: dict[str, dict[str, Any]] = {}
+        for sec, (tag, name) in WEEKLY_SECTION_NAMES.items():
+            for k, it in enumerate(wk.get(sec) or [], 1):
+                ik = f"{key}-{tag}{k}"
+                text, ev = mask(it.get("text") or ""), mask(it.get("evidence") or "")
+                entry["items"].append({"key": ik, "section": name, "text": text, "evidence": ev})
+                pending[ik] = {"from": row.get("from"), "section": name, "text": text, "evidence": ev,
+                               "signatures": list(it.get("signatures") or []), "cycle": wk.get("cycle")}
+        size = _jlen(entry) + (1 if bundle else 0)
+        if used + size > max_bytes:
+            return False
+        used += size
+        weekly_bytes += size
+        w_no += 1
+        bundle.append(entry)
+        weekly_items.update(pending)
+        weekly_in.append(row)
+        included_keys.append(row["mail_id"])
+        return True
+    weekly_carried = sum(1 for row in sorted(overdue_rows, key=lambda r: str(r.get("ts") or "")) if not add_weekly(row))
 
     # ★상한은 **줄 단위로** 지킨다(적대 1R codex — 묶음 단위면 첫 묶음이 상한을 통째로 넘었다).
     #   다만 묶음이 아직 하나도 없을 때의 첫 줄은 넘어도 담는다 — 안 담으면 그 한 통을 영영 못 읽는다(보고서에 크기를 적는다).
@@ -934,35 +961,9 @@ def collect(ctx: Any, *, max_bytes: int, now: datetime.datetime | None = None, w
                               "keys": [r["key"] for r in taken]}
             bundle.append({**head, "posts": texts})
         included_keys += [r["key"] for r in taken]
-    # 주간 성찰 보고(W) — 주간 모드에서만 · 한 통 = 한 묶음 · 항목 key = W<n>-<b|a|w><k>(제안 묶음이 항목을 가리킨다).
-    weekly_items: dict[str, dict[str, Any]] = {}
-    weekly_in: list[dict[str, Any]] = []
-    weekly_carried = 0
-    w_no = 0
-    for row in (sorted(weeklies, key=lambda r: str(r.get("ts") or "")) if weekly_mode else []):
-        wk = (_env(row)[0].get("weekly") or {})
-        key = f"W{w_no + 1}"
-        entry: dict[str, Any] = {"key": key, "layer": "주간 성찰 보고(가설)", "week": wk.get("week"),
-                                 "version": wk.get("version", "-"), "items": [],
-                                 "top_features": wk.get("top_features") or [], "owner_note": mask(wk.get("owner_note") or "")}
-        pending: dict[str, dict[str, Any]] = {}
-        for sec, (tag, name) in WEEKLY_SECTION_NAMES.items():
-            for k, it in enumerate(wk.get(sec) or [], 1):
-                ik = f"{key}-{tag}{k}"
-                text, ev = mask(it.get("text") or ""), mask(it.get("evidence") or "")
-                entry["items"].append({"key": ik, "section": name, "text": text, "evidence": ev})
-                pending[ik] = {"from": row.get("from"), "section": name, "text": text, "evidence": ev,
-                               "signatures": list(it.get("signatures") or []), "day": str(_row_day(row))}
-        size = _jlen(entry) + (1 if bundle else 0)
-        if used + size > max_bytes:
-            weekly_carried += 1
-            continue
-        used += size
-        w_no += 1
-        bundle.append(entry)
-        weekly_items.update(pending)
-        weekly_in.append(row)
-        included_keys.append(row["mail_id"])
+    for row in (sorted(fresh_rows, key=lambda r: str(r.get("ts") or "")) if weekly_mode else []):
+        add_weekly(row)
+    weekly_carried += sum(1 for r in fresh_rows if weekly_mode and r not in weekly_in)
     sig_table = _signal_table(signals)
     notes = [{"key": r["mail_id"], "from": r.get("from"),
               "note": mask(_daily_view(_mail_texts(r)[2].get("daily") or {})["owner_note"])}
@@ -1012,34 +1013,39 @@ def collect(ctx: Any, *, max_bytes: int, now: datetime.datetime | None = None, w
                     and r["key"] not in notes_out]
     urgent_rows = _rows(_desk_path(ctx, URGENT_FILE))
     all_machine = [r for r in inbox.values() if r.get("intent") in ("signal", "daily", "weekly")]
-    mismatch = signature_mismatch(dailies, [r for r in all_machine if r.get("intent") == "signal"])
+    end = day_of(now)
+    signal_all = [r for r in all_machine if r.get("intent") == "signal"]
+    # 대조 = 최근 이틀 일일 보고 전부(처리 완료 무관 · 2판 m3) — 뒤늦게 온 신호로 풀린 불일치는 다음 배치에서 사라진다.
+    mismatch = signature_mismatch([r for r in all_machine if r.get("intent") == "daily"
+                                   and _row_day(r) in window_days(end, 2)], signal_all, today=end)
     weekly_md: dict[str, str] = {}
-    if weekly_mode:
-        end = day_of(now or _now())
-        ratio = ratio_table(all_machine, end_day=end, threshold=regress_ratio)
-        status = weekly_status(all_machine, end_day=end, period_days=mail.desk_pin()["weekly_period_days"])
+    target = mail.previous_cycle(mail.cycle_of(now, policy), policy)
+    if weekly_mode or weekly_in:
+        status = weekly_status(all_machine, cycle=target, end_day=end)
         feats: dict[str, list[int]] = {}
         for row in weekly_in:
             for f in (_env(row)[0].get("weekly") or {}).get("top_features") or []:
                 a = feats.setdefault(f["op"], [0, 0])
                 a[0] += 1
                 a[1] += f["count"]
+        # 신호 대조 = 항목의 payload 주기에 결박(2판 M3) — 같은 집이 **그 주기 날들**에 보낸 신호의 서명과만 맞춘다.
+        for it in weekly_items.values():
+            span = cycle_days(str(it["cycle"]), policy["period_days"])
+            sigs = {s_ for r in signal_all if r.get("from") == it["from"] and _row_day(r) in span
+                    for s_ in (x.get("signature") for x in _env(r)[0].get("items") or [])}
+            it["matched"] = sorted(set(it["signatures"]) & sigs)
         window = window_days(end)
-        sig_by_sender: dict[Any, set[str]] = {}
-        for row in all_machine:
-            if row.get("intent") == "signal" and _row_day(row) in window:
-                sig_by_sender.setdefault(row.get("from"), set()).update(
-                    it.get("signature") for it in _env(row)[0].get("items") or [])
-        for ik, it in weekly_items.items():
-            it["matched"] = sorted(set(it["signatures"]) & sig_by_sender.get(it["from"], set()))
         weekly_md = {
-            "ratio": _ratio_md(ratio, regress_ratio),
-            "status": "\n".join(["| 참가자 | 주간 보고 |", "|---|---|"] + [f"| {_md_cell(x['from'])} | {x['state']} |" for x in status])
-                      if status else "_창 안 일일 보고 0통 — 상태 표 없음._",
+            "ratio": _ratio_md(ratio_table(all_machine, end_day=end)),
+            "status": "\n".join(["| 참가자 | 주기 " + target + " 주간 보고 |", "|---|---|"]
+                                 + [f"| {_md_cell(x['from'])} | {x['state']} |" for x in status])
+                      if status else "_최근 28일 기계 우편 0 — 예상 참가자 없음._",
             "features": "\n".join(["| 기능(op) | 집 수 | 합계 |", "|---|---|---|"]
                                    + [f"| {op} | {a[0]} | {a[1]} |" for op, a in sorted(feats.items(), key=lambda kv: (-kv[1][0], kv[0]))])
                         if feats else "_자주 쓴 기능 집계 0._",
+            "cycles": _cycles_md(_desk_path(ctx, WEEKLY_CYCLES_FILE)),
             "window": f"{min(window)}~{max(window)}"}
+    oldest = min((arrived.get(r["mail_id"], "") for r in weeklies if r not in weekly_in and arrived.get(r["mail_id"])), default="")
     return {"items": bundle, "addresses": addresses, "signals": sig_llm,
             "signals_trimmed": len(sig_table) - len(sig_llm), "notes_trimmed": len(notes_out),
             "fleet_md": fleet_md, "fleet_llm": fleet_llm,
@@ -1049,7 +1055,10 @@ def collect(ctx: Any, *, max_bytes: int, now: datetime.datetime | None = None, w
             "notes_report_only": notes_report_only,
             "keys": included_keys + machine_keys, "carried": carried + len(notes_out) + weekly_carried, "bytes": used,
             "weekly_mode": weekly_mode, "weekly_items": weekly_items, "weekly_md": weekly_md,
-            "weekly_carried": weekly_carried, "weekly_waiting": 0 if weekly_mode else len(weeklies),
+            "weekly_target": target, "weekly_policy": policy, "weekly_bytes": weekly_bytes,
+            "weekly_overdue": sum(1 for r in overdue_rows if r in weekly_in),
+            "weekly_oldest_waiting_days": (end - day_of(_parse(oldest))).days if _parse(oldest) else 0,
+            "weekly_carried": weekly_carried, "weekly_waiting": len(weeklies) - len(weekly_in) - weekly_carried,
             "mismatch": mismatch,
             "over_first": over_first,
             "urgent_suppressed": sum(1 for r in urgent_rows if not r.get("notified")
@@ -1205,9 +1214,25 @@ def _md_cell(text: Any) -> str:
     return str(text).replace("|", "/").replace("\n", " ")
 
 
+def backlog_candidates(data: dict[str, Any], model: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """승격된 제안 묶음 → **결정론** BACKLOG 후보(2판 M1) — 신호 대조로 승격된 항목이 하나라도 있는 묶음만 · 반영은 master 판단.
+    집 수·근거·서명은 코드가 항목 key 에서 센다(모델은 묶음 제목과 key 만 낸다)."""
+    items = data.get("weekly_items") or {}
+    out = []
+    for p in (model or {}).get("proposals") or []:
+        hit = [k for k in p["keys"] if items[k].get("matched")]
+        if not hit:
+            continue
+        out.append({"title": p["title"], "homes": len({items[k]["from"] for k in p["keys"]}), "keys": p["keys"],
+                    "promoted_keys": hit, "signatures": sorted({s_ for k in hit for s_ in items[k]["matched"]}),
+                    "evidence": [items[k]["evidence"][:120] for k in p["keys"][:3]], "why": p["why"],
+                    "cycle": data.get("weekly_target"), "status": "후보(반영 = master)"})
+    return out
+
+
 def _weekly_report_md(data: dict[str, Any], model: dict[str, Any] | None) -> list[str]:
     """§9 제안 묶음(가설) · §10 비율표 — 주간 모드 날에만. 집 수·근거 인용·신호 대조는 **코드가** 항목 key 에서 센다."""
-    if not data.get("weekly_mode"):
+    if not (data.get("weekly_mode") or data.get("weekly_items")):
         return []
     md, items = data["weekly_md"], data["weekly_items"]
     lines = ["", f"## 9. 제안 묶음(가설 · 주간 성찰 보고 {data['counts'].get('weeklies', 0)}통 · 창 {md.get('window', '-')})", "",
@@ -1231,10 +1256,17 @@ def _weekly_report_md(data: dict[str, Any], model: dict[str, Any] | None) -> lis
     else:
         lines += ["_이번 주간 모드에 담긴 주간 보고 0통._"]
     if data.get("weekly_carried"):
-        lines += ["", f"⚠상한으로 다음 주로 넘긴 주간 보고 {data['weekly_carried']}통."]
-    lines += ["", "### 9-1. 주간 보고 상태(안 온 것 / 생략 / 보냄)", "", md.get("status", "-"),
+        lines += ["", f"⚠상한으로 넘긴 주간 보고 {data['weekly_carried']}통 — 다음 배치에서 사람 글보다 먼저 담는다(밀린 것 우선 · 2판 M8)."]
+    if data.get("weekly_overdue"):
+        lines += ["", f"밀린 주간 보고 {data['weekly_overdue']}통을 이번 배치에 먼저 담았다."]
+    cands = backlog_candidates(data, model)
+    lines += ["", f"### 9-1. 주간 보고 상태(주기 {data.get('weekly_target')} · 예상 참가자 = 최근 28일 기계 우편)", "", md.get("status", "-"),
               "", "### 9-2. 자주 쓴 기능(기계 집계)", "", md.get("features", "-"),
-              "", "## 10. 판본별 발생 좌석 / 활성 좌석 / 관찰일(회귀 감시)", "", md.get("ratio", "-")]
+              "", f"### 9-3. BACKLOG 후보(결정론 · 승격 묶음만 · 반영 = master) — {len(cands)}건 · `backlog_candidates.json`", ""]
+    lines += [f"- {_md_cell(c['title'])} · 집 {c['homes']} · 승격 {', '.join(c['promoted_keys'])} · 서명 "
+              f"{', '.join(x[:8] for x in c['signatures'])}" for c in cands] or ["- 없음"]
+    lines += ["", "### 9-4. 주기별 계수(원장 `desk/weekly_cycles.jsonl` 최근 8)", "", md.get("cycles", "-"),
+              "", "## 10. 판본별 발생 좌석 / 활성 좌석 / 관찰일(원자료 · 판정 0)", "", md.get("ratio", "-")]
     return lines
 
 
@@ -1251,6 +1283,8 @@ def render_report(*, period: str, data: dict[str, Any], model: dict[str, Any] | 
              + (f" · ⚠첫 줄 하나가 상한을 넘어 그대로 담았다({data['over_first']:,}B)" if data.get("over_first") else "")
              + (f" · 주간 성찰 보고 {c.get('weeklies', 0)}통(주간 모드)" if data.get("weekly_mode") else "")
              + (f" · 주간 보고 대기 {data['weekly_waiting']}통(주간 모드 날에 읽는다)" if data.get("weekly_waiting") else "")
+             + (f" · ⚠일일 대조 잠정 {sum(1 for m in data['mismatch'] if m.get('provisional'))}건(그날 신호가 아직 올 수 있음)"
+                if any(m.get("provisional") for m in data.get("mismatch") or []) else "")
              + (f" · ⚠일일 대조 불일치 {len(data['mismatch'])}건(2절)" if data.get("mismatch") else ""),
              f"호출: {call.get('summary', '-')}", "",
              "## 1. 함대 일지", "", data["fleet_md"], "",
@@ -1355,6 +1389,41 @@ def _call_once(*, which: str, argv: list[str], prompt: str, period: str, now: da
     return parsed, {"called": True, "rc": res.get("rc"), "model": model, **meta, "summary": summary}
 
 
+def _weekly_ledger(ctx: Any, s: dict[str, Any], data: dict[str, Any], call: dict[str, Any], *, ok: bool,
+                   now: datetime.datetime, notifier: Callable[..., Any] | None) -> None:
+    """주기별 완료·계수 원장 1줄(2판 M8·m4) + 표본 4장 도달 알림 1회(2판 M10).
+
+    ★완료 = 분석 호출이 성한 판(주간 보고를 실제로 읽었다) · 실패면 `ok=false` — 그 주간 보고들은 「밀린 것」이 되어 다음 배치에서 먼저 담긴다.
+    """
+    path = _desk_path(ctx, WEEKLY_CYCLES_FILE)
+    usage = call.get("usage") if type(call.get("usage")) is dict else {}
+    _append(path, {"type": "cycle", "cycle": data["weekly_target"], "period_days": data["weekly_policy"]["period_days"],
+                   "at": _iso(now), "ok": ok, "weekly_mode": data["weekly_mode"], "weeklies": data["counts"]["weeklies"],
+                   "overdue": data["weekly_overdue"], "bytes_weekly": data["weekly_bytes"], "carried": data["weekly_carried"],
+                   "oldest_waiting_days": data["weekly_oldest_waiting_days"],
+                   "input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
+                   "cost_usd": call.get("total_cost_usd")})
+    rows = _rows(path)
+    samples = sum(1 for r in rows if r.get("type") == "cycle" and r.get("ok") and (r.get("weeklies") or 0) > 0)
+    if samples >= WEEKLY_SAMPLE_TARGET and not any(r.get("type") == "sample_notified" for r in rows):
+        line = (f"상담소 주간 성찰 표본 {samples}장 도달 — 주기(weekly_period_days)·비율표 지표·문턱 재판정 대상"
+                f" · 원장 {path}")
+        _append(path, {"type": "sample_notified", "at": _iso(now), "samples": samples, "notify": notify(s, line, runner=notifier)})
+
+
+def _cycles_md(path: str) -> str:
+    rows = [r for r in _rows(path) if r.get("type") == "cycle"][-8:]
+    if not rows:
+        return "_주기 원장 0줄(이번이 첫 주간 모드)._"
+    lines = ["| 주기 | 배치 시각 | 성공 | 주간 통 | 밀린 것 | 입력 B | 이월 | 가장 오래 기다림(일) | 토큰 입/출 | 비용 |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {r.get('cycle')} | {str(r.get('at'))[:16]} | {'예' if r.get('ok') else '아니오'} | {r.get('weeklies')} | "
+                     f"{r.get('overdue')} | {r.get('bytes_weekly')} | {r.get('carried')} | {r.get('oldest_waiting_days')} | "
+                     f"{r.get('input_tokens')}/{r.get('output_tokens')} | {r.get('cost_usd')} |")
+    return "\n".join(lines)
+
+
 def _batch_locked(ctx: Any, *, dry_run: bool, now: datetime.datetime | None,
                   caller: Callable[[list[str], str], dict[str, Any]] | None,
                   notifier: Callable[..., Any] | None) -> dict[str, Any]:
@@ -1366,8 +1435,7 @@ def _batch_locked(ctx: Any, *, dry_run: bool, now: datetime.datetime | None,
         _fail("이 기간의 배치 호출은 이미 했다 — 하루(설정 주) 한 번", {"period": period}, errors.GATE_REJECT)
     # ★주간 모드 = 설정 주 단위이거나 그날이 `weekly_dow`(기본 월) — 같은 분석 호출에 주간 성찰 보고를 합산한다(호출 수 불변 · 비용 천장 안).
     weekly_mode = s["batch_period"] == "week" or day_of(now).weekday() == s["weekly_dow"]
-    data = collect(ctx, max_bytes=s["batch_max_bytes"], now=now, weekly_mode=weekly_mode,
-                   regress_ratio=s["regress_ratio"])
+    data = collect(ctx, max_bytes=s["batch_max_bytes"], now=now, weekly_mode=weekly_mode)
     system_prompt = SYSTEM_PROMPT + (WEEKLY_PROMPT_ADDENDUM if data["weekly_items"] else "")
     out_dir = os.path.join(counsel_dir(ctx), period)
     os.makedirs(out_dir, mode=0o700, exist_ok=True)
@@ -1431,6 +1499,10 @@ def _batch_locked(ctx: Any, *, dry_run: bool, now: datetime.datetime | None,
         json.dump(drafts, fh, ensure_ascii=False, indent=1)
     # ★묶은 것으로 적는다 — 출력이 깨진 호출의 몫은 적지 않는다(다음 기간에 다시 읽힌다).
     #   공개 글은 두 호출 다 읽으므로 둘 다 성한 판에만 · 우편·기계 통은 분석 호출이 성하면.
+    if data["weekly_mode"] or data["weekly_items"]:
+        with open(os.path.join(out_dir, "backlog_candidates.json"), "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(backlog_candidates(data, model_doc), fh, ensure_ascii=False, indent=1)
+        _weekly_ledger(ctx, s, data, call, ok=ok_analysis, now=now, notifier=notifier)
     plaza_keys = {k for a in data["addresses"].values() if a["layer"] == "plaza" for k in a["keys"]}
     bpath = _desk_path(ctx, BATCHED_FILE)
     for key in data["keys"]:

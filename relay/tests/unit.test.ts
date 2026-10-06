@@ -880,7 +880,7 @@ describe("주간 성찰 보고 — 닫힌 서식·근거 인용 의무·빈 보�
   const okWeekly = (): any => {
     const d = okLetter();
     d.payload = { intent: "weekly", weekly: {
-      week: "2026-W41", version: "1.1.8", os: "macos-15.6",
+      cycle: "2026-W41", version: "1.1.8", os: "macos-15.6",
       blocked: [item({ signatures: ["c".repeat(32)] })], workarounds: [item()], wishes: [item()],
       top_features: [{ op: "host.update", count: 3 }, { op: "agora.mail", count: 1 }], owner_note: "" } };
     return d;
@@ -890,7 +890,7 @@ describe("주간 성찰 보고 — 닫힌 서식·근거 인용 의무·빈 보�
   it("정상 통과 · 칸 하나만 있어도 통과 · 상한 꽉 채워도 32KB 안", async () => {
     await expect(ok(okWeekly())).resolves.toBeTruthy();
     for (const only of [{ wishes: [item()] }, { top_features: [{ op: "x", count: 1 }] }, { owner_note: "주인 한 줄" }]) {
-      const d = okLetter(); d.payload = { intent: "weekly", weekly: { week: "2026-W41", ...only } };
+      const d = okLetter(); d.payload = { intent: "weekly", weekly: { cycle: "2026-W41", ...only } };
       await expect(ok(d), JSON.stringify(only)).resolves.toBeTruthy();
     }
     const big = okWeekly();
@@ -905,8 +905,9 @@ describe("주간 성찰 보고 — 닫힌 서식·근거 인용 의무·빈 보�
   it("모양 위반 = 10 — 닫힌 칸·섹션 상한·자유문 길이·서명·기능 집계·주", async () => {
     const cases: Array<(d: any) => void> = [
       d => { d.payload.weekly.extra = 1; }, d => { d.payload.subject = "자유문"; }, d => { d.payload.weekly.blocked[0].why = "x"; },
-      d => { delete d.payload.weekly.week; }, d => { d.payload.weekly.week = "2026-41"; }, d => { d.payload.weekly.week = "2026-W00"; },
-      d => { d.payload.weekly.week = "2027-W53"; },                          // 2027 은 52주까지
+      d => { delete d.payload.weekly.cycle; }, d => { d.payload.weekly.cycle = "2026-41"; }, d => { d.payload.weekly.cycle = "2026-W00"; },
+      d => { d.payload.weekly.cycle = "2027-W53"; },                          // 2027 은 52주까지
+      d => { d.payload.weekly.week = "2026-W41"; },                           // 옛 칸 이름 = 모르는 칸
       d => { d.payload.weekly.blocked = [item(), item(), item(), item()]; },
       d => { d.payload.weekly.wishes[0].text = ""; }, d => { d.payload.weekly.wishes[0].text = "   "; },
       d => { d.payload.weekly.wishes[0].text = "가".repeat(201); },
@@ -950,23 +951,34 @@ describe("주간 성찰 보고 — 닫힌 서식·근거 인용 의무·빈 보�
   it("빈 보고 = 10(weekly_empty) — 다섯 칸이 전부 비었거나 owner_note 가 공백뿐", async () => {
     const shapes = [{}, { blocked: [], workarounds: [], wishes: [], top_features: [], owner_note: "" }, { owner_note: "  " }];
     for (const s of shapes) {
-      const d = okLetter(); d.payload = { intent: "weekly", weekly: { week: "2026-W41", version: "1.1.8", ...s } };
+      const d = okLetter(); d.payload = { intent: "weekly", weekly: { cycle: "2026-W41", version: "1.1.8", ...s } };
       const r = await detailOf(() => ok(d));
       expect([r.code, r.detail.why], JSON.stringify(s)).toEqual([10, "weekly_empty"]);
     }
   });
 
-  it("week = 봉투 ts 의 ISO 주 ±1주 · 그 밖 = 10(week_far_from_ts)", async () => {
-    // MAIL_NOW = 2026-10-05(월) 12:00Z = 2026-W41
-    for (const w of ["2026-W40", "2026-W41", "2026-W42"]) {
-      const d = okWeekly(); d.payload.weekly.week = w;
-      await expect(ok(d), w).resolves.toBeTruthy();
+  it("cycle = 현재 또는 직전 7주까지 · 미래 = 10(cycle_future) · 8주 전 = 10(cycle_too_old)", async () => {
+    // MAIL_NOW = 2026-10-05(월) 12:00Z = 21:00 KST → 주기 주 2026-W41
+    for (const c of ["2026-W41", "2026-W40", "2026-W34"]) {
+      const d = okWeekly(); d.payload.weekly.cycle = c;
+      await expect(ok(d), c).resolves.toBeTruthy();
     }
-    for (const w of ["2026-W39", "2026-W43", "2025-W41"]) {
-      const d = okWeekly(); d.payload.weekly.week = w;
+    for (const [c, why] of [["2026-W42", "cycle_future"], ["2027-W01", "cycle_future"], ["2026-W33", "cycle_too_old"]]) {
+      const d = okWeekly(); d.payload.weekly.cycle = c;
       const r = await detailOf(() => ok(d));
-      expect([r.code, r.detail.why], w).toEqual([10, "week_far_from_ts"]);
+      expect([r.code, r.detail.why], c).toEqual([10, why]);
     }
+  });
+
+  it("주기 경계 = 월요일 06:00 KST(일요일 21:00Z) — 경계 양쪽 벡터", async () => {
+    expect(mailTs.cycleWeekOf(Date.parse("2026-10-04T20:59:59.999Z"))).toBe("2026-W40");   // 월 05:59 KST
+    expect(mailTs.cycleWeekOf(Date.parse("2026-10-04T21:00:00.000Z"))).toBe("2026-W41");   // 월 06:00 KST
+    expect(mailTs.cycleWeekOf(Date.parse("2026-10-11T20:59:59.999Z"))).toBe("2026-W41");
+    const at = async (iso: string) => {
+      const d = okWeekly(); d.ts = iso; return detailOf(() => mailTs.validateMail(d, Date.parse(iso)));
+    };
+    expect((await at("2026-10-04T20:59:59.999Z")).detail.why).toBe("cycle_future");          // 아직 W40 주기 — W41 은 미래
+    expect(await at("2026-10-04T21:00:00.000Z")).toBeNull();                                 // W41 주기 시작
   });
 
   it("ISO 주 계산 = 파이썬 date.isocalendar 와 같은 값(해 경계 · 53주)", () => {
@@ -982,10 +994,10 @@ describe("주간 성찰 보고 — 닫힌 서식·근거 인용 의무·빈 보�
     expect(mailTs.isoWeekMonday("0000-W01")).toBeNull();
   });
 
-  it("일일 보고 weekly_skipped — true 만 받고 false·글자 = 10(안 온 것/꺼진 것 구분 표지)", async () => {
-    const d = okLetter(); d.payload = { intent: "daily", daily: { day: "2026-10-05", weekly_skipped: true } };
+  it("일일 보고 weekly_skipped = 생략한 주기 id(cycle 과 같은 규칙) · true·미래·글자 = 10", async () => {
+    const d = okLetter(); d.payload = { intent: "daily", daily: { day: "2026-10-05", weekly_skipped: "2026-W40" } };
     await expect(ok(d)).resolves.toBeTruthy();
-    for (const v of [false, "yes", 1]) {
+    for (const v of [true, false, "yes", 1, "2026-W42"]) {
       const e = okLetter(); e.payload = { intent: "daily", daily: { day: "2026-10-05", weekly_skipped: v } };
       expect(await codeOfAsync(() => ok(e)), String(v)).toBe(10);
     }
@@ -996,25 +1008,33 @@ describe("주간 성찰 보고 — 닫힌 서식·근거 인용 의무·빈 보�
     expect(mailKindOf("weekly", "b", { from_id: "b" })).toBe("weekly");
     for (const isNew of [false, true]) {
       expect(mailBuckets("weekly", "a", isNew, l)).toEqual([{ bucket: "gmail-weekly-week:a", windowS: 604_800, max: 1,
-        label: "mail_weekly_week", offsetS: 345_600 }]);
+        label: "mail_weekly_week", offsetS: 334_800 }]);
     }
     expect(mailLimitsFromEnv({ AGORA_RATE_MAIL_WEEKLY_WEEK_MAX: "2" }).weeklyWeekMax).toBe(2);
     expect(mailLimitsFromEnv({ AGORA_RATE_MAIL_WEEKLY_WEEK_MAX: "0" }).weeklyWeekMax).toBe(1);
   });
 
-  it("주 칸 경계 = 월요일 00:00Z — 일요일 23:59 과 월요일 00:00 은 다른 칸 · 같은 주 월·일은 같은 칸", async () => {
+  it("주 칸 경계 = 월요일 06:00 KST(일요일 21:00Z) — 경계 앞뒤는 다른 칸 · 같은 주기 안은 같은 칸", async () => {
     const db = fakeD1();
     const [b] = mailBuckets("weekly", "a", false, DEFAULT_MAIL_LIMITS);
     const at = (iso: string) => bumpRate(db, b.bucket, b.windowS, b.max, Date.parse(iso), b.offsetS);
-    expect((await at("2026-10-05T00:00:00.000Z")).ok).toBe(true);     // W41 월요일 첫 통
-    const sun = await at("2026-10-11T23:00:00.000Z");                // 같은 W41 의 일요일 = 막힘
-    expect([sun.ok, sun.retryAfter]).toEqual([false, 3600]);         // 다음 월요일 00:00Z 까지
-    expect((await at("2026-10-12T00:00:00.000Z")).ok).toBe(true);     // W42 = 새 칸
-    expect((await at("2026-10-04T23:59:59.000Z")).ok).toBe(true);     // W40 일요일 = 또 다른 칸
+    expect((await at("2026-10-04T21:00:00.000Z")).ok).toBe(true);     // W41 주기 첫 통(월 06:00 KST)
+    const late = await at("2026-10-11T20:00:00.000Z");               // 같은 주기 마지막 시간 = 막힘
+    expect([late.ok, late.retryAfter]).toEqual([false, 3600]);       // 다음 월요일 06:00 KST 까지
+    expect((await at("2026-10-11T21:00:00.000Z")).ok).toBe(true);     // W42 = 새 칸
+    expect((await at("2026-10-04T20:59:59.000Z")).ok).toBe(true);     // W40 마지막 순간 = 또 다른 칸
     // 음성 대조 — 칸 이동 없이(목요일 경계) 같은 두 시각은 한 칸이라 둘째가 막힌다.
     const db2 = fakeD1();
-    expect((await bumpRate(db2, "w", 604_800, 1, Date.parse("2026-10-05T00:00:00.000Z"))).ok).toBe(true);
+    expect((await bumpRate(db2, "w", 604_800, 1, Date.parse("2026-10-04T21:00:00.000Z"))).ok).toBe(true);
     expect((await bumpRate(db2, "w", 604_800, 1, Date.parse("2026-10-07T23:00:00.000Z"))).ok).toBe(false);
+  });
+
+  it("근거는 한 줄 — CR·LF·U+2028·U+2029 = 10(evidence_multiline)", async () => {
+    for (const ev of ["줄\n바꿈", "줄\r바꿈", "줄\u2028바꿈", "줄\u2029바꿈"]) {
+      const d = okWeekly(); d.payload.weekly.wishes[0].evidence = ev;
+      const r = await detailOf(() => ok(d));
+      expect([r.code, r.detail.why], JSON.stringify(ev)).toEqual([10, "evidence_multiline"]);
+    }
   });
 
   it("스크럽 백스톱이 주간 보고 자유문(text·evidence·owner_note)까지 훑는다", async () => {
