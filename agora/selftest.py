@@ -4429,7 +4429,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     "상담소자동": ('M693-auto-signal-day-gate-dropped', 'M694-auto-sent-lines-not-moved', 'M695-auto-sent-ledger-reserialized', 'M696-auto-unknown-commit-dropped', 'M697-auto-signal-pending-never-expires', 'M698-auto-items-uncapped', 'M699-auto-unreadable-config-on', 'M700-auto-off-keeps-lines', 'M701-auto-any-desk', 'M702-auto-daily-field-unfiltered', 'M703-auto-daily-signatures-empty', 'M704-auto-weekly-rejects-kept', 'M705-auto-weekly-rewrites-dead-cycle', 'M706-auto-weekly-empty-unreported', 'M707-auto-writer-failure-as-empty', 'M708-auto-features-not-machine', 'M709-auto-old-lines-kept', 'M710-auto-weekly-429-retried', 'M711-auto-run-lock-ignored', 'M712-auto-day-utc-not-kst', 'M713-auto-writer-tools-open', 'M714-package-drops-desk-pin',
                 'M715-auto-off-skips-run-lock', 'M716-auto-signal-send-unchecked', 'M717-auto-daily-send-unchecked', 'M718-auto-weekly-send-unchecked', 'M719-auto-run-continues-after-off', 'M720-auto-daily-resend-unchecked', 'M721-auto-off-keeps-weekly-pending-cycle', 'M722-auto-off-keeps-daily-pending', 'M723-auto-off-keeps-mailbox-weekly-pending', 'M724-auto-empty-scan-marks-day', 'M725-auto-daily-ok-at-success-time', 'M726-evidence-window-ignored', 'M727-evidence-bad-cycle-whole-ledger', 'M728-writer-input-drops-by-sort-order', 'M729-writer-input-unwindowed', 'M730-whoami-counsel-not-first', 'M731-auto-daily-seats-unfolded-kept',
                 'M732-auto-off-config-after-lock', 'M733-auto-off-lock-error-left-on', 'M734-auto-off-wait-unbounded', 'M735-auto-deferred-purge-dropped', 'M736-auto-daily-stale-facts-sent', 'M737-auto-daily-cutoff-missing-local-now', 'M738-auto-daily-cutoff-not-pinned',
-                'M739-auto-off-due-not-in-config', 'M740-auto-on-ignores-due', 'M741-auto-still-on-auto-only', 'M742-auto-on-skips-purge', 'M743-auto-on-without-lock', 'M744-auto-facts-nonce-ignored', 'M745-auto-daily-future-cutoff-kept'),
+                'M739-auto-off-due-not-in-config', 'M740-auto-on-ignores-due', 'M741-auto-still-on-auto-only', 'M742-auto-on-skips-purge', 'M743-auto-on-without-lock', 'M744-auto-facts-nonce-ignored', 'M745-auto-daily-future-cutoff-kept', 'M746-cli-counsel-facts-nonce-closed'),
     # ★09-19 신설 — **광장v2**. 피드 순서와 「어느 방이 커뮤니티인가」를 계산이 정하는 자리.
     #   여기서 잃는 것은 조용하다: 서버 피드와 클라이언트 피드가 다른 순서를 보이거나, 일반 토론방이
     #   커뮤니티로 읽혀 전역 상한이 토론을 막는다 — 오류 없이.
@@ -18944,6 +18944,11 @@ def _case_auto_cli_actions() -> None:
     from agora import counsel
     counsel.check_action_args("auto", {"facts": "x"})
     counsel.check_action_args("auto", {"facts": "x", "facts_nonce": "y"})
+    from agora import cli
+    # ★팩 tick 이 실제로 치는 줄을 진입점 파서에 태운다(리뷰 4판 ② — 동작 표만 열고 명령 표를 안 열면 모르는 인자 10)
+    kw = cli.check_argv("counsel", ["auto", "--facts", "f.json", "--facts-nonce", "0123abcd"])
+    if kw.get("facts_nonce") != "0123abcd":
+        raise AssertionError(f"--facts-nonce 가 문자열 그대로 오지 않았다: {kw}")
     for action, kw in (("batch", {"facts": "x"}), ("off", {"facts": "x"})):
         try:
             counsel.check_action_args(action, kw)
@@ -23022,6 +23027,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if nonce is None or str(nonce) == "" or doc.get("nonce") != str(nonce):\n        return {}',
      '    if False:\n        return {}',
      '상담소자동: facts nonce 결박 · 미래 cutoff 0'),
+    ('M746-cli-counsel-facts-nonce-closed', "agora/cli.py",
+     '    "counsel":      ("dry_run", "date", "facts", "facts_nonce", "dir"),',
+     '    "counsel":      ("dry_run", "date", "facts", "dir"),',
+     '상담소자동: CLI 동작 갈림'),
     ('M745-auto-daily-future-cutoff-kept', "agora/collector.py",
      '        if mail._parse_ts(cutoff) > now + FACTS_FUTURE:',
      '        if False:',
