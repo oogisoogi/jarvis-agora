@@ -23,13 +23,13 @@
 |---|---|
 | `docs/SPEC-mail-1to1-2026-10-05.md` | 머리 「10-06 개정」 1단 · **§1-3 신설**(서식 표 · 빈 값 글자 목록 · 주기 = 핀 `weekly_period_days` · 빈 보고 생략 · 작성 = 그 집 master · 끄기·승인 예외 `mail_weekly`·고지 문안 · 받는 쪽) · §1-1 (4) 예외 목록 넷째 · §1-2 표 `weekly_skipped` 줄 + (4) 대조 규칙 · §2 intent 줄 · §4 표 1줄 · §4-1 1줄 · §10-2 기계 우편 회신 제외 · §10-4 주간 모드 · §10-6 설정 2칸 · §13-0 표 1줄 · §13-2 핀 줄 서식 + 스킬 메타 서명(📌) · §13-5 끄기 범위 |
 | `relay/src/lib/mail.ts` | `WEEKLY_*` 상수 · `MACHINE_INTENTS` · `checkWeekly` · `isoWeekOf`·`isoWeekMonday` · `isBlank`(명시 글자 목록) · 일일 `weekly_skipped`(true 만) · 32KB 413/3 · **3판**: `evidence_ref` 형식 검사(`evidence_kind`·`evidence_id`) |
-| `relay/src/lib/limits.ts` | `MailKind` 에 weekly · 버킷 `gmail-weekly-week:<from>`(7일 · `offsetS` 4일 = 월요일 00:00Z 칸) · 노브 `AGORA_RATE_MAIL_WEEKLY_WEEK_MAX` |
+| `relay/src/lib/limits.ts` | `MailKind` 에 weekly · 버킷 `gmail-weekly-week:<from>`(7일 · 칸 경계 = 월요일 06:00 KST · `CYCLE_OFFSET_S` 3일 21시간) · 노브 `AGORA_RATE_MAIL_WEEKLY_WEEK_MAX` |
 | `relay/src/lib/store.ts` | `bumpRate(..., offsetSeconds = 0)` — 기본 0 = 종전 칸 그대로 |
 | `relay/src/index.ts` | 연속 규칙·받는 이 축·미읽음 SQL 4곳에서 weekly 제외 · 버킷에 `offsetS` 전달 |
 | `relay/tests/unit.test.ts` · `relay/scripts/mailway.py` · `relay/scripts/mutate.py` | 시험 11 · 하네스 9-c · 뮤테이션 M45~M52 |
 | `agora/mail.py` | `WEEKLY`·`MACHINE_INTENTS` · `_check_weekly`(릴레이와 같은 규칙) · `is_blank`·`iso_week_of`·`iso_week_monday` · 일일 `weekly_skipped` · 승인 예외 `mail_weekly`(owner_note 빈 통만) · 핀 `weekly_period_days`(7~28 · 기본 7) · **3판**: `evidence_ref` 검사 · `evidence_sources`·`verify_evidence`(허용 원장 대조) · 공개 `send_weekly` → 비공개 `_send_weekly`(pending `weekly_pending.json` · `rejected`·`superseded`) · `weekly_policy` = epoch ∧ effective_at · 세대 id |
 | `agora/core.py` | `APPROVAL_EXEMPT_NAMES` 에 `mail_weekly`(기본값에도 포함) |
-| `agora/counsel.py` | 주간 보고 = 회신·긴급 대상 아님 · `signature_mismatch`(2절 「일일 대조」 열) · 주간 모드(`desk.weekly_dow` 기본 월 · `desk.regress_ratio` 기본 0.10) · W 묶음·주간 지시문 1단·`proposals` 칸 · `ratio_table`·`weekly_status`(창 = 핀 주기 · 격주 핀에서 쉬는 주 오판 방지)·9절·10절 · 알림 줄에 주간 수 · **3판**: owner_note 만 든 주간 보고 분석(N1) · `policy_history`·`policy_at`·주기 원장 `type=policy` · 비율표 `outside` · `_weekly_retry_due` · 표본 = 고유 (세대, 주기) · BACKLOG `cycles` |
+| `agora/counsel.py` | 주간 보고 = 회신·긴급 대상 아님 · `signature_mismatch`(2절 「일일 대조」 열) · 주간 모드(`desk.weekly_dow` 기본 월) · W 묶음·주간 지시문 1단·`proposals` 칸 · `ratio_table`·`weekly_status`(창 = 핀 주기 · 격주 핀에서 쉬는 주 오판 방지)·9절·10절 · 알림 줄에 주간 수 · **3판**: owner_note 만 든 주간 보고 분석(N1) · `policy_history`·`policy_at`·주기 원장 `type=policy` · 비율표 `outside` · `_weekly_retry_due` · 표본 = 고유 (세대, 주기) · BACKLOG `cycles` |
 | `agora/selftest.py` | 케이스 9 · 뮤테이션 12 · 옛 3 재조준 · `bloated` 대역 함수가 새 인자를 받게 · **3판**: 케이스 5 신설 + 기존 7 갱신 · 뮤테이션 M676~M691 · 재조준 M623·M627·M663·M673·M674 |
 | `docs/RELAY.md` · `docs/TRANSPORT-RELAY.md` | 릴레이 계약 §14 에 payload ⓓ·버킷 줄·`limit` 이름 · §15 대조표 M15 · 계약 해시 갱신 |
 | `config/desk-pin.txt` | 주석 1줄(`weekly_period_days` 줄 서식) — **값 줄 없음 = 기본 7** · 라이브 교체 아님 |
@@ -60,9 +60,9 @@
   · ⚠**연속 규칙 `:965~969` = `acked_at` 을 안 본다**(`intent NOT IN ('signal', 'daily')` 만) → weekly 행이 참가자→데스크 「연속」 계수에 들어가 그 참가자의 **사람 우편이 429 `mail_consecutive` 로 막힐 수 있다**.
   · ⚠영수 `:1113`(`acked_at IS NOT NULL`) → acked_at 을 채우면 weekly 보낸 이에게 **거짓 읽음 영수**가 간다 · 덤 삭제 `:1039` = 본문이 지워진다.
 - 부득이 되돌리면(master D1 집행 · 순서 고정):
-  ⑴ **백업** — `npx wrangler d1 execute <우편 DB> --remote --json --command "SELECT * FROM mail WHERE intent = 'weekly'" > weekly-backup-<시각>.json`(행 수 기록).
-  ⑵ **격리 = 삭제** — `DELETE FROM mail WHERE intent = 'weekly'`(옛 SQL 세 곳(연속·미읽음·영수)에서 모두 빠지는 유일한 길 · 새 표식 칸은 옛 SQL 이 모른다) → 옛 판 deploy.
-  ⑶ forward-fix 판 재배포 뒤 필요하면 ⑴ 백업으로 재적재(데스크 적재 = `(from,message_id)` 한 번만 = 중복 0).
+  ⑴ **백업** — `npx wrangler d1 execute <우편 DB> --remote --json --command "SELECT * FROM mail WHERE intent = 'weekly'" > weekly-backup-<시각>.json` · ★검증 = 같은 때 `SELECT COUNT(*) FROM mail WHERE intent = 'weekly'` 값 = 백업 파일 행 수 · `shasum -a 256 weekly-backup-<시각>.json` 값을 기록(4판 N10).
+  ⑵ **격리 = 삭제** — `DELETE FROM mail WHERE intent = 'weekly'`(옛 SQL 세 곳(연속·미읽음·영수)에서 모두 빠지는 유일한 길 · 새 표식 칸은 옛 SQL 이 모른다) → 옛 판 deploy. ⚠스키마 주석 「행은 지우지 않는다」(`relay/migrations/0003_mail.sql:3`)의 **되돌리기 한정 예외**(master 집행 · 이 절차 밖 삭제 0).
+  ⑶ forward-fix 판 재배포 뒤 필요하면 ⑴ 백업으로 재적재 — ★재적재 전 백업 파일의 행 수·sha256 이 ⑴ 기록과 같은지 대조 → 행마다 `INSERT INTO mail (message_id, thread_id, from_id, to_id, prev, reply_to, intent, hash, bytes, canonical, signature, keep_until, created_at, purged_at, acked_at) VALUES (…백업 값…) ON CONFLICT (from_id, message_id) DO NOTHING`(`seq` 는 새로 매긴다 = 옛 mail_id 와 다르다 · 데스크 적재 = `(from,message_id)` 한 번만 = 중복 0).
   ⑷ **데스크 쪽 격리분 재생** — 데스크 설정 폴더 `mailbox/quarantine.jsonl` 의 `contract` 사유 weekly·daily 줄 `mail_id` 중 최소 seq 를 `n` 이라 할 때 `mailbox/cursor.json` 의 `since` = **`ml_<n − 1 을 16자리 0 채움>`**(= `min(mail_id) − 1` · 수신은 `since` **보다 큰** 것만 받는다 — 최소값 그대로면 그 첫 통을 잃는다 · `agora/mail.py` 의 `hold - 1` 커서 관례와 같다) → 새 판 클라이언트로 `agora mail inbox` 1회(중복 0).
 
 ## 4. 전체 게이트
@@ -82,6 +82,8 @@
 - 작성기(참가자 master 백그라운드 프롬프트·스킬) · 발신 일정 · `weekly_skipped` 싣기 · 스킬 메타 동봉 = **T3**(이 티켓은 서식·받는 쪽·데스크).
 - ★**T3 의무(3판 B2 · `TICKET=agora-t3-pack-collector`)** = `send_weekly`·`weekly_is_empty` 호출자 + 주기 스케줄 + 업데이트 공지 고지 + `weekly_skipped` 생성 + 윈 실기 · 허용목록 `send_weekly` 줄 삭제 조건 = T3 머지(게이트가 호출부 실재로 대체 · 남으면 규칙 ⑶ 적색) · T3 계약 추가 = 신호 원장 보낸 줄은 **같은 바이트**로 옮겨 적기(훅 줄 id = 원문 해시 · 명세 §1-3 (4)) · `send_weekly` 반환 `rejected`·`pending`·`superseded` 처리.
 - ★**자동 수리 레인(3판 B4)** = `TICKET=agora-autofix-lane-118`(우리 쪽 도구 · 기본 OFF · 1.1.8 발행 게이트 의존 · 켜기 = master) · 이 티켓 코드 0.
+- ★**T3 계약(4판 N6)** = 작성기는 `send_weekly` 전에 `mail.verify_evidence` 를 먼저 부르고 **거부 0 일 때만** 발신한다(부분 발신 뒤 같은 주기 재발신 없음 · 버킷 주 1 · `send_weekly` 의 빼기는 마지막 그물) · pending `expired` 반환(23시간·429 = 새 문서)을 처리한다.
+- **BACKLOG(다음 판 · 3R MINOR · master 95aceb00)**: N7 주 단위 재시도가 비정상 종료 경로(호출 원장 `called` ∧ 주기 줄 0)를 못 봄 · N8 인용 최소 의미(토큰 1개 이상 일치) · N9 `rejected` 영속(`mailbox/weekly_rejected.jsonl`) · N11 `policy_at` = 목록 순서가 아니라 효력 시작 최대값 선택. (+ 3R N12 의 `relay/src/lib/limits.ts:54` 주석 「월요일 00:00Z」 = 4판 범위(HANDOFF 두 줄) 밖이라 손대지 않았다 — 다음 판.)
 - `relay/node_modules` = 본 저장소 것 심볼릭 링크(커밋 안 함 · `.gitignore` 의 `node_modules/` 는 링크를 안 잡는다 — `git add -A` 금지).
 - 데스크 주간 모드의 첫 실전 = 배포 뒤 첫 월요일 배치(07:30) — 입력 0 이면 9·10절만 결정론으로 찍힌다.
 - 증류: 메모리 1건 등록 완료 `reference_js-trim-vs-python-strip-blank-set`.
@@ -131,3 +133,11 @@
 | B3 | 기각 유지 · 문면 통일 | 명세 §1-3 (2) · §13-2 2. · `mail.desk_pin` docstring = 「꾸러미 판올림으로만(= 서명 꾸러미 교체 · T3 자동 교체 포함 · 호스트 터미널 판 불요) · 우편·원격 명령으로는 불가」 같은 문장 |
 | B6 · M5 | 기각 유지 · 확정 | 변경 0 |
 | 새 뮤테이션 | — | 클라이언트 M676~M691(16) · 바뀐 줄 재조준 M627·M663·M673·M674 · 릴레이 M54·M55 + M47 재조준 · ⚠번호 M690·M691 은 옛 주석의 「690 대역」과 숫자가 겹친다(현 저장소 모든 가지에 M69x 실재 0 — git grep 실측) |
+
+## 11-3. 3R 반영표(Fable 적대 3R · 마지막 · `~/axdev/master/reports/REVIEW-SPEC-WEEKLY-fable-3r.md` · 수렴 예 · BLOCK 0 · master 판정 95aceb00 · 4판)
+| # | 판정 | 처방(1줄) · 자리 |
+|---|---|---|
+| N5 | MAJOR 채택 | `_send_weekly` = pending `at` 23시간 초과 또는 직전 429(`rate_limited` 표식) → `resend=False` · 새 문서 · 반환 `expired`·`superseded` · 시험 = 24h 경과·429 각각 새 문서 · 뮤테이션 M692 신설 · M679 재조준(`same` 줄) — ef54d1f |
+| N6 | 계약 · 코드 0 | `_send_weekly` docstring · 명세 §1-3 (4) = 「빠진 항목은 그 주기 제외 · T3 작성기는 send 전 `verify_evidence` 선행·거부 0 일 때만 발신」 · §6 T3 계약 1줄 |
+| N10 | 문서 | §3 ⑴ 백업 검증(COUNT = 행 수 · sha256 기록) · ⑵ 스키마 「행은 지우지 않는다」의 되돌리기 한정 예외 · ⑶ 재적재 전 행 수·sha 대조 + `INSERT … ON CONFLICT (from_id, message_id) DO NOTHING` |
+| N12 | 문서 | §1 limits.ts 줄 「offsetS 4일 = 월 00:00Z」 → 월요일 06:00 KST · counsel.py 줄 `desk.regress_ratio` 삭제 (relay `limits.ts:54` 주석은 범위 밖 · §6 BACKLOG) |
