@@ -5,7 +5,8 @@
 > **2판**(master ca36b166 · codex 적대 1R BLOCK 6·MAJOR 10·MINOR 4 반영 + 게이트 수리 3f1ae4e0·b653203e) — 번호별 처방 = **§11 1R 반영표**.
 > **3판**(master 1363219c · 재개 121e6ee0 · codex 적대 2R BLOCK 3·MAJOR 8·MINOR 3 반영) — 번호별 처방 = **§11 2R 반영표**.
 
-## 0. 이어받기(현재 상태 · 09:4x · master 2773748b)
+## 0. 이어받기(현재 상태 · 11:4x · 3판 끝)
+- ★**3판 = 집행 끝**(8128ba9 본체 + 95783e4 게이트 수리 + 이 HANDOFF 커밋) · 번호별 처방 = **§11-2 2R 반영표** · 게이트 = §4 첫 줄 · 다음 = master codex 3R(마지막) + 스냅샷 게이트 → 머지.
 - ★**3판 지시(10:02 · master 1363219c · 원장 yes) = 후임 첫 집행 대상** — 지시 원문 = master 인박스 발신 `[master#1363219c]`(판정표: BLOCK M7·N1·B5 · MAJOR M3 부분·M4·M6·M8·M10·N2·B2·B4 · MINOR N3·N4·B3 문면 · 기각 유지 B6 · M5 4종 확정 · 직전 7주 창 불변) · codex 2R 원문 = `~/axdev/master/reports/REVIEW-SPEC-WEEKLY-codex-2r.md` · 순서 = 3판 집행 → `bash tests/commit_gate.sh` 전건 PASS 줄 인용 → §11 에 「2R 반영표」 추가 → 【확인요청】 3판(상한 60분 · 중단 2h) · push 0 · deploy 0.
 - **상태**: 2판 = 4a7835d(본체) + 7aab475(§4 게이트 줄) · commit_gate @4a7835d PASS · **codex 적대 2R + master 독립 스냅샷 게이트(7aab475) 가동 중** → 결과가 오면 master 가 반영분을 지시한다(새 작업은 그 지시 뒤에만).
 - **확정된 결정**: 스킬 메타 서명 = 비공개층만(67d60f6c) · M5 상태 = **4종**(보냄 / 빈 생략 / 주간 없음(일일은 옴) / 일일도 없음 · 2773748b 채택) · gitleaks 역사 1건(56c3ac9 옛 뮤턴트 이름 오탐) = **스쿼시 안 함**(현 트리 0 · 머지 때 master squash-merge 판단) · 09:09·09:16 지시 = 원장 실재 진짜 발신(queued = 제출 관측 지연).
@@ -21,15 +22,15 @@
 | 파일 | 무엇 |
 |---|---|
 | `docs/SPEC-mail-1to1-2026-10-05.md` | 머리 「10-06 개정」 1단 · **§1-3 신설**(서식 표 · 빈 값 글자 목록 · 주기 = 핀 `weekly_period_days` · 빈 보고 생략 · 작성 = 그 집 master · 끄기·승인 예외 `mail_weekly`·고지 문안 · 받는 쪽) · §1-1 (4) 예외 목록 넷째 · §1-2 표 `weekly_skipped` 줄 + (4) 대조 규칙 · §2 intent 줄 · §4 표 1줄 · §4-1 1줄 · §10-2 기계 우편 회신 제외 · §10-4 주간 모드 · §10-6 설정 2칸 · §13-0 표 1줄 · §13-2 핀 줄 서식 + 스킬 메타 서명(📌) · §13-5 끄기 범위 |
-| `relay/src/lib/mail.ts` | `WEEKLY_*` 상수 · `MACHINE_INTENTS` · `checkWeekly` · `isoWeekOf`·`isoWeekMonday` · `isBlank`(명시 글자 목록) · 일일 `weekly_skipped`(true 만) · 32KB 413/3 |
+| `relay/src/lib/mail.ts` | `WEEKLY_*` 상수 · `MACHINE_INTENTS` · `checkWeekly` · `isoWeekOf`·`isoWeekMonday` · `isBlank`(명시 글자 목록) · 일일 `weekly_skipped`(true 만) · 32KB 413/3 · **3판**: `evidence_ref` 형식 검사(`evidence_kind`·`evidence_id`) |
 | `relay/src/lib/limits.ts` | `MailKind` 에 weekly · 버킷 `gmail-weekly-week:<from>`(7일 · `offsetS` 4일 = 월요일 00:00Z 칸) · 노브 `AGORA_RATE_MAIL_WEEKLY_WEEK_MAX` |
 | `relay/src/lib/store.ts` | `bumpRate(..., offsetSeconds = 0)` — 기본 0 = 종전 칸 그대로 |
 | `relay/src/index.ts` | 연속 규칙·받는 이 축·미읽음 SQL 4곳에서 weekly 제외 · 버킷에 `offsetS` 전달 |
 | `relay/tests/unit.test.ts` · `relay/scripts/mailway.py` · `relay/scripts/mutate.py` | 시험 11 · 하네스 9-c · 뮤테이션 M45~M52 |
-| `agora/mail.py` | `WEEKLY`·`MACHINE_INTENTS` · `_check_weekly`(릴레이와 같은 규칙) · `is_blank`·`iso_week_of`·`iso_week_monday` · 일일 `weekly_skipped` · 승인 예외 `mail_weekly`(owner_note 빈 통만) · 핀 `weekly_period_days`(7~28 · 기본 7) |
+| `agora/mail.py` | `WEEKLY`·`MACHINE_INTENTS` · `_check_weekly`(릴레이와 같은 규칙) · `is_blank`·`iso_week_of`·`iso_week_monday` · 일일 `weekly_skipped` · 승인 예외 `mail_weekly`(owner_note 빈 통만) · 핀 `weekly_period_days`(7~28 · 기본 7) · **3판**: `evidence_ref` 검사 · `evidence_sources`·`verify_evidence`(허용 원장 대조) · 공개 `send_weekly` → 비공개 `_send_weekly`(pending `weekly_pending.json` · `rejected`·`superseded`) · `weekly_policy` = epoch ∧ effective_at · 세대 id |
 | `agora/core.py` | `APPROVAL_EXEMPT_NAMES` 에 `mail_weekly`(기본값에도 포함) |
-| `agora/counsel.py` | 주간 보고 = 회신·긴급 대상 아님 · `signature_mismatch`(2절 「일일 대조」 열) · 주간 모드(`desk.weekly_dow` 기본 월 · `desk.regress_ratio` 기본 0.10) · W 묶음·주간 지시문 1단·`proposals` 칸 · `ratio_table`·`weekly_status`(창 = 핀 주기 · 격주 핀에서 쉬는 주 오판 방지)·9절·10절 · 알림 줄에 주간 수 |
-| `agora/selftest.py` | 케이스 9 · 뮤테이션 12 · 옛 3 재조준 · `bloated` 대역 함수가 새 인자를 받게 |
+| `agora/counsel.py` | 주간 보고 = 회신·긴급 대상 아님 · `signature_mismatch`(2절 「일일 대조」 열) · 주간 모드(`desk.weekly_dow` 기본 월 · `desk.regress_ratio` 기본 0.10) · W 묶음·주간 지시문 1단·`proposals` 칸 · `ratio_table`·`weekly_status`(창 = 핀 주기 · 격주 핀에서 쉬는 주 오판 방지)·9절·10절 · 알림 줄에 주간 수 · **3판**: owner_note 만 든 주간 보고 분석(N1) · `policy_history`·`policy_at`·주기 원장 `type=policy` · 비율표 `outside` · `_weekly_retry_due` · 표본 = 고유 (세대, 주기) · BACKLOG `cycles` |
+| `agora/selftest.py` | 케이스 9 · 뮤테이션 12 · 옛 3 재조준 · `bloated` 대역 함수가 새 인자를 받게 · **3판**: 케이스 5 신설 + 기존 7 갱신 · 뮤테이션 M676~M691 · 재조준 M623·M627·M663·M673·M674 |
 | `docs/RELAY.md` · `docs/TRANSPORT-RELAY.md` | 릴레이 계약 §14 에 payload ⓓ·버킷 줄·`limit` 이름 · §15 대조표 M15 · 계약 해시 갱신 |
 | `config/desk-pin.txt` | 주석 1줄(`weekly_period_days` 줄 서식) — **값 줄 없음 = 기본 7** · 라이브 교체 아님 |
 
@@ -48,7 +49,7 @@
 
 ## 3. 릴레이 deploy 게이트·되돌리기(master 집행용 · 워커 실행 0 · 2판 B5 로 고침)
 **게이트 순서(앞 단계 실측 PASS 없이 다음 단계 금지)**
-1. **릴레이 deploy** — 병합판 `cd relay && unset NODE_OPTIONS && npx vitest run`(86/86) · `AGORA_PORT=<빈 포트> python3 scripts/run-local.py` rc 0(`== 결과: PASS ==` · 우편 109/109 · 클라이언트 왕복 14/14) → `npx wrangler deploy --config <절대경로>/relay/wrangler.jsonc`. D1 마이그레이션 없음(`git diff --stat origin/main -- relay/migrations` = 빈 줄). 라이브 스모크(쓰기 0 · 버킷 0): 서명된 weekly + 항목 `evidence:""` → 400·10·`evidence_required`(옛 판 = `intent 가 계약 밖`).
+1. **릴레이 deploy** — 병합판 `cd relay && unset NODE_OPTIONS && npx vitest run`(87/87) · `AGORA_PORT=<빈 포트> python3 scripts/run-local.py` rc 0(`== 결과: PASS ==` · 우편 110/110 · 클라이언트 왕복 14/14) → `npx wrangler deploy --config <절대경로>/relay/wrangler.jsonc`. D1 마이그레이션 없음(`git diff --stat origin/main -- relay/migrations` = 빈 줄). 라이브 스모크(쓰기 0 · 버킷 0): 서명된 weekly + 항목 `evidence_ref.quote:""` → 400·10·`evidence_required`(옛 판 = `intent 가 계약 밖`) · `evidence_ref.kind:"file"` → 400·10·`evidence_kind`.
 2. **데스크 클라이언트 호환 확인** — 상담소 데스크 설정 폴더의 클라이언트를 이 판(0.1.13 후보)으로 올린 뒤, 시험 참가자 키로 `weekly` 1통(빈 owner_note) + `weekly_skipped` 든 daily 1통을 데스크에 보내 데스크 `mail.sync` 결과 `quarantined` 0 · `added` 2 를 실측. ⚠이 단계 전에는 1.1.8 발행 금지 — **옛 데스크 클라이언트는 weekly 와 `weekly_skipped` 든 일일 보고를 격리하고 커서를 넘긴다**(업그레이드 뒤 자동 재수신 안 됨 · codex B5 실측).
 3. **1.1.8 팩 발행** — 2 의 PASS 줄을 인용한 뒤에만.
 
@@ -65,6 +66,8 @@
   ⑷ **데스크 쪽 격리분 재생** — 데스크 설정 폴더 `mailbox/quarantine.jsonl` 의 `contract` 사유 weekly·daily 줄 `mail_id` 중 최소 seq 를 `n` 이라 할 때 `mailbox/cursor.json` 의 `since` = **`ml_<n − 1 을 16자리 0 채움>`**(= `min(mail_id) − 1` · 수신은 `since` **보다 큰** 것만 받는다 — 최소값 그대로면 그 첫 통을 잃는다 · `agora/mail.py` 의 `hold - 1` 커서 관례와 같다) → 새 판 클라이언트로 `agora mail inbox` 1회(중복 0).
 
 ## 4. 전체 게이트
+- **3판(커밋 95783e4) `bash tests/commit_gate.sh` = `== 결과: PASS ==` rc 0** — 공개 표현 0 · 비밀 누출 0 · selftest **587/587 PASS · 632/632 KILLED · NOT-APPLIED 0** · 미발생 오류코드 0 · F-1 재현 25/25 · codex 0.1.4 사후 재현 11/11 · 공백 위생 clean · 릴레이(8128ba9 · src 이후 무변경): vitest **87/87** · 로컬 하네스 rc 0(`== 결과: PASS ==` · 우편 **110/110**(「근거 출처 종류 밖 = 400/10 evidence_kind」 신설) · 클라이언트 왕복 14/14) · 뮤테이션 M45~M55 **11/11 KILLED**(M54·M55 신설 · M47 재조준).
+  · 1차 commit_gate(8128ba9) = **FAIL**(정직): 케이스 579/587 — 새 픽스처 `_ev` 가 같은 파일의 광장 픽스처 `_ev`(selftest.py:13517)를 덮어 광장·피드 7 케이스 TypeError + M623 앵커 미이동 1 → 그 여파 NOT-APPLIED 21 · 수리 = 95783e4(`_wev` 개명 · M623 재조준) · 대상 케이스 재실행 0 적색.
 - **2판(커밋 4a7835d) `bash tests/commit_gate.sh` = `== 결과: PASS ==` rc 0** — 공개 표현 0 · 비밀 누출 0 · selftest **582/582 PASS · 616/616 KILLED** · F-1 재현 25/25 · codex 0.1.4 사후 재현 11/11 · 공백 위생 PASS. 릴레이: vitest **86/86** · 로컬 하네스 rc 0(우편 109/109 · 클라이언트 왕복 14/14 · 「핀 밖 받는 이 신호 = code 3」 신설) · 뮤테이션 M45~M53 **9/9 KILLED**.
 - (아래 = 1판 기록)
 - 클라이언트 전체 `selftest.run()`(커밋 56c3ac9 트리 · 08:52 끝): **케이스 580/580 PASS · 뮤테이션 608/608 KILLED · NOT_APPLIED 0 · 미발생 오류코드 0 · ok=True**.
