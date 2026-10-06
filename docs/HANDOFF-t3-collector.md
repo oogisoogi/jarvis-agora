@@ -1,8 +1,10 @@
 # HANDOFF — T3 상담소 자동 전달(TICKET=agora-t3-pack-collector · 2026-10-06)
 
-## 0. 지금 상태(한눈)
-- 아고라 가지 `feat/t3-collector`(main e0f5df5 위) — push 0. 커밋 = 아래 §2.
-- 팩 가지 `t3/collector-118`(1.1.8 병합 가지 7e7aa5da 위) — push 0 · 설계 1장 = 그 저장소 `docs/design/T3-COLLECTOR-DESIGN-2026-10-06.md`(공개 표현 규약 때문에 이쪽에 둠).
+## 0. 지금 상태(한눈) — 3판 끝(2026-10-06 16:4x · 이종 리뷰 1R·2R 반영 · 3R = 마지막 대기)
+- 아고라 가지 `feat/t3-collector`(main e0f5df5 위) — push 0. 판별 커밋 = 1판 §2 · 2판 `77c5f8c`·`65d9058`·`499d98c`·`d9e0e7d` · 3판 `8d40331`(끄기 = 설정 먼저·잠금 대기 상한·지우기 미룸 표식 · 일일 cutoff = facts 값·낡은 facts 거부)·`9dd0c83`(스킬 문서 칸 이름)·`9aadf40`(이 문서 함정 줄) · commit_gate PASS @9aadf40 = 605/605 · 679/679 KILLED · NOT-APPLIED 0.
+- 팩 가지 `t3/collector-118` = **merge 4d0aab95(U1 병합) 위로 rebase** — 머리 `434f06cc` · 본 가지 push 0 · CI 전용 미러 `fix/t3-collector-118`(= 434f06cc · master 재승인 9b2fe6f3) · 설계 1장 = 그 저장소 `docs/design/T3-COLLECTOR-DESIGN-2026-10-06.md`(§8~§10 = 판정·리뷰 반영).
+- 동봉 = 0.1.14 zip sha256 `1117fa98e76536a2ac4ed82c10541330792aec29e33fb2d40e15efdeae879366` · 711,863 B · 57 파일 · 빌드 트리 = 아고라 `9aadf40` · 핀 넷째 칸 = 트리 지문 v2 `8fae9158473027dd1970b3f61e10982bc8fc3a0f79ea13dc4aa497ad7431a136` · known(자동 교체 대상) = 0.1.12·0.1.13·0.1.14(산식 v2 · 다음 판 동봉 때 그 판 줄을 더한다).
+- 다음 사람이 먼저 볼 것: ①판을 올리면 known 에 지금 판 줄 추가 + 핀 4칸 재계산(팩 시험 `test_known_file_rows` 가 핀 넷째 칸 = known 동봉 판 줄을 대조) ②아고라 소스를 고쳐 zip 이 바뀌면 팩 b64·핀도 함께(같은 커밋 세트) ③윈 = windows-health 레인의 팩 파이썬 스텝이 교차 잠금·0번 바이트를 잰다.
 - 판 = 클라이언트 0.1.14 후보(`__version__` · RELEASES 후보 행) · 동봉 zip = 팩 원본 `install/agora-client-0.1.14.zip.b64` + `install/agora-client.pin`.
 - 게시·릴레이 /join 핀·main 병합·팩 발행 = master(1.1.8 발행과 묶음 · 0.1.13 존치).
 
