@@ -38,12 +38,15 @@ SIGNAL_KEEP = datetime.timedelta(days=7) - datetime.timedelta(hours=1)   # 릴�
 SIGNAL_KEEP_LINES = 5000             # 미가입·미발신 PC 의 무한 증가 막기(master 📌3 채택)
 SIGNAL_FUTURE = datetime.timedelta(minutes=5)
 FACTS_MAX_AGE = datetime.timedelta(hours=2)  # 팩 facts 의 `cutoff` 가 이보다 오래면 일일 0(묵은 사실 · 리뷰 3R ③)
+FACTS_FUTURE = datetime.timedelta(minutes=5) # cutoff 미래 허용폭 — 넘으면 일일 0(미래 `daily_ok_at` 고정 차단 · 리뷰 4판 ②)
 PENDING_TTL = datetime.timedelta(hours=23)   # 릴레이 봉투 ts 창(−24h)보다 짧게(mail.WEEKLY_PENDING_TTL 과 같은 이유)
 WEEKLY_KEEP_CYCLES = 12
 WRITER_TIMEOUT = 300                 # 터미널 일정 command 잡 600초 안 · 넘으면 프로세스 그룹째 끝낸다(resident.run_agent)
 OFF_LOCK_WAIT = WRITER_TIMEOUT + 30  # off 가 도는 판(`run.lock`)을 기다리는 상한 — 넘으면 지우기는 다음 판(리뷰 3R ②)
 LOCK_POLL = 0.2                      # 상한 있는 기다림의 재시도 간격(POSIX·윈 같은 `try_acquire` 로 잰다)
-PURGE_DUE = "purge.due"              # 미룬 지우기 표식 — 다음 판이 켜짐·꺼짐과 무관하게 **먼저** 지운다(off→on 이 미룬 것을 살리지 않게)
+PURGE_DUE = "purge.due"              # (옛 3판 표식 파일 — 남아 있으면 읽기만 한다 · 새 표식 = `config.json` `counsel.purge_due`)
+PURGE_DUE_KEY = "purge_due"          # 미룬 지우기 표식 — `auto=false` 와 **같은 설정 문서에 원자 기록**(리뷰 4판 ①) · 지우기 끝난 뒤에만 뺀다
+LEGACY_DUE = "legacy"                # 옛 표식 파일이 남았을 때의 표식 값(그 파일을 지우는 것이 「뺀다」)
 WRITER_INPUT_MAX = 24 * 1024         # 작성기 입력 상한(근거 표) — 넘으면 오래된 줄부터 뺀다
 WRITER_BUDGET_USD = "0.50"           # 1회 호출 비용 상한(`--max-budget-usd` · -p 전용)
 OK_STATUS = (200, 201)
@@ -94,10 +97,12 @@ def _load(path: str) -> dict[str, Any]:
 
 
 def _write_json(path: str, doc: dict[str, Any]) -> None:
-    """원자적 교체 · LF · BOM 0(명세 §13-6)."""
+    """원자적 교체(임시 파일 → fsync → rename) · LF · BOM 0(명세 §13-6)."""
     tmp = f"{path}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(doc, ensure_ascii=False, sort_keys=True, indent=1) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
 
 
@@ -145,24 +150,47 @@ def _file_lock(path: str, *, wait: bool, limit: float | None = None) -> Iterator
 
 
 # ── 끄기(명세 §13-5) ────────────────────────────────────────────────────────
-def auto_enabled(config_dir: str) -> bool:
-    """`config.json` 의 `"counsel": {"auto": …}` — 파일·키가 **없으면 켬**(결정 ③) · **못 읽으면 꺼짐**(자동 발신 쪽 오류는 안 보내는 쪽)."""
+def _counsel_section(config_dir: str) -> dict[str, Any] | None:
+    """`config.json` 의 `"counsel"` 칸 — 파일·칸이 없으면 `{}` · 못 읽음·형식 밖 = None."""
     path = os.path.join(config_dir, "config.json")
     if not os.path.exists(path):
-        return True
+        return {}
     try:
         with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
     except (OSError, ValueError):
-        return False
+        return None
     if type(doc) is not dict:
-        return False
-    if "counsel" not in doc:
-        return True
-    section = doc["counsel"]
-    if type(section) is not dict:
-        return False
-    return section.get("auto", True) is True
+        return None
+    section = doc.get("counsel", {})
+    return section if type(section) is dict else None
+
+
+def auto_enabled(config_dir: str) -> bool:
+    """`config.json` 의 `"counsel": {"auto": …}` — 파일·키가 **없으면 켬**(결정 ③) · **못 읽으면 꺼짐**(자동 발신 쪽 오류는 안 보내는 쪽)."""
+    section = _counsel_section(config_dir)
+    return section is not None and section.get("auto", True) is True
+
+
+def due_token(config_dir: str) -> str | None:
+    """미룬 지우기 표식 — `counsel.purge_due`(문자열) · 없으면 옛 표식 파일(`LEGACY_DUE`) · 둘 다 없으면 None.
+    ★못 읽는 설정 = 표식 있음으로 본다(지우기 쪽 · 발신 0)."""
+    section = _counsel_section(config_dir)
+    if section is None:
+        return LEGACY_DUE
+    tok = section.get(PURGE_DUE_KEY)
+    if type(tok) is str and tok:
+        return tok
+    return LEGACY_DUE if os.path.exists(_p(config_dir, PURGE_DUE)) else None
+
+
+def _clear_due(config_dir: str, tok: str) -> None:
+    """지우기를 **끝낸 뒤에만** 부른다(`run.lock` 을 쥔 채) — 표식이 그새 바뀌었으면(다른 off) 그대로 둔다."""
+    if tok == LEGACY_DUE:
+        with contextlib.suppress(OSError):
+            os.remove(_p(config_dir, PURGE_DUE))
+        return
+    _write_auto(config_dir, on=None, expect_due=tok)
 
 
 def _purge(config_dir: str) -> None:
@@ -192,24 +220,39 @@ def _purge(config_dir: str) -> None:
 def set_auto(config_dir: str, *, on: bool) -> dict[str, Any]:
     """`agora counsel on|off` — `config.json` 의 그 키만 고친다(다른 칸은 그대로) · 못 읽는 파일은 덮어쓰지 않는다.
 
-    ★off = **먼저 설정을 끈다**(원자 쓰기 · 리뷰 3R ②) — 도는 판은 발신 직전 재확인(`_still_on`)에서 멈춘다. 그다음
-      `run.lock` 을 상한(`OFF_LOCK_WAIT`)까지 기다려 쥔 채 지운다(판이 메모리의 state 를 되써서 지운 pending 을 되살리던
-      자리 · 리뷰 ①). 못 쥐면(상한·잠금 오류) 설정은 **꺼진 채** 두고 지우기는 다음 판으로 미룬다(「아직 켜짐」 길 0).
-    ★on = 미룬 지우기가 남았으면 다음 판이 먼저 지운다(`PURGE_DUE`) — 켜도 옛 pending 이 나가지 않는다.
+    ★off = `auto=false` 와 지우기 표식(`purge_due`)을 **한 설정 문서에 원자 기록**(리뷰 4판 ① — 둘 사이 죽음 0) — 도는 판은
+      발신 직전 재확인(`_still_on` = auto ∧ 표식 없음)에서 멈춘다. 그다음 `run.lock` 을 상한(`OFF_LOCK_WAIT`)까지 기다려 쥔 채
+      지우고, **지운 뒤에만** 표식을 뺀다. 못 쥐면(상한·잠금 오류) 꺼진 채 표식을 남긴다(다음 판·on 이 먼저 지운다).
+    ★on = 표식이 남았으면 `run.lock` 을 잡아 지우기를 **끝낸 뒤에만** 켠다 — 못 끝내면 켜지 않고 사유를 돌려준다
+      (도는 옛 판이 다시 켜진 값을 보고 옛 문서를 보내던 자리 · 리뷰 4판 ①).
     """
     os.makedirs(config_dir, mode=0o700, exist_ok=True)
-    path = _write_auto(config_dir, on=on)
     if on:
-        return {"상담소_자동_전달": "켜짐", "설정": path,
+        tok = due_token(config_dir)
+        if tok is None:
+            path = _write_auto(config_dir, on=True)
+            return {"상담소_자동_전달": "켜짐", "설정": path,
+                    "뜻": "신호·일일·주간 성찰을 하루 한 번(주간은 주 1회) 상담소로 보낸다"}
+        path = None
+        try:
+            with _file_lock(_p(config_dir, RUN_LOCK), wait=True, limit=OFF_LOCK_WAIT) as held:
+                if held:
+                    _purge(config_dir)
+                    path = _write_auto(config_dir, on=True, expect_due=tok)
+        except OSError:
+            held = False
+        if path is None:
+            return {"상담소_자동_전달": "꺼짐", "켜지_않음": "도는 판이 있어 미룬 지우기를 끝내지 못했다"
+                    if not held else "그사이 다른 끄기가 끼어들었다", "뜻": "잠시 뒤 다시 켜 보라(켜지 않았다)"}
+        return {"상담소_자동_전달": "켜짐", "설정": path, "지우기": "미룬 지우기를 먼저 끝냈다",
                 "뜻": "신호·일일·주간 성찰을 하루 한 번(주간은 주 1회) 상담소로 보낸다"}
-    due = _p(config_dir, PURGE_DUE)
-    with open(due, "a", encoding="utf-8"):
-        pass                                             # ★잠금 전에 표식 — 기다리다 죽어도 다음 판이 지운다
+    tok = secrets.token_hex(8)
+    path = _write_auto(config_dir, on=False, due=tok)  # ★끔 + 표식 = 한 문서 원자 기록 — 기다리다 죽어도 다음 판이 지운다
     try:
         with _file_lock(_p(config_dir, RUN_LOCK), wait=True, limit=OFF_LOCK_WAIT) as held:
             if held:
                 _purge(config_dir)
-                os.remove(due)
+                _clear_due(config_dir, tok)
     except OSError:
         held = False                                     # 윈 잠금이 자기 기다림 끝에 올린다 — 설정은 꺼진 채(되돌리지 않는다)
     return {"상담소_자동_전달": "꺼짐", "설정": path,
@@ -217,7 +260,9 @@ def set_auto(config_dir: str, *, on: bool) -> dict[str, Any]:
             "뜻": "세 통 모두 작성·발신하지 않는다"}
 
 
-def _write_auto(config_dir: str, *, on: bool) -> str:
+def _write_auto(config_dir: str, *, on: bool | None, due: str | None = None, expect_due: str | None = None) -> str | None:
+    """`counsel` 칸만 고친다(다른 칸 그대로 · 원자 쓰기) — `on` None = auto 그대로 · `due` = 표식을 함께 적는다(off) ·
+    `expect_due` = 지금 표식이 그 값일 때만 고치고 표식을 뺀다(아니면 None · 쓰지 않음)."""
     path = os.path.join(config_dir, "config.json")
     doc: Any = {}
     if os.path.exists(path):
@@ -229,8 +274,19 @@ def _write_auto(config_dir: str, *, on: bool) -> str:
         if type(doc) is not dict:
             raise AgoraError(errors.PRECONDITION, "config.json 을 읽지 못했다 — 고치지 않았다(지금은 꺼짐으로 본다)",
                              {"path": path})
-    section = doc.get("counsel") if type(doc.get("counsel")) is dict else {}
-    doc["counsel"] = {**section, "auto": on}
+    section = dict(doc.get("counsel")) if type(doc.get("counsel")) is dict else {}
+    if expect_due is not None:
+        if due_token(config_dir) != expect_due:
+            return None
+        section.pop(PURGE_DUE_KEY, None)
+        if expect_due == LEGACY_DUE:
+            with contextlib.suppress(OSError):
+                os.remove(_p(config_dir, PURGE_DUE))
+    if on is not None:
+        section["auto"] = on
+    if due is not None:
+        section[PURGE_DUE_KEY] = due
+    doc["counsel"] = section
     _write_json(path, doc)
     return path
 
@@ -382,8 +438,9 @@ OFF = {"result": "off"}                  # 판 도중 꺼짐을 봤다 — 그 �
 
 
 def _still_on(config_dir: str) -> bool:
-    """발신 **직전마다** 다시 본다(리뷰 ①) — 판이 도는 사이 설정이 꺼졌으면 그 통부터 안 보낸다."""
-    return auto_enabled(config_dir)
+    """발신 **직전마다** 다시 본다(리뷰 ①) — 판이 도는 사이 설정이 꺼졌거나 **지우기 표식이 섰으면**(리뷰 4판 ① · 미룬 off 뒤 on
+    이어도) 그 통부터 안 보낸다."""
+    return auto_enabled(config_dir) and due_token(config_dir) is None
 
 
 def _signal_step(ctx: Any, state: dict[str, Any], *, today: str, now: datetime.datetime,
@@ -477,6 +534,8 @@ def _daily_step(ctx: Any, state: dict[str, Any], *, today: str, now: datetime.da
         cutoff = facts.get("cutoff")
         if not mail._ts_ok(cutoff) or mail._parse_ts(cutoff) < now - FACTS_MAX_AGE:
             return {"result": "no_fresh_facts"}
+        if mail._parse_ts(cutoff) > now + FACTS_FUTURE:
+            return {"result": "no_fresh_facts", "why": "future_cutoff"}
         sent = state.get("signal_sent") or {}
         sigs = sent.get("signatures") if sent.get("day") == today else []
         skipped = state.get("weekly_skipped") if type(state.get("weekly_skipped")) is str else None
@@ -684,12 +743,17 @@ def collector_state(config_dir: str) -> dict[str, Any]:
     return _load(_p(config_dir, STATE_FILE))
 
 
-def load_facts(path: str | None) -> dict[str, Any]:
+def load_facts(path: str | None, nonce: Any = None) -> dict[str, Any]:
+    """팩 facts — ★그 판의 nonce(`--facts-nonce`)와 파일의 `nonce` 가 같을 때만 쓴다(리뷰 4판 ②). 부재·불일치 = 빈 사실
+    (일일 = `no_fresh_facts`) — 팩이 이번 판 facts 쓰기에 실패하면 옛 파일이 남아도 그 판 nonce 가 없어 자동 거부된다."""
     doc = _load(path) if path else {}
+    if nonce is None or str(nonce) == "" or doc.get("nonce") != str(nonce):
+        return {}
     return doc
 
 
-def run(*, directory: str | None = None, facts_path: str | None = None, now: datetime.datetime | None = None,
+def run(*, directory: str | None = None, facts_path: str | None = None, facts_nonce: Any = None,
+        now: datetime.datetime | None = None,
         ctx_factory: Callable[[str], Any] | None = None, publish: Callable[..., dict[str, Any]] | None = None,
         send_weekly: Callable[[Any, dict[str, Any]], dict[str, Any]] | None = None,
         runner: Callable[..., dict[str, Any]] | None = None,
@@ -706,10 +770,10 @@ def run(*, directory: str | None = None, facts_path: str | None = None, now: dat
     with _file_lock(_p(d, RUN_LOCK), wait=False) as held:
         if not held:
             return {"result": "locked"}
-        due = _p(d, PURGE_DUE)
-        if os.path.exists(due):
+        tok = due_token(d)
+        if tok is not None:
             _purge(d)                                    # ★off 가 미룬 지우기 — 켜짐이어도 먼저(옛 pending 재발신 0)
-            os.remove(due)
+            _clear_due(d, tok)
         if not auto_enabled(d):
             _purge(d)                                    # ★잠금 안에서 지운다(`set_auto` 와 같은 규칙)
             row["result"] = "off"
@@ -733,7 +797,9 @@ def run(*, directory: str | None = None, facts_path: str | None = None, now: dat
             _log(d, row)
             return row
         today = str(counsel.day_of(now))
-        facts = load_facts(facts_path or _p(d, FACTS_FILE))
+        facts = load_facts(facts_path or _p(d, FACTS_FILE), facts_nonce)
+        if not facts:
+            row["facts"] = "no_nonce_match"
         pub = publish or mail._publish
         steps: dict[str, Any] = {}
         for name, step in (("signal", lambda: _signal_step(ctx, state, today=today, now=now, to=to, publish=pub)),
@@ -749,7 +815,10 @@ def run(*, directory: str | None = None, facts_path: str | None = None, now: dat
                                else type(e).__name__}
             if steps[name].get("result") == OFF["result"]:
                 # ★판 도중 꺼졌다 — 남은 통은 안 보내고, 메모리의 state 는 **되쓰지 않고** 지운다(되쓰면 pending 이 살아난다).
+                tok = due_token(d)
                 _purge(d)
+                if tok is not None:
+                    _clear_due(d, tok)                   # 지운 뒤에만 표식을 뺀다(그새 선 다른 표식은 그대로)
                 row.update({"day": today, "result": "off", **steps})
                 _log(d, row)
                 return {"상담소_자동_전달": "꺼짐", "보냄": 0, **steps}
@@ -767,7 +836,7 @@ def run(*, directory: str | None = None, facts_path: str | None = None, now: dat
 def dispatch(action: str, kw: dict[str, Any]) -> dict[str, Any]:
     d = kw.get("dir")
     if action == "auto":
-        return run(directory=d, facts_path=kw.get("facts"))
+        return run(directory=d, facts_path=kw.get("facts"), facts_nonce=kw.get("facts_nonce"))
     return set_auto(os.path.abspath(d or _default_dir()), on=action == "on")
 
 

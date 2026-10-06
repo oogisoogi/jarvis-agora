@@ -1685,7 +1685,7 @@ CLI_ACTION_ARGS: dict[str, tuple[str, ...]] = {
     "batch":   ("dry_run",),
     "publish": ("date",),
     # ★참가자 쪽 자동 전달(T3 · `agora.collector`) — 데스크 동작이 아니다(데스크 설정 없이 돈다).
-    "auto":    ("facts",),
+    "auto":    ("facts", "facts_nonce"),
     "off":     (),
     "on":      (),
 }
@@ -1697,7 +1697,7 @@ def check_action_args(action: str, kw: dict[str, Any]) -> None:
     if not action:
         _fail("counsel 은 동작이 필요하다", {"accepts": list(CLI_ACTION_ARGS),
                                             "usage": "agora counsel batch [--dry-run] | publish --date <YYYY-MM-DD>"
-                                                     " | auto [--facts <파일>] | off | on"})
+                                                     " | auto [--facts <파일> --facts-nonce <값>] | off | on"})
     extra = sorted(k for k in kw if k not in CLI_ACTION_ARGS[action] + ("dir",))
     if extra:
         _fail(f"counsel {action} 이 모르는 인자", {"extra": extra, "accepts": list(CLI_ACTION_ARGS[action])})

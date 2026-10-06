@@ -4428,7 +4428,8 @@ S8_AXES: dict[str, tuple[str, ...]] = {
     #   꺼도 나감·모델 재호출(토큰)·빈 보고와 실패의 혼동 — 전부 오류 없이 조용히 난다.
     "상담소자동": ('M693-auto-signal-day-gate-dropped', 'M694-auto-sent-lines-not-moved', 'M695-auto-sent-ledger-reserialized', 'M696-auto-unknown-commit-dropped', 'M697-auto-signal-pending-never-expires', 'M698-auto-items-uncapped', 'M699-auto-unreadable-config-on', 'M700-auto-off-keeps-lines', 'M701-auto-any-desk', 'M702-auto-daily-field-unfiltered', 'M703-auto-daily-signatures-empty', 'M704-auto-weekly-rejects-kept', 'M705-auto-weekly-rewrites-dead-cycle', 'M706-auto-weekly-empty-unreported', 'M707-auto-writer-failure-as-empty', 'M708-auto-features-not-machine', 'M709-auto-old-lines-kept', 'M710-auto-weekly-429-retried', 'M711-auto-run-lock-ignored', 'M712-auto-day-utc-not-kst', 'M713-auto-writer-tools-open', 'M714-package-drops-desk-pin',
                 'M715-auto-off-skips-run-lock', 'M716-auto-signal-send-unchecked', 'M717-auto-daily-send-unchecked', 'M718-auto-weekly-send-unchecked', 'M719-auto-run-continues-after-off', 'M720-auto-daily-resend-unchecked', 'M721-auto-off-keeps-weekly-pending-cycle', 'M722-auto-off-keeps-daily-pending', 'M723-auto-off-keeps-mailbox-weekly-pending', 'M724-auto-empty-scan-marks-day', 'M725-auto-daily-ok-at-success-time', 'M726-evidence-window-ignored', 'M727-evidence-bad-cycle-whole-ledger', 'M728-writer-input-drops-by-sort-order', 'M729-writer-input-unwindowed', 'M730-whoami-counsel-not-first', 'M731-auto-daily-seats-unfolded-kept',
-                'M732-auto-off-config-after-lock', 'M733-auto-off-lock-error-left-on', 'M734-auto-off-wait-unbounded', 'M735-auto-deferred-purge-dropped', 'M736-auto-daily-stale-facts-sent', 'M737-auto-daily-cutoff-missing-local-now', 'M738-auto-daily-cutoff-not-pinned'),
+                'M732-auto-off-config-after-lock', 'M733-auto-off-lock-error-left-on', 'M734-auto-off-wait-unbounded', 'M735-auto-deferred-purge-dropped', 'M736-auto-daily-stale-facts-sent', 'M737-auto-daily-cutoff-missing-local-now', 'M738-auto-daily-cutoff-not-pinned',
+                'M739-auto-off-due-not-in-config', 'M740-auto-on-ignores-due', 'M741-auto-still-on-auto-only', 'M742-auto-on-skips-purge', 'M743-auto-on-without-lock', 'M744-auto-facts-nonce-ignored', 'M745-auto-daily-future-cutoff-kept'),
     # ★09-19 신설 — **광장v2**. 피드 순서와 「어느 방이 커뮤니티인가」를 계산이 정하는 자리.
     #   여기서 잃는 것은 조용하다: 서버 피드와 클라이언트 피드가 다른 순서를 보이거나, 일반 토론방이
     #   커뮤니티로 읽혀 전역 상한이 토론을 막는다 — 오류 없이.
@@ -18573,19 +18574,25 @@ def _auto_pub(sent: list[dict[str, Any]], mode: dict[str, str] | None = None, *,
     return pub
 
 
+_AUTO_NONCE = "n" * 32
+
+
 def _auto_run(ctx: Any, *, pub: Any, now: Any = None, facts: dict[str, Any] | None = None,
-              runner: Any = None, send: Any = None, ctx_factory: Any = None) -> dict[str, Any]:
+              runner: Any = None, send: Any = None, ctx_factory: Any = None, nonce: Any = _AUTO_NONCE) -> dict[str, Any]:
     import datetime as _dt
     from agora import collector, mail
     now = now or _auto_now()
     if facts is _AUTO_FACTS:
         # ★팩 계약(리뷰 3R ③) — facts 에는 팩이 오류 기록을 읽기 전에 정한 `cutoff` 가 실린다 · 그 판 now 기준 1분 전(신선)
         facts = {**facts, "cutoff": mail.now_ms_iso(now - _dt.timedelta(minutes=1))}
+    if facts is not None and "nonce" not in facts:
+        facts = {**facts, "nonce": _AUTO_NONCE}         # ★팩 계약(리뷰 4판 ②) — 그 판 tick 이 facts 와 인자에 같은 nonce
     fpath = os.path.join(ctx.config_dir, "facts-test.json")
     with open(fpath, "w", encoding="utf-8") as fh:
         json.dump(facts or {}, fh)
     return _with_key(_fixtures()["key_a"], lambda: collector.run(
-        directory=ctx.config_dir, facts_path=fpath, now=now, ctx_factory=ctx_factory or (lambda _d: ctx),
+        directory=ctx.config_dir, facts_path=fpath, facts_nonce=nonce, now=now,
+        ctx_factory=ctx_factory or (lambda _d: ctx),
         publish=pub, send_weekly=send or (lambda c, w: mail._send_weekly(c, w, publish=pub)),
         runner=runner or (lambda *a, **k: (_ for _ in ()).throw(AssertionError("작성기를 부르면 안 되는 판"))),
         which=lambda _n: "/fake/bin/claude"))
@@ -18936,6 +18943,7 @@ def _case_auto_cli_actions() -> None:
     """CLI `agora counsel auto|off|on` — 데스크 동작과 갈린다(데스크 dispatch 는 거절) · 동작별 인자(`batch --facts` = 10)."""
     from agora import counsel
     counsel.check_action_args("auto", {"facts": "x"})
+    counsel.check_action_args("auto", {"facts": "x", "facts_nonce": "y"})
     for action, kw in (("batch", {"facts": "x"}), ("off", {"facts": "x"})):
         try:
             counsel.check_action_args(action, kw)
@@ -19216,7 +19224,7 @@ def _case_auto_off_config_first_purge_deferred() -> None:
     with _PinnedDesk(ctx, "operator-b"):
         _auto_run(ctx, pub=_auto_pub([]), facts=_AUTO_FACTS)
     with open(sig_path, encoding="utf-8") as fh:
-        if fh.read().strip() or os.path.exists(os.path.join(d, "counsel", collector.PURGE_DUE)):
+        if fh.read().strip() or collector.due_token(d) is not None:
             raise AssertionError("미룬 지우기를 다음 판(꺼짐)이 하지 않았다")
     # (나) 잠금 오류 — 설정은 꺼진 채 · 미룸 · on 으로 되켜도 다음 판이 먼저 지운다(옛 줄 발신 0)
     ctx = _mail_ctx(_FakeMailStore())
@@ -19239,6 +19247,134 @@ def _case_auto_off_config_first_purge_deferred() -> None:
         _auto_run(ctx, pub=_auto_pub(sent), facts=_AUTO_FACTS)
     if _auto_by(sent, "signal"):
         raise AssertionError("off 가 미룬 지우기를 다음 판이 안 해서 꺼진 동안 모은 줄이 나갔다")
+
+
+def _case_auto_off_on_purge_atomic() -> None:
+    """리뷰 4판 ① — off = `auto=false` + 지우기 표식(`purge_due`) **한 문서 원자 기록** · on = 표식이 남았으면 `run.lock` 을 잡아
+    지우기를 끝낸 뒤에만 켠다(못 끝내면 안 켜고 사유) · 도는 판은 발신 직전마다 auto **와** 표식을 둘 다 본다."""
+    import threading
+    from agora import collector
+    real_still_on = collector._still_on
+
+    def paused_run(ctx: Any, sent: list[dict[str, Any]], during: Callable[[], None]) -> None:
+        """옛 판 — `run.lock` 을 쥔 채 첫 발신 직전에 멈춘다 · 그 사이 `during()` 을 부르고 놓아 준다."""
+        reached, go = threading.Event(), threading.Event()
+
+        def gate(d: str) -> bool:
+            if not reached.is_set():
+                reached.set()
+                go.wait(20)
+            return real_still_on(d)
+        collector._still_on = gate
+        try:
+            t = threading.Thread(target=lambda: _auto_run(ctx, pub=_auto_pub(sent), facts=_AUTO_FACTS), daemon=True)
+            t.start()
+            if not reached.wait(20):
+                raise AssertionError("옛 판이 발신 직전까지 오지 않았다")
+            try:
+                during()
+            finally:
+                go.set()
+                t.join(20)
+        finally:
+            collector._still_on = real_still_on
+
+    # (가) 살아 있는 옛 판 + off(미룸) → on → 옛 판 재개 = 발신 0 · on 은 켜지 않고 사유를 준다
+    ctx = _mail_ctx(_FakeMailStore())
+    d = ctx.config_dir
+    _signal_ledger(ctx, [_sig_row()])
+    sent: list[dict[str, Any]] = []
+    outs: dict[str, Any] = {}
+
+    def off_then_on() -> None:
+        old = collector.OFF_LOCK_WAIT
+        collector.OFF_LOCK_WAIT = 0.3
+        try:
+            outs["off"] = collector.set_auto(d, on=False)
+            outs["on"] = collector.set_auto(d, on=True)
+        finally:
+            collector.OFF_LOCK_WAIT = old
+    with _PinnedDesk(ctx, "operator-b"):
+        paused_run(ctx, sent, off_then_on)
+    if sent or collector.auto_enabled(d) or "켜지_않음" not in outs.get("on", {}):
+        raise AssertionError(f"off 를 미룬 뒤 on 이 옛 판을 살렸다: 보냄 {len(sent)} · on {outs.get('on')}")
+    on = collector.set_auto(d, on=True)                  # 판이 끝난 뒤 = 지우기를 끝내고 켠다
+    with open(os.path.join(d, "config.json"), encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    if on.get("상담소_자동_전달") != "켜짐" or cfg != {"counsel": {"auto": True}}:
+        raise AssertionError(f"판이 끝난 뒤 on 이 켜지지 않았거나 표식이 남았다: {on} {cfg}")
+    # (나) 판 도중 표식이 선다(auto 는 켜짐 그대로) → 발신 0 — 발신 직전 재확인이 auto 만 보면 나간다
+    ctx = _mail_ctx(_FakeMailStore())
+    d = ctx.config_dir
+    _signal_ledger(ctx, [_sig_row()])
+    sent = []
+
+    def mark_due() -> None:
+        with open(os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+            json.dump({"counsel": {"auto": True, collector.PURGE_DUE_KEY: "beef"}}, fh)
+    with _PinnedDesk(ctx, "operator-b"):
+        paused_run(ctx, sent, mark_due)
+    if sent or collector.due_token(d) is not None:
+        raise AssertionError(f"표식이 선 판이 보냈거나 지운 뒤 표식을 안 뺐다: 보냄 {len(sent)} · {collector.due_token(d)}")
+    # (다) off 기록 직후 죽음(지우기 전) 모사 → on 이 먼저 지우고 켠다 → 다음 판 옛 줄 발신 0
+    ctx = _mail_ctx(_FakeMailStore())
+    d = ctx.config_dir
+    _signal_ledger(ctx, [_sig_row()])
+    with open(os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+        json.dump({"counsel": {"auto": False, collector.PURGE_DUE_KEY: "dead"}, "keep": 1}, fh)
+    on = collector.set_auto(d, on=True)
+    with open(os.path.join(d, "counsel", "signals.jsonl"), encoding="utf-8") as fh:
+        left = fh.read().strip()
+    with open(os.path.join(d, "config.json"), encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    if left or cfg != {"counsel": {"auto": True}, "keep": 1} or on.get("상담소_자동_전달") != "켜짐":
+        raise AssertionError(f"on 이 미룬 지우기를 먼저 하지 않았다: 남음={bool(left)} {cfg} {on}")
+    sent = []
+    with _PinnedDesk(ctx, "operator-b"):
+        _auto_run(ctx, pub=_auto_pub(sent), facts=_AUTO_FACTS)
+    if _auto_by(sent, "signal"):
+        raise AssertionError("죽기 전 off 의 옛 줄이 나갔다")
+    # (라) 옛 3판 표식 파일(purge.due) — 켜짐이어도 판이 먼저 지우고 파일을 뺀다
+    ctx = _mail_ctx(_FakeMailStore())
+    d = ctx.config_dir
+    _signal_ledger(ctx, [_sig_row()])
+    with open(os.path.join(collector.counsel_dir(d), collector.PURGE_DUE), "a", encoding="utf-8"):
+        pass
+    sent = []
+    with _PinnedDesk(ctx, "operator-b"):
+        _auto_run(ctx, pub=_auto_pub(sent), facts=_AUTO_FACTS)
+    if _auto_by(sent, "signal") or os.path.exists(os.path.join(d, "counsel", collector.PURGE_DUE)):
+        raise AssertionError("옛 표식 파일을 판이 먼저 처리하지 않았다")
+
+
+def _case_auto_facts_nonce_and_future() -> None:
+    """리뷰 4판 ② — facts 는 그 판 nonce(`--facts-nonce`)와 파일 `nonce` 가 같을 때만 쓴다(부재·불일치 = 일일 0 · 표식 0) ·
+    cutoff 미래 허용폭 = +5분(넘으면 일일 0)."""
+    import datetime as _dt
+    from agora import collector, mail
+    now = _auto_now()
+    fresh = {**_AUTO_FACTS, "cutoff": mail.now_ms_iso(now - _dt.timedelta(minutes=1))}
+    for label, facts, nonce in (("옛 판 facts(다른 nonce)", {**fresh, "nonce": "o" * 32}, "n" * 32),
+                                ("nonce 없는 facts", {k: v for k, v in fresh.items()}, None),
+                                ("인자 nonce 부재", {**fresh, "nonce": "n" * 32}, None),
+                                ("미래 cutoff +6분", {**_AUTO_FACTS, "nonce": "n" * 32,
+                                                    "cutoff": mail.now_ms_iso(now + _dt.timedelta(minutes=6))}, "n" * 32)):
+        ctx = _mail_ctx(_FakeMailStore())
+        sent: list[dict[str, Any]] = []
+        if label == "nonce 없는 facts":
+            facts = {**facts, "nonce": None}
+        with _PinnedDesk(ctx, "operator-b"):
+            out = _auto_run(ctx, pub=_auto_pub(sent), now=now, facts=facts, nonce=nonce)
+        st = collector.collector_state(ctx.config_dir)
+        if _auto_by(sent, "daily") or (out.get("daily") or {}).get("result") != "no_fresh_facts" or st.get("daily_day"):
+            raise AssertionError(f"{label}: 일일이 나갔거나 표식을 썼다 — {out.get('daily')} · {st.get('daily_day')}")
+    ctx = _mail_ctx(_FakeMailStore())
+    sent = []
+    cutoff = mail.now_ms_iso(now + _dt.timedelta(minutes=4))
+    with _PinnedDesk(ctx, "operator-b"):
+        _auto_run(ctx, pub=_auto_pub(sent), now=now, facts={**_AUTO_FACTS, "cutoff": cutoff})
+    if len(_auto_by(sent, "daily")) != 1 or collector.collector_state(ctx.config_dir).get("daily_ok_at") != cutoff:
+        raise AssertionError("허용폭 안(+4분) cutoff 의 일일이 안 나갔다")
 
 
 def _case_auto_evidence_cycle_window() -> None:
@@ -19912,6 +20048,8 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ('상담소자동: daily_ok_at = 마감 시각', _case_auto_daily_ok_at_is_cutoff, None),
     ('상담소자동: 일일 마감 = facts cutoff · 묵은 사실 0', _case_auto_daily_cutoff_from_facts, None),
     ('상담소자동: off 상한·잠금 오류 = 꺼진 채 지우기 미룸', _case_auto_off_config_first_purge_deferred, None),
+    ('상담소자동: off·표식 원자 · on 은 지우기 뒤에만', _case_auto_off_on_purge_atomic, None),
+    ('상담소자동: facts nonce 결박 · 미래 cutoff 0', _case_auto_facts_nonce_and_future, None),
     ('상담소자동: 근거 = 그 주기 창', _case_auto_evidence_cycle_window, None),
 )
 
@@ -22764,8 +22902,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '상담소자동: 주간 작성기 계약'),
     # ★T3 리뷰 반영(①~⑤·⑫·⑬ · TICKET=agora-t3-pack-collector)
     ('M715-auto-off-skips-run-lock', "agora/collector.py",
-     '        with _file_lock(_p(config_dir, RUN_LOCK), wait=True, limit=OFF_LOCK_WAIT) as held:',
-     '        with contextlib.nullcontext(True) as held:',
+     '        with _file_lock(_p(config_dir, RUN_LOCK), wait=True, limit=OFF_LOCK_WAIT) as held:\n            if held:\n                _purge(config_dir)\n                _clear_due',
+     '        with contextlib.nullcontext(True) as held:\n            if held:\n                _purge(config_dir)\n                _clear_due',
      '상담소자동: off 는 판을 기다리고 판은 발신 직전마다 본다'),
     ('M716-auto-signal-send-unchecked', "agora/collector.py",
      '    if not _still_on(ctx.config_dir):\n        return dict(OFF)\n    if new:',
@@ -22832,20 +22970,20 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    if "seats" in candidates and not type(roles) is list:',
      '상담소자동: 일일 닫힌 칸만'),
     ('M732-auto-off-config-after-lock', "agora/collector.py",
-     '    path = _write_auto(config_dir, on=on)\n    if on:\n        return',
-     '    path = os.path.join(config_dir, "config.json")\n    if on:\n        _write_auto(config_dir, on=on)\n        return',
+     '    path = _write_auto(config_dir, on=False, due=tok)',
+     '    path = os.path.join(config_dir, "config.json")',
      '상담소자동: off 는 판을 기다리고 판은 발신 직전마다 본다'),
     ('M733-auto-off-lock-error-left-on', "agora/collector.py",
      '    except OSError:\n        held = False',
      '    except OSError:\n        _write_auto(config_dir, on=True)\n        held = False',
      '상담소자동: off 상한·잠금 오류 = 꺼진 채 지우기 미룸'),
     ('M734-auto-off-wait-unbounded', "agora/collector.py",
-     'wait=True, limit=OFF_LOCK_WAIT)',
-     'wait=True, limit=None)',
+     'wait=True, limit=OFF_LOCK_WAIT) as held:\n            if held:\n                _purge(config_dir)\n                _clear_due',
+     'wait=True, limit=None) as held:\n            if held:\n                _purge(config_dir)\n                _clear_due',
      '상담소자동: off 상한·잠금 오류 = 꺼진 채 지우기 미룸'),
     ('M735-auto-deferred-purge-dropped', "agora/collector.py",
-     '        if os.path.exists(due):\n            _purge(d)',
-     '        if False:\n            _purge(d)',
+     '        tok = due_token(d)\n        if tok is not None:\n            _purge(d)',
+     '        tok = due_token(d)\n        if False:\n            _purge(d)',
      '상담소자동: off 상한·잠금 오류 = 꺼진 채 지우기 미룸'),
     ('M736-auto-daily-stale-facts-sent', "agora/collector.py",
      '        if not mail._ts_ok(cutoff) or mail._parse_ts(cutoff) < now - FACTS_MAX_AGE:',
@@ -22859,6 +22997,35 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        pending = {"at": _iso(now), "cutoff": cutoff,',
      '        pending = {"at": _iso(now), "cutoff": _iso(now),',
      '상담소자동: 일일 마감 = facts cutoff · 묵은 사실 0'),
+    # ★T3 리뷰 4판(①② · TICKET=agora-t3-pack-collector)
+    ('M739-auto-off-due-not-in-config', "agora/collector.py",
+     '    path = _write_auto(config_dir, on=False, due=tok)',
+     '    path = _write_auto(config_dir, on=False)',
+     '상담소자동: off 상한·잠금 오류 = 꺼진 채 지우기 미룸'),
+    ('M740-auto-on-ignores-due', "agora/collector.py",
+     '        tok = due_token(config_dir)\n        if tok is None:',
+     '        tok = None\n        if tok is None:',
+     '상담소자동: off·표식 원자 · on 은 지우기 뒤에만'),
+    ('M741-auto-still-on-auto-only', "agora/collector.py",
+     '    return auto_enabled(config_dir) and due_token(config_dir) is None',
+     '    return auto_enabled(config_dir)',
+     '상담소자동: off·표식 원자 · on 은 지우기 뒤에만'),
+    ('M742-auto-on-skips-purge', "agora/collector.py",
+     '                    _purge(config_dir)\n                    path = _write_auto(config_dir, on=True, expect_due=tok)',
+     '                    path = _write_auto(config_dir, on=True, expect_due=tok)',
+     '상담소자동: off·표식 원자 · on 은 지우기 뒤에만'),
+    ('M743-auto-on-without-lock', "agora/collector.py",
+     '            with _file_lock(_p(config_dir, RUN_LOCK), wait=True, limit=OFF_LOCK_WAIT) as held:\n                if held:',
+     '            with contextlib.nullcontext(True) as held:\n                if held:',
+     '상담소자동: off·표식 원자 · on 은 지우기 뒤에만'),
+    ('M744-auto-facts-nonce-ignored', "agora/collector.py",
+     '    if nonce is None or str(nonce) == "" or doc.get("nonce") != str(nonce):\n        return {}',
+     '    if False:\n        return {}',
+     '상담소자동: facts nonce 결박 · 미래 cutoff 0'),
+    ('M745-auto-daily-future-cutoff-kept', "agora/collector.py",
+     '        if mail._parse_ts(cutoff) > now + FACTS_FUTURE:',
+     '        if False:',
+     '상담소자동: facts nonce 결박 · 미래 cutoff 0'),
 )
 
 
