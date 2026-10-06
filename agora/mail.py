@@ -84,6 +84,7 @@ CYCLE_BACK_WEEKS_MAX = 7                    # 허용 = 현재 주기 또는 직�
 EVIDENCE_NEWLINE_RE = re.compile("[\r\n\u2028\u2029]")
 WEEKLY_THREAD_FILE = "weekly_thread.json"   # 데스크별 안정 주간 대화(2판 M9)
 WEEKLY_PENDING_FILE = "weekly_pending.json"  # 성공 판정 전 주간 보고 한 통(3판 N2 — 같은 message_id 로만 재전송)
+WEEKLY_PENDING_TTL = datetime.timedelta(hours=23)   # 4판 N5 — 릴레이 봉투 ts 창(−24h · 멱등보다 앞)보다 짧게: 그 뒤 재전송은 422 뿐
 WEEKLY_ITEM_KEYS = ("text", "evidence_ref", "signatures")
 # ★근거 = 구조화 출처(3판 M7) — 자유문 근거 칸을 없앴다. 종류별 id 형식(닫힘) · 인용(quote)은 송신 클라이언트가
 #   허용 원장(`<설정 폴더>/counsel/signals*.jsonl` · 명세 §13-3)의 실제 줄에서 만든 원문의 부분 문자열일 때만 통과한다.
@@ -490,11 +491,14 @@ def send_weekly(ctx: Any, weekly: dict[str, Any]) -> dict[str, Any]:
 def _send_weekly(ctx: Any, weekly: dict[str, Any], *, publish: Callable[..., dict[str, Any]]) -> dict[str, Any]:
     """받는 이 = 핀의 데스크 · 데스크별 **안정 대화**(`mailbox/weekly_thread.json`) · 빈 보고면 보내지 않는다(`skipped`).
 
-    ★3판 M7: 근거(`evidence_ref`)를 허용 원장과 대조해 못 맞춘 항목은 **통에서 빼고 `rejected` 로 돌려준다**(조용히 보내지 않는다 ·
-      작성기가 고쳐 쓴다) · 남은 항목이 없으면 발신 0.
+    ★3판 M7: 근거(`evidence_ref`)를 허용 원장과 대조해 못 맞춘 항목은 **통에서 빼고 `rejected` 로 돌려준다**(조용히 보내지 않는다) ·
+      남은 항목이 없으면 발신 0. ★4판 N6 계약: 빠진 항목은 **그 주기에서 제외**(같은 주기 재발신 없음 · 버킷 주 1) —
+      T3 작성기는 send 전에 `verify_evidence` 를 먼저 부르고 **거부 0 일 때만** 발신한다(이 자리의 빼기는 마지막 그물).
     ★3판 N2: 발신 **전에** 문서(message_id·thread_id 포함)를 `mailbox/weekly_pending.json` 에 적고, 성공(200·201) 판정 전까지
       같은 주기 호출은 **그 문서만** 다시 보낸다(새 id 0 · 릴레이 멱등 §3-1 ⑧) · 실패는 예외 대신 `{"pending": True, "doc": …}` 로 돌려준다.
       다른 주기를 보내면 그 전 pending 은 버린다(`superseded` · 429 = 그 주기 포기 규칙).
+    ★4판 N5: pending 이 23시간을 넘었거나(릴레이 봉투 ts 창 −24h 가 멱등보다 앞 — 그 뒤 같은 문서는 영영 422) 직전 결과가
+      429 였으면 재전송하지 않고 새 문서를 만든다(`expired` · 앞 문서는 `superseded`).
     `publish` = 시험 주입점(비공개 · 3판 N3).
     """
     desks = sorted(desk_pin()["desk"].values())
@@ -503,7 +507,10 @@ def _send_weekly(ctx: Any, weekly: dict[str, Any], *, publish: Callable[..., dic
     to, cycle = desks[0], weekly.get("cycle")
     ppath = _path(ctx, WEEKLY_PENDING_FILE)
     pending = _load_json(ppath)
-    resend = pending.get("to") == to and pending.get("cycle") == cycle and type(pending.get("doc")) is dict
+    same = pending.get("to") == to and pending.get("cycle") == cycle and type(pending.get("doc")) is dict
+    expired = same and (pending.get("rate_limited") is True or not _ts_ok(pending.get("at"))
+                        or _parse_ts(pending["at"]) < datetime.datetime.now(datetime.timezone.utc) - WEEKLY_PENDING_TTL)
+    resend = same and not expired
     superseded = None if resend or not pending.get("doc") else (pending.get("doc") or {}).get("message_id")
     rejected: list[dict[str, Any]] = []
     if resend:
@@ -518,13 +525,18 @@ def _send_weekly(ctx: Any, weekly: dict[str, Any], *, publish: Callable[..., dic
         state = _load_json(_path(ctx, WEEKLY_THREAD_FILE))
         thread = state.get(to) if is_id(str(state.get(to) or "")) else None
         doc = build(ctx, to=to, payload={"intent": WEEKLY, "weekly": kept}, thread_id=thread)
-        _write_atomic(ppath, {"to": to, "cycle": cycle, "at": now_ms_iso(), "doc": doc})
-    extra = {"rejected": rejected, "resent": resend, "superseded": superseded}
+        pending = {"to": to, "cycle": cycle, "at": now_ms_iso(), "doc": doc}
+        _write_atomic(ppath, pending)
+    extra = {"rejected": rejected, "resent": resend, "superseded": superseded, "expired": expired}
     try:
         out = publish(ctx, doc)
     except AgoraError as e:
+        if type(e.detail) is dict and e.detail.get("status") == 429:
+            _write_atomic(ppath, {**pending, "rate_limited": True})       # 429 = 서버가 「안 받았다」 — 다음 호출은 새 문서(4판 N5)
         return {"status": None, "error": e.code, "message": e.message, "pending": True, "doc": doc, **extra}
     if out.get("status") not in (200, 201):
+        if out.get("status") == 429:
+            _write_atomic(ppath, {**pending, "rate_limited": True})
         return {**out, "pending": True, "doc": doc, **extra}
     tpath = _path(ctx, WEEKLY_THREAD_FILE)
     state = _load_json(tpath)

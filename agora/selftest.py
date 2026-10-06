@@ -4479,7 +4479,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
              "M676-mail-weekly-exempt-unverified", "M677-mail-evidence-quote-unchecked",
              "M678-mail-send-weekly-keeps-rejected", "M679-mail-send-weekly-new-id-on-retry",
              "M680-mail-evidence-kind-open", "M681-mail-policy-ignores-missing-effective",
-             "M690-mail-send-weekly-pending-unsaved"),
+             "M690-mail-send-weekly-pending-unsaved", "M692-mail-weekly-pending-never-expires"),
     # ★상담소 데스크(2026-10-05) — 회신이 한 번인가 · 긴급이 도배가 되는가 · 호출이 한 번인가 · 남의 글이 새는가.
     "상담소": ("M621-desk-acks-every-mail", "M622-desk-urgent-no-thread-cap", "M623-desk-batch-twice-a-period",
                "M624-desk-batch-unmasked", "M625-desk-model-picks-address", "M626-desk-publish-no-leak-check",
@@ -18058,7 +18058,7 @@ def _case_mail_send_weekly_stable_thread() -> None:
 
 def _case_mail_send_weekly_pending_resend() -> None:
     """3판 N2 — 발신 전 pending 원장(문서·message_id·thread_id) · 성공 판정 전까지 같은 주기는 **그 문서만** 재전송(새 id 0) ·
-    실패 반환에 문서 · 성공하면 비움 · 다른 주기를 보내면 앞 pending 은 superseded."""
+    실패 반환에 문서 · 성공하면 비움 · 다른 주기를 보내면 앞 pending 은 superseded · 4판 N5 = 23시간 초과·직전 429 면 새 문서."""
     from agora import mail
     store = _FakeMailStore()
     ctx = _mail_ctx(store)
@@ -18072,6 +18072,8 @@ def _case_mail_send_weekly_pending_resend() -> None:
             raise AgoraError(errors.UNKNOWN_COMMIT, "성공 불명")
         if state["mode"] == "500":
             return {"status": 500}
+        if state["mode"] == "429":
+            raise AgoraError(errors.STORE, "속도 제한", {"status": 429})
         return {"status": 201, "message_id": d["message_id"]}
     w1 = _weekly_payload(cycle="2026-W40")["weekly"]
     with _PinnedDesk(ctx, "operator-b"):
@@ -18098,6 +18100,25 @@ def _case_mail_send_weekly_pending_resend() -> None:
         out = _with_key(_fixtures()["key_a"], lambda: mail._send_weekly(ctx, _weekly_payload(cycle="2026-W42")["weekly"], publish=pub))
         if out.get("superseded") != sent[4]["message_id"] or sent[5]["message_id"] == sent[4]["message_id"]:
             raise AssertionError(f"다른 주기 발신이 앞 pending 을 superseded 로 안 알렸다: {out}")
+        # 4판 N5 — pending 23시간 초과(릴레이 ts 창 −24h 가 멱등보다 앞) · 직전 429 = 재전송하지 않고 새 문서
+        import datetime as _dt
+        ppath = mail._path(ctx, mail.WEEKLY_PENDING_FILE)
+        for how in ("old", "429"):
+            cyc = "2026-W43" if how == "old" else "2026-W44"
+            state["mode"] = "fail" if how == "old" else "429"
+            _with_key(_fixtures()["key_a"], lambda: mail._send_weekly(ctx, _weekly_payload(cycle=cyc)["weekly"], publish=pub))
+            failed = sent[-1]["message_id"]
+            if how == "old":
+                row = mail._load_json(ppath)
+                row["at"] = mail.now_ms_iso(_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=24))
+                mail._write_atomic(ppath, row)
+            elif not mail._load_json(ppath).get("rate_limited"):
+                raise AssertionError("429 를 pending 에 안 적었다")
+            state["mode"] = "ok"
+            out = _with_key(_fixtures()["key_a"], lambda: mail._send_weekly(ctx, _weekly_payload(cycle=cyc)["weekly"], publish=pub))
+            if sent[-1]["message_id"] == failed or not out.get("expired") or out.get("resent") \
+                    or out.get("superseded") != failed or out.get("status") != 201:
+                raise AssertionError(f"만료된 pending({how})을 또 보냈다(그 주기가 영구 pending 이 된다): {out}")
 
 
 def _case_mail_weekly_evidence_ledger() -> None:
@@ -19311,8 +19332,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        kept = weekly',
      "우편: 주간 근거 = 허용 원장 대조"),
     ("M679-mail-send-weekly-new-id-on-retry", "agora/mail.py",
-     '    resend = pending.get("to") == to and pending.get("cycle") == cycle and type(pending.get("doc")) is dict',
-     '    resend = False',
+     '    same = pending.get("to") == to and pending.get("cycle") == cycle and type(pending.get("doc")) is dict',
+     '    same = False',
      "우편: 주간 발신 pending = 같은 문서 재전송"),
     ("M680-mail-evidence-kind-open", "agora/mail.py",
      '            if kind not in EVIDENCE_ID_RES:\n',
@@ -19354,6 +19375,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '        if at and start and start <= at:',
      '        if False:',
      "상담소: 주간 정책 세대·항목 주기"),
+    ("M692-mail-weekly-pending-never-expires", "agora/mail.py",
+     '    resend = same and not expired',
+     '    resend = same',
+     "우편: 주간 발신 pending = 같은 문서 재전송"),
     ("M690-mail-send-weekly-pending-unsaved", "agora/mail.py",
      '        _write_atomic(ppath, {"to": to, "cycle": cycle, "at": now_ms_iso(), "doc": doc})',
      '        pass',
