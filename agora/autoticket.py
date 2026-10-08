@@ -161,38 +161,116 @@ def _recur_mark(period: str) -> str:
     return f"- {period} · 재발 "
 
 
+def _recur_append(path: str, want: str, res: dict[str, Any]) -> None:
+    """재발 줄 = **완전한 예상 행 전체 일치**로 판정(3판 (c)) · 끝의 부분 행이 예상 행의 앞부분이면 나머지를 채워 완성 ·
+    같은 fd(`O_NOFOLLOW|O_APPEND` · 정규 파일 fstat)로 쓰고 fsync — 그 뒤에만 seen 을 원장에 적는다(3판 (d))."""
+    fd = _open_regular(path, os.O_RDWR | os.O_APPEND)
+    try:
+        chunks = []
+        while True:
+            b = os.read(fd, 1 << 16)
+            if not b:
+                break
+            chunks.append(b)
+        text = b"".join(chunks).decode("utf-8", errors="surrogateescape")
+        lines = text.split("\n")
+        done, tail = lines[:-1], lines[-1]
+        if want in done:
+            return
+        if tail and want.startswith(tail):
+            add = want[len(tail):] + "\n"
+        elif tail:
+            add = "\n" + want + "\n"
+        elif any(ln.startswith(want.split(" 재발 ")[0] + " 재발 ") for ln in done):
+            res["ledger_errors"].append(f"초안의 같은 기간 재발 줄이 예상과 다르다 — 그대로 둠 · {os.path.basename(path)}")
+            return
+        else:
+            add = want + "\n"
+        _write_all(fd, add.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
 # ── 원장(append-only JSONL) ─────────────────────────────────────────────────
 
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_KEY_ROW_RE = re.compile(r"^(ticket|seen|ambiguous):[0-9a-f]{16}:(?:\d{4}-\d{2}-\d{2}|\d{4}-W\d{2})\Z", re.ASCII)
+
+
+class Unsafe(OSError):
+    """원장·초안이 정규 파일이 아니다(symlink·폴더·장치) — 쓰지 않는다."""
+
+
+def _open_regular(path: str, flags: int, mode: int = 0o600) -> int:
+    """★검사와 쓰기를 한 fd 로(master 865269a1 → 3판 (d)): `O_NOFOLLOW` 로 열고 그 fd 를 fstat 해 정규 파일일 때만 돌려준다."""
+    try:
+        fd = os.open(path, flags | _NOFOLLOW, mode)
+    except OSError as e:
+        if os.path.islink(path):
+            raise Unsafe(f"symlink 거부: {os.path.basename(path)}") from e
+        raise
+    import stat
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise Unsafe(f"정규 파일 아님: {os.path.basename(path)}")
+    return fd
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """짧은 쓰기 = 남은 것을 다시(3판 (b)) — 전부 쓴 뒤 fsync."""
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        if n <= 0:
+            raise OSError("write 가 0 바이트를 돌려줬다")
+        view = view[n:]
+    os.fsync(fd)
+
+
 def _append_row(path: str, row: dict[str, Any]) -> None:
-    """한 줄 append — ★끝 바이트가 LF 가 아니면(죽은 쓰기의 잘린 줄) LF 를 먼저 붙여 새 줄을 지킨다 · 한 번의 write + fsync(master ⑧)."""
+    """한 줄 append — ★끝 바이트가 LF 가 아니면(죽은 쓰기의 잘린 줄) LF 를 먼저 붙여 새 줄을 지킨다 · 전부 쓸 때까지 + fsync(master ⑧ · 3판 (b))."""
     data = (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = _open_regular(path, os.O_RDWR | os.O_CREAT | os.O_APPEND)
     try:
         if os.fstat(fd).st_size:
             os.lseek(fd, -1, os.SEEK_END)
             if os.read(fd, 1) != b"\n":
                 data = b"\n" + data
-        os.write(fd, data)
-        os.fsync(fd)
+        _write_all(fd, data)
+    finally:
+        os.close(fd)
+
+
+def _read_bytes(path: str) -> bytes | None:
+    try:
+        fd = _open_regular(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    try:
+        chunks = []
+        while True:
+            b = os.read(fd, 1 << 16)
+            if not b:
+                break
+            chunks.append(b)
+        return b"".join(chunks)
     finally:
         os.close(fd)
 
 
 def _read_ledger(path: str) -> tuple[list[dict[str, Any]], int]:
-    """(행, 깨진 줄 수) — 깨진 줄은 격리(무시하고 센다)."""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
-    except OSError:
+    """(행, 깨진 줄 수) — ★binary · LF 단위 · 줄마다 UTF-8·JSON 오류를 따로 격리(한글 중간 절단 1줄이 전체를 못 막게 · 3판 (b))."""
+    data = _read_bytes(path)
+    if not data:
         return [], 0
     rows, broken = [], 0
-    for ln in lines:
-        if not ln.strip():
+    for raw in data.split(b"\n"):
+        if not raw.strip():
             continue
         try:
-            r = json.loads(ln)
-        except ValueError:
+            r = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
             broken += 1
             continue
         if type(r) is dict:
@@ -202,54 +280,84 @@ def _read_ledger(path: str) -> tuple[list[dict[str, Any]], int]:
     return rows, broken
 
 
-def _valid_ticket(r: dict[str, Any]) -> bool:
+_ROW_KEYS = {
+    "ticket": {"type", "fp", "slug", "period", "signatures", "homes", "key", "line", "notified", "at"},
+    "seen": {"type", "fp", "period", "homes", "signatures", "key", "line", "notified", "at"},
+    "ambiguous": {"type", "fp", "period", "with", "signatures", "key", "line", "notified", "at"},
+    "notified": {"type", "key", "at"},
+}
+
+
+def _valid_row(r: dict[str, Any]) -> bool:
+    """닫힌 스키마(3판 (a)) — 칸 집합 정확히 · fp 16 hex · 기간 · 서명 32hex · key 재계산 일치 · 줄 = 한 줄 문자열."""
     from agora import mail
-    sigs = r.get("signatures")
-    return (type(r.get("fp")) is str and bool(_FP_RE.match(r["fp"])) and r.get("slug") == f"bl-{r['fp']}"
-            and type(r.get("period")) is str and bool(_PERIOD_RE.match(r["period"]))
-            and type(sigs) is list and bool(sigs) and all(type(x) is str and mail.SIG32_RE.match(x) for x in sigs)
-            and fingerprint(sigs) == r["fp"])
+    t = r.get("type")
+    if t not in _ROW_KEYS or set(r) != _ROW_KEYS[t] or type(r.get("at")) is not str:
+        return False
+    if t == "notified":
+        return type(r["key"]) is str and bool(_KEY_ROW_RE.match(r["key"]))
+    fp, per, sigs = r["fp"], r["period"], r["signatures"]
+    if not (type(fp) is str and _FP_RE.match(fp) and type(per) is str and _PERIOD_RE.match(per)
+            and type(sigs) is list and sigs and all(type(x) is str and mail.SIG32_RE.match(x) for x in sigs)):
+        return False
+    if r["key"] != f"{t}:{fp}:{per}" or type(r["line"]) is not str or not r["line"].startswith("【티켓후보") \
+            or any(unicodedata.category(ch).startswith("C") for ch in r["line"]) or r["notified"] is not False \
+            or type(r["homes"] if "homes" in r else 0) is not int:
+        return False
+    if t == "ticket":
+        return r["slug"] == f"bl-{fp}" and fingerprint(sigs) == fp
+    if t == "ambiguous":
+        w = r["with"]
+        return fingerprint(sigs) == fp and type(w) is list and all(type(x) is str and re.fullmatch(r"bl-[0-9a-f]{16}", x) for x in w)
+    return True
+
+
+def _digest(r: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(r, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _state(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """원장 → 상태(★(type, fp) 단위 축약 · 같은 내용 중복 = 하나 · 내용이 다른 중복 = 그 fp 격리 · master ⑤)."""
-    tickets: dict[str, dict[str, Any]] = {}
-    conflict: set[str] = set()
+    """원장 → 상태. ★(a) 닫힌 스키마 밖 행 = 상태에 안 넣고 격리 · (g) 같은 (type, fp, 기간)에 **행 전체 digest** 가 다르면
+    그 묶음 전부 격리(알림 포함) · ticket 은 fp 하나에 한 행(기간이 달라도 격리) · 격리된 ticket 의 서명 = 후보 보류."""
     errors: list[str] = []
+    good = []
     for r in rows:
-        if r.get("type") != "ticket":
-            continue
-        if not _valid_ticket(r):
-            errors.append("형식이 틀린 ticket 행")
-            continue
-        core = {"fp": r["fp"], "slug": r["slug"], "period": r["period"], "signatures": sorted(set(r["signatures"]))}
-        prev = tickets.get(r["fp"])
-        if prev is not None and prev != core:
-            conflict.add(r["fp"])
-        tickets.setdefault(r["fp"], core)
+        if _valid_row(r):
+            good.append(r)
+        else:
+            errors.append(f"형식이 틀린 행 — 격리({str(r.get('type'))[:12]})")
+    groups: dict[tuple[str, str, str], set[str]] = {}
+    for r in good:
+        if r["type"] != "notified":
+            gk = (r["type"], r["fp"], r["period"] if r["type"] != "ticket" else "")
+            groups.setdefault(gk, set()).add(_digest(r))
+    bad = {gk for gk, ds in groups.items() if len(ds) > 1}
     blocked: set[str] = set()
-    for fp in sorted(conflict):
-        errors.append(f"내용이 다른 ticket 중복 — 격리 bl-{fp}")
-        tickets.pop(fp, None)
-        blocked |= {x for r in rows if r.get("type") == "ticket" and r.get("fp") == fp
-                    for x in (r.get("signatures") if type(r.get("signatures")) is list else []) if type(x) is str}
+    quarantine: set[tuple[str, str, str]] = set()
+    for gk in sorted(bad):
+        errors.append(f"내용이 다른 {gk[0]} 중복 — 격리 bl-{gk[1]}" + (f" · {gk[2]}" if gk[2] else ""))
+        quarantine.add(gk)
+        if gk[0] == "ticket":
+            blocked |= {x for r in good if r["type"] == "ticket" and r["fp"] == gk[1] for x in r["signatures"]}
+    ok = [r for r in good if r["type"] == "notified"
+          or (r["type"], r["fp"], r["period"] if r["type"] != "ticket" else "") not in quarantine]
+    tickets = {r["fp"]: {"fp": r["fp"], "slug": r["slug"], "period": r["period"], "signatures": sorted(set(r["signatures"]))}
+               for r in ok if r["type"] == "ticket"}
     periods: dict[str, set[str]] = {fp: {t["period"]} for fp, t in tickets.items()}
-    for r in rows:
-        if r.get("type") == "seen" and r.get("fp") in tickets and type(r.get("period")) is str \
-                and _PERIOD_RE.match(r["period"]):
+    for r in ok:
+        if r["type"] == "seen" and r["fp"] in tickets:
             periods[r["fp"]].add(r["period"])
-    amb = {(r.get("fp"), r.get("period")) for r in rows if r.get("type") == "ambiguous"}
-    notified = {r.get("key") for r in rows if r.get("type") == "notified"}
-    pending = []
-    for r in rows:
-        k = r.get("key")
-        if r.get("type") in ("ticket", "seen", "ambiguous") and type(k) is str and type(r.get("line")) is str \
-                and k not in notified and k not in {p["key"] for p in pending}:
-            fp = r.get("fp")
-            if r["type"] != "ambiguous" and fp not in tickets:
-                continue                       # 격리된 티켓의 알림은 다시 보내지 않는다
-            pending.append({"key": k, "line": r["line"]})
-    return {"tickets": tickets, "periods": periods, "amb": amb, "pending": pending, "errors": errors, "blocked": blocked}
+    amb = {(r["fp"], r["period"]) for r in ok if r["type"] == "ambiguous"}
+    notified = {r["key"] for r in ok if r["type"] == "notified"}
+    pending, seen_keys = [], set()
+    for r in ok:
+        if r["type"] != "notified" and r["key"] not in notified and r["key"] not in seen_keys:
+            if r["type"] != "ambiguous" and r["fp"] not in tickets:
+                continue
+            seen_keys.add(r["key"])
+            pending.append({"key": r["key"], "line": r["line"]})
+    return {"tickets": tickets, "periods": periods, "amb": amb, "pending": pending, "errors": errors, "blocked": blocked,
+            "quarantine": quarantine}
 
 
 # ── 판정(쓰기 0) ────────────────────────────────────────────────────────────
@@ -257,8 +365,7 @@ def _state(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _load_period(cdir: str, period: str, skipped: list[dict[str, Any]]) -> list[dict[str, Any]]:
     path = os.path.join(cdir, period, CANDIDATES_FILE)
     try:
-        with open(path, encoding="utf-8") as fh:
-            doc = json.load(fh)
+        doc = json.loads((_read_bytes(path) or b"").decode("utf-8"))
     except (OSError, ValueError) as e:
         skipped.append({"period": period, "why": f"파일을 못 읽는다({type(e).__name__})"})
         return []
@@ -266,16 +373,21 @@ def _load_period(cdir: str, period: str, skipped: list[dict[str, Any]]) -> list[
         skipped.append({"period": period, "why": "후보 파일이 목록이 아니다"})
         return []
     by_fp: dict[str, dict[str, Any]] = {}
+    collided: set[str] = set()
     for i, raw in enumerate(doc):
         cand, why = _candidate(raw)
         if cand is None:
             skipped.append({"period": period, "index": i, "why": why})
             continue
-        # 같은 fp 여럿 = 하나(순서 독립: 정규화 JSON 이 가장 작은 것)
         prev = by_fp.get(cand["fp"])
+        if prev is not None and prev["signatures"] != cand["signatures"]:
+            collided.add(cand["fp"])                    # ★(f) fp 같은데 서명 집합 다름 = 고르지 않는다 · 둘 다 격리
+        # 같은 fp·같은 서명 여럿 = 하나(순서 독립: 정규화 JSON 이 가장 작은 것)
         if prev is None or json.dumps(cand, sort_keys=True, ensure_ascii=False) < json.dumps(prev, sort_keys=True, ensure_ascii=False):
             by_fp[cand["fp"]] = cand
-    return [by_fp[fp] for fp in sorted(by_fp)]          # ★fp 정렬(master ④)
+    for fp in sorted(collided):
+        skipped.append({"period": period, "fp": fp, "why": "fingerprint-collision — 서로 다른 서명 집합 · 둘 다 격리"})
+    return [by_fp[fp] for fp in sorted(by_fp) if fp not in collided]          # ★fp 정렬(master ④)
 
 
 def _decide(cands: list[dict[str, Any]], tickets: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -321,10 +433,13 @@ def _write_new(path: str, out: str, body: str) -> str:
     """초안 = 임시 파일 → 이름 붙이기(덮어쓰지 않음 · master ⑦). 돌려주는 값: written · same(같은 바이트 = 앞선 부분 실패의 우리 파일) ·
     collision(다른 파일·symlink·폴더 밖)."""
     if os.path.lexists(path):
-        if not _safe_target(path, out) or not os.path.isfile(path):
+        if not _safe_target(path, out):
             return "collision"
-        with open(path, encoding="utf-8") as fh:
-            return "same" if fh.read() == body else "collision"
+        try:
+            got = _read_bytes(path)
+        except OSError:
+            return "collision"
+        return "same" if got == body.encode("utf-8") else "collision"
     os.makedirs(out, mode=0o700, exist_ok=True)
     if not _inside(path, out):
         return "collision"
@@ -351,9 +466,15 @@ def run_locked(ctx: Any, s: dict[str, Any], *, dry_run: bool = False, now: datet
     out = output_dir(ctx, s)
     if out is None:
         return {"enabled": False, "why": "desk.autoticket=false"}
+    from agora import _lock
+    if not dry_run and _lock.backend() == _lock.NONE:      # ★(e) 잠글 수단이 없으면 쓰지 않는다(두 판 동시 쓰기 = 잘린 JSONL·중복 알림)
+        return {"enabled": True, "error": "잠금 수단 없음 — 쓰기 거절"}
     cdir = os.path.join(ctx.config_dir, counsel.COUNSEL_DIR)
     ledger = os.path.join(cdir, LEDGER_FILE)
-    rows, broken = _read_ledger(ledger)
+    try:
+        rows, broken = _read_ledger(ledger)
+    except Unsafe as e:
+        return {"enabled": True, "error": str(e)}
     st = _state(rows)
     res: dict[str, Any] = {"enabled": True, "dry_run": dry_run, "dir": out, "new": [], "recur": [], "ambiguous": [],
                            "collision": [], "noop": 0, "skipped": [], "ledger_errors": st["errors"] + (
@@ -387,7 +508,7 @@ def run_locked(ctx: Any, s: dict[str, Any], *, dry_run: bool = False, now: datet
                 res["noop"] += 1
                 continue
             if act == "ambiguous":
-                if (c["fp"], period) in st["amb"]:
+                if (c["fp"], period) in st["amb"] or ("ambiguous", c["fp"], period) in st["quarantine"]:
                     res["noop"] += 1
                     continue
                 st["amb"].add((c["fp"], period))
@@ -402,7 +523,7 @@ def run_locked(ctx: Any, s: dict[str, Any], *, dry_run: bool = False, now: datet
                 continue
             if act == "recur":
                 fp = d["ticket"]
-                if period in periods[fp]:
+                if period in periods[fp] or ("seen", fp, period) in st["quarantine"]:
                     res["noop"] += 1
                     continue
                 t = tickets[fp]
@@ -414,13 +535,9 @@ def run_locked(ctx: Any, s: dict[str, Any], *, dry_run: bool = False, now: datet
                 res["recur"].append({"slug": t["slug"], "period": period, "recur": recur, "brief": path})
                 if not dry_run:
                     # ⑦ 재발 append = 초안 끝 표식(기간) 검사로 멱등 → 원장 → 알림 · 경로는 재계산·폴더 안·symlink 아님일 때만
-                    if os.path.isfile(path) and _safe_target(path, out):
-                        with open(path, encoding="utf-8") as fh:
-                            has = any(ln.startswith(_recur_mark(period)) for ln in fh.read().splitlines())
-                        if not has:
-                            with open(path, "a", encoding="utf-8", newline="\n") as fh:
-                                fh.write(f"{_recur_mark(period)}{recur}회 · 집 {c['homes']} · 서명 "
-                                         f"{', '.join(x[:8] for x in c['signatures'])}\n")
+                    if os.path.lexists(path) and _safe_target(path, out):
+                        _recur_append(path, f"{_recur_mark(period)}{recur}회 · 집 {c['homes']} · 서명 "
+                                            f"{', '.join(x[:8] for x in c['signatures'])}", res)
                     _append_row(ledger, {"type": "seen", "fp": fp, "period": period, "homes": c["homes"],
                                          "signatures": c["signatures"], "key": key, "line": line, "notified": False,
                                          "at": stamp})
@@ -461,9 +578,13 @@ def tickets(ctx: Any, *, dry_run: bool = False, now: datetime.datetime | None = 
     if dry_run or output_dir(ctx, s) is None:     # 꺼짐 = 잠금 파일도 안 만든다(쓰기 0)
         return run_locked(ctx, s, dry_run=dry_run, now=now, notifier=notifier)
     from agora import errors, resident
-    held, _backend = resident._lock_acquire(os.path.join(counsel.counsel_dir(ctx), "batch.lock"))
+    held, backend = resident._lock_acquire(os.path.join(counsel.counsel_dir(ctx), "batch.lock"))
     if held is None:
         counsel._fail("배치가 돌고 있다 — 이번 실행은 물러난다", None, errors.GATE_REJECT)
+    from agora import _lock
+    if backend == _lock.NONE:                              # ★(e) try_acquire None(잠글 수단 없음) = 잠근 것이 아니다
+        resident._lock_release(held)
+        counsel._fail("잠금 수단이 없다 — 쓰기 실행 거절", {"backend": backend}, errors.PRECONDITION)
     try:
         return run_locked(ctx, s, now=now, notifier=notifier)
     finally:
