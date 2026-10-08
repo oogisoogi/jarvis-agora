@@ -16934,13 +16934,15 @@ def _case_mail_daily_exempt_only_without_note() -> None:
     ctx = _mail_ctx(store)
     ctx.isatty, ctx.prompt = (lambda: False), (lambda: False)
     key = _fixtures()["key_a"]
-    plain = mail.build(ctx, to="operator-b", payload={"intent": mail.DAILY, "daily": {"day": "2026-10-05"}})
+    # ★day = 지금(UTC) 날짜 — 받는 쪽 「봉투 ts ±1일」 검사(mail.py)와 같은 시계 · 구판 고정 2026-10-05 = 10-07 부터 code 10(날짜 시한폭탄)
+    day = _auto_now().date().isoformat()
+    plain = mail.build(ctx, to="operator-b", payload={"intent": mail.DAILY, "daily": {"day": day}})
     with _PinnedDesk(ctx, "operator-b"):
         out = _with_key(key, lambda: mail._publish(ctx, plain))
     if out["approval"].get("why") != "approval_exempt:mail_daily":
         raise AssertionError(f"빈 owner_note 일일 보고가 예외로 지나지 않았다: {out['approval']}")
     noted = mail.build(ctx, to="operator-b", payload={"intent": mail.DAILY,
-                                                      "daily": {"day": "2026-10-05", "owner_note": "오너 말"}})
+                                                      "daily": {"day": day, "owner_note": "오너 말"}})
     try:
         with _PinnedDesk(ctx, "operator-b"):
             _with_key(key, lambda: mail._publish(ctx, noted))
@@ -18876,7 +18878,14 @@ def _case_auto_rate_limit_and_unknown() -> None:
     """429 = 그날 포기(같은 날 재시도 0 · 줄은 남아 다음 날) · code 8 = 다음 판 **같은 message_id** · 23시간 넘은 pending = 새 문서."""
     import datetime as _dt
     ctx = _mail_ctx(_FakeMailStore())
+    from agora import collector, mail
     now = _auto_now()
+    # ★주간 단계는 이 케이스 밖(작성기 계약 = 「주간 작성기 계약」 케이스) — 판이 now 부터 +3일까지 도는 동안 지나는 주기의
+    #   직전 주기를 「끝남(empty)」으로 둔다. 구판은 그 사이 월 06:00 KST(다음 주기)를 넘는 요일(금~일 · 월 06시 전)에
+    #   직전 주기의 신호 줄 때문에 작성기가 불려 적색이었다(실측 7요일 × 시각 · 10-09 · 시계를 옮기는 처방은 미래/7일 창에 걸린다).
+    _pol = mail.weekly_policy({}, now)
+    _book = {mail.previous_cycle(mail.cycle_of(now + _dt.timedelta(hours=h), _pol), _pol): "empty" for h in range(0, 24 * 4 + 1, 6)}
+    collector._write_json(os.path.join(collector.counsel_dir(ctx.config_dir), collector.STATE_FILE), {"weekly": _book})
     _signal_ledger(ctx, [_sig_row()])
     sent: list[dict[str, Any]] = []
     mode = {"m": "429"}
@@ -18994,25 +19003,29 @@ def _case_auto_needs_one_pinned_desk() -> None:
 
 def _case_auto_daily_closed_fields() -> None:
     """일일 = 닫힌 칸만 · 형식 밖 값은 **그 칸만** 뺀다(null 0 · 한 칸 탓에 한 통을 잃지 않는다) · owner_note 0 · weekly_skipped 조건부."""
-    from agora import collector
+    from agora import collector, mail
+    import datetime as _dt
     now = _auto_now()
+    # ★날짜 = 지금 기준(구판 고정 today·weekly_skipped = 받는 쪽 「봉투 ts ±1일」·「직전 7주」 검사에 걸리는 시한폭탄 · 10-07 부터 적색)
+    today = now.date().isoformat()
+    skipped = _auto_prev_cycle(now)[0]
     facts = {**_AUTO_FACTS, "seats": {"count": 1, "roles": ["Master"]}, "owner_note": "새면 안 된다",
              "doctor": {"ok": 12, "warn": 1, "fail": 0, "skip": 1, "warn_ids": ["dept-awakening-seed"], "fail_ids": []},
-             "uptime": {"last_boot": "2026-10-04T23:45:00.000Z", "uptime_s": 8106}, "nope": 1,
+             "uptime": {"last_boot": mail.now_ms_iso(now - _dt.timedelta(seconds=8106)), "uptime_s": 8106}, "nope": 1,
              "depts": {"active": -1, "tombstones": 0}}
-    out = collector.daily_payload(facts, today="2026-10-06", signatures=["a" * 32], weekly_skipped="2026-W40", now=now)
+    out = collector.daily_payload(facts, today=today, signatures=["a" * 32], weekly_skipped=skipped, now=now)
     d = out["daily"]
     # ★`depts` = 형식 밖 값(받는 쪽 검사기가 거부) — 범주 거르기(⑬)와 따로 **검사기 거르기**를 잰다(M702).
-    if "seats" in d or "depts" in d or "owner_note" in d or "nope" in d or d.get("weekly_skipped") != "2026-W40" \
+    if "seats" in d or "depts" in d or "owner_note" in d or "nope" in d or d.get("weekly_skipped") != skipped \
             or d.get("doctor", {}).get("warn_ids") != ["dept-awakening-seed"] or d["errors"]["signatures"] != ["a" * 32] \
             or d.get("version") != {"host": "1.1.8", "pack": "1.1.8"}:
         raise AssertionError(f"일일 칸 거르기가 틀렸다: {sorted(d)}")
-    if "errors" in collector.daily_payload(facts, today="2026-10-06", signatures=None, weekly_skipped=None, now=now)["daily"]:
+    if "errors" in collector.daily_payload(facts, today=today, signatures=None, weekly_skipped=None, now=now)["daily"]:
         raise AssertionError("서명 집합을 모르는데 errors 칸을 실었다")
     # ★리뷰 ⑬: 자리 역할 = 접힌 범주(master·cso·worker·pack)만 — 형식(소문자 토큰)은 맞아도 범주 밖 이름이 하나면 칸째 뺀다.
     folded = {"count": 4, "roles": ["cso", "master", "pack", "worker"]}
     for roles, keep in ((folded["roles"], True), (["master", "w3"], False), (["edu-dept", "master"], False)):
-        got = collector.daily_payload({"seats": {"count": len(roles), "roles": roles}}, today="2026-10-06",
+        got = collector.daily_payload({"seats": {"count": len(roles), "roles": roles}}, today=today,
                                       signatures=None, weekly_skipped=None, now=now)["daily"]
         if ("seats" in got) is not keep:
             raise AssertionError(f"자리 역할 범주 거르기가 틀렸다: {roles} → {got.get('seats')}")
