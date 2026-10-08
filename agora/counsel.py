@@ -49,6 +49,7 @@ DEFAULTS: dict[str, Any] = {
     "daily_cost_cap_usd": 10,        # 하루(06:00 KST 경계) 합산 천장 = 분석 5 + 공개 답 5 — 넘을 호출은 거절(code 3 · master f78aa7c6 R2)
     "agent": None,                   # 배치 에이전트 실행 파일(없으면 PATH 의 claude)
     "weekly_dow": 0,                 # 주간 모드 요일(0=월 … 6=일 · day_of 기준) — 그날 배치가 주간 성찰 보고를 같은 분석 호출에 합산(명세 §1-3 (6))
+    "autoticket": True,              # BACKLOG 후보 → 티켓 초안(agora/autoticket.py) — false = 끔 · 경로 문자열 = 출력 폴더 · 그 밖 = counsel/tickets/
 }
 WEEKLY_CYCLES_FILE = "weekly_cycles.jsonl"   # 주기별 완료·계수 원장(2판 M8·M10·m4 · append-only)
 WEEKLY_SAMPLE_TARGET = 4             # 표본 4장(주간 모드 배치에서 주간 보고 ≥1통) — 닿으면 master 에 1줄(주기·문턱 재판정)
@@ -133,6 +134,9 @@ def settings(config: dict[str, Any] | None) -> dict[str, Any]:
     v = raw.get("weekly_dow")
     if type(v) is int and 0 <= v <= 6:
         out["weekly_dow"] = v
+    v = raw.get("autoticket")
+    if v is False or (type(v) is str and v.strip()):
+        out["autoticket"] = v
     return out
 
 
@@ -1564,6 +1568,12 @@ def _batch_locked(ctx: Any, *, dry_run: bool, now: datetime.datetime | None,
         with open(os.path.join(out_dir, "backlog_candidates.json"), "w", encoding="utf-8", newline="\n") as fh:
             json.dump(backlog_candidates(data, model_doc), fh, ensure_ascii=False, indent=1)
         _weekly_ledger(ctx, s, data, call, ok=ok_analysis, now=now, notifier=notifier)
+    # ★BACKLOG 후보 → 티켓 초안(같은 잠금 · LLM 0) — 실패해도 배치는 깨지 않는다(결과·알림 꼬리에 오류 1).
+    from agora import autoticket
+    try:
+        tickets = autoticket.run_locked(ctx, s, now=now, notifier=notifier)
+    except Exception as e:  # noqa: BLE001 — 후처리 결함이 보고서·초안·원장을 쓴 배치를 실패로 만들지 않게
+        tickets = {"enabled": True, "error": type(e).__name__}
     plaza_keys = {k for a in data["addresses"].values() if a["layer"] == "plaza" for k in a["keys"]}
     bpath = _desk_path(ctx, BATCHED_FILE)
     for key in data["keys"]:
@@ -1572,7 +1582,8 @@ def _batch_locked(ctx: Any, *, dry_run: bool, now: datetime.datetime | None,
     line = (f"상담소 배치 {period} · 보고서 {report_path} · 입력 대화 {data['counts']['mail_threads']}"
             f" · 공개 글 {data['counts']['plaza_groups']} · 신호 {data['counts']['signals']} · 일일 {data['counts']['dailies']}"
             + (f" · 주간 {data['counts']['weeklies']}(제안 묶음 §9 · 비율표 §10)" if weekly_mode else "")
-            + f" · 이월 {data['carried']} · 답 초안 {len(drafts['replies'])} · {call['summary']}")
+            + f" · 이월 {data['carried']} · 답 초안 {len(drafts['replies'])} · {call['summary']}"
+            + autoticket.summary(tickets))
     sent = notify(s, line, runner=notifier)
     refused = [c for c in (call, call.get("public") or {}) if c.get("refused")]
     if refused:
@@ -1582,7 +1593,7 @@ def _batch_locked(ctx: Any, *, dry_run: bool, now: datetime.datetime | None,
                                                  "cap_usd": s["daily_cost_cap_usd"]}, errors.GATE_REJECT)
     return {"period": period, "dir": out_dir, "report": report_path, "call": call,
             "drafts": len(drafts["replies"]), "carried": data["carried"], "counts": data["counts"],
-            "notify": sent}
+            "notify": sent, "autoticket": tickets}
 
 
 # ── 게시(master 가 보고서를 읽은 뒤) ─────────────────────────────────────────
@@ -1684,6 +1695,7 @@ def publish(ctx: Any, *, period: str, mail_send: Callable[..., Any] | None = Non
 CLI_ACTION_ARGS: dict[str, tuple[str, ...]] = {
     "batch":   ("dry_run",),
     "publish": ("date",),
+    "tickets": ("dry_run",),          # BACKLOG 후보 → 티켓 초안(agora/autoticket.py · 멱등 · dry-run = 쓰기 0)
     # ★참가자 쪽 자동 전달(T3 · `agora.collector`) — 데스크 동작이 아니다(데스크 설정 없이 돈다).
     "auto":    ("facts", "facts_nonce"),
     "off":     (),
@@ -1696,7 +1708,7 @@ CLI_ACTION_REQUIRED: dict[str, tuple[str, ...]] = {"publish": ("date",)}
 def check_action_args(action: str, kw: dict[str, Any]) -> None:
     if not action:
         _fail("counsel 은 동작이 필요하다", {"accepts": list(CLI_ACTION_ARGS),
-                                            "usage": "agora counsel batch [--dry-run] | publish --date <YYYY-MM-DD>"
+                                            "usage": "agora counsel batch [--dry-run] | publish --date <YYYY-MM-DD> | tickets [--dry-run]"
                                                      " | auto [--facts <파일> --facts-nonce <값>] | off | on"})
     extra = sorted(k for k in kw if k not in CLI_ACTION_ARGS[action] + ("dir",))
     if extra:
@@ -1714,4 +1726,7 @@ def dispatch(ctx: Any, action: str, kw: dict[str, Any]) -> dict[str, Any]:
         _fail("이 설정 폴더는 상담소 데스크가 아니다(config.json desk.enabled)", None, errors.PRECONDITION)
     if action == "batch":
         return batch(ctx, dry_run=bool(kw.get("dry_run", False)))
+    if action == "tickets":
+        from agora import autoticket
+        return autoticket.tickets(ctx, dry_run=bool(kw.get("dry_run", False)))
     return publish(ctx, period=str(kw["date"]))

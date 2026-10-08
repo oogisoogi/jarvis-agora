@@ -284,7 +284,7 @@ SELF_PARSED = ("selfcheck", "selftest", "keygen", "mcp-serve")
 # 진입점(`_run_onboard`)과 문서 시험이 같은 표를 봐야 「문서대로 치면 돈다」가 참이 된다.
 ACTION_ARG: dict[str, tuple[str, ...]] = {"checkpoint": ("issue",),
                                           "mail": ("send", "inbox", "read", "ack", "sync"),
-                                          "counsel": ("batch", "publish", "auto", "off", "on")}
+                                          "counsel": ("batch", "publish", "tickets", "auto", "off", "on")}
 
 
 def action_names(command: str) -> tuple[str, ...]:
