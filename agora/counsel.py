@@ -1571,7 +1571,7 @@ def _batch_locked(ctx: Any, *, dry_run: bool, now: datetime.datetime | None,
     # ★BACKLOG 후보 → 티켓 초안(같은 잠금 · LLM 0) — 실패해도 배치는 깨지 않는다(결과·알림 꼬리에 오류 1).
     from agora import autoticket
     try:
-        tickets = autoticket.run_locked(ctx, s, now=now, notifier=notifier)
+        tickets = autoticket.run_locked(ctx, s, dry_run=dry_run, now=now, notifier=notifier)   # 방어: dry-run 은 위 :1521 에서 이미 반환
     except Exception as e:  # noqa: BLE001 — 후처리 결함이 보고서·초안·원장을 쓴 배치를 실패로 만들지 않게
         tickets = {"enabled": True, "error": type(e).__name__}
     plaza_keys = {k for a in data["addresses"].values() if a["layer"] == "plaza" for k in a["keys"]}

@@ -161,7 +161,7 @@ def _recur_mark(period: str) -> str:
     return f"- {period} · 재발 "
 
 
-def _recur_append(path: str, want: str, res: dict[str, Any]) -> None:
+def _recur_append(path: str, want: str, res: dict[str, Any]) -> bool:
     """재발 줄 = **완전한 예상 행 전체 일치**로 판정(3판 (c)) · 끝의 부분 행이 예상 행의 앞부분이면 나머지를 채워 완성 ·
     같은 fd(`O_NOFOLLOW|O_APPEND` · 정규 파일 fstat)로 쓰고 fsync — 그 뒤에만 seen 을 원장에 적는다(3판 (d))."""
     fd = _open_regular(path, os.O_RDWR | os.O_APPEND)
@@ -176,17 +176,18 @@ def _recur_append(path: str, want: str, res: dict[str, Any]) -> None:
         lines = text.split("\n")
         done, tail = lines[:-1], lines[-1]
         if want in done:
-            return
+            return True
         if tail and want.startswith(tail):
             add = want[len(tail):] + "\n"
         elif tail:
             add = "\n" + want + "\n"
         elif any(ln.startswith(want.split(" 재발 ")[0] + " 재발 ") for ln in done):
             res["ledger_errors"].append(f"초안의 같은 기간 재발 줄이 예상과 다르다 — 그대로 둠 · {os.path.basename(path)}")
-            return
+            return False
         else:
             add = want + "\n"
         _write_all(fd, add.encode("utf-8"))
+        return True
     finally:
         os.close(fd)
 
@@ -292,7 +293,7 @@ def _valid_row(r: dict[str, Any]) -> bool:
     """닫힌 스키마(3판 (a)) — 칸 집합 정확히 · fp 16 hex · 기간 · 서명 32hex · key 재계산 일치 · 줄 = 한 줄 문자열."""
     from agora import mail
     t = r.get("type")
-    if t not in _ROW_KEYS or set(r) != _ROW_KEYS[t] or type(r.get("at")) is not str:
+    if type(t) is not str or t not in _ROW_KEYS or set(r) != _ROW_KEYS[t] or type(r.get("at")) is not str:
         return False
     if t == "notified":
         return type(r["key"]) is str and bool(_KEY_ROW_RE.match(r["key"]))
@@ -439,7 +440,10 @@ def _write_new(path: str, out: str, body: str) -> str:
             got = _read_bytes(path)
         except OSError:
             return "collision"
-        return "same" if got == body.encode("utf-8") else "collision"
+        if got != body.encode("utf-8"):
+            return "collision"
+        _fsync_dir(out)                         # 앞선 부분 실패의 우리 파일 — 엔트리 확정 뒤 확정
+        return "same"
     os.makedirs(out, mode=0o700, exist_ok=True)
     if not _inside(path, out):
         return "collision"
@@ -457,7 +461,22 @@ def _write_new(path: str, out: str, body: str) -> str:
             os.unlink(tmp)
         except OSError:
             pass
+    _fsync_dir(out)                             # ★새 디렉터리 엔트리를 확정한 뒤에만 ticket 행(4판 ④)
     return "written"
+
+
+def _fsync_dir(path: str) -> None:
+    """디렉터리 엔트리 확정 — 윈(디렉터리 fd 불가)은 건너뛴다."""
+    try:
+        dfd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dfd)
+    except OSError:
+        pass
+    finally:
+        os.close(dfd)
 
 
 def run_locked(ctx: Any, s: dict[str, Any], *, dry_run: bool = False, now: datetime.datetime | None = None,
@@ -477,7 +496,7 @@ def run_locked(ctx: Any, s: dict[str, Any], *, dry_run: bool = False, now: datet
         return {"enabled": True, "error": str(e)}
     st = _state(rows)
     res: dict[str, Any] = {"enabled": True, "dry_run": dry_run, "dir": out, "new": [], "recur": [], "ambiguous": [],
-                           "collision": [], "noop": 0, "skipped": [], "ledger_errors": st["errors"] + (
+                           "collision": [], "held": [], "noop": 0, "skipped": [], "ledger_errors": st["errors"] + (
                                [f"깨진 줄 {broken} — 격리"] if broken else []), "notify": [], "renotify": []}
     stamp = counsel._iso(now or counsel._now())
 
@@ -498,6 +517,13 @@ def run_locked(ctx: Any, s: dict[str, Any], *, dry_run: bool = False, now: datet
     for period in _periods(cdir, res["skipped"]):
         cands = []
         for c in _load_period(cdir, period, res["skipped"]):
+            t0 = tickets.get(c["fp"])
+            if t0 is not None and t0["signatures"] != c["signatures"]:
+                # ★원장 티켓과 fp 같고 서명 집합 다름(4판 ⑤) = 쓰기 전 둘 다 fingerprint-collision 격리 · 그 서명 겹침 후보 보류
+                res["skipped"].append({"period": period, "fp": c["fp"], "why": "fingerprint-collision — 원장 티켓과 서명 집합 다름 · 둘 다 격리"})
+                st["blocked"] |= set(t0["signatures"]) | set(c["signatures"])
+                tickets.pop(c["fp"], None)
+                continue
             if set(c["signatures"]) & st["blocked"]:     # 격리된 티켓과 겹침 = 원장을 master 가 고칠 때까지 보류(새 티켓으로 새지 않게)
                 res["skipped"].append({"period": period, "fp": c["fp"], "why": "원장 격리 티켓과 겹침 — 보류"})
                 continue
@@ -529,15 +555,23 @@ def run_locked(ctx: Any, s: dict[str, Any], *, dry_run: bool = False, now: datet
                 t = tickets[fp]
                 path = brief_path(out, t["period"], t["slug"])
                 recur = len(periods[fp] | {period}) - 1
-                periods[fp].add(period)
                 key = f"seen:{fp}:{period}"
                 line = _line("recur", slug=t["slug"], homes=c["homes"], brief=path, recur=recur)
+                if not dry_run:
+                    # ⑦ 재발 append = 완전한 예상 행 확인 또는 append+fsync 성공일 때만 seen(4판 ②) — 초안 없음·symlink·
+                    #   폴더 밖·같은 기간 다른 줄 = 격리·보고(seen 0 · 알림 0 · 다음 실행이 다시 본다)
+                    try:
+                        ok = os.path.lexists(path) and _safe_target(path, out) and _recur_append(
+                            path, f"{_recur_mark(period)}{recur}회 · 집 {c['homes']} · 서명 "
+                                  f"{', '.join(x[:8] for x in c['signatures'])}", res)
+                    except Unsafe:
+                        ok = False
+                    if not ok:
+                        res["held"].append({"slug": t["slug"], "period": period, "why": "초안 재발 줄을 확정 못 함 — seen 0"})
+                        continue
+                periods[fp].add(period)
                 res["recur"].append({"slug": t["slug"], "period": period, "recur": recur, "brief": path})
                 if not dry_run:
-                    # ⑦ 재발 append = 초안 끝 표식(기간) 검사로 멱등 → 원장 → 알림 · 경로는 재계산·폴더 안·symlink 아님일 때만
-                    if os.path.lexists(path) and _safe_target(path, out):
-                        _recur_append(path, f"{_recur_mark(period)}{recur}회 · 집 {c['homes']} · 서명 "
-                                            f"{', '.join(x[:8] for x in c['signatures'])}", res)
                     _append_row(ledger, {"type": "seen", "fp": fp, "period": period, "homes": c["homes"],
                                          "signatures": c["signatures"], "key": key, "line": line, "notified": False,
                                          "at": stamp})

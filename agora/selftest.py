@@ -4432,7 +4432,7 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                 'M739-auto-off-due-not-in-config', 'M740-auto-on-ignores-due', 'M741-auto-still-on-auto-only', 'M742-auto-on-skips-purge', 'M743-auto-on-without-lock', 'M744-auto-facts-nonce-ignored', 'M745-auto-daily-future-cutoff-kept', 'M746-cli-counsel-facts-nonce-closed'),
     # ★119(2026-10-09) — 티켓 후보 자동 초안. 잃는 것: 재발이 새 티켓(소음) · 흔한 서명이 무관한 문제를 사슬로 엮음 ·
     #   참가자 글의 표식 위조 · 꺼도 돎 · 재실행 중복 · dry-run 쓰기 · 후처리 결함이 배치를 깨뜨림 · CLI 닫힘 — 전부 조용히 난다.
-    "티켓후보": ('M747-autoticket-overlap-exact-only', 'M748-autoticket-ambiguous-chains', 'M749-autoticket-marker-kept', 'M750-autoticket-off-ignored', 'M751-autoticket-rerun-recounts', 'M752-autoticket-dry-run-writes', 'M753-autoticket-batch-failure-raises', 'M754-cli-counsel-tickets-closed', 'M755-autoticket-period-symlink-followed', 'M756-autoticket-slug-fp8', 'M757-autoticket-foreign-file-adopted', 'M758-autoticket-fresh-chain-not-ambiguous', 'M759-autoticket-ledger-conflict-kept', 'M760-autoticket-brief-symlink-followed', 'M761-autoticket-recur-line-repeated', 'M762-autoticket-ledger-no-lf-guard', 'M763-autoticket-failed-notify-dropped', 'M764-autoticket-own-partial-file-refused', 'M765-autoticket-row-schema-skipped', 'M766-autoticket-short-write-accepted', 'M767-autoticket-ledger-read-whole', 'M768-autoticket-recur-prefix-match', 'M769-autoticket-open-follows-symlink', 'M770-autoticket-no-lock-writes', 'M771-autoticket-fp-collision-picks-one', 'M772-autoticket-digest-conflict-merged'),
+    "티켓후보": ('M747-autoticket-overlap-exact-only', 'M748-autoticket-ambiguous-chains', 'M749-autoticket-marker-kept', 'M750-autoticket-off-ignored', 'M751-autoticket-rerun-recounts', 'M752-autoticket-dry-run-writes', 'M753-autoticket-batch-failure-raises', 'M754-cli-counsel-tickets-closed', 'M755-autoticket-period-symlink-followed', 'M756-autoticket-slug-fp8', 'M757-autoticket-foreign-file-adopted', 'M758-autoticket-fresh-chain-not-ambiguous', 'M759-autoticket-ledger-conflict-kept', 'M761-autoticket-recur-line-repeated', 'M762-autoticket-ledger-no-lf-guard', 'M763-autoticket-failed-notify-dropped', 'M764-autoticket-own-partial-file-refused', 'M765-autoticket-row-schema-skipped', 'M766-autoticket-short-write-accepted', 'M767-autoticket-ledger-read-whole', 'M768-autoticket-recur-prefix-match', 'M769-autoticket-open-follows-symlink', 'M770-autoticket-no-lock-writes', 'M771-autoticket-fp-collision-picks-one', 'M772-autoticket-digest-conflict-merged', 'M773-autoticket-row-type-unchecked', 'M774-autoticket-seen-without-brief', 'M775-autoticket-no-dir-fsync', 'M776-autoticket-ledger-fp-collision-kept'),
     # ★09-19 신설 — **광장v2**. 피드 순서와 「어느 방이 커뮤니티인가」를 계산이 정하는 자리.
     #   여기서 잃는 것은 조용하다: 서버 피드와 클라이언트 피드가 다른 순서를 보이거나, 일반 토론방이
     #   커뮤니티로 읽혀 전역 상한이 토론을 막는다 — 오류 없이.
@@ -18887,7 +18887,9 @@ def _case_autoticket_brief_path_recomputed() -> None:
     os.symlink(victim, autoticket.brief_path(out, "2026-10-05", "bl-" + fp))
     _at_put(ctx, "2026-10-12", [_at_cand([_AT_A])])
     r = _at_run(ctx, lines)
-    if len(r["recur"]) != 1 or r["recur"][0]["brief"] == victim or open(victim, encoding="utf-8").read() != "원본\n":
+    # 4판 ②: 재계산한 초안 자리가 symlink = 재발 확정 못 함 → seen 0 · 알림 0 · held 보고
+    if r["recur"] or len(r["held"]) != 1 or open(victim, encoding="utf-8").read() != "원본\n" \
+            or any(x["type"] == "seen" for x in _at_ledger(ctx)):
         raise AssertionError(f"원장 경로·symlink 를 따라 폴더 밖에 썼다: {r}")
 
 
@@ -19103,6 +19105,78 @@ def _case_autoticket_row_digest_conflict() -> None:
     r = _at_run(ctx, lines)
     if not any("내용이 다른 ticket 중복" in e for e in r["ledger_errors"]) or r["renotify"] or len(lines) != n:
         raise AssertionError(f"행 전체가 다른 중복을 축약·재알림했다: {r}")
+
+
+def _case_autoticket_row_type_not_str() -> None:
+    """4판 ① `{"type":[]}` 한 줄 = 해시 전에 격리(TypeError 0)."""
+    from agora import autoticket
+    ctx, lines = _at_world()
+    autoticket._append_row(os.path.join(ctx.config_dir, "counsel", autoticket.LEDGER_FILE), {"type": []})
+    _at_put(ctx, "2026-10-12", [_at_cand([_AT_A])])
+    r = _at_run(ctx, lines)
+    if len(r["new"]) != 1 or not any("형식이 틀린 행" in e for e in r["ledger_errors"]):
+        raise AssertionError(f"type 이 문자열 아닌 행이 격리되지 않았다: {r}")
+
+
+def _case_autoticket_recur_needs_brief() -> None:
+    """4판 ② 초안이 없어진 티켓에 겹치는 후보 = seen 0 · 알림 0 · held 보고(다음 실행이 다시 본다)."""
+    ctx, lines = _at_world()
+    _at_put(ctx, "2026-10-12", [_at_cand([_AT_A])])
+    os.unlink(_at_run(ctx, lines)["new"][0]["brief"])
+    _at_put(ctx, "2026-10-19", [_at_cand([_AT_A, _AT_C])])
+    n = len(lines)
+    r = _at_run(ctx, lines)
+    if r["recur"] or len(r["held"]) != 1 or len(lines) != n or any(x["type"] == "seen" for x in _at_ledger(ctx)):
+        raise AssertionError(f"초안 없이 seen 을 확정했다: {r}")
+
+
+def _case_autoticket_batch_dry_run_writes_nothing() -> None:
+    """4판 ③ `counsel batch --dry-run` + 과거 후보 파일 = 티켓 원장·초안·알림 쓰기 0(계약 3)."""
+    from agora import counsel
+    ctx, _s = _desk_world([], config=dict(_DESK_CONFIG, desk={"enabled": True, "notify_cmd": ["true"]}))
+    _at_put(ctx, "2026-10-05", [_at_cand([_AT_A])])
+    called: list[Any] = []
+    counsel.batch(ctx, dry_run=True, notifier=lambda *a, **k: called.append(a))
+    cdir = os.path.join(ctx.config_dir, "counsel")
+    if called or os.path.exists(os.path.join(cdir, "tickets.jsonl")) or os.path.exists(os.path.join(cdir, "tickets")):
+        raise AssertionError("dry-run 배치가 티켓 후처리를 실제로 썼다")
+
+
+def _case_autoticket_dir_fsync_before_ledger() -> None:
+    """4판 ④ 새 초안 link 뒤 출력 디렉터리 fsync 가 ticket 행 append 보다 먼저."""
+    from agora import autoticket
+    ctx, lines = _at_world()
+    _at_put(ctx, "2026-10-12", [_at_cand([_AT_A])])
+    order: list[str] = []
+    o_dir, o_row = autoticket._fsync_dir, autoticket._append_row
+    autoticket._fsync_dir = lambda p: (order.append("dir"), o_dir(p))[1]
+    autoticket._append_row = lambda p, r: (order.append(r.get("type")), o_row(p, r))[1]
+    try:
+        _at_run(ctx, lines)
+    finally:
+        autoticket._fsync_dir, autoticket._append_row = o_dir, o_row
+    if "dir" not in order or "ticket" not in order or order.index("dir") > order.index("ticket"):
+        raise AssertionError(f"디렉터리 fsync 전에 ticket 행을 적었다: {order}")
+
+
+def _case_autoticket_ledger_fp_collision() -> None:
+    """4판 ⑤ 후보 fp 가 원장 티켓 fp 와 같고 서명 집합이 다르면 = 쓰기 전 둘 다 fingerprint-collision 격리 · 재발·새 티켓 0."""
+    from agora import autoticket
+    ctx, lines = _at_world()
+    _at_put(ctx, "2026-10-12", [_at_cand([_AT_A])])
+    _at_run(ctx, lines)
+    fpA = autoticket.fingerprint([_AT_A])
+    _at_put(ctx, "2026-10-19", [_at_cand([_AT_B])])
+    orig = autoticket.fingerprint
+    autoticket.fingerprint = lambda sigs: fpA if set(sigs) == {_AT_B} else orig(sigs)
+    try:
+        n = len(lines)
+        r = _at_run(ctx, lines)
+    finally:
+        autoticket.fingerprint = orig
+    if r["new"] or r["recur"] or len(lines) != n \
+            or not any("원장 티켓과 서명 집합 다름" in x["why"] for x in r["skipped"]):
+        raise AssertionError(f"원장 fp 충돌을 격리하지 않았다: {r}")
 
 
 def _case_autoticket_cli() -> None:
@@ -20640,6 +20714,11 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("티켓후보: 잠금 수단 없음 거절",             _case_autoticket_no_lock_backend_refused, None),
     ("티켓후보: 기간 안 fp 충돌 격리",            _case_autoticket_fp_collision_isolated, None),
     ("티켓후보: 행 digest 충돌 격리",             _case_autoticket_row_digest_conflict, None),
+    ("티켓후보: type 문자열 아닌 행 격리",        _case_autoticket_row_type_not_str, None),
+    ("티켓후보: 초안 없으면 seen 0",              _case_autoticket_recur_needs_brief, None),
+    ("티켓후보: 배치 dry-run 쓰기 0",             _case_autoticket_batch_dry_run_writes_nothing, None),
+    ("티켓후보: 디렉터리 fsync 뒤 원장",          _case_autoticket_dir_fsync_before_ledger, None),
+    ("티켓후보: 원장 fp 충돌 격리",               _case_autoticket_ledger_fp_collision, None),
     # ★T3 상담소 자동 전달(agora/collector.py)
     ("꾸러미: 상담소 핀이 실린다", _case_package_ships_desk_pin, None),
     ('상담소자동: 신호 하루 한 통·같은 바이트 이동', _case_auto_signal_once_same_bytes, None),
@@ -23681,8 +23760,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            fp, slug = c["fp"], f"bl-{c[\'fp\'][:8]}"',
      '티켓후보: slug 16자·충돌 확정 0'),
     ('M757-autoticket-foreign-file-adopted', 'agora/autoticket.py',
-     '        return "same" if got == body.encode("utf-8") else "collision"',
-     '        return "same"',
+     '        if got != body.encode("utf-8"):\n            return "collision"',
+     '        if False:\n            return "collision"',
      '티켓후보: slug 16자·충돌 확정 0'),
     ('M758-autoticket-fresh-chain-not-ambiguous', 'agora/autoticket.py',
      '        elif len(peers[fp]) >= 2:',
@@ -23692,10 +23771,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            blocked |= {x for r in good if r["type"] == "ticket" and r["fp"] == gk[1] for x in r["signatures"]}',
      '            pass',
      '티켓후보: 원장 중복 축약·격리'),
-    ('M760-autoticket-brief-symlink-followed', 'agora/autoticket.py',
-     '                    if os.path.lexists(path) and _safe_target(path, out):',
-     '                    if os.path.lexists(path):',
-     '티켓후보: 초안 경로 재계산'),
+    # M760 삭제(4판 · 등가 변이): 재발 경로의 _safe_target 을 빼도 O_NOFOLLOW(M769)가 같은 symlink 를 막아 행동이 같다 — 생존 = 무의미.
     ('M761-autoticket-recur-line-repeated', 'agora/autoticket.py',
      '        elif any(ln.startswith(want.split(" 재발 ")[0] + " 재발 ") for ln in done):',
      '        elif False:',
@@ -23709,8 +23785,8 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    for p in []:',
      '티켓후보: 알림 실패 재알림'),
     ('M764-autoticket-own-partial-file-refused', 'agora/autoticket.py',
-     '        return "same" if got == body.encode("utf-8") else "collision"',
-     '        return "collision"',
+     '        _fsync_dir(out)                         # 앞선 부분 실패의 우리 파일 — 엔트리 확정 뒤 확정\n        return "same"',
+     '        _fsync_dir(out)                         # 앞선 부분 실패의 우리 파일 — 엔트리 확정 뒤 확정\n        return "collision"',
      '티켓후보: 부분 실패 재실행 한 번'),
     ('M765-autoticket-row-schema-skipped', 'agora/autoticket.py',
      '        if _valid_row(r):\n            good.append(r)',
@@ -23744,6 +23820,22 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '    bad = {gk for gk, ds in groups.items() if len(ds) > 1}',
      '    bad = set()',
      '티켓후보: 행 digest 충돌 격리'),
+    ('M773-autoticket-row-type-unchecked', 'agora/autoticket.py',
+     '    if type(t) is not str or t not in _ROW_KEYS or set(r) != _ROW_KEYS[t] or type(r.get("at")) is not str:',
+     '    if t not in _ROW_KEYS or set(r) != _ROW_KEYS[t] or type(r.get("at")) is not str:',
+     '티켓후보: type 문자열 아닌 행 격리'),
+    ('M774-autoticket-seen-without-brief', 'agora/autoticket.py',
+     '                    if not ok:\n                        res["held"]',
+     '                    if False:\n                        res["held"]',
+     '티켓후보: 초안 없으면 seen 0'),
+    ('M775-autoticket-no-dir-fsync', 'agora/autoticket.py',
+     '    _fsync_dir(out)                             # ★새 디렉터리 엔트리를',
+     '    pass                                        # ★새 디렉터리 엔트리를',
+     '티켓후보: 디렉터리 fsync 뒤 원장'),
+    ('M776-autoticket-ledger-fp-collision-kept', 'agora/autoticket.py',
+     '            if t0 is not None and t0["signatures"] != c["signatures"]:',
+     '            if False:',
+     '티켓후보: 원장 fp 충돌 격리'),
 )
 
 
