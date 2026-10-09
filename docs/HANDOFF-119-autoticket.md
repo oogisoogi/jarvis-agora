@@ -1,6 +1,6 @@
 # HANDOFF — 119 상담소 BACKLOG 후보 → 티켓 초안 생성기(TICKET=agora-119-autoticket · 2026-10-09)
 
-## 0. 지금 상태(한눈) — 1판 끝(2026-10-09 · 다음 = master 적대 검토 codex 1R → 반영 → 병합·데스크 재배포 = master)
+## 0. 지금 상태(한눈) — **4판 끝**(2026-10-09 09:26 · codex 1R·2R·3R + master 직접 판정 반영 · 다음 = master diff 정독·종결 → 병합 main + 데스크 재배포 = master) · 1판 기록은 아래 그대로
 - 가지 `feat/119-autoticket`(origin/main `e1372db` 위) · push 0 · 라이브 데스크 쓰기 0. 커밋 = 설계 `3da07f0` · 구현 `ebef940` · 문서 정정·이 문서(아래 §2).
 - 설계 1장 = `docs/design/AUTOTICKET-119.md`(master 판정 da6c43ce 통과 — ⑴ 겹침 = 같은 티켓 + **둘 이상 겹침 = 모호** ⑵ 출력 폴더 = 설정 값 ⑶ 보안 4 채택 ⑷ 초안 머리 「생성: autoticket <판> · 원장 fp · 기간」).
 - 게이트: commit_gate @ebef940 = 결과 FAIL(rc 1) — **이 가지 변경 밖 기존 적색만**: 케이스 612/615 · 뮤테이션 690/695 KILLED · NOT-APPLIED 5 · 공개 표현 위반 2(SPEC-mail §608 기존 1 + 이 설계 문서 1 → 정정 커밋에서 0) · 비밀 누출 0 · F-1 25/25 · codex 0.1.4 11/11 · 공백 clean. 이 티켓 케이스 8/8 PASS · M747~M754 8/8 KILLED. 실패 3·NOT-APPLIED 5 = 깨끗한 `e1372db` 에서도 같은 적색(§4) — selftest 원문 JSON 재실행으로 대조.
@@ -68,9 +68,23 @@
 | ④ | 1R #9 알림 성공 뒤 notified 행 전 중단 | master 08:26 결정 「적어도 한 번」 · 수신 쪽 멱등 키 = 1.1.10 |
 | ⑤ | 2R 신규 BLOCK 2 충돌 알림 실행마다 1줄 | master 08:26 결정(해소까지 실행마다 1줄) = 설계 결정 |
 | ⑥ | 1R #10 광역 fault injection | (a)~(g) 각각의 뮤턴트로 한정 |
+| ⑦ | 3R (d) 부모 디렉터리 dirfd·openat 결박 | 2R 기각 ② 그대로 — counsel/ = 신뢰 경계 안 · `O_NOFOLLOW` 는 마지막 성분까지(master 0b1712a8) |
 
 ### BACKLOG(1.1.10 · master 400d0710 ②)
 - 알림 수신 쪽 멱등 키 — 행동 행의 `key`(`<type>:<fp>:<기간>`)를 인박스 줄에 실어 받는 쪽(inbox-append 류)이 같은 key 를 한 번만 적게 한다(지금 = 적어도 한 번 · 성공 뒤 notified 행 append 실패 시 중복 1줄).
+
+## 0-5. 4판(2026-10-09 09:1x · codex 3R BLOCK 5·MAJOR 1 → 라운드 상한 · master 직접 판정 0b1712a8 반영 5 · 기각 1) — 코드 커밋 `82d2a63`
+- 게이트: commit_gate @82d2a63(09:26 KST · 실 `tests/commit_gate.sh`) = **결과: PASS(rc 0)** · 공개 표현 합계 0건 · 비밀 누출 no leaks · selftest **636/636 PASS · 716/716 KILLED · NOT-APPLIED 0** · 미발생 오류코드 [] · F-1 25/25 · codex 0.1.4 11/11 · 공백 clean
+- 라이브 dry-run(4판 · 09:13 KST) = rc 0 · 전 칸 0(held 포함) · 라이브 데스크 stat 전후 diff 0.
+| # | 지적 | 고친 자리 | 케이스 · 뮤턴트 |
+|---|---|---|---|
+| ① | (a) 보강 — `type` 이 문자열 아니면 해시 전에 죽음 | `autoticket.py:296` `type(t) is not str` 선행 | type 문자열 아닌 행 격리(`{"type":[]}`) · M773 |
+| ② | (c) 보강 — 재발 줄 확정 못 해도 seen 기록 | `:569` `_recur_append` 가 예상 행 일치 또는 append+fsync 성공(True)일 때만 seen·알림 · 초안 없음·symlink·같은 기간 다른 줄 = `held` 보고(seen 0 · 알림 0 · 다음 실행이 다시 봄) | 초안 없으면 seen 0 · 초안 경로 재계산(symlink → held) · M774 |
+| ③ | 배치 후처리가 dry_run 을 안 넘김 | `counsel.py:1574` `dry_run=dry_run` 전달 · 【관측】 재현 안 됨 — dry-run 배치는 `counsel.py:1521` 에서 후처리 전에 반환한다(이 줄은 dry-run 에서 도달 불가) → 방어로 넣고 계약을 시험으로 고정 · **그 줄 뮤턴트는 도달 불가라 죽일 수 없어 등재 안 함**(공짜 KILLED 금지) | 배치 dry-run 쓰기 0(과거 후보 파일 + `batch --dry-run` → 원장·초안·알림 0) |
+| ④ | link 뒤 디렉터리 엔트리 미확정인 채 원장 확정 | `:464` `os.link` 뒤 `_fsync_dir(out)`(디렉터리 fd fsync · 윈 = 건너뜀) → 그 뒤 ticket 행 · 「같은 바이트」 확정도 `:445` 에서 같은 fsync | 디렉터리 fsync 뒤 원장(순서 기록) · M775 |
+| ⑤ | 원장 티켓과 fp 같고 서명 다름 | `:521` 쓰기 전 둘 다 fingerprint-collision 격리 · 두 서명 집합 = 보류 · 그 티켓 = 이번 실행 상태에서 뺌 | 원장 fp 충돌 격리 · M776 |
+- 뮤턴트 정리: M757·M764 앵커 재조준(초안 정체 확인 줄이 ④로 바뀜) · **M760 삭제** = 등가 변이(재발 경로 `_safe_target` 을 빼도 `O_NOFOLLOW`(M769)가 같은 symlink 를 막아 행동 동일 — 남기면 의미 없는 SURVIVED) · 티켓후보 뮤턴트 29/29 KILLED · 케이스 29.
+- 기각 추가: (d) 부모 디렉터리 dirfd·openat 결박 = 2R 기각 ② 그대로(counsel/ = 신뢰 경계 안 · `O_NOFOLLOW` 는 마지막 성분까지만).
 
 ## 1. 무엇이 어디서 도나
 | 부품 | 자리 | 비고 |
