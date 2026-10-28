@@ -32,8 +32,23 @@
 
 ## 5. 남은 것 · 함정
 - 📌 같은 모양의 구멍이 하나 더 있다(범위 밖이라 안 고침): **일일 보고(`intent=daily`)의 `updates[].result` 가 ok 가 아니면** 그 값이 코드로 긴급 대조에 들어간다(`_mail_texts` · result 형식 = `^[a-z0-9._-]{1,48}$`). result 가 `update.…` 모양이면 신호와 똑같이 긴급이 울린다. 라이브 일일 18통에서는 아직 0건. 일일 보고의 갱신 실패를 긴급으로 둘지(사람 손이 필요할 수 있음) 뺄지는 master 판단.
-- 배포 = master 게이트(워커 실행 0): 브랜치 → main 병합 → 데스크 안정 체크아웃 이동 → 상주 재적재. 이 변경은 데스크(받는 쪽)만이라 릴레이·참가자 클라이언트 배포는 필요 없다.
+  → **2판에서 고침(§7 · master#ec2a27e6 지시)**.
+- 배포 = master 게이트(워커 실행 0): 브랜치 → main 병합 → `git -C ~/axdev/jarvis-agora/.wt/desk-stable checkout --detach <병합 커밋>`. launchd 재적재 불요 — `kr.godmeyou.agora.desk` 는 매 판 새 프로세스(`resident once` · 껍데기 `~/.config/agora-desk/bin/agora` → desk-stable). 이 변경은 데스크(받는 쪽)만이라 릴레이·참가자 클라이언트 배포는 필요 없다.
 
 ## 6. 게이트
 - commit_gate(실 `tests/commit_gate.sh` · 2026-10-29 · 코드 커밋 직전 작업트리) = **결과: PASS(rc 0)** · 공개 표현 합계 0건 · 비밀 누출 no leaks · selftest **637/637 PASS · 717/717 KILLED · NOT-APPLIED 0** · 미발생 오류코드 [] · F-1 25/25 · codex 0.1.4 11/11 · 공백 clean. (main 9529f73 기준 636/716 → 케이스 +1 · 뮤턴트 +1)
 - 라이브 원장 무접촉 실측: `urgent.jsonl` mtime 시험 전후 동일(10-29 06:11:18).
+
+## 7. 2판 — 기계 코드 전부 제외(master#ec2a27e6 · 일일 포함)
+- 원칙(master): 긴급 낱말 대조는 「사람이 쓴 글」에만. 자동 생성 필드는 대조하지 않는다.
+- 고친 것: 1판의 「intent == signal 이면 hits = []」를 걷고, 우편 긴급 대조를 `match_urgent(text, [], urgent_table)` 로 바꿨다 — `_mail_texts` 가 돌려주는 기계 코드(신호 `items[].error_code` · 일일 `updates[].result`)를 **아예 넘기지 않는다**. 기계 우편(signal·daily·weekly = `mail.MACHINE_INTENTS`)은 `text` 가 빈 문자열이라 0, 사람 글(notice·request·report = `mail.INTENTS`)은 제목·본문 대조 그대로(본문에 사람이 적은 `J-NET-01` 같은 코드 모양 낱말도 그대로 잡힌다). 우편 intent 는 이 6개뿐(`mail.py:33·37`) — 다른 갈래 없음.
+- 형제 grep 1회(`grep -n "urgent|match_faq|_fold(|긴급" agora/*.py` · selftest 제외): 긴급 대조 호출 = 2곳뿐 — ① `counsel.py` 우편(이번에 고침) ② `counsel.py` 공개 방 글 `p.get("body")`(사람 글 · 코드 인자 `[]` · 그대로). 그 밖의 낱말 대조 = `match_faq(text, faq)`(접수 회신 링크 · HUMAN_INTENTS 만 · 기계 우편은 text 가 비어 무관). `resident.py` 는 데스크 결과 수만 싣고(661·676) 대조 없음 · `autoticket.py` 긴급 대조 없음. ⇒ 자동 필드가 긴급 대조에 들어가는 곳은 이번 1곳뿐이었다.
+- 시험: 케이스 이름 「상담소: 기계 봉투 코드는 긴급 0 · 사람 글 1」 — 같은 판에 신호(`update.sig_mismatch`) + 일일(`updates[0].result = update.sig_mismatch`) + 사람 글 「업데이트가 안 돼요 급해요」 → 접수 3 · 알림 1 · 생략 0 · 긴급 원장 = 사람 대화 1줄.
+  뮤턴트 2 = `M777-desk-signal-urgent`(신호 코드만 되살림) · `M778-desk-daily-urgent`(일일 코드만 되살림) — 둘 다 KILLED(사전 실측 · M778 KILLED = 고치기 전 일일 봉투가 실제로 긴급을 울렸다는 증거).
+- 게이트 = 아래 줄(2판 커밋 직전 작업트리).
+- commit_gate(실 `tests/commit_gate.sh` · 2판 코드) = **결과: PASS(rc 0)** · 비밀 누출 no leaks · selftest **637/637 PASS · 718/718 KILLED · NOT-APPLIED 0** · 미발생 오류코드 [] · F-1 25/25 · codex 0.1.4 11/11 · 공백 clean. 이 HANDOFF 는 게이트 도중 고쳐져 따로 재검: `tests/public_terms.sh` 0건 · `tests/ws_hygiene.sh` rc 0.
+
+## 8. The Unarchiver 「압축 풀 폴더 권한」 창(07:29:33 · master#d6018fba 질의) — 이 시험 경로가 아님
+- 시험·게이트에 GUI 로 여는 단계 0: `git grep` 으로 `open` 명령·NSWorkspace·osascript·LaunchServices·qlmanage·webbrowser 0건(문서 한 줄뿐). selftest 의 외부 실행 = python·node·git·bash(`tools/publish-check.sh` = python `open()` 으로 바이트만 읽음 · `tests/*.sh`)·SIGNER·icacls 뿐. zip 은 전부 `zipfile` 모듈로 쓰고 읽는다(`_publish_fixture` = agora-pub-* · `_case_package_ships_desk_pin` = agora-zip-desk-*).
+- 시각: The Unarchiver 프로세스 시작 = 07:29:33 · 부모 = launchd(1) = LaunchServices 로 열림(누가 열었는지는 통합 로그에 안 남음). 그 때 내 1차 게이트가 돌고 있었으나 agora-zip-desk-* 는 07:30:11 에 생겼다(창보다 뒤). `$TMPDIR` 는 여러 좌석이 같이 쓴다(07:41·07:47 의 agora-zip-desk-* = 다른 실행).
+- 창의 목록에 보인 `counsel.bak` = 내가 07:28:06 에 실수로 `$TMPDIR` 에 둔 백업(작업용 폴더에 둘 것이었다) — 원인은 아니고 목록에 보였을 뿐 · 지웠다. The Unarchiver 프로세스는 건드리지 않았다.
