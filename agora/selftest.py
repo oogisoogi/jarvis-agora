@@ -4512,7 +4512,9 @@ S8_AXES: dict[str, tuple[str, ...]] = {
                "M682-desk-owner-note-weekly-skipped", "M683-desk-ratio-counts-outside",
                "M684-desk-ratio-ignores-population", "M685-desk-candidates-target-cycle",
                "M686-desk-overdue-span-current-policy", "M687-desk-week-no-retry", "M688-desk-samples-count-rows",
-               "M689-desk-policy-history-ignored", "M691-desk-policy-row-unwritten"),
+               "M689-desk-policy-history-ignored", "M691-desk-policy-row-unwritten",
+               # 신호 봉투 긴급 제외(2026-10-29)
+               "M777-desk-signal-urgent"),
     # ★릴레이로 갈아 끼우며 **새로 생긴 자리들**. 이름이 곧 「무엇을 잃을 수 있나」다.
     "운반교체": ("M305-relay-fetch-stops-at-first-page", "M320-relay-status-never-derives",
                  "M321-relay-coerces-number-to-int", "M327-relay-cursor-not-encoded",
@@ -17380,6 +17382,26 @@ def _case_desk_urgent_rules() -> None:
         raise AssertionError(f"알림 낱말에 본문 토큰이 실렸다(반사): {hit}")
 
 
+def _case_desk_signal_not_urgent() -> None:
+    """신호 봉투(`update.*` 코드)는 긴급 0 — 같은 판의 사람 글 「업데이트가 안 돼요 급해요」는 그대로 긴급 1(회귀 0 · 2026-10-29)."""
+    from agora import counsel, mail
+    sig = _mail_doc(payload={"intent": "signal", "items": [_mail_signal_item()]})
+    human = _mail_doc(subject="급해요", body="업데이트가 안 돼요 급해요")
+    ctx, _store = _desk_world([sig, human], config={"human_approval": False,
+                                                    "desk": {"enabled": True, "notify_cmd": ["notify-x"]}})
+    lines: list[str] = []
+
+    def capture(argv: list[str], **kw: Any) -> Any:
+        lines.append(kw["input"])
+        return type("P", (), {"returncode": 0})()
+    out = _desk_cycle(ctx, notifier=capture)
+    rows = mail._rows(counsel._desk_path(ctx, counsel.URGENT_FILE))
+    if (out["mail_new"], out["urgent"], out["urgent_suppressed"]) != (2, 1, 0) or len(lines) != 1:
+        raise AssertionError(f"신호를 긴급으로 셌거나 사람 글을 놓쳤다(2 접수 · 1 알림 · 0 생략 기대): {out} {lines}")
+    if [r.get("thread_id") for r in rows] != [human["thread_id"]] or "업데이트가 안" not in lines[0]:
+        raise AssertionError(f"긴급 원장·알림이 사람 글 한 줄이 아니다: {rows} {lines}")
+
+
 def _case_desk_machine_mail_no_reply() -> None:
     """신호·일일 보고는 회신 없이 접수만(사람에게 알릴 글이 아니다)."""
     from agora import counsel, mail
@@ -20653,6 +20675,7 @@ CASES: tuple[tuple[str, Callable[[], None], int | None], ...] = (
     ("우편: 색인은 같은 회차 적재분도 본다",   _case_mail_index_sees_same_page, None),
     ("상담소: 접수 회신은 새 대화 첫 통에만",   _case_desk_ack_first_mail_only, None),
     ("상담소: 긴급 규칙 양성·음성·상한",        _case_desk_urgent_rules, None),
+    ("상담소: 신호 봉투는 긴급 0 · 사람 글 1",  _case_desk_signal_not_urgent, None),
     ("상담소: 신호·일일은 회신 없이 접수",      _case_desk_machine_mail_no_reply, None),
     ("상담소: 공개 방 글 접수·회신 0",          _case_desk_plaza_intake_no_reply, None),
     ("상담소: 댓글 주입 10 → 접수만",          _case_desk_comment_injection_ten, None),
@@ -23836,6 +23859,10 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      '            if t0 is not None and t0["signatures"] != c["signatures"]:',
      '            if False:',
      '티켓후보: 원장 fp 충돌 격리'),
+    ("M777-desk-signal-urgent", "agora/counsel.py",
+     '            hits = [] if payload.get("intent") == "signal" else match_urgent(text, codes, urgent_table)',
+     '            hits = match_urgent(text, codes, urgent_table)',
+     "상담소: 신호 봉투는 긴급 0 · 사람 글 1"),
 )
 
 

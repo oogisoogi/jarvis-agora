@@ -413,7 +413,7 @@ def desk_cycle(ctx: Any, *, now: datetime.datetime | None = None,
         key = row.get("mail_id")
         if not key or row.get("purged") or row.get("from") == me:
             continue
-        text, codes, _payload = _mail_texts(row)
+        text, codes, payload = _mail_texts(row)
         if key not in items:
             first = not any(r.get("layer") == "mail" and r.get("thread_id") == row.get("thread_id")
                             for r in items.values())
@@ -425,7 +425,9 @@ def desk_cycle(ctx: Any, *, now: datetime.datetime | None = None,
             _append(intake_path, item)
             items[key] = item
             out["mail_new"] += 1
-            hits = match_urgent(text, codes, urgent_table)
+            # 신호(참가자 PC 자동 오류 신호)는 긴급 대조에서 뺀다 — 오류코드 `update.*` 가 접두 일치로 신호마다 알림을 울렸다
+            # (10-06·10-26·10-28·10-29 · 실사용자 긴급 0). 여러 기기 같은 오류 폭증은 배치 「자동 신호 집계」(서명 × 횟수 × 참가자)가 센다.
+            hits = [] if payload.get("intent") == "signal" else match_urgent(text, codes, urgent_table)
             if hits:
                 candidates.append({"layer": "mail", "thread_id": row.get("thread_id"),
                                    "from": row.get("from"), "hit": hits[0], "key": key})
